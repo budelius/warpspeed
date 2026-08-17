@@ -312,15 +312,44 @@ fn test_template_pane_with_commands_starts_eagerly_when_deferred() {
     });
 }
 
-/// With the flag off, a template that asks to defer still starts eagerly,
-/// because `for_launch_config_tab` never produces `Deferred`.
+/// With the flag off, a background tab's panes still fork eagerly. Drives the
+/// real template pipeline rather than re-asserting `for_launch_config_tab`,
+/// which Task 1 already covers: the requirement is about what the pane does,
+/// not about what the constructor returns.
 #[test]
 fn test_flag_off_starts_every_template_pane_eagerly() {
     let _flag = FeatureFlag::LazyShellStartup.override_enabled(false);
-    assert_eq!(
-        ShellStartPolicy::for_launch_config_tab(false),
-        ShellStartPolicy::Eager
-    );
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    // The policy a background tab would receive. With the flag
+                    // off this resolves to `Eager`.
+                    shell_start: ShellStartPolicy::for_launch_config_tab(false),
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "with the flag off no pane may park its shell"
+        );
+    });
 }
 ```
 

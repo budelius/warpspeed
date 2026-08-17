@@ -143,6 +143,10 @@ pub enum FeatureFlag {
     /// a shell other than the default shell.
     ShellSelector,
 
+    /// Defers forking a login shell for launch-configuration panes that are
+    /// not in their window's active tab until the pane is first activated.
+    LazyShellStartup,
+
     /// Enables writing to long-running commands in shared sessions.
     SharedSessionWriteToLongRunningCommands,
 
@@ -1044,6 +1048,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::FactoryMcp,
     FeatureFlag::PricingTransparency,
     FeatureFlag::PeriodicHandoffCheckpoints,
+    FeatureFlag::LazyShellStartup,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

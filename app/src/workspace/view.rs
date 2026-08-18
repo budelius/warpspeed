@@ -1008,6 +1008,29 @@ enum TabBarSlot {
     },
 }
 
+/// Distinguishes a tab activation that makes a tab's panes genuinely visible
+/// to the user -- which must start any deferred shells belonging to those
+/// panes -- from one that is purely internal bookkeeping and must not.
+///
+/// The only current `Bookkeeping` use is
+/// [`Workspace::open_launch_config_window`]'s tab-construction loop: each
+/// tab it inserts is activated as an implementation detail of building the
+/// tab list (so later iterations, and code after the loop, can key off
+/// `active_tab_index`), not because it becomes visible -- the whole loop
+/// runs within a single update before the window settles on the tab the
+/// user actually sees. Starting deferred shells on every tab as it is
+/// constructed would fork every pane in the launch configuration up front,
+/// defeating the deferral this type exists to prevent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabActivation {
+    /// The tab genuinely becomes visible: start its deferred shells.
+    Visible,
+    /// This activation does not make the tab visible on its own -- either
+    /// it is the already-active tab being re-indexed, or a later, real
+    /// activation will follow. Leave deferred shells parked.
+    Bookkeeping,
+}
+
 pub struct Workspace {
     window_id: WindowId,
     pub(crate) tabs: Vec<TabData>,
@@ -3889,12 +3912,12 @@ impl Workspace {
             .iter()
             .enumerate()
             .for_each(|(tab_index, tab_template)| {
-                // `_ex(.., false, ..)`: this loop's per-insertion activation is
-                // bookkeeping, not a real switch (see
-                // `add_tab_with_pane_layout_ex`'s doc comment) -- it must not
-                // start any tab's deferred shells. The tab that actually
-                // becomes visible is activated for real, once, below.
-                self.add_tab_with_pane_layout_ex(
+                // `TabActivation::Bookkeeping`: this loop's per-insertion
+                // activation is bookkeeping, not a real switch (see
+                // `add_tab_with_pane_layout_with_activation`'s doc comment) --
+                // it must not start any tab's deferred shells. The tab that
+                // actually becomes visible is activated for real, once, below.
+                self.add_tab_with_pane_layout_with_activation(
                     PanesLayout::Template {
                         template: tab_template.layout_with_tab_commands(),
                         shell_start: ShellStartPolicy::for_launch_config_tab(
@@ -3903,7 +3926,7 @@ impl Workspace {
                     },
                     Arc::new(HashMap::new()),
                     tab_template.title.clone(),
-                    false,
+                    TabActivation::Bookkeeping,
                     ctx,
                 );
                 self.tabs[start_index + tab_index].selected_color = tab_template
@@ -5339,19 +5362,20 @@ impl Workspace {
     /// This function is meant to be used by other actions to perform the logic to update the
     /// view's state. It's not meant to be invoked directly by an action.
     pub fn activate_tab_internal(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
-        self.activate_tab_internal_ex(index, true, ctx);
+        self.activate_tab_internal_with_activation(index, TabActivation::Visible, ctx);
     }
 
-    /// Shared body of [`Self::activate_tab_internal`]. `start_deferred_shells`
-    /// gates the deferred-shell-starting side effect so that
-    /// [`Self::add_tab_with_pane_layout_ex`] can reuse the rest of this
-    /// activation logic (active-index bookkeeping, focus, window title) for a
-    /// tab insertion that is *not* a real, user-visible switch -- see that
-    /// function's doc comment for why that distinction matters.
-    fn activate_tab_internal_ex(
+    /// Shared body of [`Self::activate_tab_internal`]. `activation` is
+    /// forwarded to [`Self::set_active_tab_index_with_activation`], the
+    /// actual choke point that gates the deferred-shell-starting side
+    /// effect -- see that function's doc comment. Threading it through here
+    /// lets [`Self::add_tab_with_pane_layout_with_activation`] reuse the rest
+    /// of this activation logic (palette/agent-view dismissal, focus, window
+    /// title) for a tab insertion that is *not* a real, user-visible switch.
+    fn activate_tab_internal_with_activation(
         &mut self,
         index: usize,
-        start_deferred_shells: bool,
+        activation: TabActivation,
         ctx: &mut ViewContext<Self>,
     ) {
         if index < self.tab_count() {
@@ -5367,16 +5391,7 @@ impl Workspace {
                 self.set_is_agent_management_view_open(false, ctx);
             }
 
-            self.set_active_tab_index(index, ctx);
-
-            if start_deferred_shells {
-                // The newly active tab renders every one of its panes, so start any
-                // whose shell was deferred when the launch configuration opened.
-                let pane_group = self.active_tab_pane_group().clone();
-                pane_group.update(ctx, |pane_group, ctx| {
-                    pane_group.start_deferred_shells(ctx);
-                });
-            }
+            self.set_active_tab_index_with_activation(index, activation, ctx);
 
             self.focus_active_tab(ctx);
             self.update_window_title(ctx);
@@ -5451,6 +5466,29 @@ impl Workspace {
     /// Change the active tab index. This must be used instead of setting `self.active_tab_index`
     /// directly, as it updates related state.
     pub(crate) fn set_active_tab_index(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        self.set_active_tab_index_with_activation(index, TabActivation::Visible, ctx);
+    }
+
+    /// Shared body of [`Self::set_active_tab_index`]. This is the single
+    /// choke point where a tab actually becomes the one rendered -- every
+    /// path that makes a tab visible (direct activation, renames, drag and
+    /// drop within or across windows, share-modal opening, tab-group
+    /// creation, ...) funnels through here, which is why the deferred-shell
+    /// start lives here rather than in `activate_tab_internal`: hooking it
+    /// one level up left paths that call this function directly (bypassing
+    /// `activate_tab_internal`) able to render a tab whose panes were never
+    /// started.
+    ///
+    /// `activation` distinguishes that real visibility change from
+    /// `TabActivation::Bookkeeping`, used only while a tab is being
+    /// constructed but not yet shown to the user (see
+    /// [`Self::add_tab_with_pane_layout_with_activation`]'s doc comment).
+    fn set_active_tab_index_with_activation(
+        &mut self,
+        index: usize,
+        activation: TabActivation,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let index = if index >= self.tab_count() {
             log::warn!(
                 "Attempted to set active tab index {index} but only {} tabs exist, clamping",
@@ -5510,6 +5548,15 @@ impl Workspace {
             .map(|tv| tv.id());
         let ambient_agent_task_id = self.ambient_agent_task_id_for_focused_terminal_view(ctx);
         self.notify_terminal_focus_change(focused_terminal_view_id, ambient_agent_task_id, ctx);
+
+        if activation == TabActivation::Visible {
+            // The newly active tab renders every one of its panes, so start any
+            // whose shell was deferred when the launch configuration opened.
+            let pane_group = self.active_tab_pane_group().clone();
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.start_deferred_shells(ctx);
+            });
+        }
 
         self.update_active_session(ctx);
     }
@@ -12848,7 +12895,13 @@ impl Workspace {
         custom_tab_title: Option<String>,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.add_tab_with_pane_layout_ex(panes_layout, block_lists, custom_tab_title, true, ctx);
+        self.add_tab_with_pane_layout_with_activation(
+            panes_layout,
+            block_lists,
+            custom_tab_title,
+            TabActivation::Visible,
+            ctx,
+        );
     }
 
     /// Like [`Self::add_tab_with_pane_layout`], but lets the caller suppress
@@ -12864,16 +12917,16 @@ impl Workspace {
     /// the user will actually see. Starting deferred shells on every
     /// intermediate tab here would fork every pane in the launch
     /// configuration up front, defeating the deferral this feature exists to
-    /// provide. `start_deferred_shells = false` keeps the rest of
+    /// provide. `TabActivation::Bookkeeping` keeps the rest of
     /// activation (active index, focus, window title) so that bookkeeping
     /// still works, while leaving deferred panes parked until the real
     /// activation that follows the loop.
-    fn add_tab_with_pane_layout_ex(
+    fn add_tab_with_pane_layout_with_activation(
         &mut self,
         panes_layout: PanesLayout,
         block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
         custom_tab_title: Option<String>,
-        start_deferred_shells: bool,
+        activation: TabActivation,
         ctx: &mut ViewContext<Self>,
     ) {
         // Remember whether the left panel was open on the current active pane group
@@ -12924,7 +12977,7 @@ impl Workspace {
         self.tabs.insert(insert_idx, TabData::new(new_pane_group));
         self.tab_mru_order
             .push(self.tabs[insert_idx].pane_group.id());
-        self.activate_tab_internal_ex(insert_idx, start_deferred_shells, ctx);
+        self.activate_tab_internal_with_activation(insert_idx, activation, ctx);
 
         // Inherit the active tab's group membership (skipped for top-level tabs).
         if let Some(group_id) = inherited_group_id {

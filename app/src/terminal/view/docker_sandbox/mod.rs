@@ -57,6 +57,8 @@ use crate::terminal::local_tty::{
 use crate::terminal::remote_tty::TerminalManager as RemoteTtyTerminalManager;
 #[cfg(all(feature = "local_tty", not(feature = "remote_tty")))]
 use crate::terminal::shared_session::IsSharedSessionCreator;
+#[cfg(all(feature = "local_tty", not(feature = "remote_tty")))]
+use crate::terminal::shell_start_policy::ShellStartPolicy;
 
 /// Default base Docker image used for newly created sandbox shells.
 ///
@@ -114,6 +116,7 @@ fn create_docker_sandbox_view(
                 initial_size,
                 model_event_sender,
                 chosen_shell,
+                ShellStartPolicy::Eager,
                 ctx,
                 |surface_init, ctx| {
                     create_terminal_view_surface(

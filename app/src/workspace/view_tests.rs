@@ -5131,3 +5131,63 @@ fn test_launch_config_out_of_range_active_index_starts_first_tab() {
         assert_eq!(deferred, vec![false, true]);
     });
 }
+
+/// Switching to a background tab starts that tab's shells, and leaves the
+/// other background tabs parked.
+#[test]
+fn test_activating_background_tab_starts_its_deferred_shells() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        // `mock_workspace` already seeds one tab (e.g. the Warp Home/onboarding
+        // tab), so the tabs created by this launch config start after it.
+        let start_index = app.read(|ctx| workspace.read(ctx, |ws, _ctx| ws.tabs.len()));
+
+        let window_template = WindowTemplate {
+            active_tab_index: Some(0),
+            tabs: vec![
+                tab_template_with_single_pane("tab-0"),
+                tab_template_with_single_pane("tab-1"),
+                tab_template_with_single_pane("tab-2"),
+            ],
+        };
+
+        app.update(|ctx| {
+            workspace.update(ctx, |ws, ctx| {
+                ws.open_launch_config_window(window_template, ctx);
+            });
+        });
+
+        let read_deferred = |app: &mut App| -> Vec<bool> {
+            app.read(|ctx| {
+                workspace.read(ctx, |ws, ctx| {
+                    ws.tabs[start_index..]
+                        .iter()
+                        .map(|tab| {
+                            tab.pane_group
+                                .read(ctx, |group, ctx| group.terminal_manager(0, ctx))
+                                .expect("each tab has one terminal pane")
+                                .read(ctx, |m, _| m.has_deferred_shell())
+                        })
+                        .collect()
+                })
+            })
+        };
+
+        assert_eq!(read_deferred(&mut app), vec![false, true, true]);
+
+        app.update(|ctx| {
+            workspace.update(ctx, |ws, ctx| {
+                ws.activate_tab_internal(start_index + 2, ctx);
+            });
+        });
+
+        assert_eq!(
+            read_deferred(&mut app),
+            vec![false, true, false],
+            "activating tab 2 starts only tab 2's shell"
+        );
+    });
+}

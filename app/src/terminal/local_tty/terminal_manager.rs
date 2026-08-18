@@ -640,7 +640,22 @@ impl<S> TerminalManager<S> {
                 }
             }
             _ => {
-                log::warn!("No event loop handle to join when dropping terminal manager.");
+                if self.deferred_shell.is_some() {
+                    // Routine: this pane's shell was deferred and never
+                    // started (e.g. a background launch-config tab the user
+                    // never visited), so no event loop was ever spawned and
+                    // there is nothing to join. A 141-pane launch config can
+                    // close 135 such panes at once; logging each as a warning
+                    // would be spurious noise, not a signal of anything wrong.
+                    log::debug!(
+                        "No event loop handle to join when dropping terminal manager: shell was deferred and never started."
+                    );
+                } else {
+                    // Anomalous: this manager was never deferred (or its
+                    // deferred shell was already consumed), so a shell should
+                    // have been started and produced an event loop handle.
+                    log::warn!("No event loop handle to join when dropping terminal manager.");
+                }
             }
         }
 

@@ -5914,6 +5914,17 @@ impl PaneGroup {
             }
         }
 
+        // A pane activated inside an already-active tab may still be parked
+        // (for instance a pane the user pre-warms from the sidebar and then
+        // clicks). Starting one pane here is enough; its siblings were started
+        // when the tab was activated. Placed after every early-return guard
+        // above so a pane we're about to bail out on (hover suppressed, link
+        // tooltip active, ...) is never started.
+        if let Some(pane) = content.as_any().downcast_ref::<TerminalPane>() {
+            let manager = pane.terminal_manager(ctx);
+            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+        }
+
         self.focus_pane_by_id(id, ctx);
     }
 
@@ -7782,6 +7793,25 @@ impl PaneGroup {
             self.update_pane_history(id);
         }
         focused
+    }
+
+    /// Starts the parked shell of every terminal pane in this group.
+    ///
+    /// Called when the group's tab becomes active. All of a tab's panes render
+    /// at once, so all of them start -- starting only the focused pane would
+    /// leave the visible splits showing nothing. Panes that are already
+    /// running are unaffected: `ensure_shell_started` is a no-op for them.
+    pub fn start_deferred_shells(&self, ctx: &mut ViewContext<Self>) {
+        // Collect first: the iteration borrows `self.pane_contents`, while
+        // `update` needs the context mutably.
+        let managers: Vec<_> = self
+            .panes_of::<TerminalPane>()
+            .map(|pane| pane.terminal_manager(ctx))
+            .collect();
+
+        for manager in managers {
+            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+        }
     }
 
     pub fn terminal_manager(

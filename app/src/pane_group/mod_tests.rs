@@ -4144,3 +4144,56 @@ fn test_flag_on_defers_background_tab_pane() {
         );
     });
 }
+
+/// `start_deferred_shells` starts every pane in the group, not just the focused
+/// one: a split tab renders all of its panes simultaneously, so starting one
+/// would leave the others blank.
+#[test]
+fn test_start_deferred_shells_starts_every_pane_in_the_group() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let leaf = |focused: bool| PaneTemplateType::PaneTemplate {
+            is_focused: Some(focused),
+            cwd: "/".into(),
+            commands: vec![],
+            pane_mode: PaneMode::Terminal,
+            shell: None,
+        };
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneBranchTemplate {
+                        split_direction:
+                            crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                        panes: vec![leaf(true), leaf(false)],
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let deferred_count = |app: &mut App| -> usize {
+            app.read(|ctx| {
+                pane_group.read(ctx, |group, ctx| {
+                    (0..2)
+                        .filter_map(|index| group.terminal_manager(index, ctx))
+                        .filter(|manager| manager.read(ctx, |m, _| m.has_deferred_shell()))
+                        .count()
+                })
+            })
+        };
+
+        assert_eq!(deferred_count(&mut app), 2, "both panes start parked");
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+
+        assert_eq!(deferred_count(&mut app), 0, "both panes started");
+    });
+}

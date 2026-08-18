@@ -21,6 +21,7 @@
     1. Task 2's tests cannot pass until Task 3 exists — the default `has_deferred_shell()` returns `false`, so the deferred-pane assertion fails until the real field is implemented. Task 2's "cargo check clean" gate is likewise unachievable in isolation.
     2. Task 3's code is genuinely unit-tested rather than compile-checked only. Coverage is better than planned, not worse.
 - Package name for cargo is `warp`, not `app`. Unit tests: `cargo nextest run -p warp --lib`.
+- **The build gate is the WORKSPACE, not `-p warp`.** CI runs `cargo nextest run --workspace --locked`. `create_tui_model` is `pub` and consumed by `crates/warp_tui`; `create_model` is consumed by `crates/integration`. A `-p warp --lib` check passes while the workspace is broken — this actually happened in Tasks 2+3 and was caught only in review. Every task's verification must include `cargo check --workspace` before commit. Types crossing that boundary must also be re-exported from `app/src/tui_export.rs`.
 
 ---
 

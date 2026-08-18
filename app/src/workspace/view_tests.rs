@@ -47,6 +47,7 @@ use crate::cloud_object::model::view::CloudViewModel;
 use crate::context_chips::prompt::Prompt;
 use crate::editor::Event;
 use crate::gpu_state::GPUState;
+use crate::launch_configs::launch_config::{PaneMode, PaneTemplateType, TabTemplate};
 use crate::network::NetworkStatus;
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::notebooks::notebook::NotebookView;
@@ -5018,5 +5019,115 @@ fn test_tools_panel_warp_drive_toggle_updates_available_views() {
                 "Warp Drive should be selectable again after re-enabling"
             );
         });
+    });
+}
+
+fn tab_template_with_single_pane(title: &str) -> TabTemplate {
+    TabTemplate {
+        title: Some(title.to_string()),
+        layout: PaneTemplateType::PaneTemplate {
+            is_focused: Some(true),
+            cwd: "/".into(),
+            commands: vec![],
+            pane_mode: PaneMode::Terminal,
+            shell: None,
+        },
+        commands: Vec::new(),
+        color: None,
+    }
+}
+
+/// Opening a multi-tab launch configuration parks the shells of every tab but
+/// the one it activates.
+#[test]
+fn test_launch_config_defers_all_but_active_tab() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        // `mock_workspace` already seeds one tab (e.g. the Warp Home/onboarding
+        // tab), so the tabs created by this launch config start after it.
+        let start_index = app.read(|ctx| workspace.read(ctx, |ws, _ctx| ws.tabs.len()));
+
+        let window_template = WindowTemplate {
+            active_tab_index: Some(1),
+            tabs: vec![
+                tab_template_with_single_pane("tab-0"),
+                tab_template_with_single_pane("tab-1"),
+                tab_template_with_single_pane("tab-2"),
+            ],
+        };
+
+        app.update(|ctx| {
+            workspace.update(ctx, |ws, ctx| {
+                ws.open_launch_config_window(window_template, ctx);
+            });
+        });
+
+        let deferred: Vec<bool> = app.read(|ctx| {
+            workspace.read(ctx, |ws, ctx| {
+                ws.tabs[start_index..]
+                    .iter()
+                    .map(|tab| {
+                        tab.pane_group
+                            .read(ctx, |group, ctx| group.terminal_manager(0, ctx))
+                            .expect("each tab has one terminal pane")
+                            .read(ctx, |m, _| m.has_deferred_shell())
+                    })
+                    .collect()
+            })
+        });
+
+        assert_eq!(
+            deferred,
+            vec![true, false, true],
+            "only the activated tab (index 1) starts its shell eagerly"
+        );
+    });
+}
+
+/// An out-of-range `active_tab_index` falls back to the first tab for both
+/// activation and the eager set, so the two never disagree.
+#[test]
+fn test_launch_config_out_of_range_active_index_starts_first_tab() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        // `mock_workspace` already seeds one tab (e.g. the Warp Home/onboarding
+        // tab), so the tabs created by this launch config start after it.
+        let start_index = app.read(|ctx| workspace.read(ctx, |ws, _ctx| ws.tabs.len()));
+
+        let window_template = WindowTemplate {
+            active_tab_index: Some(99),
+            tabs: vec![
+                tab_template_with_single_pane("tab-0"),
+                tab_template_with_single_pane("tab-1"),
+            ],
+        };
+
+        app.update(|ctx| {
+            workspace.update(ctx, |ws, ctx| {
+                ws.open_launch_config_window(window_template, ctx);
+            });
+        });
+
+        let deferred: Vec<bool> = app.read(|ctx| {
+            workspace.read(ctx, |ws, ctx| {
+                ws.tabs[start_index..]
+                    .iter()
+                    .map(|tab| {
+                        tab.pane_group
+                            .read(ctx, |group, ctx| group.terminal_manager(0, ctx))
+                            .expect("each tab has one terminal pane")
+                            .read(ctx, |m, _| m.has_deferred_shell())
+                    })
+                    .collect()
+            })
+        });
+
+        assert_eq!(deferred, vec![false, true]);
     });
 }

@@ -3874,6 +3874,16 @@ impl Workspace {
     ) {
         let start_index = self.tabs.len();
 
+        // Resolve the eager tab before creating anything. Tabs fork their
+        // shells as they are constructed below, while the active index is only
+        // applied afterwards, so this has to be decided up front — and with the
+        // same clamp the activation uses, or the tab that starts eagerly would
+        // not be the tab that ends up visible.
+        let eager_tab_index = window
+            .active_tab_index
+            .filter(|index| *index < window.tabs.len())
+            .unwrap_or_default();
+
         window
             .tabs
             .iter()
@@ -3882,7 +3892,9 @@ impl Workspace {
                 self.add_tab_with_pane_layout(
                     PanesLayout::Template {
                         template: tab_template.layout_with_tab_commands(),
-                        shell_start: ShellStartPolicy::Eager,
+                        shell_start: ShellStartPolicy::for_launch_config_tab(
+                            tab_index == eager_tab_index,
+                        ),
                     },
                     Arc::new(HashMap::new()),
                     tab_template.title.clone(),
@@ -3895,8 +3907,7 @@ impl Workspace {
 
         if !window.tabs.is_empty() {
             // Focus the active tab from the launch config.
-
-            let mut index = start_index + window.active_tab_index.unwrap_or_default();
+            let mut index = start_index + eager_tab_index;
 
             if index >= self.tab_count() {
                 index = start_index;

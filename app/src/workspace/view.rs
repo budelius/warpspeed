@@ -416,6 +416,7 @@ use crate::terminal::session_settings::{
 use crate::terminal::settings::{SpacingMode, TerminalSettings};
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shell::ShellType;
+use crate::terminal::shell_start_policy::ShellStartPolicy;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel as HandoffAmbientAgentViewModel;
 use crate::terminal::view::ambient_agent::{AuthSecretFtuxView, AuthSecretFtuxViewEvent};
@@ -3879,7 +3880,10 @@ impl Workspace {
             .enumerate()
             .for_each(|(tab_index, tab_template)| {
                 self.add_tab_with_pane_layout(
-                    PanesLayout::Template(tab_template.layout_with_tab_commands()),
+                    PanesLayout::Template {
+                        template: tab_template.layout_with_tab_commands(),
+                        shell_start: ShellStartPolicy::Eager,
+                    },
                     Arc::new(HashMap::new()),
                     tab_template.title.clone(),
                     ctx,
@@ -7108,7 +7112,10 @@ impl Workspace {
         let (rendered_title, pane_template) =
             crate::tab_configs::render_tab_config(&tab_config, &param_values, worktree_branch_name);
         self.add_tab_with_pane_layout(
-            PanesLayout::Template(pane_template),
+            PanesLayout::Template {
+                template: pane_template,
+                shell_start: ShellStartPolicy::Eager,
+            },
             Arc::new(HashMap::new()),
             rendered_title,
             ctx,

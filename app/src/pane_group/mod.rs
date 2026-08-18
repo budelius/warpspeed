@@ -143,6 +143,7 @@ use crate::terminal::shared_session::share_modal::{ShareSessionModal, ShareSessi
 use crate::terminal::shared_session::{
     self, IsSharedSessionCreator, SharedSessionActionSource, SharedSessionSource,
 };
+use crate::terminal::shell_start_policy::ShellStartPolicy;
 use crate::terminal::view::inline_banner::{
     ZeroStatePromptSuggestionTriggeredFrom, ZeroStatePromptSuggestionType,
 };
@@ -868,7 +869,13 @@ impl NewTerminalOptions {
 pub enum PanesLayout {
     SingleTerminal(Box<NewTerminalOptions>),
     Snapshot(Box<PaneNodeSnapshot>),
-    Template(PaneTemplateType),
+    Template {
+        template: PaneTemplateType,
+        /// Policy for this tab's panes, refined per pane by
+        /// [`ShellStartPolicy::refine_for_pane`]. Only this variant can defer:
+        /// `Snapshot` (session restore) and `SingleTerminal` always start eagerly.
+        shell_start: ShellStartPolicy,
+    },
     AmbientAgent,
 }
 
@@ -1347,6 +1354,7 @@ impl PaneGroup {
     #[allow(clippy::too_many_arguments)]
     fn pane_tree_from_template(
         root: PaneTemplateType,
+        shell_start: ShellStartPolicy,
         resources: TerminalViewResources,
         ctx: &mut ViewContext<PaneGroup>,
         pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
@@ -1358,6 +1366,7 @@ impl PaneGroup {
         let (leftmost_pane_id, pane_data, initial_focus) =
             PaneGroup::pane_tree_from_template_recursive(
                 root,
+                shell_start,
                 resources,
                 ctx,
                 pane_contents,
@@ -1383,6 +1392,7 @@ impl PaneGroup {
     #[allow(clippy::too_many_arguments)]
     fn pane_tree_from_template_recursive(
         root: PaneTemplateType,
+        shell_start: ShellStartPolicy,
         resources: TerminalViewResources,
         ctx: &mut ViewContext<PaneGroup>,
         pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
@@ -1399,6 +1409,10 @@ impl PaneGroup {
                 pane_mode,
                 shell,
             } => {
+                // Computed before `commands` is moved into the pending-command
+                // queue below. A pane with startup commands never defers.
+                let pane_shell_start = shell_start.refine_for_pane(!commands.is_empty());
+
                 let uuid = Uuid::new_v4();
 
                 #[cfg(feature = "local_tty")]
@@ -1430,6 +1444,7 @@ impl PaneGroup {
                         model_event_sender.clone(),
                         chosen_shell,
                         None,
+                        pane_shell_start,
                         ctx,
                     ),
                 };
@@ -1516,6 +1531,7 @@ impl PaneGroup {
                     let (child_leftmost_pane_id, child, child_focus) =
                         PaneGroup::pane_tree_from_template_recursive(
                             node.clone(),
+                            shell_start,
                             resources.clone(),
                             ctx,
                             pane_contents,
@@ -1731,6 +1747,7 @@ impl PaneGroup {
                     model_event_sender.clone(),
                     chosen_shell,
                     terminal_snapshot.input_config,
+                    ShellStartPolicy::Eager,
                     ctx,
                 );
 
@@ -3418,6 +3435,7 @@ impl PaneGroup {
             model_event_sender.clone(),
             options.shell,
             None,
+            ShellStartPolicy::Eager,
             ctx,
         );
 
@@ -3466,8 +3484,12 @@ impl PaneGroup {
                                    view_bounds: RectF,
                                    ctx: &mut ViewContext<Self>| {
             match panes_layout {
-                PanesLayout::Template(template) => Self::pane_tree_from_template(
+                PanesLayout::Template {
                     template,
+                    shell_start,
+                } => Self::pane_tree_from_template(
+                    template,
+                    shell_start,
                     resources,
                     ctx,
                     pane_contents,
@@ -6089,6 +6111,7 @@ impl PaneGroup {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
         initial_input_config: Option<InputConfig>,
+        shell_start: ShellStartPolicy,
         ctx: &mut ViewContext<Self>,
     ) -> (
         ViewHandle<TerminalView>,
@@ -6098,6 +6121,7 @@ impl PaneGroup {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "remote_tty")] {
+                let _ = shell_start;
                 let terminal_init = RemoteTtyTerminalManager::create_model(
                     resources,
                     initial_size,
@@ -6140,6 +6164,7 @@ impl PaneGroup {
                     initial_size,
                     model_event_sender,
                     chosen_shell,
+                    shell_start,
                     ctx,
                     |surface_init, ctx| {
                         create_terminal_view_surface(
@@ -6170,6 +6195,7 @@ impl PaneGroup {
                         display_name: ShellName::blank(),
                         shell_type: ShellType::Zsh
                     },
+                    shell_start,
                     resources,
                     None,
                     conversation_restoration,
@@ -6338,6 +6364,7 @@ impl PaneGroup {
                 display_name: ShellName::blank(),
                 shell_type: ShellType::Zsh,
             },
+            ShellStartPolicy::Eager,
             resources,
             Some(&restored_blocks),
             Some(ConversationRestorationInNewPaneType::Historical {
@@ -6401,6 +6428,7 @@ impl PaneGroup {
                 display_name: ShellName::blank(),
                 shell_type: ShellType::Zsh,
             },
+            ShellStartPolicy::Eager,
             resources,
             None, // No restored blocks
             None, // No conversation restoration
@@ -6555,6 +6583,7 @@ impl PaneGroup {
             self.model_event_sender.clone(),
             None, // chosen_shell
             None, // initial_input_config
+            ShellStartPolicy::Eager,
             ctx,
         );
 
@@ -6674,6 +6703,7 @@ impl PaneGroup {
             self.model_event_sender.clone(),
             chosen_shell,
             None,
+            ShellStartPolicy::Eager,
             ctx,
         );
 

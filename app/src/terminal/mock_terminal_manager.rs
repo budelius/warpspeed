@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::FairMutex;
 use pathfinder_geometry::vector::Vector2F;
-use warpui::{AppContext, ModelHandle, SingletonEntity, ViewHandle, WindowId};
+use warpui::{AppContext, ModelContext, ModelHandle, SingletonEntity, ViewHandle, WindowId};
 
 use super::event_listener::ChannelEventListener;
 use super::model::session::Sessions;
@@ -14,11 +14,16 @@ use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::blocklist::SerializedBlockListItem;
 use crate::context_chips::prompt_type::PromptType;
 use crate::pane_group::TerminalViewResources;
+use crate::terminal::shell_start_policy::ShellStartPolicy;
 use crate::terminal::view::ConversationRestorationInNewPaneType;
 
 pub struct MockTerminalManager {
     model: Arc<FairMutex<TerminalModel>>,
     view: ViewHandle<TerminalView>,
+    /// Mirrors the real manager's parked-start bookkeeping so that policy and
+    /// activation wiring are testable without `local_tty`. `Some(())` means a
+    /// start is parked; `ensure_shell_started` takes it.
+    deferred_shell: Option<()>,
 }
 pub struct MockTerminalManagerInit {
     pub(crate) manager: ModelHandle<Box<dyn TerminalManager>>,
@@ -26,8 +31,10 @@ pub struct MockTerminalManagerInit {
 }
 
 impl MockTerminalManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn create_model(
         shell_state: ShellLaunchState,
+        shell_start: ShellStartPolicy,
         resources: TerminalViewResources,
         restored_blocks: Option<&Vec<SerializedBlockListItem>>,
         conversation_restoration: Option<ConversationRestorationInNewPaneType>,
@@ -97,7 +104,11 @@ impl MockTerminalManager {
         });
 
         let terminal_view = view.clone();
-        let terminal_manager = Self { model, view };
+        let terminal_manager = Self {
+            model,
+            view,
+            deferred_shell: shell_start.is_deferred().then_some(()),
+        };
         let manager_model = ctx.add_model(|_ctx| {
             let manager: Box<dyn TerminalManager> = Box::new(terminal_manager);
             manager
@@ -126,6 +137,14 @@ impl TerminalManager for MockTerminalManager {
                 model.unregister_ambient_session(terminal_view_id, ctx);
             });
         }
+    }
+
+    fn ensure_shell_started(&mut self, _ctx: &mut ModelContext<Box<dyn TerminalManager>>) {
+        self.deferred_shell.take();
+    }
+
+    fn has_deferred_shell(&self) -> bool {
+        self.deferred_shell.is_some()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -189,6 +208,7 @@ mod testing {
                         display_name: ShellName::blank(),
                         shell_type: ShellType::Zsh,
                     },
+                    ShellStartPolicy::Eager,
                     resources,
                     restored_blocks.map(|blocks| blocks.to_vec()).as_ref(),
                     None,

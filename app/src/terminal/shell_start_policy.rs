@@ -5,8 +5,12 @@ use crate::FeatureFlag;
 ///
 /// Decided per tab when a launch configuration is opened, then refined per pane
 /// by [`ShellStartPolicy::refine_for_pane`]. Deliberately free of any
-/// `local_tty` gating so the decision is observable in test builds, where
-/// `MockTerminalManager` records it and no shell exists to fork.
+/// `local_tty` gating so one policy type backs every terminal manager
+/// implementation. `local_tty` is unconditionally active on non-wasm targets
+/// (see `app/build.rs`), so on those platforms it is the real
+/// `local_tty::TerminalManager` that parks and replays the shell start, not
+/// `MockTerminalManager` — that mock only backs the wasm/`remote_tty`
+/// configurations where `local_tty` is genuinely absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellStartPolicy {
     /// Fork the shell as part of building the terminal manager.
@@ -46,8 +50,8 @@ impl ShellStartPolicy {
 
 #[cfg(test)]
 mod tests {
-    use crate::FeatureFlag;
     use super::ShellStartPolicy;
+    use crate::FeatureFlag;
 
     #[test]
     fn eager_tab_is_eager_and_background_tab_defers_when_flag_on() {

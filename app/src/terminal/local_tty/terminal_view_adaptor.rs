@@ -2006,14 +2006,11 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
     }
 
     fn ensure_shell_started(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>) {
-        let Some(parked) = self.deferred_shell.take() else {
-            return;
-        };
-        Self::spawn_shell_start(parked, ctx);
+        self.start_deferred_shell(ctx)
     }
 
     fn has_deferred_shell(&self) -> bool {
-        self.deferred_shell.is_some()
+        self.is_shell_deferred()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

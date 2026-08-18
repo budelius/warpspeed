@@ -179,6 +179,13 @@ struct ShellStartupResources {
 /// Holds exactly what the eager path's `ctx.spawn` closure captures. Nothing
 /// else in `create_model_with_manager` depends on the shell existing, which is
 /// why deferral needs no other plumbing.
+///
+/// The shell is *selected* eagerly regardless of policy: `ShellStarter::init`
+/// runs at construction (see the `preferred_shell` resolution above), and it
+/// is that already-chosen `wsl_name_or_shell_starter` which gets parked here.
+/// Only the *fork* -- resolving the starter source and running
+/// `on_shell_determined` -- is deferred. This is what makes an eager and a
+/// deferred pane start the same shell.
 pub(super) struct DeferredShellStart {
     startup_directory: Option<PathBuf>,
     env_vars: HashMap<OsString, OsString>,
@@ -206,11 +213,11 @@ where
     }
 
     fn ensure_shell_started(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>) {
-        self.0.ensure_shell_started(ctx)
+        self.0.start_deferred_shell(ctx)
     }
 
     fn has_deferred_shell(&self) -> bool {
-        self.0.has_deferred_shell()
+        self.0.is_shell_deferred()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -578,11 +585,13 @@ impl<S> TerminalManager<S> {
         );
     }
 
-    /// Inherent counterpart of [`TerminalManagerTrait::ensure_shell_started`],
-    /// used by `TuiTerminalManager::ensure_shell_started` to forward to `self.0`
-    /// for a generic `S` (the trait itself is only implemented concretely for
-    /// `TerminalManager<TerminalView>`).
-    pub(super) fn ensure_shell_started(
+    /// The sole body of `TerminalManagerTrait::ensure_shell_started`. Both the
+    /// concrete `impl TerminalManagerTrait for TerminalManager<TerminalView>`
+    /// (terminal_view_adaptor.rs) and `TuiTerminalManager`'s forwarding impl
+    /// below call this rather than duplicating its body, so there is exactly
+    /// one `Option::take` on `deferred_shell` in the whole crate: deleting this
+    /// method is a compile error at both call sites, not silent recursion.
+    pub(super) fn start_deferred_shell(
         &mut self,
         ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
     ) where
@@ -595,8 +604,10 @@ impl<S> TerminalManager<S> {
         Self::spawn_shell_start(parked, ctx);
     }
 
-    /// Inherent counterpart of [`TerminalManagerTrait::has_deferred_shell`].
-    pub(super) fn has_deferred_shell(&self) -> bool {
+    /// The sole body of `TerminalManagerTrait::has_deferred_shell`. See
+    /// [`Self::start_deferred_shell`] for why this is shared rather than
+    /// duplicated.
+    pub(super) fn is_shell_deferred(&self) -> bool {
         self.deferred_shell.is_some()
     }
 

@@ -239,6 +239,7 @@ pub use crate::terminal::model::terminal_model::BlockIndex;
 pub use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 pub use crate::terminal::session_settings::SessionSettings;
 pub use crate::terminal::shared_session::IsSharedSessionCreator;
+pub use crate::terminal::shell_start_policy::ShellStartPolicy;
 pub use crate::terminal::terminal_manager::BlockSpacing;
 pub use crate::terminal::view::blocklist_filter::should_show_task_in_blocklist;
 pub use crate::terminal::view::{ExecuteCommandEvent, WAKEUP_THROTTLE_PERIOD};

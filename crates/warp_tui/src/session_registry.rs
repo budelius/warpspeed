@@ -11,8 +11,8 @@ use pathfinder_geometry::vector::Vector2F;
 use warp::tui_export::{
     AIConversation, AIConversationAutoexecuteMode, AIConversationId, AmbientAgentTaskId,
     BannerState, BlocklistAIHistoryModel, GlobalResourceHandlesProvider, IsSharedSessionCreator,
-    LocalTtyTerminalManager, PersistenceWriter, ServerConversationToken, TerminalManagerTrait,
-    TerminalSurfaceResult, oz_run_url,
+    LocalTtyTerminalManager, PersistenceWriter, ServerConversationToken, ShellStartPolicy,
+    TerminalManagerTrait, TerminalSurfaceResult, oz_run_url,
 };
 use warpui::SingletonEntity;
 use warpui_core::runtime::TuiDriverHandle;
@@ -189,6 +189,7 @@ impl TuiSessions {
             Vector2F::new(120., 24.),
             model_event_sender,
             None,
+            ShellStartPolicy::Eager, // The TUI has no launch-config concept and always starts eagerly.
             TRANSCRIPT_BLOCK_SPACING,
             ctx,
             move |surface_init, ctx| {

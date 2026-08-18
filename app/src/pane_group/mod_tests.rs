@@ -3965,11 +3965,14 @@ fn test_undo_close_keeps_a_file_pane_watching_its_file() {
 
 /// A background-tab template parks its shell instead of forking it, and the
 /// first `ensure_shell_started` consumes the parked start while the second is a
-/// no-op. Asserted against `MockTerminalManager`: `local_tty` is not enabled in
-/// test builds, so there is no shell to count.
+/// no-op. Asserted against the real `local_tty` `TerminalManager<TerminalView>`:
+/// `local_tty` is unconditionally active on this platform (see `app/build.rs`),
+/// so this reaches `deferred_shell`/`spawn_shell_start` for real, not a mock.
 #[test]
 fn test_deferred_template_pane_parks_shell_until_started() {
-    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    // LazyShellStartup does not gate this layer: `shell_start` is injected
+    // directly by the caller (this is the mechanism Task 4 wires a real flag
+    // check into). No override needed to exercise it here.
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
@@ -4023,7 +4026,9 @@ fn test_deferred_template_pane_parks_shell_until_started() {
 /// would leave the commands with no defined moment to run.
 #[test]
 fn test_template_pane_with_commands_starts_eagerly_when_deferred() {
-    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    // LazyShellStartup does not gate this layer: `shell_start` is injected
+    // directly by the caller (this is the mechanism Task 4 wires a real flag
+    // check into). No override needed to exercise it here.
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
@@ -4093,6 +4098,49 @@ fn test_flag_off_starts_every_template_pane_eagerly() {
         assert!(
             !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
             "with the flag off no pane may park its shell"
+        );
+    });
+}
+
+/// With the flag on, a background tab's panes defer -- the mirror of
+/// `test_flag_off_starts_every_template_pane_eagerly`, and the only place in
+/// this file where `LazyShellStartup` actually reaches `PanesLayout::Template`
+/// through `ShellStartPolicy::for_launch_config_tab` rather than a
+/// hand-injected `Deferred`. Closes the flag-to-pipeline coverage gap before
+/// Task 4 wires a real background tab into this constructor: without the
+/// `is_enabled()` check inside `for_launch_config_tab`, this test and
+/// `test_flag_off_starts_every_template_pane_eagerly` cannot both pass.
+#[test]
+fn test_flag_on_defers_background_tab_pane() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    // The policy a background tab would receive with the flag on.
+                    shell_start: ShellStartPolicy::for_launch_config_tab(false),
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "with the flag on, a background tab's pane parks its shell start"
         );
     });
 }

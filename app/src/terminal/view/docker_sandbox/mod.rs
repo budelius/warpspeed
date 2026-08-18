@@ -149,6 +149,7 @@ fn create_docker_sandbox_view(
                     display_name: ShellName::blank(),
                     shell_type: ShellType::Bash,
                 },
+                ShellStartPolicy::Eager,
                 resources,
                 None, /* restored_blocks */
                 None, /* conversation_restoration */

@@ -6121,6 +6121,9 @@ impl PaneGroup {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "remote_tty")] {
+                // remote_tty sessions are viewers/attach points onto a shell
+                // that already exists on the remote side -- there is no local
+                // fork to defer, so the policy has nothing to act on here.
                 let _ = shell_start;
                 let terminal_init = RemoteTtyTerminalManager::create_model(
                     resources,

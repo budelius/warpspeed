@@ -15,7 +15,11 @@
 - **Eager set = the active tab's panes**, not the focused pane. A tab with splits renders all its panes at once.
 - **A pane whose template carries a non-empty `commands` list is always `Eager`**, regardless of policy or flag.
 - **Never reap a started shell.** `ensure_shell_started` is one-way; there is no path back to `Deferred`.
-- **`local_tty` is not enabled in any test configuration in this repo.** `app/Cargo.toml:792` declares `local_tty = []` and nothing else in the workspace references it; CI runs `cargo nextest run --workspace --locked` on default features. All `#[cfg(feature = "local_tty")]` code is therefore compile-checked only (`cargo check -p warp --lib --features local_tty`), never unit-tested. Every assertion in this plan runs against `MockTerminalManager`.
+- **CORRECTED DURING EXECUTION — `local_tty` IS enabled everywhere, including tests.** `app/build.rs:231-235` unconditionally emits `cargo:rustc-cfg=feature="local_tty"` for every non-wasm target, and does not emit `remote_tty`. So tests compile the `local_tty` branch of `create_session`, `MockTerminalManager` is dead code on that path, and every assertion here exercises the real `TerminalManager<S>`. There is no separate `--features local_tty` build: `cargo check -p warp --lib` already is it.
+
+  The original constraint claimed the opposite, derived from grepping `Cargo.toml` (which declares `local_tty = []`, referenced by no other feature) without checking `build.rs`. Two consequences follow, and Tasks 2 and 3 were merged into one unit of work because of them:
+    1. Task 2's tests cannot pass until Task 3 exists — the default `has_deferred_shell()` returns `false`, so the deferred-pane assertion fails until the real field is implemented. Task 2's "cargo check clean" gate is likewise unachievable in isolation.
+    2. Task 3's code is genuinely unit-tested rather than compile-checked only. Coverage is better than planned, not worse.
 - Package name for cargo is `warp`, not `app`. Unit tests: `cargo nextest run -p warp --lib`.
 
 ---
@@ -34,7 +38,7 @@ They are split because each produces working, testable software alone, and becau
 Three things in the spec do not survive contact with the code. Two are handled below; one needs a decision.
 
 1. **`FeatureFlag::LazyShellStartup` has no "APP-5257 deferred-scrollback" precedent to follow.** No such flag exists in `crates/warp_features/src/lib.rs`. Task 1 follows the actual pattern: enum variant plus a `DOGFOOD_FLAGS` entry.
-2. **The spec's tests cannot be written as stated.** "A deferred pane forks no shell" is unobservable in a test build — there is no shell. Tasks 2 and 5 assert on the recorded policy and on `has_deferred_shell()` via `MockTerminalManager` instead, which is the same decision one layer up. Actual fork counts are verified by hand per the spec's Verification section.
+2. **~~The spec's tests cannot be written as stated.~~ WITHDRAWN — this was wrong.** I claimed "a deferred pane forks no shell" was unobservable because a test build has no shell. `app/build.rs` force-enables `local_tty`, so the real manager *is* built and the assertions in Tasks 2 and 5 land on it rather than on `MockTerminalManager`. The tests as written are valid; they just needed Task 3's implementation to exist before they could pass, which is why those tasks merged. Actual process-level fork counts still need the manual measurement in the spec's Verification section — a unit test can observe the parked state, not the absence of a `powershell.exe`.
 3. **OPEN — a deferred pane's `ShellLaunchState` stays `DeterminingShell` forever.** `create_terminal_model` is handed `ShellLaunchState::DeterminingShell` at `terminal_manager.rs:351`, and only `on_shell_determined` advances it. A deferred pane will therefore display as though its shell is still being determined (`shell_launch_state.rs:7-23` has exactly two variants). Adding a third variant touches `display_name()` and its callers in tab titles. This plan leaves the state as-is and does not paper over it; decide before Task 6 of the sidebar plan whether to add `ShellLaunchState::Deferred`.
 
 ---

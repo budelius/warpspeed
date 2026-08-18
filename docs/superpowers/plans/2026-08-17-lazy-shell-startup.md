@@ -1169,10 +1169,63 @@ Do not read the steps above as a description of the current code; read this sect
 
 **Spec coverage.** The seam (Task 3), parking the inputs (Task 3), starting on demand (Task 3), which panes start eagerly (Task 4), the safety guard for `commands` (Tasks 1-2), feature gating (Task 1), and pane/tab activation (Task 5) are all covered. `app/src/workspace/view.rs` is in the spec's file table for "mark the active tab's panes eager" — Task 4. The spec's fifth file, `vertical_tabs.rs`, is the manual start control, deliberately split into its own plan and flagged above rather than dropped.
 
-Of the spec's Testing section: "deferred pane forks no shell", "first activation forks exactly one", "second activation forks none", "pane with commands forks eagerly", and "flag off forks eagerly" map to Task 2 Step 1 and Task 5 Step 1, restated against `MockTerminalManager` for the reason given in Global Constraints. "Opening a multi-tab configuration forks only the active tab's panes" and "switching to a background tab forks that tab's panes" map to Tasks 4 and 5. The `vertical_tabs_tests.rs` cases belong to the sidebar plan.
+Of the spec's Testing section: "deferred pane forks no shell", "first activation forks exactly one", "second activation forks none", "pane with commands forks eagerly", and "flag off forks eagerly" map to Task 2 Step 1 and Task 5 Step 1, ~~restated against `MockTerminalManager`~~ — corrected during execution: they assert against the real `TerminalManager<TerminalView>`, see Global Constraints. "Opening a multi-tab configuration forks only the active tab's panes" and "switching to a background tab forks that tab's panes" map to Tasks 4 and 5. The `vertical_tabs_tests.rs` cases belong to the sidebar plan.
 
 **Type consistency.** `ShellStartPolicy` spelled identically throughout; `for_launch_config_tab` takes `is_eager_tab: bool`; `refine_for_pane` takes `has_commands: bool`; `is_deferred()` is used by the mock in Task 2 and defined in Task 1. `has_deferred_shell` and `ensure_shell_started` are declared with default bodies in Task 2 and overridden in Task 2 (mock) and Task 3 (real). `PanesLayout::Template { template, shell_start }` field names match at every construction and destructuring site. `DeferredShellStart`'s five fields are destructured by the same names in `spawn_shell_start`. `start_deferred_shells` is defined in Task 5 Step 3 and called in Steps 4 and the test in Step 1.
 
 **Placeholder scan.** Clean. Every code step carries the actual code; every test step carries the actual assertions; every run step carries the exact command and the expected result. The two steps that are instructions rather than code — Task 2 Step 9 (convert the remaining tuple-variant call sites the compiler reports) and Task 5 Step 8 (measure) — are mechanical compiler-driven cleanup and manual measurement respectively, neither of which can be enumerated in advance without inventing line numbers.
 
 One deliberate non-assertion is worth restating so it is not mistaken for an oversight: nothing in this plan proves a shell was actually forked or not forked, because no test configuration in this repo compiles the PTY. Task 5 Step 8 is the only evidence of the actual behaviour, and it is manual.
+
+
+---
+
+## Known gaps and flag-promotion readiness (as merged)
+
+Recorded from the final whole-branch review so this survives the scratch workspace. The feature
+merges behind `FeatureFlag::LazyShellStartup` in `DOGFOOD_FLAGS`. The bar for merging and the bar
+for turning it on by default are different; this is the latter.
+
+### The one test gap that matters
+
+**Nothing asserts a shell actually started.** Every test on this branch asserts `has_deferred_shell()`
+flipping `true → false` — a bookkeeping bit, not a fork. Mutate `start_deferred_shell`
+(`app/src/terminal/local_tty/terminal_manager.rs:594-605`) from `Self::spawn_shell_start(parked, ctx)`
+to `drop(parked)` and all tests still pass, while every deferred pane in the product becomes
+permanently blank on activation. That is precisely the failure this feature can produce and it is
+invisible to the suite.
+
+Closing it needs an observable that distinguishes "deferred" from "determining". The follow-on
+sidebar-control plan needs the same distinction for its per-pane indicator, so the two should be
+solved together rather than bolting a test-only hook on here.
+
+### Before promoting the flag to release
+
+1. **Run the measurement.** No automated evidence exists that this reduces process count. See the
+   Verification section: baseline is 141 forks plus 141 `conhost.exe`; target is the active tab's
+   pane count.
+2. **Close the test gap above**, or accept it knowingly.
+3. **`open_launch_config_window`'s `start_index` arithmetic** (`app/src/workspace/view.rs:3898`) is
+   wrong under `NewTabPlacement::AfterCurrentTab`: `start_index = self.tabs.len()` but insertion
+   goes to `active_tab_index + 1`. Pre-existing, no pane goes blank, but the eagerly-forked tab and
+   the visible tab disagree, silently costing that segment its savings. Will read as "the feature
+   doesn't work" in bug reports.
+4. **Ship the sidebar indicator with the promotion, not after.** With deferral on by default and no
+   indicator, a user cannot distinguish "never started" from "shell died".
+5. **Pane-focus recovery is mouse-only.** `focus_pane_by_id` and keyboard pane navigation have no
+   hook. Fine while the tab hook covers every visibility path; not fine once any path does not.
+6. **Optional:** pin the Agent-pane behaviour with a test. A full trace of
+   `enter_agent_view_for_new_conversation` confirmed a deferred Agent pane never touches the PTY at
+   construction, so this is now known-safe rather than merely unexamined — hygiene, not a gate.
+
+### Deliberately shipped as-is
+
+- `pending_commands_force_eager` names one of its three assertions.
+- No dedicated test for `active_tab_index: None` or an empty tab list — both share one expression
+  with the covered out-of-range case.
+- The out-of-range test survives a "hardcode eager tab to 0" mutant; its sibling kills that mutant.
+- Double `downcast_ref::<TerminalPane>()` in `focus_pane_on_mouse_event`.
+- `start_deferred_shells` allocates a `Vec` per tab switch; traced to be a no-op-level cost
+  (`update_model` does not notify, and the nested `flush_effects` is guarded by `pending_flushes`).
+- `ShellLaunchState` keeps two variants. A deferred pane's tab title is identical to an eager one's,
+  and the one visible "Starting Shell..." string is unreachable while deferred panes stay invisible.

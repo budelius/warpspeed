@@ -5469,17 +5469,23 @@ impl Workspace {
         self.set_active_tab_index_with_activation(index, TabActivation::Visible, ctx);
     }
 
-    /// Shared body of [`Self::set_active_tab_index`]. This is the single
-    /// choke point where a tab actually becomes the one rendered -- every
-    /// path that makes a tab visible (direct activation, renames, drag and
-    /// drop within or across windows, share-modal opening, tab-group
+    /// Shared body of [`Self::set_active_tab_index`]. This is the choke
+    /// point for tab *activation*: every path that makes an existing tab
+    /// within this window the active one (direct activation, renames, drag
+    /// and drop within or across windows, share-modal opening, tab-group
     /// creation, ...) funnels through here, which is why the deferred-shell
-    /// start lives here rather than in `activate_tab_internal`: hooking it
-    /// one level up left paths that call this function directly (bypassing
-    /// `activate_tab_internal`) able to render a tab whose panes were never
-    /// started.
+    /// start for activation lives here rather than in `activate_tab_internal`:
+    /// hooking it one level up left paths that call this function directly
+    /// (bypassing `activate_tab_internal`) able to render a tab whose panes
+    /// were never started.
     ///
-    /// `activation` distinguishes that real visibility change from
+    /// It is *not* the choke point for every way a pane group can end up
+    /// rendered, though. A pane group adopted into a window by a tab
+    /// tear-out never passes through here -- `adopt_transferred_pane_group`
+    /// swaps it directly into the (already-visible) placeholder tab, so it
+    /// starts its own deferred shells at that adoption site instead.
+    ///
+    /// `activation` distinguishes a real visibility change from
     /// `TabActivation::Bookkeeping`, used only while a tab is being
     /// constructed but not yet shown to the user (see
     /// [`Self::add_tab_with_pane_layout_with_activation`]'s doc comment).
@@ -28383,6 +28389,20 @@ impl Workspace {
         ctx.unsubscribe_to_view(&placeholder_pane_group);
         ctx.subscribe_to_view(&new_pane_group, move |me, pane_group, event, ctx| {
             me.handle_file_tree_event(pane_group, event, ctx)
+        });
+
+        // The placeholder tab that `create_transferred_window` inserted was
+        // activated `Visible` (see `add_tab_with_pane_layout_with_activation`),
+        // which started *its* shells -- but that placeholder is discarded
+        // right here, in favor of `new_pane_group`, which never went through
+        // `set_active_tab_index_with_activation` and may still be carrying
+        // deferred panes from the source window's launch config. A tab torn
+        // out into a brand-new window has no subsequent tab-switch to heal
+        // this on, so start its shells now, at adoption time, rather than
+        // leaving them parked until a mouse click happens to reach
+        // `focus_pane_on_mouse_event`.
+        new_pane_group.update(ctx, |pane_group, ctx| {
+            pane_group.start_deferred_shells(ctx);
         });
 
         let working_directories_model = self.working_directories_model.clone();

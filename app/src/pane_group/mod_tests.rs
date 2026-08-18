@@ -4197,3 +4197,70 @@ fn test_start_deferred_shells_starts_every_pane_in_the_group() {
         assert_eq!(deferred_count(&mut app), 0, "both panes started");
     });
 }
+
+/// `focus_pane_on_mouse_event` -- reached here via `PaneGroupAction::Activate`,
+/// the same entry point `PaneGroup::handle_action` routes mouse clicks
+/// through -- starts the clicked pane's deferred shell without touching its
+/// sibling. This is the only recovery path for a pane made visible outside
+/// the tab-activation hook (see `adopt_transferred_pane_group`'s doc
+/// comment), so pinning the asymmetry here catches the hook being silently
+/// dropped, which would otherwise leave a pane permanently blank.
+#[test]
+fn test_activating_one_pane_via_mouse_starts_only_that_pane() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let leaf = |focused: bool| PaneTemplateType::PaneTemplate {
+            is_focused: Some(focused),
+            cwd: "/".into(),
+            commands: vec![],
+            pane_mode: PaneMode::Terminal,
+            shell: None,
+        };
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneBranchTemplate {
+                        split_direction:
+                            crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                        panes: vec![leaf(true), leaf(false)],
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let is_deferred = |app: &mut App, index: usize| -> bool {
+            app.read(|ctx| {
+                pane_group.read(ctx, |group, ctx| {
+                    group
+                        .terminal_manager(index, ctx)
+                        .map(|manager| manager.read(ctx, |m, _| m.has_deferred_shell()))
+                        .unwrap_or(false)
+                })
+            })
+        };
+
+        assert!(is_deferred(&mut app, 0), "pane 0 starts parked");
+        assert!(is_deferred(&mut app, 1), "pane 1 starts parked");
+
+        let pane_id_1 =
+            app.read(|ctx| pane_group.read(ctx, |group, _ctx| group.pane_id_by_index(1).unwrap()));
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| {
+                group.handle_action(
+                    &PaneGroupAction::Activate(pane_id_1, ActivationReason::Click),
+                    ctx,
+                );
+            });
+        });
+
+        assert!(!is_deferred(&mut app, 1), "activated pane started");
+        assert!(is_deferred(&mut app, 0), "sibling pane stayed parked");
+    });
+}

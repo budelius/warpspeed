@@ -130,6 +130,8 @@ APP-5257 deferred-scrollback work established in the same file.
 | `app/src/workspace/view/vertical_tabs.rs` | per-pane started indicator and start control |
 | `crates/warp_features/src/lib.rs` | the flag |
 
+**As shipped:** `ShellStartPolicy` landed in the new `app/src/terminal/shell_start_policy.rs` rather than `local_tty/terminal_manager.rs`, and `vertical_tabs.rs` was left untouched — split into a follow-on sidebar-control plan instead, as expected drift in an implementation plan versus this design.
+
 ## Testing
 
 In `app/src/pane_group/mod_tests.rs`:

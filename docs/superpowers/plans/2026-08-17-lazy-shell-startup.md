@@ -225,8 +225,9 @@ Append to `app/src/pane_group/mod_tests.rs`:
 ```rust
 /// A background-tab template parks its shell instead of forking it, and the
 /// first `ensure_shell_started` consumes the parked start while the second is a
-/// no-op. Asserted against `MockTerminalManager`: `local_tty` is not enabled in
-/// test builds, so there is no shell to count.
+/// no-op. Asserted against the real `local_tty` `TerminalManager<TerminalView>`:
+/// `local_tty` is unconditionally active on this platform (see `app/build.rs`),
+/// so this reaches `deferred_shell`/`spawn_shell_start` for real, not a mock.
 #[test]
 fn test_deferred_template_pane_parks_shell_until_started() {
     let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
@@ -543,7 +544,7 @@ git commit -m "feat(pane_group): carry ShellStartPolicy from template to termina
 
 **Files:**
 - Modify: `app/src/terminal/local_tty/terminal_manager.rs:78-112` (field), `:159-165` (near `ShellStartupResources`, add `DeferredShellStart`), `:197-233` (`create_model`), `:238-274` (`create_tui_model`), `:278-495` (`create_model_with_manager`), and a new `ensure_shell_started` in the `impl<S> TerminalManager<S>` block
-- Test: none. `local_tty` is not enabled in any test configuration (see Global Constraints); this task is verified by compilation and by the manual measurement in Task 5's final step.
+- Test: `local_tty` is unconditionally active in test builds too (see Global Constraints' "CORRECTED DURING EXECUTION" note), so this task is genuinely unit-tested against the real `TerminalManager<S>`, not just compile-checked: `test_deferred_template_pane_parks_shell_until_started` and `test_template_pane_with_commands_starts_eagerly_when_deferred` in `app/src/pane_group/mod_tests.rs` exercise `deferred_shell`/`spawn_shell_start` directly, in addition to compilation and the manual measurement in Task 5's final step.
 
 **Interfaces:**
 - Consumes: `ShellStartPolicy` (Task 1); the trait methods added in Task 2.
@@ -1145,6 +1146,22 @@ Open `DUMMY-18` (141 panes, 63 tabs, whose active tab has 6 panes) and re-run al
 Expected: the open adds ~6 shells rather than 141; the process total does not spike by ~1700; switching to a background tab adds that tab's pane count.
 
 Record the three numbers in the commit message or the PR body. If the open still adds 141, the eager set is wrong — check `eager_tab_index` before assuming the deferral itself failed.
+
+---
+
+### Task 5: As shipped
+
+Steps 4-5 above are what was planned. They are left in place because the planned-vs-shipped delta is itself useful record; what follows is what the code actually does.
+
+**Step 4 as planned was wrong.** Hooking `activate_tab_internal` directly forks every tab in a launch configuration up front: `add_tab_with_pane_layout` reaches `activate_tab_internal` during tab *construction* (via `add_tab_with_pane_layout_with_activation`), not only on a genuine user-visible switch. `Workspace::open_launch_config_window` builds its tab list by calling this in a loop, one insertion per tab, entirely within a single update before the window ever shows the tab the user will actually see. A hook at `activate_tab_internal` cannot tell construction-time activation apart from a real switch, so it would start every pane's shell during that loop — the exact up-front fork this feature exists to prevent.
+
+**What shipped instead:**
+- A `TabActivation` enum (`app/src/workspace/view.rs:1025`), `{ Visible, Bookkeeping }`, distinguishes a tab activation that makes the tab genuinely visible (`Visible` — start its deferred shells) from one that's purely internal bookkeeping during construction (`Bookkeeping` — leave them parked). `Workspace::open_launch_config_window`'s tab-construction loop is the sole `Bookkeeping` producer, reached via `add_tab_with_pane_layout_with_activation` (`view.rs:12930`); every other caller goes through `add_tab_with_pane_layout`, which always passes `Visible`.
+- The hook lives in `set_active_tab_index_with_activation` (`view.rs:5495`, the shared body `set_active_tab_index` calls into), gated on `activation == TabActivation::Visible`, not in `activate_tab_internal`.
+- Step 5's inherent-method sketch shipped under different, narrower-visibility names. The public trait methods are as declared here (`TerminalManager::ensure_shell_started`, `has_deferred_shell`), but the concrete `local_tty` implementation routes through renamed `pub(super)` inherent methods instead: `start_deferred_shell` (`app/src/terminal/local_tty/terminal_manager.rs:594`) and `is_shell_deferred` (`:610`).
+- A further gap this design doesn't cover was found and closed in the final whole-branch review's fix wave: a pane group adopted into a *new* window by a tab tear-out (`Workspace::adopt_transferred_pane_group`) never passes through `set_active_tab_index_with_activation` at all — it's swapped directly into an already-visible placeholder tab. That path now calls `start_deferred_shells` at the adoption site itself; see that function's doc comment in `app/src/workspace/view.rs`.
+
+Do not read the steps above as a description of the current code; read this section for that.
 
 ---
 

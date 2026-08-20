@@ -60,7 +60,7 @@ use crate::terminal::shared_session::manager::{Manager, ManagerEvent};
 use crate::terminal::shared_session::role_change_modal::RoleChangeOpenSource;
 use crate::terminal::shared_session::{SharedSessionStatus, join_link};
 use crate::terminal::view::Event;
-use crate::terminal::{TerminalManager, TerminalView};
+use crate::terminal::{ShellLaunchData, TerminalManager, TerminalView};
 use crate::view_components::ToastFlavor;
 use crate::workspace::sync_inputs::SyncedInputState;
 use crate::workspace::{PaneViewLocator, WorkspaceRegistry};
@@ -75,6 +75,29 @@ use crate::{
 
 pub type TerminalPaneView = PaneView<TerminalView>;
 
+/// The snapshot fields a pane was restored with, kept so a pane whose shell is
+/// still parked can re-save them verbatim.
+///
+/// Both `TerminalView::pwd_if_local` and
+/// `TerminalView::shell_launch_data_if_local` bottom out in
+/// `TerminalView::active_block_metadata`, which is only ever populated from
+/// live PTY block-metadata events. A pane parked by
+/// [`ShellStartPolicy::Deferred`](crate::terminal::shell_start_policy::ShellStartPolicy)
+/// has no PTY, so without this the next save would write NULL for both and the
+/// tab would silently come back in the home directory under the default shell.
+pub(in crate::pane_group) struct RestoredShellSnapshotFields {
+    /// The directory the parked shell will start in: the restored `cwd` after
+    /// the same existence filter `restore_pane_leaf` applies before handing it
+    /// to `create_session`, so what we re-save is what this pane would use.
+    pub cwd: Option<String>,
+    /// The restored `shell_launch_data`, verbatim. Kept rather than derived
+    /// from the resolved
+    /// [`AvailableShell`](crate::terminal::available_shells::AvailableShell)
+    /// so a shell that is momentarily unresolvable (an unregistered WSL
+    /// distro, say) is not erased from the session.
+    pub shell_launch_data: Option<ShellLaunchData>,
+}
+
 /// Data kept for terminal panes.
 pub struct TerminalPane {
     model_event_sender: Option<SyncSender<ModelEvent>>,
@@ -83,6 +106,10 @@ pub struct TerminalPane {
     uuid: Vec<u8>,
 
     pane_configuration: ModelHandle<PaneConfiguration>,
+
+    /// Set only on the session-restore path. Consulted by [`Self::snapshot`]
+    /// while (and only while) this pane's shell is still parked.
+    restored_shell_snapshot_fields: Option<RestoredShellSnapshotFields>,
 
     /// Defining `terminal_manager` before `view` means that `terminal_manager`
     /// gets dropped first (guaranteed by the language), which halts the event
@@ -160,8 +187,39 @@ impl TerminalPane {
             model_event_sender,
             uuid,
             pane_configuration,
+            restored_shell_snapshot_fields: None,
             view,
         }
+    }
+
+    /// Records the `cwd` and `shell_launch_data` this pane was restored with,
+    /// so [`Self::snapshot`] can re-save them if the shell never starts.
+    ///
+    /// Only the session-restore path calls this; every other pane either
+    /// starts eagerly or has no persisted fields to preserve.
+    pub(in crate::pane_group) fn set_restored_shell_snapshot_fields(
+        &mut self,
+        fields: RestoredShellSnapshotFields,
+    ) {
+        self.restored_shell_snapshot_fields = Some(fields);
+    }
+
+    /// The restored `cwd`/`shell_launch_data` to snapshot instead of the live
+    /// ones, or `None` when the live values are authoritative.
+    ///
+    /// Gated on `has_deferred_shell`, which is the single source of truth for
+    /// "the shell has not forked yet": the manager consumes its parked start
+    /// with `Option::take`, so this stops applying the moment the pane's shell
+    /// starts and a running pane keeps reporting the directory the user
+    /// actually navigated to.
+    fn restored_shell_snapshot_fields(
+        &self,
+        app: &AppContext,
+    ) -> Option<&RestoredShellSnapshotFields> {
+        let fields = self.restored_shell_snapshot_fields.as_ref()?;
+        self.terminal_manager(app)
+            .read(app, |manager, _| manager.has_deferred_shell())
+            .then_some(fields)
     }
 
     /// The [`PaneView<TerminalView>`] for this pane.
@@ -528,12 +586,19 @@ impl PaneContent for TerminalPane {
                         .active_conversation_id()
                 });
 
+            // A pane whose shell never started has no live metadata to report,
+            // so fall back to what it was restored with.
+            let (cwd, shell_launch_data) = match self.restored_shell_snapshot_fields(app) {
+                Some(restored) => (restored.cwd.clone(), restored.shell_launch_data.clone()),
+                None => (view.pwd_if_local(app), view.shell_launch_data_if_local(app)),
+            };
+
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
-                cwd: view.pwd_if_local(app),
+                cwd,
                 is_active,
                 is_read_only: view.model.lock().is_read_only(),
-                shell_launch_data: view.shell_launch_data_if_local(app),
+                shell_launch_data,
                 input_config: Some(current_input_config),
                 llm_model_override,
                 active_profile_id,

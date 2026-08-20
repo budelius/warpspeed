@@ -98,6 +98,7 @@ use crate::palette::PaletteMode;
 use crate::pane_group::focus_state::PaneGroupFocusEvent;
 use crate::pane_group::pane::ActionOrigin;
 use crate::pane_group::pane::get_started_pane::GetStartedPane;
+use crate::pane_group::pane::terminal_pane::RestoredShellSnapshotFields;
 #[cfg(not(target_family = "wasm"))]
 use crate::pane_group::pane::terminal_pane::{
     host_terminal_shared_session_source_type, inherit_share_for_local_child,
@@ -1699,6 +1700,17 @@ impl PaneGroup {
                     .map(PathBuf::from)
                     .filter(|path| path.is_dir());
 
+                // If this pane's shell is parked and never started, these are
+                // the only record of its directory and shell -- there will be
+                // no live PTY metadata to snapshot from. See
+                // `TerminalPane::set_restored_shell_snapshot_fields`.
+                let restored_shell_snapshot_fields = RestoredShellSnapshotFields {
+                    cwd: startup_directory
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    shell_launch_data: terminal_snapshot.shell_launch_data.clone(),
+                };
+
                 // Filter conversation IDs to only include those that have task messages
                 // and are not entirely passive (ignored suggestions).
                 // This prevents showing the "Previous session" banner when there's nothing to restore
@@ -1757,13 +1769,14 @@ impl PaneGroup {
 
                 let terminal_view_id = terminal_view.id();
 
-                let pane_data = TerminalPane::new(
+                let mut pane_data = TerminalPane::new(
                     uuid.0,
                     terminal_manager,
                     terminal_view,
                     model_event_sender,
                     ctx,
                 );
+                pane_data.set_restored_shell_snapshot_fields(restored_shell_snapshot_fields);
 
                 let terminal_pane_id = pane_data.terminal_pane_id();
                 let pane_id = terminal_pane_id.into();

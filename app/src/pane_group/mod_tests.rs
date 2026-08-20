@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
@@ -84,6 +85,7 @@ use crate::settings::PrivacySettings;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
+use crate::terminal::ShellLaunchData;
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
@@ -96,8 +98,9 @@ use crate::terminal::shared_session::{
     IsSharedSessionCreator, SharedSessionActionSource, SharedSessionScrollbackType,
     SharedSessionSource, SharedSessionStatus,
 };
+use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
-use crate::test_util::pane_snapshots::single_terminal_leaf_snapshot;
+use crate::test_util::pane_snapshots::{single_terminal_leaf_snapshot, terminal_leaf_snapshot};
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseStack;
 use crate::warp_managed_paths_watcher::WarpManagedPathsWatcher;
@@ -4420,6 +4423,74 @@ fn test_restored_pane_starts_eagerly_under_eager_policy() {
         assert!(
             !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
             "an eagerly-restored pane starts its shell immediately"
+        );
+    });
+}
+
+/// A restored pane that is never activated must still re-save the `cwd` and
+/// `shell_launch_data` it was restored with.
+///
+/// A parked pane has no PTY, so `TerminalView::active_block_metadata` -- which
+/// both `pwd_if_local` and `shell_launch_data_if_local` bottom out in -- is
+/// permanently `None`. Without a fallback the next save writes NULL for both,
+/// and the tab silently comes back in the home directory under the default
+/// shell on the following launch.
+#[test]
+fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        // Restore has to accept the directory (it drops paths that no longer
+        // exist), so use one that is guaranteed to be there.
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let shell_launch_data = ShellLaunchData::Executable {
+            executable_path: PathBuf::from("/usr/bin/fish"),
+            shell_type: ShellType::Fish,
+        };
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(terminal_leaf_snapshot(
+                        Some(cwd.clone()),
+                        Some(shell_launch_data.clone()),
+                    )),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored pane must be parked for this test to mean anything"
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected the restored tab to snapshot as a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected the restored leaf to snapshot as a terminal pane");
+        };
+
+        assert_eq!(
+            terminal.cwd,
+            Some(cwd),
+            "a parked pane must re-save the cwd it was restored with"
+        );
+        assert_eq!(
+            terminal.shell_launch_data,
+            Some(shell_launch_data),
+            "a parked pane must re-save the shell it was restored with"
         );
     });
 }

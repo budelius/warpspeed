@@ -3999,7 +3999,11 @@ impl Workspace {
                     .for_each(|(tab_index, saved_tab)| {
                         let custom_title = saved_tab.custom_title.clone();
                         self.add_tab_with_pane_layout(
-                            PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
+                            PanesLayout::Snapshot {
+                                snapshot: Box::new(saved_tab.root.clone()),
+                                // TODO(Task 3): pick eager vs. deferred per tab.
+                                shell_start: ShellStartPolicy::Eager,
+                            },
                             block_lists.clone(),
                             custom_title,
                             ctx,
@@ -8729,14 +8733,17 @@ impl Workspace {
             }
         });
 
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Settings(SettingsPaneSnapshot::Local {
-                current_page: page.unwrap_or_default(),
-                search_query: search_query.map(|s| s.to_owned()),
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Settings(SettingsPaneSnapshot::Local {
+                    current_page: page.unwrap_or_default(),
+                    search_query: search_query.map(|s| s.to_owned()),
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(
             panes_layout,
             Arc::new(HashMap::new()),
@@ -12637,11 +12644,14 @@ impl Workspace {
 
     fn add_get_started_tab(&mut self, ctx: &mut ViewContext<Self>) {
         self.add_tab_with_pane_layout(
-            PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-                is_focused: true,
-                custom_vertical_tabs_title: None,
-                contents: LeafContents::GetStarted,
-            }))),
+            PanesLayout::Snapshot {
+                snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    is_focused: true,
+                    custom_vertical_tabs_title: None,
+                    contents: LeafContents::GetStarted,
+                })),
+                shell_start: ShellStartPolicy::Eager,
+            },
             Arc::new(HashMap::new()),
             None,
             ctx,
@@ -12949,7 +12959,7 @@ impl Workspace {
         let active_tab_default_color = active_tab.and_then(|tab| tab.default_directory_color);
 
         let is_new_terminal = matches!(panes_layout, PanesLayout::SingleTerminal(_));
-        let is_restoration = matches!(panes_layout, PanesLayout::Snapshot(_));
+        let is_restoration = matches!(panes_layout, PanesLayout::Snapshot { .. });
         let new_pane_group = ctx.add_typed_action_view(|ctx| {
             let mut pane_group = PaneGroup::new_with_panes_layout(
                 self.tips_completed.clone(),
@@ -13077,14 +13087,17 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         // TODO: We should validate that this notebook exists and fallback if it doesn't
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Notebook(NotebookPaneSnapshot::CloudNotebook {
-                notebook_id: Some(notebook_id),
-                settings: settings.clone(),
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Notebook(NotebookPaneSnapshot::CloudNotebook {
+                    notebook_id: Some(notebook_id),
+                    settings: settings.clone(),
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(panes_layout, Arc::new(HashMap::new()), None, ctx);
     }
 
@@ -13094,14 +13107,17 @@ impl Workspace {
         settings: &OpenWarpDriveObjectSettings,
         ctx: &mut ViewContext<Self>,
     ) {
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Workflow(WorkflowPaneSnapshot::CloudWorkflow {
-                workflow_id: Some(workflow_id),
-                settings: settings.clone(),
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Workflow(WorkflowPaneSnapshot::CloudWorkflow {
+                    workflow_id: Some(workflow_id),
+                    settings: settings.clone(),
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(panes_layout, Arc::new(HashMap::new()), None, ctx);
     }
 
@@ -13111,13 +13127,16 @@ impl Workspace {
         file_path: Option<PathBuf>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Notebook(NotebookPaneSnapshot::LocalFileNotebook {
-                path: file_path,
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Notebook(NotebookPaneSnapshot::LocalFileNotebook {
+                    path: file_path,
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(panes_layout, Arc::new(HashMap::new()), None, ctx);
     }
 

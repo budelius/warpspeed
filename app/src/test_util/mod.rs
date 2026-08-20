@@ -1,5 +1,6 @@
 pub mod ai_agent_tasks;
 pub mod blockgrid;
+pub mod pane_snapshots;
 pub mod settings;
 pub mod terminal;
 mod virtual_fs;

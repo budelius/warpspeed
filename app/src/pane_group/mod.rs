@@ -868,7 +868,12 @@ impl NewTerminalOptions {
 #[derive(Debug)]
 pub enum PanesLayout {
     SingleTerminal(Box<NewTerminalOptions>),
-    Snapshot(Box<PaneNodeSnapshot>),
+    Snapshot {
+        snapshot: Box<PaneNodeSnapshot>,
+        /// Policy for this restored tab's panes. Restored panes carry scrollback
+        /// that renders without a PTY, so a parked one shows its history.
+        shell_start: ShellStartPolicy,
+    },
     Template {
         template: PaneTemplateType,
         /// Policy for this tab's panes. Panes carrying startup commands defer
@@ -1565,6 +1570,7 @@ impl PaneGroup {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         deferred_panes: &mut Vec<(PaneId, LeafSnapshot)>,
         pending_ambient_restorations: &mut Vec<(AmbientAgentTaskId, PaneId)>,
+        shell_start: ShellStartPolicy,
     ) -> anyhow::Result<(PaneData, InitialFocus)> {
         match root {
             PaneNodeSnapshot::Leaf(leaf) => Self::restore_pane_leaf(
@@ -1578,6 +1584,7 @@ impl PaneGroup {
                 model_event_sender,
                 deferred_panes,
                 pending_ambient_restorations,
+                shell_start,
             ),
             PaneNodeSnapshot::Branch(pane) => {
                 let mut len = 0;
@@ -1609,6 +1616,7 @@ impl PaneGroup {
                         model_event_sender.clone(),
                         deferred_panes,
                         pending_ambient_restorations,
+                        shell_start,
                     ) {
                         Ok((child, child_focus)) => {
                             len += child.len();
@@ -1646,6 +1654,7 @@ impl PaneGroup {
         #[cfg_attr(not(feature = "local_fs"), allow(unused_variables, clippy::ptr_arg))]
         deferred_panes: &mut Vec<(PaneId, LeafSnapshot)>,
         pending_ambient_restorations: &mut Vec<(AmbientAgentTaskId, PaneId)>,
+        shell_start: ShellStartPolicy,
     ) -> anyhow::Result<(PaneData, InitialFocus)> {
         let custom_vertical_tabs_title = leaf.custom_vertical_tabs_title.clone();
         let result = match leaf.contents {
@@ -1742,7 +1751,7 @@ impl PaneGroup {
                     model_event_sender.clone(),
                     chosen_shell,
                     terminal_snapshot.input_config,
-                    ShellStartPolicy::Eager,
+                    shell_start,
                     ctx,
                 );
 
@@ -3493,11 +3502,14 @@ impl PaneGroup {
                     view_bounds.size(),
                     model_event_sender_clone,
                 ),
-                PanesLayout::Snapshot(panes_snapshot) => {
+                PanesLayout::Snapshot {
+                    snapshot,
+                    shell_start,
+                } => {
                     let mut deferred_panes = Vec::new();
                     let mut pending_restorations = Vec::new();
                     let result = Self::restore_pane_tree(
-                        *panes_snapshot,
+                        *snapshot,
                         block_lists,
                         resources.clone(),
                         ctx,
@@ -3507,6 +3519,7 @@ impl PaneGroup {
                         model_event_sender_clone.clone(),
                         &mut deferred_panes,
                         &mut pending_restorations,
+                        shell_start,
                     )
                     .unwrap_or_else(|err| {
                         log::warn!("Error restoring pane tree: {err:#}");

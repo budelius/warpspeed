@@ -3098,11 +3098,14 @@ fn set_left_panel_visibility_across_tabs(is_enabled: bool, ctx: &mut ViewContext
 
 fn add_get_started_tab(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
     workspace.add_tab_with_pane_layout(
-        PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::GetStarted,
-        }))),
+        PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::GetStarted,
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        },
         Arc::new(HashMap::<PaneUuid, Vec<SerializedBlockListItem>>::new()),
         None,
         ctx,

@@ -97,6 +97,7 @@ use crate::terminal::shared_session::{
     SharedSessionSource, SharedSessionStatus,
 };
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::test_util::pane_snapshots::single_terminal_leaf_snapshot;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseStack;
 use crate::warp_managed_paths_watcher::WarpManagedPathsWatcher;
@@ -4350,6 +4351,75 @@ fn test_eager_pane_with_commands_still_starts_immediately() {
         assert!(
             !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
             "an eager pane with commands starts immediately"
+        );
+    });
+}
+
+/// A restored pane defers when its policy says to. Restored panes carry
+/// scrollback that renders without a PTY, so a parked restored pane shows its
+/// history rather than being blank.
+#[test]
+fn test_restored_pane_defers_when_policy_is_deferred() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(single_terminal_leaf_snapshot()),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a restored pane must defer when the policy says Deferred"
+        );
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "activation starts the restored pane's shell"
+        );
+    });
+}
+
+/// Session restore under `Eager` is unchanged. This is the regression guard for
+/// every existing restore path.
+#[test]
+fn test_restored_pane_starts_eagerly_under_eager_policy() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(single_terminal_leaf_snapshot()),
+                    shell_start: ShellStartPolicy::Eager,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "an eagerly-restored pane starts its shell immediately"
         );
     });
 }

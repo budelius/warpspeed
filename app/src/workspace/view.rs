@@ -3964,7 +3964,23 @@ impl Workspace {
                 window_snapshot,
                 block_lists,
             } => {
-                let active_tab_index = window_snapshot.active_tab_index;
+                // Clamp up front, once, and reuse this single binding for
+                // both the per-tab eager/deferred decision below and the
+                // final `activate_tab_internal` call (mirroring
+                // `open_launch_config_window`'s `eager_tab_index`). Without
+                // this, an out-of-range `active_tab_index` -- reachable via
+                // `sqlite.rs`'s `filter_map` silently dropping tabs whose
+                // pane tree fails to deserialize without re-clamping the
+                // stored index -- would mean no tab matches the eager
+                // comparison (every tab restores deferred) while
+                // `activate_tab_internal` silently no-ops on an out-of-range
+                // index, leaving the tab that actually ends up visible with a
+                // shell that never starts. `saturating_sub(1)` degenerates to
+                // 0 when there are no tabs to restore, matching the default
+                // tab created below in that case.
+                let active_tab_index = window_snapshot
+                    .active_tab_index
+                    .min(window_snapshot.tabs.len().saturating_sub(1));
                 let restored_left_panel_open = window_snapshot.left_panel_open;
 
                 // Restore groups first so per-tab `group_id` assignments

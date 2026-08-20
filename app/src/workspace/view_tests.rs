@@ -5259,3 +5259,40 @@ fn test_session_restore_defers_all_but_active_tab() {
         );
     });
 }
+
+/// An out-of-range `active_tab_index` on the restored snapshot must not
+/// leave the visible tab's shell parked forever: `activate_tab_internal`
+/// silently no-ops on an out-of-range index rather than clamping, so the
+/// eager tab and the activated tab must agree on the same clamped index.
+#[test]
+fn test_session_restore_out_of_range_active_index_starts_last_tab() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let snapshot = window_snapshot_with_tabs(3, /* active_tab_index */ 99);
+
+        let workspace = restored_workspace(&mut app, snapshot);
+
+        let deferred: Vec<bool> = app.read(|ctx| {
+            workspace.read(ctx, |ws, ctx| {
+                ws.tabs
+                    .iter()
+                    .map(|tab| {
+                        tab.pane_group
+                            .read(ctx, |group, ctx| group.terminal_manager(0, ctx))
+                            .expect("each restored tab has one terminal pane")
+                            .read(ctx, |m, _| m.has_deferred_shell())
+                    })
+                    .collect()
+            })
+        });
+
+        assert_eq!(
+            deferred,
+            vec![true, true, false],
+            "an out-of-range active_tab_index clamps to the last tab for both \
+             the eager set and activation, so exactly that tab's shell starts"
+        );
+    });
+}

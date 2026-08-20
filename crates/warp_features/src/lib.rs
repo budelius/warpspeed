@@ -143,8 +143,9 @@ pub enum FeatureFlag {
     /// a shell other than the default shell.
     ShellSelector,
 
-    /// Defers forking a login shell for launch-configuration panes that are
-    /// not in their window's active tab until the pane is first activated.
+    /// Defers forking a login shell for panes that are not in their window's
+    /// active tab until the pane is first activated. Applies to windows built
+    /// up front: opening a launch configuration and restoring a saved session.
     LazyShellStartup,
 
     /// Enables writing to long-running commands in shared sessions.

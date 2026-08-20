@@ -1012,15 +1012,15 @@ enum TabBarSlot {
 /// to the user -- which must start any deferred shells belonging to those
 /// panes -- from one that is purely internal bookkeeping and must not.
 ///
-/// The only current `Bookkeeping` use is
-/// [`Workspace::open_launch_config_window`]'s tab-construction loop: each
-/// tab it inserts is activated as an implementation detail of building the
-/// tab list (so later iterations, and code after the loop, can key off
-/// `active_tab_index`), not because it becomes visible -- the whole loop
-/// runs within a single update before the window settles on the tab the
-/// user actually sees. Starting deferred shells on every tab as it is
-/// constructed would fork every pane in the launch configuration up front,
-/// defeating the deferral this type exists to prevent.
+/// `Bookkeeping` is used by the two tab-construction loops -- the one in
+/// [`Workspace::open_launch_config_window`] and the one that rebuilds a
+/// window from its session snapshot: each tab they insert is activated as an
+/// implementation detail of building the tab list (so later iterations, and
+/// code after the loop, can key off `active_tab_index`), not because it
+/// becomes visible -- the whole loop runs within a single update before the
+/// window settles on the tab the user actually sees. Starting deferred
+/// shells on every tab as it is constructed would fork every pane in the
+/// window up front, defeating the deferral this type exists to prevent.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TabActivation {
     /// The tab genuinely becomes visible: start its deferred shells.
@@ -5585,7 +5585,8 @@ impl Workspace {
 
         if activation == TabActivation::Visible {
             // The newly active tab renders every one of its panes, so start any
-            // whose shell was deferred when the launch configuration opened.
+            // whose shell was deferred when the window was built -- by opening
+            // a launch configuration or by restoring a saved session.
             let pane_group = self.active_tab_pane_group().clone();
             pane_group.update(ctx, |pane_group, ctx| {
                 pane_group.start_deferred_shells(ctx);
@@ -12947,20 +12948,21 @@ impl Workspace {
     /// Like [`Self::add_tab_with_pane_layout`], but lets the caller suppress
     /// the shell-starting side effect of activating the newly inserted tab.
     ///
-    /// [`Self::open_launch_config_window`] inserts every tab of a launch
-    /// configuration in a loop via this function. The activation each
-    /// insertion performs below is bookkeeping -- later iterations of that
-    /// loop, and code after it, read `self.active_tab_index` and expect it to
-    /// track the tab just inserted -- not a real, user-visible tab switch:
-    /// none of these intermediate tabs are ever rendered, since the whole
-    /// loop runs within a single update before the window activates the tab
-    /// the user will actually see. Starting deferred shells on every
-    /// intermediate tab here would fork every pane in the launch
-    /// configuration up front, defeating the deferral this feature exists to
-    /// provide. `TabActivation::Bookkeeping` keeps the rest of
-    /// activation (active index, focus, window title) so that bookkeeping
-    /// still works, while leaving deferred panes parked until the real
-    /// activation that follows the loop.
+    /// Two callers insert a window's whole tab list in a loop via this
+    /// function: [`Self::open_launch_config_window`] for a launch
+    /// configuration, and session restore for a saved window. The activation
+    /// each insertion performs below is bookkeeping -- later iterations of
+    /// those loops, and code after them, read `self.active_tab_index` and
+    /// expect it to track the tab just inserted -- not a real, user-visible
+    /// tab switch: none of these intermediate tabs are ever rendered, since
+    /// the whole loop runs within a single update before the window activates
+    /// the tab the user will actually see. Starting deferred shells on every
+    /// intermediate tab here would fork every pane in the window up front,
+    /// defeating the deferral this feature exists to provide.
+    /// `TabActivation::Bookkeeping` keeps the rest of activation (active
+    /// index, focus, window title) so that bookkeeping still works, while
+    /// leaving deferred panes parked until the real activation that follows
+    /// the loop.
     fn add_tab_with_pane_layout_with_activation(
         &mut self,
         panes_layout: PanesLayout,

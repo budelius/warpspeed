@@ -4309,13 +4309,37 @@ fn test_deferred_pane_with_commands_parks_its_shell() {
             "a pane with commands must now defer instead of forcing eager"
         );
 
-        // Activating it starts the shell; the queued commands drain from there.
+        let view = app
+            .read(|ctx| {
+                pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(0, ctx))
+            })
+            .expect("pane 0 has a terminal view");
+        assert!(
+            app.read(|ctx| view
+                .as_ref(ctx)
+                .has_pending_command_or_awaiting_completion(ctx)),
+            "parking the shell must not discard the pane's queued commands"
+        );
+
+        // Activating starts the parked shell, and the queued commands are still
+        // there waiting for it. They only *run* once the shell bootstraps:
+        // `Input::execute_pending_command` refuses to submit anything until
+        // `block_list().is_bootstrapped()`, which needs a real PTY handshake
+        // this harness never performs. So the drain itself is not asserted
+        // here -- only that activation neither drops the queue nor consumes it
+        // early.
         app.update(|ctx| {
             pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
         });
         assert!(
             !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
             "activation starts the parked shell"
+        );
+        assert!(
+            app.read(|ctx| view
+                .as_ref(ctx)
+                .has_pending_command_or_awaiting_completion(ctx)),
+            "the queued commands must still be pending for the freshly started shell"
         );
     });
 }

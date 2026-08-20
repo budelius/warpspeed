@@ -5194,3 +5194,68 @@ fn test_activating_background_tab_starts_its_deferred_shells() {
         );
     });
 }
+
+fn window_snapshot_with_tabs(tab_count: usize, active_tab_index: usize) -> WindowSnapshot {
+    WindowSnapshot {
+        tabs: (0..tab_count)
+            .map(|_| TabSnapshot {
+                custom_title: None,
+                root: crate::test_util::pane_snapshots::single_terminal_leaf_snapshot(),
+                default_directory_color: None,
+                selected_color: SelectedTabColor::default(),
+                left_panel: None,
+                right_panel: None,
+                group_id: None,
+                pinned: false,
+            })
+            .collect(),
+        active_tab_index,
+        team_uid: None,
+        bounds: None,
+        fullscreen_state: Default::default(),
+        quake_mode: false,
+        universal_search_width: None,
+        warp_ai_width: None,
+        voltron_width: None,
+        warp_drive_index_width: None,
+        left_panel_open: false,
+        vertical_tabs_panel_open: false,
+        left_panel_width: None,
+        right_panel_width: None,
+        agent_management_filters: None,
+        tab_groups: vec![],
+    }
+}
+
+/// Restoring a multi-tab session parks every tab but the one it activates.
+#[test]
+fn test_session_restore_defers_all_but_active_tab() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let snapshot = window_snapshot_with_tabs(3, /* active_tab_index */ 1);
+
+        let workspace = restored_workspace(&mut app, snapshot);
+
+        let deferred: Vec<bool> = app.read(|ctx| {
+            workspace.read(ctx, |ws, ctx| {
+                ws.tabs
+                    .iter()
+                    .map(|tab| {
+                        tab.pane_group
+                            .read(ctx, |group, ctx| group.terminal_manager(0, ctx))
+                            .expect("each restored tab has one terminal pane")
+                            .read(ctx, |m, _| m.has_deferred_shell())
+                    })
+                    .collect()
+            })
+        });
+
+        assert_eq!(
+            deferred,
+            vec![true, false, true],
+            "only the restored active tab (index 1) starts its shells"
+        );
+    });
+}

@@ -3998,14 +3998,22 @@ impl Workspace {
                     .enumerate()
                     .for_each(|(tab_index, saved_tab)| {
                         let custom_title = saved_tab.custom_title.clone();
-                        self.add_tab_with_pane_layout(
+                        // `TabActivation::Bookkeeping`: this loop's per-insertion
+                        // activation is bookkeeping, not a real switch (see
+                        // `add_tab_with_pane_layout_with_activation`'s doc comment) --
+                        // it must not start any tab's deferred shells. The tab that
+                        // actually becomes visible is activated for real via
+                        // `activate_tab_internal` once, after this loop.
+                        self.add_tab_with_pane_layout_with_activation(
                             PanesLayout::Snapshot {
                                 snapshot: Box::new(saved_tab.root.clone()),
-                                // TODO(Task 3): pick eager vs. deferred per tab.
-                                shell_start: ShellStartPolicy::Eager,
+                                shell_start: ShellStartPolicy::for_launch_config_tab(
+                                    tab_index == active_tab_index,
+                                ),
                             },
                             block_lists.clone(),
                             custom_title,
+                            TabActivation::Bookkeeping,
                             ctx,
                         );
                         self.tabs[tab_index].default_directory_color =

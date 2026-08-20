@@ -3,9 +3,8 @@ use crate::FeatureFlag;
 /// Whether a terminal pane forks its login shell at construction time or parks
 /// the inputs and forks on first activation.
 ///
-/// Decided per tab when a launch configuration is opened, then refined per pane
-/// by [`ShellStartPolicy::refine_for_pane`]. Deliberately free of any
-/// `local_tty` gating so one policy type backs every terminal manager
+/// Decided per tab when a launch configuration is opened. Deliberately free
+/// of any `local_tty` gating so one policy type backs every terminal manager
 /// implementation. `local_tty` is unconditionally active on non-wasm targets
 /// (see `app/build.rs`), so on those platforms it is the real
 /// `local_tty::TerminalManager` that parks and replays the shell start, not
@@ -31,15 +30,6 @@ impl ShellStartPolicy {
         } else {
             Self::Deferred
         }
-    }
-
-    /// Narrows a tab-level policy for one pane.
-    ///
-    /// A pane with pending startup commands always starts eagerly: deferring it
-    /// would raise the question of when those commands run and what the user
-    /// sees until they do, and forcing it eager sidesteps that entirely.
-    pub fn refine_for_pane(self, has_commands: bool) -> Self {
-        if has_commands { Self::Eager } else { self }
     }
 
     /// Whether this policy parks the shell instead of forking it.
@@ -75,22 +65,6 @@ mod tests {
         );
         assert_eq!(
             ShellStartPolicy::for_launch_config_tab(false),
-            ShellStartPolicy::Eager
-        );
-    }
-
-    #[test]
-    fn pending_commands_force_eager() {
-        assert_eq!(
-            ShellStartPolicy::Deferred.refine_for_pane(true),
-            ShellStartPolicy::Eager
-        );
-        assert_eq!(
-            ShellStartPolicy::Deferred.refine_for_pane(false),
-            ShellStartPolicy::Deferred
-        );
-        assert_eq!(
-            ShellStartPolicy::Eager.refine_for_pane(false),
             ShellStartPolicy::Eager
         );
     }

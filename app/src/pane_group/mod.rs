@@ -871,9 +871,8 @@ pub enum PanesLayout {
     Snapshot(Box<PaneNodeSnapshot>),
     Template {
         template: PaneTemplateType,
-        /// Policy for this tab's panes, refined per pane by
-        /// [`ShellStartPolicy::refine_for_pane`]. Only this variant can defer:
-        /// `Snapshot` (session restore) and `SingleTerminal` always start eagerly.
+        /// Policy for this tab's panes. Panes carrying startup commands defer
+        /// too; their commands stay queued and run when the tab is activated.
         shell_start: ShellStartPolicy,
     },
     AmbientAgent,
@@ -1409,10 +1408,6 @@ impl PaneGroup {
                 pane_mode,
                 shell,
             } => {
-                // Computed before `commands` is moved into the pending-command
-                // queue below. A pane with startup commands never defers.
-                let pane_shell_start = shell_start.refine_for_pane(!commands.is_empty());
-
                 let uuid = Uuid::new_v4();
 
                 #[cfg(feature = "local_tty")]
@@ -1444,7 +1439,7 @@ impl PaneGroup {
                         model_event_sender.clone(),
                         chosen_shell,
                         None,
-                        pane_shell_start,
+                        shell_start,
                         ctx,
                     ),
                 };

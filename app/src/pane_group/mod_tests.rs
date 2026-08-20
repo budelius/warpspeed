@@ -4022,10 +4022,13 @@ fn test_deferred_template_pane_parks_shell_until_started() {
     });
 }
 
-/// A pane carrying startup commands ignores `Deferred`, because deferring it
-/// would leave the commands with no defined moment to run.
+/// A pane carrying startup commands now honors `Deferred` like any other
+/// pane; the commands stay queued and run once the pane is activated. This
+/// pins the behaviour Task 1 introduced in place of the old force-eager
+/// guard (see `test_deferred_pane_with_commands_parks_its_shell` for the
+/// full activation flow).
 #[test]
-fn test_template_pane_with_commands_starts_eagerly_when_deferred() {
+fn test_template_pane_with_commands_honors_deferred() {
     // LazyShellStartup does not gate this layer: `shell_start` is injected
     // directly by the caller (this is the mechanism Task 4 wires a real flag
     // check into). No override needed to exercise it here.
@@ -4056,8 +4059,8 @@ fn test_template_pane_with_commands_starts_eagerly_when_deferred() {
             .expect("pane 0 has a terminal manager");
 
         assert!(
-            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
-            "a pane with pending commands must not defer"
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a pane with pending commands now defers"
         );
     });
 }
@@ -4262,5 +4265,91 @@ fn test_activating_one_pane_via_mouse_starts_only_that_pane() {
 
         assert!(!is_deferred(&mut app, 1), "activated pane started");
         assert!(is_deferred(&mut app, 0), "sibling pane stayed parked");
+    });
+}
+
+/// A pane carrying startup commands now defers like any other. Its commands
+/// stay queued and run when the pane is activated, which is the answer the
+/// original design lacked when it forced such panes eager.
+#[test]
+fn test_deferred_pane_with_commands_parks_its_shell() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![crate::launch_configs::launch_config::CommandTemplate {
+                            exec: "echo hello".to_string(),
+                        }],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a pane with commands must now defer instead of forcing eager"
+        );
+
+        // Activating it starts the shell; the queued commands drain from there.
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "activation starts the parked shell"
+        );
+    });
+}
+
+/// A pane with commands under `Eager` is unchanged — this is the case that
+/// must not regress, since it is what every existing config does today.
+#[test]
+fn test_eager_pane_with_commands_still_starts_immediately() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![crate::launch_configs::launch_config::CommandTemplate {
+                            exec: "echo hello".to_string(),
+                        }],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Eager,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "an eager pane with commands starts immediately"
+        );
     });
 }

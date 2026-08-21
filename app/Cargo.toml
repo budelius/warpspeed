@@ -23,6 +23,11 @@ path = "src/bin/oss.rs"
 test = false
 
 [[bin]]
+name = "warpspeed"
+path = "src/bin/warpspeed.rs"
+test = false
+
+[[bin]]
 name = "warp"
 path = "src/bin/local.rs"
 test = false

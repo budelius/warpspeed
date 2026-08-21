@@ -1,3 +1,53 @@
+# WarpSpeed
+
+A fork of [warpdotdev/Warp](https://github.com/warpdotdev/Warp), used for work on
+terminal startup and session-restore behaviour.
+
+## What this fork adds
+
+- **A `warpspeed` build target.** Upstream's `dev`, `local`, `stable`, and `preview`
+  binaries resolve their channel config at runtime from a private generator that
+  needs SSH access to `warpdotdev/warp-channel-config`, and panic at startup
+  without it. `oss` runs standalone but keeps dogfood flags off. `warpspeed`
+  carries an inline config *and* enables dogfood flags, so in-progress features
+  are actually reachable. It also takes a distinct `AppId` that varies with
+  elevation and `WARPSPEED_PROFILE`, so it runs alongside an installed Warp
+  instead of sharing its settings, database, and session state.
+- **Lazy session restore** (on `feature/launch-config-shell-improvements`, not yet
+  merged). Restored tabs defer starting their shells until activated, so opening a
+  large saved session forks shells for the active tab rather than every pane.
+
+## Building
+
+```bash
+export PROTOC=/path/to/protoc          # required by workspace build scripts
+cargo run -p warp --bin warpspeed
+```
+
+On Linux, install build dependencies first with `./script/linux/install_build_deps`.
+
+## Branches
+
+| Branch | Contents |
+| --- | --- |
+| `main` | Upstream snapshot `19dc505`, plus this fork's build target |
+| `dev` | Integration branch; CI lints merge requests and pushes here |
+| `feature/*` | Work in progress |
+
+Note: this repository was created from a shallow clone, so history begins at
+upstream `19dc505` rather than at Warp's root commit.
+
+## License and attribution
+
+Licensing is unchanged from upstream: dual-licensed under AGPL-3.0 and MIT. See
+[`LICENSE-AGPL`](LICENSE-AGPL) and [`LICENSE-MIT`](LICENSE-MIT).
+
+Warp is a product of Warp Dev, Inc. This fork is independent, and is neither
+affiliated with nor endorsed by Warp Dev, Inc. All upstream copyright and
+attribution is retained; the upstream README follows below unmodified.
+
+---
+
 <a href="https://www.warp.dev">
     <img width="1024" alt="Warp Agentic Development Environment product preview" src="https://github.com/user-attachments/assets/9976b2da-2edd-4604-a36c-8fd53719c6d4" />
 </a>

@@ -1,33 +1,33 @@
-# CI for the WarpSpeed fork -- targeted at GitLab.com **shared** runners.
+# CI for the WarpSpeed fork.
 #
 # Shape mirrors gitlab.com/martin-wieser/locke: a `lint` stage gated on merge
 # requests and `dev`, and a tag-gated release stage. What differs is what
 # "publish" means -- this repo ships no packages, so it builds the `warpspeed`
 # binary and keeps it as a job artifact.
 #
-# Why the jobs are split the way they are
-# ---------------------------------------
-# `saas-linux-small-amd64` gives 2 vCPU / 8 GB RAM / ~25 GB disk, and the free
-# tier allows 400 compute-minutes a month. That budget decides the design:
+# Runner
+# ------
+# Everything runs on the self-hosted `obachan-staging-oss` project runner, the
+# same one locke uses. Two consequences:
 #
-#   * `fmt` compiles nothing. rustfmt parses sources, so it needs no system
-#     packages, no LFS payload, and no dependency graph. It runs in ~1 minute
-#     and is therefore the automatic gate.
-#   * `clippy` and `build:warpspeed` must build Warp's entire dependency graph.
-#     On 2 vCPU that is tens of minutes and pushes against the 25 GB disk, so
-#     both are `when: manual` -- one click when you want them, rather than
-#     silently eating the monthly budget on every push. Flip them to automatic
-#     by deleting the `when: manual` line if you move to paid minutes or a
-#     self-hosted runner.
+#   * The tag is mandatory. That runner has `run_untagged: false`, so an
+#     untagged job is not merely slower -- it never gets picked up and ends as
+#     `stuck_pending_no_matching_runners`.
+#   * Self-hosted minutes are not billed against the GitLab.com compute quota,
+#     so the compile jobs run automatically rather than behind `when: manual`.
+#     `build:warpspeed` is the exception on `dev`: a release build of a GPU
+#     desktop app occupies a runner shared with granny, locke, and ojiichan for
+#     a long stretch, so on `dev` it is opt-in and on version tags it is
+#     automatic.
 #
 # Container caveat: script/linux/install_build_deps sources script/warp_sudo,
 # which shells out to `sudo` unconditionally. These images run as root and have
 # no sudo, so it is installed first and WARP_SKIP_SUDO_PROMPT bypasses the
 # interactive confirmation.
 #
-# Verified: this file passes GitLab's CI lint. The compile jobs themselves have
-# not completed a run on shared runners -- expect the first `clippy` to need
-# adjustment, most likely on disk.
+# Verified: config passes GitLab's CI lint, and `fmt` has completed a real run.
+# The compile jobs have not yet completed one -- expect the first `clippy` to
+# need adjustment.
 
 stages:
   - lint
@@ -35,6 +35,8 @@ stages:
 
 default:
   image: rust:1-bookworm
+  tags:
+    - obachan-staging-oss
   interruptible: true
 
 variables:
@@ -43,8 +45,8 @@ variables:
   # Incremental artefacts are pure cost in CI: nothing is reused across jobs.
   CARGO_INCREMENTAL: "0"
   CARGO_NET_RETRY: "3"
-  # Upstream CI uses line-tables-only; drop debug info entirely, since the
-  # binding constraint on a shared runner is disk rather than backtrace quality.
+  # Upstream CI uses line-tables-only; drop debug info entirely. Warp's build
+  # tree is large enough that this is worth the lost backtrace detail.
   RUSTFLAGS: "-C debuginfo=0 --cfg=web_sys_unstable_apis"
   WARP_SKIP_SUDO_PROMPT: "1"
 
@@ -59,8 +61,8 @@ cache:
 fmt:
   stage: lint
   variables:
-    # rustfmt never reads the ONNX models or the Windows PDBs, so skip the
-    # ~147 MB LFS payload entirely.
+    # rustfmt only parses -- it never reads the ONNX models or the Windows
+    # PDBs, so skip the ~147 MB LFS payload and the system packages entirely.
     GIT_LFS_SKIP_SMUDGE: "1"
   script:
     - rustup component add rustfmt
@@ -72,8 +74,6 @@ fmt:
 clippy:
   stage: lint
   timeout: 3h
-  when: manual
-  allow_failure: true
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends sudo
     - ./script/linux/install_build_deps
@@ -91,7 +91,6 @@ clippy:
 build:warpspeed:
   stage: build
   timeout: 3h
-  when: manual
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends sudo
     - ./script/linux/install_build_deps
@@ -111,3 +110,5 @@ build:warpspeed:
     # three-part semver: `v1.0.0`.
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
     - if: $CI_COMMIT_BRANCH == "dev"
+      when: manual
+      allow_failure: true

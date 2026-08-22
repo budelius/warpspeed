@@ -12,11 +12,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `warpspeed` build target: a standalone binary with an inline channel config and
   dogfood flags enabled, taking a distinct `AppId` that varies with elevation and
   `WARPSPEED_PROFILE` so it runs alongside an installed Warp.
-- GitLab CI targeted at GitLab.com shared runners: an automatic `fmt` gate on
-  merge requests and `dev` (compiles nothing, so it needs no system packages and
-  no LFS payload), plus manual `clippy` and `build:warpspeed` jobs that build the
-  full dependency graph. Config validated with GitLab's CI lint; the compile jobs
-  have not yet completed a run.
+- GitLab CI on the self-hosted `obachan-staging-oss` runner: `fmt` and `clippy`
+  on merge requests and `dev`, and `build:warpspeed` automatic on version tags,
+  opt-in on `dev`. `fmt` compiles nothing, so it skips system packages and the
+  LFS payload and finishes in about a minute. Config validated with GitLab's CI
+  lint; `fmt` has completed a real run, the compile jobs have not.
 
 ### Changed
 

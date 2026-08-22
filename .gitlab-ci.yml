@@ -1,66 +1,106 @@
-# CI for the WarpSpeed fork.
+# CI for the WarpSpeed fork -- targeted at GitLab.com **shared** runners.
 #
 # Shape mirrors gitlab.com/martin-wieser/locke: a `lint` stage gated on merge
-# requests and `dev`, and a `publish` stage gated on version tags. What differs
-# is what "publish" means -- this repo ships no packages, so the publish stage
-# builds the `warpspeed` binary and keeps it as a job artifact.
+# requests and `dev`, and a tag-gated release stage. What differs is what
+# "publish" means -- this repo ships no packages, so it builds the `warpspeed`
+# binary and keeps it as a job artifact.
 #
-# Both jobs install Linux build dependencies via the upstream-maintained
-# `script/linux/install_build_deps`, rather than pinning an apt list here that
-# would drift from upstream.
+# Why the jobs are split the way they are
+# ---------------------------------------
+# `saas-linux-small-amd64` gives 2 vCPU / 8 GB RAM / ~25 GB disk, and the free
+# tier allows 400 compute-minutes a month. That budget decides the design:
 #
-# UNVERIFIED: these jobs have never run. Warp is a GPU-accelerated desktop app
-# with a large dependency graph; expect the first pipeline to need adjustment,
-# and expect a cold build to be slow. Both jobs are pinned to the
-# `obachan-staging-oss` runner because a full Warp build is not viable on
-# GitLab's shared runners -- confirm that runner is available to this project
-# before expecting green pipelines.
+#   * `fmt` compiles nothing. rustfmt parses sources, so it needs no system
+#     packages, no LFS payload, and no dependency graph. It runs in ~1 minute
+#     and is therefore the automatic gate.
+#   * `clippy` and `build:warpspeed` must build Warp's entire dependency graph.
+#     On 2 vCPU that is tens of minutes and pushes against the 25 GB disk, so
+#     both are `when: manual` -- one click when you want them, rather than
+#     silently eating the monthly budget on every push. Flip them to automatic
+#     by deleting the `when: manual` line if you move to paid minutes or a
+#     self-hosted runner.
+#
+# Container caveat: script/linux/install_build_deps sources script/warp_sudo,
+# which shells out to `sudo` unconditionally. These images run as root and have
+# no sudo, so it is installed first and WARP_SKIP_SUDO_PROMPT bypasses the
+# interactive confirmation.
+#
+# Verified: this file passes GitLab's CI lint. The compile jobs themselves have
+# not completed a run on shared runners -- expect the first `clippy` to need
+# adjustment, most likely on disk.
 
 stages:
   - lint
-  - publish
+  - build
+
+default:
+  image: rust:1-bookworm
+  interruptible: true
 
 variables:
   CARGO_TERM_COLOR: always
   CARGO_HOME: "$CI_PROJECT_DIR/.cache/cargo"
-  # Matches upstream CI: keep debug info minimal so runners don't run out of disk.
-  RUSTFLAGS: "-C debuginfo=line-tables-only --cfg=web_sys_unstable_apis"
+  # Incremental artefacts are pure cost in CI: nothing is reused across jobs.
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "3"
+  # Upstream CI uses line-tables-only; drop debug info entirely, since the
+  # binding constraint on a shared runner is disk rather than backtrace quality.
+  RUSTFLAGS: "-C debuginfo=0 --cfg=web_sys_unstable_apis"
+  WARP_SKIP_SUDO_PROMPT: "1"
 
 cache:
-  # Only the registry/git cache. `target/` is deliberately not cached -- a Warp
-  # build tree runs to tens of gigabytes and would exceed any sane cache budget.
+  # Registry and git checkouts only. `target/` is deliberately not cached: a
+  # Warp build tree is tens of gigabytes, so uploading it would cost more than
+  # the rebuild it saves.
   key: cargo-$CI_COMMIT_REF_SLUG
   paths:
     - .cache/cargo
 
-lint:
+fmt:
   stage: lint
-  image: rust:1-bookworm
-  tags:
-    - obachan-staging-oss
-  before_script:
-    - ./script/linux/install_build_deps
-    - rustup component add rustfmt clippy
+  variables:
+    # rustfmt never reads the ONNX models or the Windows PDBs, so skip the
+    # ~147 MB LFS payload entirely.
+    GIT_LFS_SKIP_SMUDGE: "1"
   script:
+    - rustup component add rustfmt
     - cargo fmt --all -- --check
-    # Scoped to the `warp` package: `command-signatures-v2` needs Node/yarn and
-    # `integration` needs libclang, neither of which this image provides.
-    - cargo clippy -p warp --lib -- -D warnings
   rules:
     - if: $CI_MERGE_REQUEST_ID
     - if: $CI_COMMIT_BRANCH == "dev"
 
-publish:warpspeed:
-  stage: publish
-  image: rust:1-bookworm
-  tags:
-    - obachan-staging-oss
+clippy:
+  stage: lint
+  timeout: 3h
+  when: manual
+  allow_failure: true
   before_script:
+    - apt-get update && apt-get install -y --no-install-recommends sudo
+    - ./script/linux/install_build_deps
+    - rustup component add clippy
+  script:
+    - df -h / | tail -1
+    # Scoped to the `warp` package: command-signatures-v2 needs Node/yarn and
+    # `integration` needs libclang, neither of which this image provides.
+    - cargo clippy -p warp --lib --locked -- -D warnings
+    - df -h / | tail -1
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+build:warpspeed:
+  stage: build
+  timeout: 3h
+  when: manual
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends sudo
     - ./script/linux/install_build_deps
   script:
-    - cargo build -p warp --release --bin warpspeed
+    - df -h / | tail -1
+    - cargo build -p warp --release --bin warpspeed --locked
+    - df -h / | tail -1
   artifacts:
-    name: "warpspeed-$CI_COMMIT_TAG"
+    name: "warpspeed-${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
     paths:
       - target/release/warpspeed
     expire_in: 30 days
@@ -70,3 +110,4 @@ publish:warpspeed:
     # so pushing upstream tags would fire a release build. Fork tags are plain
     # three-part semver: `v1.0.0`.
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+    - if: $CI_COMMIT_BRANCH == "dev"

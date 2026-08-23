@@ -98,6 +98,7 @@ use crate::palette::PaletteMode;
 use crate::pane_group::focus_state::PaneGroupFocusEvent;
 use crate::pane_group::pane::ActionOrigin;
 use crate::pane_group::pane::get_started_pane::GetStartedPane;
+use crate::pane_group::pane::terminal_pane::RestoredShellSnapshotFields;
 #[cfg(not(target_family = "wasm"))]
 use crate::pane_group::pane::terminal_pane::{
     host_terminal_shared_session_source_type, inherit_share_for_local_child,
@@ -143,6 +144,7 @@ use crate::terminal::shared_session::share_modal::{ShareSessionModal, ShareSessi
 use crate::terminal::shared_session::{
     self, IsSharedSessionCreator, SharedSessionActionSource, SharedSessionSource,
 };
+use crate::terminal::shell_start_policy::ShellStartPolicy;
 use crate::terminal::view::inline_banner::{
     ZeroStatePromptSuggestionTriggeredFrom, ZeroStatePromptSuggestionType,
 };
@@ -867,8 +869,18 @@ impl NewTerminalOptions {
 #[derive(Debug)]
 pub enum PanesLayout {
     SingleTerminal(Box<NewTerminalOptions>),
-    Snapshot(Box<PaneNodeSnapshot>),
-    Template(PaneTemplateType),
+    Snapshot {
+        snapshot: Box<PaneNodeSnapshot>,
+        /// Policy for this restored tab's panes. Restored panes carry scrollback
+        /// that renders without a PTY, so a parked one shows its history.
+        shell_start: ShellStartPolicy,
+    },
+    Template {
+        template: PaneTemplateType,
+        /// Policy for this tab's panes. Panes carrying startup commands defer
+        /// too; their commands stay queued and run when the tab is activated.
+        shell_start: ShellStartPolicy,
+    },
     AmbientAgent,
 }
 
@@ -1347,6 +1359,7 @@ impl PaneGroup {
     #[allow(clippy::too_many_arguments)]
     fn pane_tree_from_template(
         root: PaneTemplateType,
+        shell_start: ShellStartPolicy,
         resources: TerminalViewResources,
         ctx: &mut ViewContext<PaneGroup>,
         pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
@@ -1358,6 +1371,7 @@ impl PaneGroup {
         let (leftmost_pane_id, pane_data, initial_focus) =
             PaneGroup::pane_tree_from_template_recursive(
                 root,
+                shell_start,
                 resources,
                 ctx,
                 pane_contents,
@@ -1383,6 +1397,7 @@ impl PaneGroup {
     #[allow(clippy::too_many_arguments)]
     fn pane_tree_from_template_recursive(
         root: PaneTemplateType,
+        shell_start: ShellStartPolicy,
         resources: TerminalViewResources,
         ctx: &mut ViewContext<PaneGroup>,
         pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
@@ -1430,6 +1445,7 @@ impl PaneGroup {
                         model_event_sender.clone(),
                         chosen_shell,
                         None,
+                        shell_start,
                         ctx,
                     ),
                 };
@@ -1516,6 +1532,7 @@ impl PaneGroup {
                     let (child_leftmost_pane_id, child, child_focus) =
                         PaneGroup::pane_tree_from_template_recursive(
                             node.clone(),
+                            shell_start,
                             resources.clone(),
                             ctx,
                             pane_contents,
@@ -1554,6 +1571,7 @@ impl PaneGroup {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         deferred_panes: &mut Vec<(PaneId, LeafSnapshot)>,
         pending_ambient_restorations: &mut Vec<(AmbientAgentTaskId, PaneId)>,
+        shell_start: ShellStartPolicy,
     ) -> anyhow::Result<(PaneData, InitialFocus)> {
         match root {
             PaneNodeSnapshot::Leaf(leaf) => Self::restore_pane_leaf(
@@ -1567,6 +1585,7 @@ impl PaneGroup {
                 model_event_sender,
                 deferred_panes,
                 pending_ambient_restorations,
+                shell_start,
             ),
             PaneNodeSnapshot::Branch(pane) => {
                 let mut len = 0;
@@ -1598,6 +1617,7 @@ impl PaneGroup {
                         model_event_sender.clone(),
                         deferred_panes,
                         pending_ambient_restorations,
+                        shell_start,
                     ) {
                         Ok((child, child_focus)) => {
                             len += child.len();
@@ -1635,6 +1655,7 @@ impl PaneGroup {
         #[cfg_attr(not(feature = "local_fs"), allow(unused_variables, clippy::ptr_arg))]
         deferred_panes: &mut Vec<(PaneId, LeafSnapshot)>,
         pending_ambient_restorations: &mut Vec<(AmbientAgentTaskId, PaneId)>,
+        shell_start: ShellStartPolicy,
     ) -> anyhow::Result<(PaneData, InitialFocus)> {
         let custom_vertical_tabs_title = leaf.custom_vertical_tabs_title.clone();
         let result = match leaf.contents {
@@ -1678,6 +1699,17 @@ impl PaneGroup {
                     .cwd
                     .map(PathBuf::from)
                     .filter(|path| path.is_dir());
+
+                // If this pane's shell is parked and never started, these are
+                // the only record of its directory and shell -- there will be
+                // no live PTY metadata to snapshot from. See
+                // `TerminalPane::set_restored_shell_snapshot_fields`.
+                let restored_shell_snapshot_fields = RestoredShellSnapshotFields {
+                    cwd: startup_directory
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    shell_launch_data: terminal_snapshot.shell_launch_data.clone(),
+                };
 
                 // Filter conversation IDs to only include those that have task messages
                 // and are not entirely passive (ignored suggestions).
@@ -1731,18 +1763,20 @@ impl PaneGroup {
                     model_event_sender.clone(),
                     chosen_shell,
                     terminal_snapshot.input_config,
+                    shell_start,
                     ctx,
                 );
 
                 let terminal_view_id = terminal_view.id();
 
-                let pane_data = TerminalPane::new(
+                let mut pane_data = TerminalPane::new(
                     uuid.0,
                     terminal_manager,
                     terminal_view,
                     model_event_sender,
                     ctx,
                 );
+                pane_data.set_restored_shell_snapshot_fields(restored_shell_snapshot_fields);
 
                 let terminal_pane_id = pane_data.terminal_pane_id();
                 let pane_id = terminal_pane_id.into();
@@ -3418,6 +3452,7 @@ impl PaneGroup {
             model_event_sender.clone(),
             options.shell,
             None,
+            ShellStartPolicy::Eager,
             ctx,
         );
 
@@ -3466,8 +3501,12 @@ impl PaneGroup {
                                    view_bounds: RectF,
                                    ctx: &mut ViewContext<Self>| {
             match panes_layout {
-                PanesLayout::Template(template) => Self::pane_tree_from_template(
+                PanesLayout::Template {
                     template,
+                    shell_start,
+                } => Self::pane_tree_from_template(
+                    template,
+                    shell_start,
                     resources,
                     ctx,
                     pane_contents,
@@ -3476,11 +3515,14 @@ impl PaneGroup {
                     view_bounds.size(),
                     model_event_sender_clone,
                 ),
-                PanesLayout::Snapshot(panes_snapshot) => {
+                PanesLayout::Snapshot {
+                    snapshot,
+                    shell_start,
+                } => {
                     let mut deferred_panes = Vec::new();
                     let mut pending_restorations = Vec::new();
                     let result = Self::restore_pane_tree(
-                        *panes_snapshot,
+                        *snapshot,
                         block_lists,
                         resources.clone(),
                         ctx,
@@ -3490,6 +3532,7 @@ impl PaneGroup {
                         model_event_sender_clone.clone(),
                         &mut deferred_panes,
                         &mut pending_restorations,
+                        shell_start,
                     )
                     .unwrap_or_else(|err| {
                         log::warn!("Error restoring pane tree: {err:#}");
@@ -5929,6 +5972,17 @@ impl PaneGroup {
             }
         }
 
+        // A pane activated inside an already-active tab may still be parked
+        // (for instance a pane the user pre-warms from the sidebar and then
+        // clicks). Starting one pane here is enough; its siblings were started
+        // when the tab was activated. Placed after every early-return guard
+        // above so a pane we're about to bail out on (hover suppressed, link
+        // tooltip active, ...) is never started.
+        if let Some(pane) = content.as_any().downcast_ref::<TerminalPane>() {
+            let manager = pane.terminal_manager(ctx);
+            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+        }
+
         self.focus_pane_by_id(id, ctx);
     }
 
@@ -6126,6 +6180,7 @@ impl PaneGroup {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
         initial_input_config: Option<InputConfig>,
+        shell_start: ShellStartPolicy,
         ctx: &mut ViewContext<Self>,
     ) -> (
         ViewHandle<TerminalView>,
@@ -6135,6 +6190,10 @@ impl PaneGroup {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "remote_tty")] {
+                // remote_tty sessions are viewers/attach points onto a shell
+                // that already exists on the remote side -- there is no local
+                // fork to defer, so the policy has nothing to act on here.
+                let _ = shell_start;
                 let terminal_init = RemoteTtyTerminalManager::create_model(
                     resources,
                     initial_size,
@@ -6177,6 +6236,7 @@ impl PaneGroup {
                     initial_size,
                     model_event_sender,
                     chosen_shell,
+                    shell_start,
                     ctx,
                     |surface_init, ctx| {
                         create_terminal_view_surface(
@@ -6207,6 +6267,7 @@ impl PaneGroup {
                         display_name: ShellName::blank(),
                         shell_type: ShellType::Zsh
                     },
+                    shell_start,
                     resources,
                     None,
                     conversation_restoration,
@@ -6375,6 +6436,7 @@ impl PaneGroup {
                 display_name: ShellName::blank(),
                 shell_type: ShellType::Zsh,
             },
+            ShellStartPolicy::Eager,
             resources,
             Some(&restored_blocks),
             Some(ConversationRestorationInNewPaneType::Historical {
@@ -6438,6 +6500,7 @@ impl PaneGroup {
                 display_name: ShellName::blank(),
                 shell_type: ShellType::Zsh,
             },
+            ShellStartPolicy::Eager,
             resources,
             None, // No restored blocks
             None, // No conversation restoration
@@ -6592,6 +6655,7 @@ impl PaneGroup {
             self.model_event_sender.clone(),
             None, // chosen_shell
             None, // initial_input_config
+            ShellStartPolicy::Eager,
             ctx,
         );
 
@@ -6711,6 +6775,7 @@ impl PaneGroup {
             self.model_event_sender.clone(),
             chosen_shell,
             None,
+            ShellStartPolicy::Eager,
             ctx,
         );
 
@@ -7786,6 +7851,25 @@ impl PaneGroup {
             self.update_pane_history(id);
         }
         focused
+    }
+
+    /// Starts the parked shell of every terminal pane in this group.
+    ///
+    /// Called when the group's tab becomes active. All of a tab's panes render
+    /// at once, so all of them start -- starting only the focused pane would
+    /// leave the visible splits showing nothing. Panes that are already
+    /// running are unaffected: `ensure_shell_started` is a no-op for them.
+    pub fn start_deferred_shells(&self, ctx: &mut ViewContext<Self>) {
+        // Collect first: the iteration borrows `self.pane_contents`, while
+        // `update` needs the context mutably.
+        let managers: Vec<_> = self
+            .panes_of::<TerminalPane>()
+            .map(|pane| pane.terminal_manager(ctx))
+            .collect();
+
+        for manager in managers {
+            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+        }
     }
 
     pub fn terminal_manager(

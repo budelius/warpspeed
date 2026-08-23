@@ -417,6 +417,7 @@ use crate::terminal::session_settings::{
 use crate::terminal::settings::{SpacingMode, TerminalSettings};
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shell::ShellType;
+use crate::terminal::shell_start_policy::ShellStartPolicy;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel as HandoffAmbientAgentViewModel;
 use crate::terminal::view::ambient_agent::{AuthSecretFtuxView, AuthSecretFtuxViewEvent};
@@ -1012,6 +1013,29 @@ enum TabBarSlot {
         first_index: usize,
         run_len: usize,
     },
+}
+
+/// Distinguishes a tab activation that makes a tab's panes genuinely visible
+/// to the user -- which must start any deferred shells belonging to those
+/// panes -- from one that is purely internal bookkeeping and must not.
+///
+/// `Bookkeeping` is used by the two tab-construction loops -- the one in
+/// [`Workspace::open_launch_config_window`] and the one that rebuilds a
+/// window from its session snapshot: each tab they insert is activated as an
+/// implementation detail of building the tab list (so later iterations, and
+/// code after the loop, can key off `active_tab_index`), not because it
+/// becomes visible -- the whole loop runs within a single update before the
+/// window settles on the tab the user actually sees. Starting deferred
+/// shells on every tab as it is constructed would fork every pane in the
+/// window up front, defeating the deferral this type exists to prevent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabActivation {
+    /// The tab genuinely becomes visible: start its deferred shells.
+    Visible,
+    /// This activation does not make the tab visible on its own -- either
+    /// it is the already-active tab being re-indexed, or a later, real
+    /// activation will follow. Leave deferred shells parked.
+    Bookkeeping,
 }
 
 pub struct Workspace {
@@ -3883,15 +3907,36 @@ impl Workspace {
     ) {
         let start_index = self.tabs.len();
 
+        // Resolve the eager tab before creating anything. Tabs fork their
+        // shells as they are constructed below, while the active index is only
+        // applied afterwards, so this has to be decided up front — and with the
+        // same clamp the activation uses, or the tab that starts eagerly would
+        // not be the tab that ends up visible.
+        let eager_tab_index = window
+            .active_tab_index
+            .filter(|index| *index < window.tabs.len())
+            .unwrap_or_default();
+
         window
             .tabs
             .iter()
             .enumerate()
             .for_each(|(tab_index, tab_template)| {
-                self.add_tab_with_pane_layout(
-                    PanesLayout::Template(tab_template.layout_with_tab_commands()),
+                // `TabActivation::Bookkeeping`: this loop's per-insertion
+                // activation is bookkeeping, not a real switch (see
+                // `add_tab_with_pane_layout_with_activation`'s doc comment) --
+                // it must not start any tab's deferred shells. The tab that
+                // actually becomes visible is activated for real, once, below.
+                self.add_tab_with_pane_layout_with_activation(
+                    PanesLayout::Template {
+                        template: tab_template.layout_with_tab_commands(),
+                        shell_start: ShellStartPolicy::for_launch_config_tab(
+                            tab_index == eager_tab_index,
+                        ),
+                    },
                     Arc::new(HashMap::new()),
                     tab_template.title.clone(),
+                    TabActivation::Bookkeeping,
                     ctx,
                 );
                 self.tabs[start_index + tab_index].selected_color = tab_template
@@ -3901,8 +3946,7 @@ impl Workspace {
 
         if !window.tabs.is_empty() {
             // Focus the active tab from the launch config.
-
-            let mut index = start_index + window.active_tab_index.unwrap_or_default();
+            let mut index = start_index + eager_tab_index;
 
             if index >= self.tab_count() {
                 index = start_index;
@@ -3930,7 +3974,23 @@ impl Workspace {
                 window_snapshot,
                 block_lists,
             } => {
-                let active_tab_index = window_snapshot.active_tab_index;
+                // Clamp up front, once, and reuse this single binding for
+                // both the per-tab eager/deferred decision below and the
+                // final `activate_tab_internal` call (mirroring
+                // `open_launch_config_window`'s `eager_tab_index`). Without
+                // this, an out-of-range `active_tab_index` -- reachable via
+                // `sqlite.rs`'s `filter_map` silently dropping tabs whose
+                // pane tree fails to deserialize without re-clamping the
+                // stored index -- would mean no tab matches the eager
+                // comparison (every tab restores deferred) while
+                // `activate_tab_internal` silently no-ops on an out-of-range
+                // index, leaving the tab that actually ends up visible with a
+                // shell that never starts. `saturating_sub(1)` degenerates to
+                // 0 when there are no tabs to restore, matching the default
+                // tab created below in that case.
+                let active_tab_index = window_snapshot
+                    .active_tab_index
+                    .min(window_snapshot.tabs.len().saturating_sub(1));
                 let restored_left_panel_open = window_snapshot.left_panel_open;
 
                 // Restore groups first so per-tab `group_id` assignments
@@ -3964,10 +4024,22 @@ impl Workspace {
                     .enumerate()
                     .for_each(|(tab_index, saved_tab)| {
                         let custom_title = saved_tab.custom_title.clone();
-                        self.add_tab_with_pane_layout(
-                            PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
+                        // `TabActivation::Bookkeeping`: this loop's per-insertion
+                        // activation is bookkeeping, not a real switch (see
+                        // `add_tab_with_pane_layout_with_activation`'s doc comment) --
+                        // it must not start any tab's deferred shells. The tab that
+                        // actually becomes visible is activated for real via
+                        // `activate_tab_internal` once, after this loop.
+                        self.add_tab_with_pane_layout_with_activation(
+                            PanesLayout::Snapshot {
+                                snapshot: Box::new(saved_tab.root.clone()),
+                                shell_start: ShellStartPolicy::for_launch_config_tab(
+                                    tab_index == active_tab_index,
+                                ),
+                            },
                             block_lists.clone(),
                             custom_title,
+                            TabActivation::Bookkeeping,
                             ctx,
                         );
                         self.tabs[tab_index].default_directory_color =
@@ -5328,6 +5400,22 @@ impl Workspace {
     /// This function is meant to be used by other actions to perform the logic to update the
     /// view's state. It's not meant to be invoked directly by an action.
     pub fn activate_tab_internal(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        self.activate_tab_internal_with_activation(index, TabActivation::Visible, ctx);
+    }
+
+    /// Shared body of [`Self::activate_tab_internal`]. `activation` is
+    /// forwarded to [`Self::set_active_tab_index_with_activation`], the
+    /// actual choke point that gates the deferred-shell-starting side
+    /// effect -- see that function's doc comment. Threading it through here
+    /// lets [`Self::add_tab_with_pane_layout_with_activation`] reuse the rest
+    /// of this activation logic (palette/agent-view dismissal, focus, window
+    /// title) for a tab insertion that is *not* a real, user-visible switch.
+    fn activate_tab_internal_with_activation(
+        &mut self,
+        index: usize,
+        activation: TabActivation,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if index < self.tab_count() {
             // If the command palette is open when the tab is switched using a keybinding,
             // we want to close the palette so that we don't get into a state where the palette
@@ -5341,7 +5429,8 @@ impl Workspace {
                 self.set_is_agent_management_view_open(false, ctx);
             }
 
-            self.set_active_tab_index(index, ctx);
+            self.set_active_tab_index_with_activation(index, activation, ctx);
+
             self.focus_active_tab(ctx);
             self.update_window_title(ctx);
         }
@@ -5415,6 +5504,35 @@ impl Workspace {
     /// Change the active tab index. This must be used instead of setting `self.active_tab_index`
     /// directly, as it updates related state.
     pub(crate) fn set_active_tab_index(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        self.set_active_tab_index_with_activation(index, TabActivation::Visible, ctx);
+    }
+
+    /// Shared body of [`Self::set_active_tab_index`]. This is the choke
+    /// point for tab *activation*: every path that makes an existing tab
+    /// within this window the active one (direct activation, renames, drag
+    /// and drop within or across windows, share-modal opening, tab-group
+    /// creation, ...) funnels through here, which is why the deferred-shell
+    /// start for activation lives here rather than in `activate_tab_internal`:
+    /// hooking it one level up left paths that call this function directly
+    /// (bypassing `activate_tab_internal`) able to render a tab whose panes
+    /// were never started.
+    ///
+    /// It is *not* the choke point for every way a pane group can end up
+    /// rendered, though. A pane group adopted into a window by a tab
+    /// tear-out never passes through here -- `adopt_transferred_pane_group`
+    /// swaps it directly into the (already-visible) placeholder tab, so it
+    /// starts its own deferred shells at that adoption site instead.
+    ///
+    /// `activation` distinguishes a real visibility change from
+    /// `TabActivation::Bookkeeping`, used only while a tab is being
+    /// constructed but not yet shown to the user (see
+    /// [`Self::add_tab_with_pane_layout_with_activation`]'s doc comment).
+    fn set_active_tab_index_with_activation(
+        &mut self,
+        index: usize,
+        activation: TabActivation,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let index = if index >= self.tab_count() {
             log::warn!(
                 "Attempted to set active tab index {index} but only {} tabs exist, clamping",
@@ -5474,6 +5592,16 @@ impl Workspace {
             .map(|tv| tv.id());
         let ambient_agent_task_id = self.ambient_agent_task_id_for_focused_terminal_view(ctx);
         self.notify_terminal_focus_change(focused_terminal_view_id, ambient_agent_task_id, ctx);
+
+        if activation == TabActivation::Visible {
+            // The newly active tab renders every one of its panes, so start any
+            // whose shell was deferred when the window was built -- by opening
+            // a launch configuration or by restoring a saved session.
+            let pane_group = self.active_tab_pane_group().clone();
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.start_deferred_shells(ctx);
+            });
+        }
 
         self.update_active_session(ctx);
     }
@@ -7118,7 +7246,10 @@ impl Workspace {
         let (rendered_title, pane_template) =
             crate::tab_configs::render_tab_config(&tab_config, &param_values, worktree_branch_name);
         self.add_tab_with_pane_layout(
-            PanesLayout::Template(pane_template),
+            PanesLayout::Template {
+                template: pane_template,
+                shell_start: ShellStartPolicy::Eager,
+            },
             Arc::new(HashMap::new()),
             rendered_title,
             ctx,
@@ -8637,14 +8768,17 @@ impl Workspace {
             }
         });
 
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Settings(SettingsPaneSnapshot::Local {
-                current_page: page.unwrap_or_default(),
-                search_query: search_query.map(|s| s.to_owned()),
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Settings(SettingsPaneSnapshot::Local {
+                    current_page: page.unwrap_or_default(),
+                    search_query: search_query.map(|s| s.to_owned()),
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(
             panes_layout,
             Arc::new(HashMap::new()),
@@ -12545,11 +12679,14 @@ impl Workspace {
 
     fn add_get_started_tab(&mut self, ctx: &mut ViewContext<Self>) {
         self.add_tab_with_pane_layout(
-            PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-                is_focused: true,
-                custom_vertical_tabs_title: None,
-                contents: LeafContents::GetStarted,
-            }))),
+            PanesLayout::Snapshot {
+                snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    is_focused: true,
+                    custom_vertical_tabs_title: None,
+                    contents: LeafContents::GetStarted,
+                })),
+                shell_start: ShellStartPolicy::Eager,
+            },
             Arc::new(HashMap::new()),
             None,
             ctx,
@@ -12809,6 +12946,41 @@ impl Workspace {
         custom_tab_title: Option<String>,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.add_tab_with_pane_layout_with_activation(
+            panes_layout,
+            block_lists,
+            custom_tab_title,
+            TabActivation::Visible,
+            ctx,
+        );
+    }
+
+    /// Like [`Self::add_tab_with_pane_layout`], but lets the caller suppress
+    /// the shell-starting side effect of activating the newly inserted tab.
+    ///
+    /// Two callers insert a window's whole tab list in a loop via this
+    /// function: [`Self::open_launch_config_window`] for a launch
+    /// configuration, and session restore for a saved window. The activation
+    /// each insertion performs below is bookkeeping -- later iterations of
+    /// those loops, and code after them, read `self.active_tab_index` and
+    /// expect it to track the tab just inserted -- not a real, user-visible
+    /// tab switch: none of these intermediate tabs are ever rendered, since
+    /// the whole loop runs within a single update before the window activates
+    /// the tab the user will actually see. Starting deferred shells on every
+    /// intermediate tab here would fork every pane in the window up front,
+    /// defeating the deferral this feature exists to provide.
+    /// `TabActivation::Bookkeeping` keeps the rest of activation (active
+    /// index, focus, window title) so that bookkeeping still works, while
+    /// leaving deferred panes parked until the real activation that follows
+    /// the loop.
+    fn add_tab_with_pane_layout_with_activation(
+        &mut self,
+        panes_layout: PanesLayout,
+        block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+        custom_tab_title: Option<String>,
+        activation: TabActivation,
+        ctx: &mut ViewContext<Self>,
+    ) {
         // Remember whether the left panel was open on the current active pane group
         // before creating a new active pane group.
         let left_panel_was_open = if self.tabs.is_empty() {
@@ -12823,7 +12995,7 @@ impl Workspace {
         let active_tab_default_color = active_tab.and_then(|tab| tab.default_directory_color);
 
         let is_new_terminal = matches!(panes_layout, PanesLayout::SingleTerminal(_));
-        let is_restoration = matches!(panes_layout, PanesLayout::Snapshot(_));
+        let is_restoration = matches!(panes_layout, PanesLayout::Snapshot { .. });
         let new_pane_group = ctx.add_typed_action_view(|ctx| {
             let mut pane_group = PaneGroup::new_with_panes_layout(
                 self.tips_completed.clone(),
@@ -12857,7 +13029,7 @@ impl Workspace {
         self.tabs.insert(insert_idx, TabData::new(new_pane_group));
         self.tab_mru_order
             .push(self.tabs[insert_idx].pane_group.id());
-        self.activate_tab_internal(insert_idx, ctx);
+        self.activate_tab_internal_with_activation(insert_idx, activation, ctx);
 
         // Inherit the active tab's group membership (skipped for top-level tabs).
         if let Some(group_id) = inherited_group_id {
@@ -12951,14 +13123,17 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         // TODO: We should validate that this notebook exists and fallback if it doesn't
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Notebook(NotebookPaneSnapshot::CloudNotebook {
-                notebook_id: Some(notebook_id),
-                settings: settings.clone(),
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Notebook(NotebookPaneSnapshot::CloudNotebook {
+                    notebook_id: Some(notebook_id),
+                    settings: settings.clone(),
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(panes_layout, Arc::new(HashMap::new()), None, ctx);
     }
 
@@ -12968,14 +13143,17 @@ impl Workspace {
         settings: &OpenWarpDriveObjectSettings,
         ctx: &mut ViewContext<Self>,
     ) {
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Workflow(WorkflowPaneSnapshot::CloudWorkflow {
-                workflow_id: Some(workflow_id),
-                settings: settings.clone(),
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Workflow(WorkflowPaneSnapshot::CloudWorkflow {
+                    workflow_id: Some(workflow_id),
+                    settings: settings.clone(),
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(panes_layout, Arc::new(HashMap::new()), None, ctx);
     }
 
@@ -12985,13 +13163,16 @@ impl Workspace {
         file_path: Option<PathBuf>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
-            is_focused: true,
-            custom_vertical_tabs_title: None,
-            contents: LeafContents::Notebook(NotebookPaneSnapshot::LocalFileNotebook {
-                path: file_path,
-            }),
-        })));
+        let panes_layout = PanesLayout::Snapshot {
+            snapshot: Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+                is_focused: true,
+                custom_vertical_tabs_title: None,
+                contents: LeafContents::Notebook(NotebookPaneSnapshot::LocalFileNotebook {
+                    path: file_path,
+                }),
+            })),
+            shell_start: ShellStartPolicy::Eager,
+        };
         self.add_tab_with_pane_layout(panes_layout, Arc::new(HashMap::new()), None, ctx);
     }
 
@@ -28293,6 +28474,20 @@ impl Workspace {
         ctx.unsubscribe_to_view(&placeholder_pane_group);
         ctx.subscribe_to_view(&new_pane_group, move |me, pane_group, event, ctx| {
             me.handle_file_tree_event(pane_group, event, ctx)
+        });
+
+        // The placeholder tab that `create_transferred_window` inserted was
+        // activated `Visible` (see `add_tab_with_pane_layout_with_activation`),
+        // which started *its* shells -- but that placeholder is discarded
+        // right here, in favor of `new_pane_group`, which never went through
+        // `set_active_tab_index_with_activation` and may still be carrying
+        // deferred panes from the source window's launch config. A tab torn
+        // out into a brand-new window has no subsequent tab-switch to heal
+        // this on, so start its shells now, at adoption time, rather than
+        // leaving them parked until a mouse click happens to reach
+        // `focus_pane_on_mouse_event`.
+        new_pane_group.update(ctx, |pane_group, ctx| {
+            pane_group.start_deferred_shells(ctx);
         });
 
         let working_directories_model = self.working_directories_model.clone();

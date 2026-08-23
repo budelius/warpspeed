@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::FairMutex;
 use pathfinder_geometry::vector::Vector2F;
 use settings::Setting as _;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{AppContext, ModelContext, SingletonEntity};
 
 use super::event_listener::ChannelEventListener;
 use super::model::block::BlockSize;
@@ -32,6 +32,19 @@ pub trait TerminalManager: Any {
     /// Implementations should preserve state on [`DetachType::HiddenForClose`] or
     /// [`DetachType::Moved`] and clean up only on [`DetachType::Closed`].
     fn on_view_detached(&self, _detach_type: DetachType, _app: &mut AppContext) {}
+
+    /// Starts this manager's parked shell if it has one, and does nothing
+    /// otherwise.
+    ///
+    /// Idempotent: implementations consume the parked start with
+    /// `Option::take`, so any number of calls fork at most one shell. Managers
+    /// that never defer keep the default no-op.
+    fn ensure_shell_started(&mut self, _ctx: &mut ModelContext<Box<dyn TerminalManager>>) {}
+
+    /// Whether a shell start is parked and has not run yet.
+    fn has_deferred_shell(&self) -> bool {
+        false
+    }
 
     /// Returns this [`TerminalManager`] as an [`Any`], to support downcasting.
     fn as_any(&self) -> &dyn Any;

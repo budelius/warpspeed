@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
@@ -84,6 +85,7 @@ use crate::settings::PrivacySettings;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
+use crate::terminal::ShellLaunchData;
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
@@ -96,6 +98,9 @@ use crate::terminal::shared_session::{
     IsSharedSessionCreator, SharedSessionActionSource, SharedSessionScrollbackType,
     SharedSessionSource, SharedSessionStatus,
 };
+use crate::terminal::shell::ShellType;
+use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::test_util::pane_snapshots::{single_terminal_leaf_snapshot, terminal_leaf_snapshot};
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseStack;
 use crate::warp_managed_paths_watcher::WarpManagedPathsWatcher;
@@ -3128,7 +3133,10 @@ fn test_initial_widths_are_computed_correctly() {
         let pane_group = mock_pane_group(
             &mut app,
             MockOptions {
-                layout: PanesLayout::Template(template),
+                layout: PanesLayout::Template {
+                    template,
+                    shell_start: ShellStartPolicy::Eager,
+                },
                 window_bounds: WindowBounds::ExactPosition(RectF::new(
                     Vector2F::zero(),
                     window_size,
@@ -3648,25 +3656,29 @@ fn test_pane_focus_does_not_have_an_infinite_event_loop() {
         // Create a pane group with two terminal panes that will fight for
         // focus.
         let mock_options = MockOptions {
-            layout: PanesLayout::Template(PaneTemplateType::PaneBranchTemplate {
-                split_direction: crate::launch_configs::launch_config::SplitDirection::Horizontal,
-                panes: vec![
-                    PaneTemplateType::PaneTemplate {
-                        is_focused: Some(true),
-                        cwd: "/".into(),
-                        commands: vec![],
-                        pane_mode: PaneMode::Terminal,
-                        shell: None,
-                    },
-                    PaneTemplateType::PaneTemplate {
-                        is_focused: None,
-                        cwd: "/".into(),
-                        commands: vec![],
-                        pane_mode: PaneMode::Terminal,
-                        shell: None,
-                    },
-                ],
-            }),
+            layout: PanesLayout::Template {
+                template: PaneTemplateType::PaneBranchTemplate {
+                    split_direction:
+                        crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                    panes: vec![
+                        PaneTemplateType::PaneTemplate {
+                            is_focused: Some(true),
+                            cwd: "/".into(),
+                            commands: vec![],
+                            pane_mode: PaneMode::Terminal,
+                            shell: None,
+                        },
+                        PaneTemplateType::PaneTemplate {
+                            is_focused: None,
+                            cwd: "/".into(),
+                            commands: vec![],
+                            pane_mode: PaneMode::Terminal,
+                            shell: None,
+                        },
+                    ],
+                },
+                shell_start: ShellStartPolicy::Eager,
+            },
             ..Default::default()
         };
         let pane_group = mock_pane_group(&mut app, mock_options);
@@ -3774,25 +3786,28 @@ fn test_focused_pane_is_synchronized_with_application_focus() {
 
         // Create a pane group with two terminal panes, so that we can move
         // focus and observe the effects.
-        let panes_layout = PanesLayout::Template(PaneTemplateType::PaneBranchTemplate {
-            split_direction: crate::launch_configs::launch_config::SplitDirection::Horizontal,
-            panes: vec![
-                PaneTemplateType::PaneTemplate {
-                    is_focused: Some(true),
-                    cwd: "/".into(),
-                    commands: vec![],
-                    pane_mode: PaneMode::Terminal,
-                    shell: None,
-                },
-                PaneTemplateType::PaneTemplate {
-                    is_focused: None,
-                    cwd: "/".into(),
-                    commands: vec![],
-                    pane_mode: PaneMode::Terminal,
-                    shell: None,
-                },
-            ],
-        });
+        let panes_layout = PanesLayout::Template {
+            template: PaneTemplateType::PaneBranchTemplate {
+                split_direction: crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                panes: vec![
+                    PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    PaneTemplateType::PaneTemplate {
+                        is_focused: None,
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                ],
+            },
+            shell_start: ShellStartPolicy::Eager,
+        };
 
         let tips_model = app.add_model(|_| TipsCompleted::default());
         let (_, root_view) =
@@ -3951,5 +3966,557 @@ fn test_undo_close_keeps_a_file_pane_watching_its_file() {
                 "a permanently discarded pane should release its file"
             );
         });
+    });
+}
+
+/// A background-tab template parks its shell instead of forking it, and the
+/// first `ensure_shell_started` consumes the parked start while the second is a
+/// no-op. Asserted against the real `local_tty` `TerminalManager<TerminalView>`:
+/// `local_tty` is unconditionally active on this platform (see `app/build.rs`),
+/// so this reaches `deferred_shell`/`spawn_shell_start` for real, not a mock.
+#[test]
+fn test_deferred_template_pane_parks_shell_until_started() {
+    // LazyShellStartup does not gate this layer: `shell_start` is injected
+    // directly by the caller (this is the mechanism Task 4 wires a real flag
+    // check into). No override needed to exercise it here.
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a deferred pane parks its shell start"
+        );
+
+        app.update(|ctx| {
+            manager.update(ctx, |m, ctx| m.ensure_shell_started(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the first activation consumes the parked start"
+        );
+
+        // Idempotency: Option::take left None, so this must do nothing rather
+        // than fork a second shell.
+        app.update(|ctx| {
+            manager.update(ctx, |m, ctx| m.ensure_shell_started(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a second activation starts nothing"
+        );
+    });
+}
+
+/// A pane carrying startup commands now honors `Deferred` like any other
+/// pane; the commands stay queued and run once the pane is activated. This
+/// pins the behaviour Task 1 introduced in place of the old force-eager
+/// guard (see `test_deferred_pane_with_commands_parks_its_shell` for the
+/// full activation flow).
+#[test]
+fn test_template_pane_with_commands_honors_deferred() {
+    // LazyShellStartup does not gate this layer: `shell_start` is injected
+    // directly by the caller (this is the mechanism Task 4 wires a real flag
+    // check into). No override needed to exercise it here.
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![crate::launch_configs::launch_config::CommandTemplate {
+                            exec: "echo hello".to_string(),
+                        }],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a pane with pending commands now defers"
+        );
+    });
+}
+
+/// With the flag off, a background tab's panes still fork eagerly. Drives the
+/// real template pipeline rather than re-asserting `for_launch_config_tab`,
+/// which Task 1 already covers: the requirement is about what the pane does,
+/// not about what the constructor returns.
+#[test]
+fn test_flag_off_starts_every_template_pane_eagerly() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    // The policy a background tab would receive. With the flag
+                    // off this resolves to `Eager`.
+                    shell_start: ShellStartPolicy::for_launch_config_tab(false),
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "with the flag off no pane may park its shell"
+        );
+    });
+}
+
+/// With the flag on, a background tab's panes defer -- the mirror of
+/// `test_flag_off_starts_every_template_pane_eagerly`, and the only place in
+/// this file where `LazyShellStartup` actually reaches `PanesLayout::Template`
+/// through `ShellStartPolicy::for_launch_config_tab` rather than a
+/// hand-injected `Deferred`. Closes the flag-to-pipeline coverage gap before
+/// Task 4 wires a real background tab into this constructor: without the
+/// `is_enabled()` check inside `for_launch_config_tab`, this test and
+/// `test_flag_off_starts_every_template_pane_eagerly` cannot both pass.
+#[test]
+fn test_flag_on_defers_background_tab_pane() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    // The policy a background tab would receive with the flag on.
+                    shell_start: ShellStartPolicy::for_launch_config_tab(false),
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "with the flag on, a background tab's pane parks its shell start"
+        );
+    });
+}
+
+/// `start_deferred_shells` starts every pane in the group, not just the focused
+/// one: a split tab renders all of its panes simultaneously, so starting one
+/// would leave the others blank.
+#[test]
+fn test_start_deferred_shells_starts_every_pane_in_the_group() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let leaf = |focused: bool| PaneTemplateType::PaneTemplate {
+            is_focused: Some(focused),
+            cwd: "/".into(),
+            commands: vec![],
+            pane_mode: PaneMode::Terminal,
+            shell: None,
+        };
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneBranchTemplate {
+                        split_direction:
+                            crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                        panes: vec![leaf(true), leaf(false)],
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let deferred_count = |app: &mut App| -> usize {
+            app.read(|ctx| {
+                pane_group.read(ctx, |group, ctx| {
+                    (0..2)
+                        .filter_map(|index| group.terminal_manager(index, ctx))
+                        .filter(|manager| manager.read(ctx, |m, _| m.has_deferred_shell()))
+                        .count()
+                })
+            })
+        };
+
+        assert_eq!(deferred_count(&mut app), 2, "both panes start parked");
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+
+        assert_eq!(deferred_count(&mut app), 0, "both panes started");
+    });
+}
+
+/// `focus_pane_on_mouse_event` -- reached here via `PaneGroupAction::Activate`,
+/// the same entry point `PaneGroup::handle_action` routes mouse clicks
+/// through -- starts the clicked pane's deferred shell without touching its
+/// sibling. This is the only recovery path for a pane made visible outside
+/// the tab-activation hook (see `adopt_transferred_pane_group`'s doc
+/// comment), so pinning the asymmetry here catches the hook being silently
+/// dropped, which would otherwise leave a pane permanently blank.
+#[test]
+fn test_activating_one_pane_via_mouse_starts_only_that_pane() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let leaf = |focused: bool| PaneTemplateType::PaneTemplate {
+            is_focused: Some(focused),
+            cwd: "/".into(),
+            commands: vec![],
+            pane_mode: PaneMode::Terminal,
+            shell: None,
+        };
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneBranchTemplate {
+                        split_direction:
+                            crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                        panes: vec![leaf(true), leaf(false)],
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let is_deferred = |app: &mut App, index: usize| -> bool {
+            app.read(|ctx| {
+                pane_group.read(ctx, |group, ctx| {
+                    group
+                        .terminal_manager(index, ctx)
+                        .map(|manager| manager.read(ctx, |m, _| m.has_deferred_shell()))
+                        .unwrap_or(false)
+                })
+            })
+        };
+
+        assert!(is_deferred(&mut app, 0), "pane 0 starts parked");
+        assert!(is_deferred(&mut app, 1), "pane 1 starts parked");
+
+        let pane_id_1 =
+            app.read(|ctx| pane_group.read(ctx, |group, _ctx| group.pane_id_by_index(1).unwrap()));
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| {
+                group.handle_action(
+                    &PaneGroupAction::Activate(pane_id_1, ActivationReason::Click),
+                    ctx,
+                );
+            });
+        });
+
+        assert!(!is_deferred(&mut app, 1), "activated pane started");
+        assert!(is_deferred(&mut app, 0), "sibling pane stayed parked");
+    });
+}
+
+/// A pane carrying startup commands now defers like any other. Its commands
+/// stay queued and run when the pane is activated, which is the answer the
+/// original design lacked when it forced such panes eager.
+#[test]
+fn test_deferred_pane_with_commands_parks_its_shell() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![crate::launch_configs::launch_config::CommandTemplate {
+                            exec: "echo hello".to_string(),
+                        }],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a pane with commands must now defer instead of forcing eager"
+        );
+
+        let view = app
+            .read(|ctx| {
+                pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(0, ctx))
+            })
+            .expect("pane 0 has a terminal view");
+        assert!(
+            app.read(|ctx| view
+                .as_ref(ctx)
+                .has_pending_command_or_awaiting_completion(ctx)),
+            "parking the shell must not discard the pane's queued commands"
+        );
+
+        // Activating starts the parked shell, and the queued commands are still
+        // there waiting for it. They only *run* once the shell bootstraps:
+        // `Input::execute_pending_command` refuses to submit anything until
+        // `block_list().is_bootstrapped()`, which needs a real PTY handshake
+        // this harness never performs. So the drain itself is not asserted
+        // here -- only that activation neither drops the queue nor consumes it
+        // early.
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "activation starts the parked shell"
+        );
+        assert!(
+            app.read(|ctx| view
+                .as_ref(ctx)
+                .has_pending_command_or_awaiting_completion(ctx)),
+            "the queued commands must still be pending for the freshly started shell"
+        );
+    });
+}
+
+/// A pane with commands under `Eager` is unchanged — this is the case that
+/// must not regress, since it is what every existing config does today.
+#[test]
+fn test_eager_pane_with_commands_still_starts_immediately() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![crate::launch_configs::launch_config::CommandTemplate {
+                            exec: "echo hello".to_string(),
+                        }],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Eager,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "an eager pane with commands starts immediately"
+        );
+    });
+}
+
+/// A restored pane defers when its policy says to. Restored panes carry
+/// scrollback that renders without a PTY, so a parked restored pane shows its
+/// history rather than being blank.
+#[test]
+fn test_restored_pane_defers_when_policy_is_deferred() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(single_terminal_leaf_snapshot()),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "a restored pane must defer when the policy says Deferred"
+        );
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "activation starts the restored pane's shell"
+        );
+    });
+}
+
+/// Session restore under `Eager` is unchanged. This is the regression guard for
+/// every existing restore path.
+#[test]
+fn test_restored_pane_starts_eagerly_under_eager_policy() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(single_terminal_leaf_snapshot()),
+                    shell_start: ShellStartPolicy::Eager,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "an eagerly-restored pane starts its shell immediately"
+        );
+    });
+}
+
+/// A restored pane that is never activated must still re-save the `cwd` and
+/// `shell_launch_data` it was restored with.
+///
+/// A parked pane has no PTY, so `TerminalView::active_block_metadata` -- which
+/// both `pwd_if_local` and `shell_launch_data_if_local` bottom out in -- is
+/// permanently `None`. Without a fallback the next save writes NULL for both,
+/// and the tab silently comes back in the home directory under the default
+/// shell on the following launch.
+#[test]
+fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        // Restore has to accept the directory (it drops paths that no longer
+        // exist), so use one that is guaranteed to be there.
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let shell_launch_data = ShellLaunchData::Executable {
+            executable_path: PathBuf::from("/usr/bin/fish"),
+            shell_type: ShellType::Fish,
+        };
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(terminal_leaf_snapshot(
+                        Some(cwd.clone()),
+                        Some(shell_launch_data.clone()),
+                    )),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored pane must be parked for this test to mean anything"
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected the restored tab to snapshot as a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected the restored leaf to snapshot as a terminal pane");
+        };
+
+        assert_eq!(
+            terminal.cwd,
+            Some(cwd),
+            "a parked pane must re-save the cwd it was restored with"
+        );
+        assert_eq!(
+            terminal.shell_launch_data,
+            Some(shell_launch_data),
+            "a parked pane must re-save the shell it was restored with"
+        );
     });
 }

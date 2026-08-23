@@ -22,7 +22,7 @@ use warpui::r#async::executor::Background;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle};
 
 use super::event_loop::EventLoop;
-use super::shell::{ShellStarter, ShellStarterSource};
+use super::shell::{ShellStarter, ShellStarterSource, ShellStarterSourceOrWslName};
 #[cfg(unix)]
 use super::terminal_attributes::TerminalAttributesPoller;
 use super::{mio_channel, recorder};
@@ -55,6 +55,7 @@ use crate::terminal::session_settings::{SessionSettings, ToolbarChipSelection};
 use crate::terminal::shared_session::sharer::network::Network;
 use crate::terminal::shared_session::{IsSharedSessionCreator, SharedSessionStatus};
 use crate::terminal::shell::ShellName;
+use crate::terminal::shell_start_policy::ShellStartPolicy;
 use crate::terminal::terminal_manager::BlockSpacing;
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
@@ -111,6 +112,14 @@ pub struct TerminalManager<S> {
     /// The sharer side of the session sharing protocol. [`Some`] only when a
     /// shared session connection is ongoing.
     pub(super) session_sharer: Rc<RefCell<Option<ModelHandle<Network>>>>,
+
+    /// Inputs for a shell that has not been forked yet. `None` once the shell
+    /// has started, or immediately for [`ShellStartPolicy::Eager`] managers.
+    ///
+    /// `ensure_shell_started` consumes this with `Option::take`, which is what
+    /// makes starting idempotent — there is no separate flag or state machine
+    /// that could disagree with it, and no way to fork twice.
+    pub(super) deferred_shell: Option<DeferredShellStart>,
 }
 
 /// Shared inputs needed to construct a terminal surface for a local PTY.
@@ -165,6 +174,29 @@ struct ShellStartupResources {
     model_events: ModelHandle<ModelEventDispatcher>,
 }
 
+/// The complete set of inputs [`on_shell_determined`] needs, parked so the
+/// shell can be forked later.
+///
+/// Holds exactly what the eager path's `ctx.spawn` closure captures. Nothing
+/// else in `create_model_with_manager` depends on the shell existing, which is
+/// why deferral needs no other plumbing.
+///
+/// The shell is *selected* eagerly regardless of policy: `ShellStarter::init`
+/// runs at construction (see the `preferred_shell` resolution above), and it
+/// is that already-chosen `wsl_name_or_shell_starter` which gets parked here.
+/// Only the *fork* -- resolving the starter source and running
+/// `on_shell_determined` -- is deferred. This is what makes an eager and a
+/// deferred pane start the same shell.
+pub(super) struct DeferredShellStart {
+    startup_directory: Option<PathBuf>,
+    env_vars: HashMap<OsString, OsString>,
+    user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
+    shell_startup_resources: ShellStartupResources,
+    /// The async block's input: either a resolved starter source or a WSL
+    /// distro name that still needs a WSL instance to resolve.
+    wsl_name_or_shell_starter: Option<ShellStarterSourceOrWslName>,
+}
+
 /// Handles created for a local terminal manager and its surface.
 pub struct TerminalManagerInit<S> {
     pub manager: ModelHandle<Box<dyn TerminalManagerTrait>>,
@@ -173,9 +205,20 @@ pub struct TerminalManagerInit<S> {
 /// Adapts a TUI-owned surface manager to Warp's type-erased manager contract.
 struct TuiTerminalManager<S>(TerminalManager<S>);
 
-impl<S: 'static> TerminalManagerTrait for TuiTerminalManager<S> {
+impl<S: TerminalSurface> TerminalManagerTrait for TuiTerminalManager<S>
+where
+    <S as Entity>::Event: PtyIntentEvent,
+{
     fn model(&self) -> Arc<FairMutex<TerminalModel>> {
         self.0.model()
+    }
+
+    fn ensure_shell_started(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>) {
+        self.0.start_deferred_shell(ctx)
+    }
+
+    fn has_deferred_shell(&self) -> bool {
+        self.0.is_shell_deferred()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -204,6 +247,7 @@ impl<S> TerminalManager<S> {
         initial_size: Vector2F,
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
+        shell_start: ShellStartPolicy,
         ctx: &mut AppContext,
         create_surface: impl FnOnce(
             TerminalSurfaceInit,
@@ -225,6 +269,7 @@ impl<S> TerminalManager<S> {
             initial_size,
             model_event_sender,
             chosen_shell,
+            shell_start,
             BlockSpacing::for_gui(ctx),
             SshRemoteServerSupport::Enabled,
             ctx,
@@ -245,6 +290,7 @@ impl<S> TerminalManager<S> {
         initial_size: Vector2F,
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
+        shell_start: ShellStartPolicy,
         block_spacing: BlockSpacing,
         ctx: &mut AppContext,
         create_surface: impl FnOnce(
@@ -266,6 +312,7 @@ impl<S> TerminalManager<S> {
             initial_size,
             model_event_sender,
             chosen_shell,
+            shell_start,
             block_spacing,
             SshRemoteServerSupport::Disabled,
             ctx,
@@ -285,6 +332,7 @@ impl<S> TerminalManager<S> {
         initial_size: Vector2F,
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
+        shell_start: ShellStartPolicy,
         block_spacing: BlockSpacing,
         ssh_remote_server_support: SshRemoteServerSupport,
         ctx: &mut AppContext,
@@ -443,6 +491,7 @@ impl<S> TerminalManager<S> {
             pid: None,
             inactive_pty_reads_rx,
             session_sharer: Rc::new(RefCell::new(None)),
+            deferred_shell: None,
         };
 
         // Run surface-specific wiring after the manager exists, because this
@@ -457,44 +506,112 @@ impl<S> TerminalManager<S> {
             model_events,
         };
 
-        let terminal_manager_model = ctx.add_model(|ctx| {
-            let terminal_manager = box_manager(terminal_manager);
-            ctx.spawn(
-                async move {
-                    match wsl_name_or_shell_starter {
-                        Some(starter_source) => starter_source.to_shell_starter_source().await,
-                        None => None,
-                    }
-                },
-                move |terminal_manager: &mut Box<dyn TerminalManagerTrait>,
-                      shell_starter_source,
-                      ctx| {
-                    let Some(terminal_manager) =
-                        TerminalManagerTrait::as_any_mut(terminal_manager.as_mut())
-                            .downcast_mut::<Self>()
-                    else {
-                        return;
-                    };
-
-                    on_shell_determined(
-                        terminal_manager,
+        let terminal_manager_model = ctx.add_model(|ctx| match shell_start {
+            ShellStartPolicy::Deferred => {
+                log::info!("Deferring shell startup for this pane until activation");
+                terminal_manager.deferred_shell = Some(DeferredShellStart {
+                    startup_directory,
+                    env_vars,
+                    user_default_shell_unsupported_banner_model_handle,
+                    shell_startup_resources,
+                    wsl_name_or_shell_starter,
+                });
+                box_manager(terminal_manager)
+            }
+            ShellStartPolicy::Eager => {
+                let terminal_manager = box_manager(terminal_manager);
+                Self::spawn_shell_start(
+                    DeferredShellStart {
                         startup_directory,
                         env_vars,
                         user_default_shell_unsupported_banner_model_handle,
                         shell_startup_resources,
-                        shell_starter_source,
-                        ctx,
-                    )
-                },
-            );
-
-            terminal_manager
+                        wsl_name_or_shell_starter,
+                    },
+                    ctx,
+                );
+                terminal_manager
+            }
         });
 
         TerminalManagerInit {
             manager: terminal_manager_model,
             surface: terminal_surface,
         }
+    }
+
+    /// Resolves the shell starter off the main thread and hands the result to
+    /// [`on_shell_determined`]. This is the body the eager path runs at
+    /// construction and the deferred path runs from `ensure_shell_started`.
+    pub(super) fn spawn_shell_start(
+        parked: DeferredShellStart,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        let DeferredShellStart {
+            startup_directory,
+            env_vars,
+            user_default_shell_unsupported_banner_model_handle,
+            shell_startup_resources,
+            wsl_name_or_shell_starter,
+        } = parked;
+
+        ctx.spawn(
+            async move {
+                match wsl_name_or_shell_starter {
+                    Some(starter_source) => starter_source.to_shell_starter_source().await,
+                    None => None,
+                }
+            },
+            move |terminal_manager: &mut Box<dyn TerminalManagerTrait>,
+                  shell_starter_source,
+                  ctx| {
+                let Some(terminal_manager) =
+                    TerminalManagerTrait::as_any_mut(terminal_manager.as_mut())
+                        .downcast_mut::<Self>()
+                else {
+                    return;
+                };
+
+                on_shell_determined(
+                    terminal_manager,
+                    startup_directory,
+                    env_vars,
+                    user_default_shell_unsupported_banner_model_handle,
+                    shell_startup_resources,
+                    shell_starter_source,
+                    ctx,
+                )
+            },
+        );
+    }
+
+    /// The sole body of `TerminalManagerTrait::ensure_shell_started`. Both the
+    /// concrete `impl TerminalManagerTrait for TerminalManager<TerminalView>`
+    /// (terminal_view_adaptor.rs) and `TuiTerminalManager`'s forwarding impl
+    /// below call this rather than duplicating its body, so there is exactly
+    /// one `Option::take` on `deferred_shell` in the whole crate: deleting this
+    /// method is a compile error at both call sites, not silent recursion.
+    pub(super) fn start_deferred_shell(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        let Some(parked) = self.deferred_shell.take() else {
+            return;
+        };
+        Self::spawn_shell_start(parked, ctx);
+    }
+
+    /// The sole body of `TerminalManagerTrait::has_deferred_shell`. See
+    /// [`Self::start_deferred_shell`] for why this is shared rather than
+    /// duplicated.
+    pub(super) fn is_shell_deferred(&self) -> bool {
+        self.deferred_shell.is_some()
     }
 
     /// Returns the terminal model owned by this manager.
@@ -526,7 +643,22 @@ impl<S> TerminalManager<S> {
                 }
             }
             _ => {
-                log::warn!("No event loop handle to join when dropping terminal manager.");
+                if self.deferred_shell.is_some() {
+                    // Routine: this pane's shell was deferred and never
+                    // started (e.g. a background launch-config tab the user
+                    // never visited), so no event loop was ever spawned and
+                    // there is nothing to join. A 141-pane launch config can
+                    // close 135 such panes at once; logging each as a warning
+                    // would be spurious noise, not a signal of anything wrong.
+                    log::debug!(
+                        "No event loop handle to join when dropping terminal manager: shell was deferred and never started."
+                    );
+                } else {
+                    // Anomalous: this manager was never deferred (or its
+                    // deferred shell was already consumed), so a shell should
+                    // have been started and produced an event loop handle.
+                    log::warn!("No event loop handle to join when dropping terminal manager.");
+                }
             }
         }
 

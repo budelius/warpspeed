@@ -22,7 +22,9 @@ use session_sharing_protocol::sharer::{
 use warp_core::execution_mode::AppExecutionMode;
 use warp_core::send_telemetry_from_ctx;
 use warp_errors::report_error;
-use warpui::{AppContext, ModelHandle, SingletonEntity, ViewContext, ViewHandle, WindowId};
+use warpui::{
+    AppContext, ModelContext, ModelHandle, SingletonEntity, ViewContext, ViewHandle, WindowId,
+};
 
 use super::terminal_manager::{TerminalManager, TerminalSurfaceInit, TerminalSurfaceResult};
 use crate::NetworkStatus;
@@ -2005,6 +2007,14 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
                 app,
             )
         }
+    }
+
+    fn ensure_shell_started(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>) {
+        self.start_deferred_shell(ctx)
+    }
+
+    fn has_deferred_shell(&self) -> bool {
+        self.is_shell_deferred()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

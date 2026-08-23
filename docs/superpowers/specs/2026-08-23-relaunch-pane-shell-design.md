@@ -28,13 +28,13 @@ Out of scope, tracked separately: process-per-window, and opening a launch confi
 
 A relaunch is three phases against one pane's `TerminalManager`. The pane's `blocklist` is never touched, which is what keeps scrollback and agent history safe — not by copying them, but by never putting them at risk.
 
-1. **Guard.** If `block_list().active_block().is_active_and_long_running()` (`app/src/terminal/input.rs:5015`), show what is running and confirm. Otherwise proceed silently. A running CLI agent is a foreground process, so it takes this path too.
+1. **Guard.** If `block_list().active_block().is_active_and_long_running()` (`app/src/terminal/input.rs:5016`), show what is running and confirm. Otherwise proceed silently. A running CLI agent is a foreground process, so it takes this path too.
 2. **Capture, then tear down.** Read the live working directory and the agent resume payload *before* killing the PTY — both become unreadable afterwards. Then end the session.
 3. **Re-park and start.** Build a fresh `DeferredShellStart` carrying the target shell and the translated directory, park it, and call `start_deferred_shell`.
 
 Phase 3 is already written and reviewed: it is the machinery merged in `7f2a6aa2`. Restart and switch-shell differ only in the `ShellLaunchData` phase 3 receives, so both commands are one code path.
 
-**The new work is teardown.** `TerminalManager` tears down only via `Drop` → `shutdown_event_loop()` (`app/src/terminal/local_tty/terminal_manager.rs:512`). Nothing today ends a session while keeping the manager alive and re-parkable.
+**The new work is teardown.** `TerminalManager` tears down only via `Drop` → `shutdown_event_loop()` (`app/src/terminal/local_tty/terminal_manager.rs:629`). Nothing today ends a session while keeping the manager alive and re-parkable.
 
 ## Components
 
@@ -42,19 +42,28 @@ Phase 3 is already written and reviewed: it is the machinery merged in `7f2a6aa2
 
 **`TerminalManager::repark_shell(DeferredShellStart)`** — new. Sets `deferred_shell = Some(..)`.
 
-The crate deliberately keeps **exactly one `Option::take` on `deferred_shell`** (`terminal_manager.rs:594-606`), so that deleting the shared body is a compile error at both call sites rather than silent recursion. This adds a write, not a take, so the invariant holds — but the new method belongs beside it, documented with the same reasoning.
+The crate deliberately keeps **exactly one `Option::take` on `deferred_shell`** (`terminal_manager.rs:597-609`), so that deleting the shared body is a compile error at both call sites rather than silent recursion. This adds a write, not a take, so the invariant holds — but the new method belongs beside it, documented with the same reasoning.
 
-**`restart_shell(target: Option<ShellLaunchData>, ctx)`** on `TerminalManagerTrait` — the single entry point. `None` means "same shell".
+**`relaunch_shell(target: Option<ShellLaunchData>, cwd: Option<PathBuf>, ctx)`** on `TerminalManagerTrait` — the single entry point. `target: None` means "same shell". `cwd` is passed in **host** form and converted to the target shell's native form inside, because only this method knows which shell is starting.
 
-**`WorkspaceAction::RestartShell` and `WorkspaceAction::ChangeShell`** — both call `restart_shell`; the second opens the shell picker first. Wired like the existing `AddTabWithShell`.
+**`WorkspaceAction::RestartShell` and `WorkspaceAction::ChangeShell`** — both call `relaunch_shell`; the second opens the shell picker first. Wired like the existing `AddTabWithShell`.
 
 Neither command gets a default keybinding in this work. Restart is the one that would benefit, but every unclaimed chord is a collision risk against user bindings and platform conventions, and the command palette is sufficient to use the feature. Assigning one is a separate, reversible decision.
 
-**Shell picker** — reuses the list the new-tab menu already builds (`app/src/workspace/view.rs:6929-6940`): `AvailableShells::handle(ctx).get_available_shells()`, with `display_name_for_shell` for labels and `ShellIndicatorType` for icons, gated on `FeatureFlag::ShellSelector`. Building a second list would let the two drift.
+**Shell picker** — reuses the list the new-tab menu already builds (`app/src/workspace/view.rs:6931`): `AvailableShells::handle(ctx).get_available_shells()`, with `display_name_for_shell` for labels and `ShellIndicatorType` for icons, gated on `FeatureFlag::ShellSelector`. Building a second list would let the two drift.
 
 **Confirmation modal** — follows the established pattern: a `ModalViewState<Modal<T>>` field with `ctx.add_typed_action_view(..)`, as `TransferOwnershipConfirmationModal` does (`app/src/settings_view/transfer_ownership_confirmation_modal.rs`). It names the running command so the choice is informed, rather than asking a generic "are you sure".
 
-**Reverse path converters** — new `convert_windows_host_to_wsl_path` and `convert_windows_host_to_msys2_path` in `crates/warp_util/src/path.rs`, mirroring the existing forward pair at `:369` and `:465`.
+**Reverse path converters** in `crates/warp_util/src/path.rs`. Less new code than it first appears — the forward WSL converter has two branches, and one already has an inverse:
+
+| Forward (`convert_wsl_to_windows_host_path`) | Inverse |
+| --- | --- |
+| `/mnt/<drive>/…` → `<DRIVE>:\…` | **New.** `<DRIVE>:\…` → `/mnt/<drive>/…` |
+| anything else → `\\WSL$\<distro>\…` | **Exists:** `parse_wsl_unc_path` (`path.rs:537`), which handles the `wsl$`, `wsl.localhost`, verbatim-UNC and forward-slash spellings, case-insensitively |
+
+So the WSL work is one new branch plus a dispatcher that routes to it or to `parse_wsl_unc_path`. The MSYS2 reverse has no counterpart and is genuinely new.
+
+One asymmetry the inverse cannot undo: the forward converter calls `std::fs::read_link` on the drive-letter branch (`path.rs:492-495`), so a `/mnt/c/…` path may come back already resolved through a symlink. Round-tripping such a path will not return the original.
 
 ## Data flow
 
@@ -62,7 +71,7 @@ Neither command gets a default keybinding in this work. Restart is the one that 
 
 `pwd_if_local()` yields a **host** path: the existing converters normalise shell→host, and `TerminalPaneSnapshot.cwd` is stored in host form.
 
-`startup_directory` for a WSL shell is in **WSL-native** form. Verified: `on_shell_determined` (`terminal_manager.rs:712-719`) substitutes `wsl_shell_starter.home_directory()` only when `startup_directory` is `None`, and otherwise passes the value through untouched. Handing a host path to a WSL shell would therefore land the user in the wrong directory, or fail outright.
+`startup_directory` for a WSL shell is in **WSL-native** form. Verified: `on_shell_determined` (`terminal_manager.rs:713-719`) substitutes `wsl_shell_starter.home_directory()` only when `startup_directory` is `None`, and otherwise passes the value through untouched. Handing a host path to a WSL shell would therefore land the user in the wrong directory, or fail outright.
 
 So the flow is: `pwd_if_local()` → host path → convert to the target shell's native form → `DeferredShellStart.startup_directory`. The conversion is the identity for `Executable` shells, and the new converters for WSL and MSYS2.
 
@@ -80,7 +89,7 @@ That sequencing already exists and should be reused rather than rebuilt: the pen
 
 **Directory no longer exists.** The captured directory may have been deleted, or may not resolve in the target shell (a Windows path with no WSL mount). Fall back to the target shell's default — `home_directory()` for WSL, the existing default otherwise — and say so in the pane rather than failing the relaunch.
 
-**Resume against a truncated transcript.** Killing an agent mid-turn truncates its transcript. `rehydrate_claude_transcript` (`claude_code.rs:279`) reconstructs the envelope. Resume must mean *resume from the last complete turn*; a partial turn is exactly the case that would corrupt a resume, so this needs verifying against the harness rather than assuming.
+**Resume against a truncated transcript.** Killing an agent mid-turn truncates its transcript. `rehydrate_claude_transcript` (`claude_code.rs:282`) reconstructs the envelope. Resume must mean *resume from the last complete turn*; a partial turn is exactly the case that would corrupt a resume, so this needs verifying against the harness rather than assuming.
 
 **No agent was running.** Relaunch is a plain restart. No resume, no error.
 
@@ -104,4 +113,4 @@ Unit tests observe model state, not real PTYs — the limit inherited from the l
 
 **Mid-turn resume is unverified.** The behaviour of `rehydrate_claude_transcript` against a transcript truncated mid-turn must be checked, not assumed.
 
-**The reverse path converters are new code on a correctness-critical path.** They have a symmetric counterpart and its tests to mirror, which bounds the work, but a wrong conversion silently lands the user in the wrong directory rather than failing loudly.
+**The reverse path converters sit on a correctness-critical path.** Half the WSL case already exists (`parse_wsl_unc_path`), and the rest has a symmetric counterpart to mirror, which bounds the work. But a wrong conversion silently lands the user in the wrong directory rather than failing loudly, and the `read_link` asymmetry means round-trip tests cannot be the only check.

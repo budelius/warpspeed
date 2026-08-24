@@ -26,6 +26,8 @@ use warpui::{
     AppContext, ModelContext, ModelHandle, SingletonEntity, ViewContext, ViewHandle, WindowId,
 };
 
+#[cfg(test)]
+use super::terminal_manager::DeferredShellStart;
 use super::terminal_manager::{TerminalManager, TerminalSurfaceInit, TerminalSurfaceResult};
 use crate::NetworkStatus;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
@@ -1955,6 +1957,37 @@ impl TerminalManager<TerminalView> {
     #[cfg(test)]
     pub fn session_sharer(&self) -> Rc<RefCell<Option<ModelHandle<Network>>>> {
         self.session_sharer.clone()
+    }
+
+    /// Test-only entry point onto [`TerminalManager::end_session`].
+    ///
+    /// `end_session` is `pub(super)` (scoped to `local_tty`) because the only
+    /// production caller is expected to live inside this module tree. The
+    /// `mod_tests` covering the relaunch round trip live under `pane_group`
+    /// and can only reach the concrete `TerminalManager<TerminalView>` by
+    /// downcasting a `Box<dyn TerminalManagerTrait>` (see `session_sharer`
+    /// above for the same pattern), so this thin wrapper -- gated out of
+    /// non-test builds -- is the crossing point.
+    #[cfg(test)]
+    pub(crate) fn end_session_for_test(&mut self) -> bool {
+        self.end_session()
+    }
+
+    /// Test-only entry point onto [`TerminalManager::repark_shell`]. See
+    /// [`Self::end_session_for_test`] for why this wrapper exists.
+    #[cfg(test)]
+    pub(crate) fn repark_shell_for_test(&mut self, parked: DeferredShellStart) {
+        self.repark_shell(parked)
+    }
+
+    /// Test-only: takes this manager's parked shell start, if any, without
+    /// forking it. Lets a test move a still-parked `DeferredShellStart` from
+    /// a donor manager into another manager's [`Self::repark_shell_for_test`]
+    /// call, which is otherwise unobtainable outside `local_tty` since
+    /// `deferred_shell` itself stays `pub(super)`.
+    #[cfg(test)]
+    pub(crate) fn take_deferred_shell_for_test(&mut self) -> Option<DeferredShellStart> {
+        self.deferred_shell.take()
     }
 
     /// Returns the PTY process id, for integration tests.

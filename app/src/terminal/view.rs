@@ -8768,11 +8768,43 @@ impl TerminalView {
         self.restart_in_progress = true;
     }
 
-    /// Clears the restart mark once the replacement session is up, so a later
-    /// real exit is handled normally.
-    pub fn finish_restart(&mut self) {
+    /// Clears the restart mark and re-enables the input editor, undoing what
+    /// the exit being replaced did to this pane, so a later real exit is
+    /// handled normally.
+    ///
+    /// Must be called only after the old shell's `ModelEvent::Exit` has
+    /// actually reached and been processed by `handle_terminal_event` --
+    /// **not** merely after the new session has been spawned. The event
+    /// arrives asynchronously (`TerminalModel::exit` -> an event-proxy
+    /// channel -> a singleton dispatcher -> this view's
+    /// `handle_terminal_event`), so `begin_restart(); spawn the replacement;
+    /// finish_restart();` can still have the old shell's `Exit` queued behind
+    /// the call to this function. Once `restart_in_progress` is cleared here,
+    /// that queued event is treated as a real exit: it inserts the banner,
+    /// disables the editor, and emits `Event::Exited` -- closing the pane,
+    /// which is exactly the failure this task exists to prevent, reintroduced
+    /// by call-site ordering. This is not just theoretical: the normal
+    /// shell-death path in `local_tty/event_loop.rs` calls `exit()` twice
+    /// (`ShellProcessExited`, then unconditionally `PtyDisconnected`); today
+    /// `handled_exit` silently absorbs the second call, but
+    /// `reset_exit_state` below removes that protection, so a premature call
+    /// here can let the second exit land on a pane that looks restarted but
+    /// isn't done exiting yet.
+    pub fn finish_restart(&mut self, ctx: &mut ViewContext<Self>) {
         self.restart_in_progress = false;
         self.model.lock().reset_exit_state();
+        // Symmetric counterpart of the editor-disable in the `ModelEvent::Exit`
+        // handler: `reset_exit_state` restores model writability, but the
+        // editor's `InteractionState` is separate state that only that
+        // handler sets and nothing else clears. Without this, a pane whose
+        // shell died before bootstrapping (left open, not closed, per
+        // `terminal_pane.rs`) stays disabled and untypable even after a
+        // successful restart.
+        self.input.update(ctx, |input, ctx| {
+            input.editor().update(ctx, |editor, ctx| {
+                editor.set_interaction_state(crate::editor::InteractionState::Editable, ctx);
+            });
+        });
     }
 
     pub(crate) fn stop_local_agent_conversation(

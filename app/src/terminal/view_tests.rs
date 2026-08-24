@@ -10097,7 +10097,7 @@ fn restart_in_progress_suppresses_exit_teardown_and_finish_restart_restores_it()
 
         terminal.update(&mut app, |view, ctx| {
             // --- The replacement session is up: finish the restart. ---
-            view.finish_restart();
+            view.finish_restart(ctx);
             assert!(
                 !view.model.lock().is_read_only(),
                 "finish_restart should reset the exit latch so the restarted pane is writable"
@@ -10139,5 +10139,58 @@ fn restart_in_progress_suppresses_exit_teardown_and_finish_restart_restores_it()
             1,
             "a real exit after finish_restart should emit Event::Exited"
         );
+    });
+}
+/// `reset_exit_state` (called from `finish_restart`) restores the model's writability, but the
+/// exit handler's editor-disable (`InteractionState::Disabled`) is separate state that only that
+/// handler sets and nothing else clears. A shell that dies before bootstrapping leaves the pane
+/// open rather than closed (`terminal_pane.rs` returns early for `!is_login_shell_bootstrapped()`)
+/// -- exactly the disabled, read-only pane a "restart shell" feature exists to recover. Without
+/// `finish_restart` re-enabling the editor, the user restarts and still cannot type.
+#[test]
+fn finish_restart_re_enables_an_editor_disabled_by_the_exit_it_is_replacing() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |view, ctx| {
+            view.is_login_shell_bootstrapped = true;
+
+            // The old shell dies for real (no restart in progress yet): the exit handler
+            // disables the editor, as it does for any shell death.
+            view.model
+                .lock()
+                .exit(crate::terminal::model::terminal_model::ExitReason::ShellProcessExited);
+            view.handle_terminal_event(
+                &ModelEvent::Exit {
+                    reason: crate::terminal::model::terminal_model::ExitReason::ShellProcessExited,
+                },
+                ctx,
+            );
+            view.input.read(ctx, |input, ctx| {
+                input.editor().read(ctx, |editor, ctx| {
+                    assert_eq!(
+                        editor.interaction_state(ctx),
+                        crate::editor::InteractionState::Disabled,
+                        "the exit handler should have disabled the editor"
+                    );
+                });
+            });
+
+            // The user restarts the (now-dead) shell.
+            view.begin_restart();
+            view.finish_restart(ctx);
+
+            view.input.read(ctx, |input, ctx| {
+                input.editor().read(ctx, |editor, ctx| {
+                    assert_ne!(
+                        editor.interaction_state(ctx),
+                        crate::editor::InteractionState::Disabled,
+                        "finish_restart should re-enable the editor a prior exit disabled, or \
+                         the restarted pane is unusable"
+                    );
+                });
+            });
+        });
     });
 }

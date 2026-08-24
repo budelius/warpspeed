@@ -1498,6 +1498,15 @@ impl TerminalModel {
         self.commit_lifecycle_transition(&transition);
     }
 
+    /// Clears the exit latch so a replaced shell's model is writable again.
+    ///
+    /// `exit` sets `handled_exit` and nothing resets it, so without this a
+    /// restarted pane stays `is_read_only()` forever and the new shell's own
+    /// exit is swallowed by the latch.
+    pub fn reset_exit_state(&mut self) {
+        self.handled_exit = false;
+    }
+
     pub fn is_read_only(&self) -> bool {
         self.handled_exit
             || self.is_conversation_transcript_viewer()

@@ -10018,3 +10018,126 @@ fn back_button_label_resolves_token_only_parent_linkage() {
         });
     });
 }
+
+/// `ModelEvent::Exit` is written for a shell that died: it inserts the "process
+/// terminated" banner, disables the input editor, and emits `Event::Exited` (which
+/// closes the pane, per `terminal_pane.rs`). A deliberate restart needs none of that
+/// to happen for the shell it is replacing -- and needs it to happen normally again
+/// once the restart is done and a later shell genuinely dies.
+///
+/// No test in this crate drives a `ModelEvent` through the full model -> dispatcher ->
+/// view pipeline (it requires pumping the app's async event loop, which no existing
+/// terminal test does); `TerminalModel::exit` sends `Event::Exit` over an async
+/// channel that a singleton dispatcher converts to `ModelEvent::Exit` and forwards to
+/// subscribers. So, following the established pattern in this file of calling a
+/// private `handle_*` method directly (e.g. `handle_ambient_agent_event`,
+/// `handle_ai_history_model_event`, `handle_find_event`), this test calls
+/// `handle_terminal_event` directly with a hand-built `ModelEvent::Exit`, and asserts
+/// on the three pieces of state the handler touches: the banner, the editor's
+/// interaction state, and (via the model) `is_read_only()`.
+#[test]
+fn restart_in_progress_suppresses_exit_teardown_and_finish_restart_restores_it() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let exited_count = Rc::new(RefCell::new(0usize));
+        let exited_count_handle = exited_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::Exited = event {
+                    *exited_count_handle.borrow_mut() += 1;
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            // Use the "bootstrapped" banner path: it's a single flag flip
+            // (`inline_banners_state.shell_process_terminated_banner`) rather than the
+            // unbootstrapped path's rich-content view, so it is straightforward to assert on.
+            view.is_login_shell_bootstrapped = true;
+            assert!(
+                !view.model.lock().is_read_only(),
+                "a freshly constructed view's model should be writable"
+            );
+
+            // --- A restart is in progress when the shell being replaced exits. ---
+            view.begin_restart();
+            view.model
+                .lock()
+                .exit(crate::terminal::model::terminal_model::ExitReason::ShellProcessExited);
+            view.handle_terminal_event(
+                &ModelEvent::Exit {
+                    reason: crate::terminal::model::terminal_model::ExitReason::ShellProcessExited,
+                },
+                ctx,
+            );
+
+            assert!(
+                view.inline_banners_state
+                    .shell_process_terminated_banner
+                    .is_none(),
+                "a restart in progress must not insert the terminated banner"
+            );
+            view.input.read(ctx, |input, ctx| {
+                input.editor().read(ctx, |editor, ctx| {
+                    assert_ne!(
+                        editor.interaction_state(ctx),
+                        crate::editor::InteractionState::Disabled,
+                        "a restart in progress must not disable the input editor"
+                    );
+                });
+            });
+        });
+        assert_eq!(
+            *exited_count.borrow(),
+            0,
+            "a restart in progress must not emit Event::Exited"
+        );
+
+        terminal.update(&mut app, |view, ctx| {
+            // --- The replacement session is up: finish the restart. ---
+            view.finish_restart();
+            assert!(
+                !view.model.lock().is_read_only(),
+                "finish_restart should reset the exit latch so the restarted pane is writable"
+            );
+
+            // --- A later, real exit (no restart in progress) must behave normally. ---
+            view.model
+                .lock()
+                .exit(crate::terminal::model::terminal_model::ExitReason::ShellProcessExited);
+            view.handle_terminal_event(
+                &ModelEvent::Exit {
+                    reason: crate::terminal::model::terminal_model::ExitReason::ShellProcessExited,
+                },
+                ctx,
+            );
+
+            assert!(
+                view.inline_banners_state
+                    .shell_process_terminated_banner
+                    .is_some(),
+                "a real exit after finish_restart should insert the terminated banner"
+            );
+            view.input.read(ctx, |input, ctx| {
+                input.editor().read(ctx, |editor, ctx| {
+                    assert_eq!(
+                        editor.interaction_state(ctx),
+                        crate::editor::InteractionState::Disabled,
+                        "a real exit after finish_restart should disable the input editor"
+                    );
+                });
+            });
+            assert!(
+                view.model.lock().is_read_only(),
+                "a real exit after finish_restart should latch the model read-only"
+            );
+        });
+        assert_eq!(
+            *exited_count.borrow(),
+            1,
+            "a real exit after finish_restart should emit Event::Exited"
+        );
+    });
+}

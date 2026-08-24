@@ -1919,6 +1919,40 @@ fn terminal_exit_absorbs_later_lifecycle_inputs() {
     assert_eq!(terminal.block_list().blocks().len(), block_count);
     assert_eq!(terminal.pending_session_id(), pending_session_id);
 }
+
+/// Mirrors `terminal_exit_absorbs_later_lifecycle_inputs` above: `exit` latches
+/// `handled_exit` and makes the model read-only. `reset_exit_state` is the write
+/// counterpart a pane restart needs -- without it, `is_read_only()` (which reads the
+/// same latch) would stay true forever and a replaced shell's model would never
+/// become writable again.
+#[test]
+fn reset_exit_state_lets_a_restarted_pane_become_writable_again() {
+    let mut terminal: TerminalModel = TerminalModel::mock(None, None);
+    assert!(
+        !terminal.is_read_only(),
+        "a freshly constructed model should be writable"
+    );
+
+    terminal.exit(ExitReason::PtyDisconnected);
+    assert!(
+        terminal.is_read_only(),
+        "exit should latch the model read-only"
+    );
+
+    terminal.reset_exit_state();
+    assert!(
+        !terminal.is_read_only(),
+        "reset_exit_state should clear the latch so a restarted pane is writable again"
+    );
+
+    // A later, real exit (the replacement shell dying) must still be handled, not
+    // silently swallowed by a latch that was never reset.
+    terminal.exit(ExitReason::PtyDisconnected);
+    assert!(
+        terminal.is_read_only(),
+        "a real exit after reset_exit_state should still latch the model read-only"
+    );
+}
 #[test]
 fn test_alt_screen_selection_tracks_scroll() {
     let mut terminal: TerminalModel = TerminalModel::mock(None, None);

@@ -2945,6 +2945,14 @@ pub struct TerminalView {
     /// (tab close, update relaunch, etc.) are not attributed to agent commands.
     manual_pty_shutdown_requested: bool,
 
+    /// `true` while this view's shell is being deliberately restarted.
+    ///
+    /// `ModelEvent::Exit` cannot otherwise distinguish a shell that died from
+    /// one being replaced. While this is set, the exit handler does not
+    /// insert the "process terminated" banner, disable the input editor, or
+    /// emit `Event::Exited` (which would close the pane).
+    restart_in_progress: bool,
+
     ephemeral_message_model: ModelHandle<EphemeralMessageModel>,
 
     /// Per-session PTY recorder for writing PTY bytes to a file.
@@ -4465,6 +4473,7 @@ impl TerminalView {
             active_init_project_model: None,
             is_pending_aws_login: false,
             manual_pty_shutdown_requested: false,
+            restart_in_progress: false,
             first_time_cloud_agent_setup_view,
             environment_setup_mode_selector,
             is_environment_setup_mode_selector_open: false,
@@ -8749,6 +8758,23 @@ impl TerminalView {
         ctx.emit(Event::ShutdownPty);
     }
 
+    /// Marks the next shell exit as a deliberate restart, so the exit handler
+    /// does not tear the pane down.
+    ///
+    /// `ModelEvent::Exit` cannot distinguish a shell that died from one being
+    /// replaced. Without this, a restart inserts a "process terminated" banner,
+    /// disables the input, and emits `Event::Exited` -- which closes the pane.
+    pub fn begin_restart(&mut self) {
+        self.restart_in_progress = true;
+    }
+
+    /// Clears the restart mark once the replacement session is up, so a later
+    /// real exit is handled normally.
+    pub fn finish_restart(&mut self) {
+        self.restart_in_progress = false;
+        self.model.lock().reset_exit_state();
+    }
+
     pub(crate) fn stop_local_agent_conversation(
         &mut self,
         conversation_id: AIConversationId,
@@ -11884,25 +11910,34 @@ impl TerminalView {
                     });
                 }
 
-                // If the pty spawn has failed, we've already inserted a banner.
-                if !self.pty_spawn_failed {
-                    let shell_detail = self.shell_detail.take().unwrap_or("shell".to_owned());
-                    self.insert_shell_process_terminated_banner(
-                        shell_terminated_banner::TerminationType::Premature {
-                            shell_detail,
-                            reason: *reason,
-                        },
-                        ctx,
-                    );
-                }
-                // Mark the editor as disabled to ensure user interactions with
-                // it are ignored.
-                self.input.update(ctx, |input, ctx| {
-                    input.editor().update(ctx, |editor, ctx| {
-                        editor
-                            .set_interaction_state(crate::editor::InteractionState::Disabled, ctx);
+                // If a restart is in progress, this exit is the old shell being
+                // deliberately replaced, not a teardown: don't insert the banner,
+                // disable the editor, or emit `Event::Exited` (which would close
+                // the pane out from under the restart).
+                if !self.restart_in_progress {
+                    // If the pty spawn has failed, we've already inserted a banner.
+                    if !self.pty_spawn_failed {
+                        let shell_detail =
+                            self.shell_detail.take().unwrap_or("shell".to_owned());
+                        self.insert_shell_process_terminated_banner(
+                            shell_terminated_banner::TerminationType::Premature {
+                                shell_detail,
+                                reason: *reason,
+                            },
+                            ctx,
+                        );
+                    }
+                    // Mark the editor as disabled to ensure user interactions with
+                    // it are ignored.
+                    self.input.update(ctx, |input, ctx| {
+                        input.editor().update(ctx, |editor, ctx| {
+                            editor.set_interaction_state(
+                                crate::editor::InteractionState::Disabled,
+                                ctx,
+                            );
+                        });
                     });
-                });
+                }
 
                 // If we failed to bootstrap by the time we exited, show the
                 // bootstrap block so the user might be able to see what went wrong.
@@ -11910,7 +11945,7 @@ impl TerminalView {
                     self.show_initialization_block();
                 }
 
-                if !self.pty_spawn_failed {
+                if !self.pty_spawn_failed && !self.restart_in_progress {
                     ctx.emit(Event::Exited);
                 }
             }

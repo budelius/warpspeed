@@ -931,6 +931,78 @@ fn test_canonicalize_git_bash_path() {
     );
 }
 
+#[test]
+fn windows_drive_path_converts_to_wsl_mnt_path() {
+    let result = convert_windows_host_to_wsl_path(Path::new(r"C:\projects\warp"), "Ubuntu")
+        .expect("a drive-letter path converts");
+    assert_eq!(result, "/mnt/c/projects/warp");
+}
+
+#[test]
+fn windows_drive_letter_is_lowercased_for_wsl() {
+    let result = convert_windows_host_to_wsl_path(Path::new(r"D:\Data"), "Ubuntu")
+        .expect("an upper-case drive converts");
+    assert_eq!(
+        result, "/mnt/d/Data",
+        "the drive lowercases; the rest keeps its case"
+    );
+}
+
+#[test]
+fn wsl_unc_path_converts_back_to_its_linux_path() {
+    let result =
+        convert_windows_host_to_wsl_path(Path::new(r"\\wsl$\Ubuntu\home\me\src"), "Ubuntu")
+            .expect("a UNC path converts");
+    assert_eq!(result, "/home/me/src");
+}
+
+#[test]
+fn wsl_localhost_spelling_is_accepted() {
+    let result =
+        convert_windows_host_to_wsl_path(Path::new(r"\\wsl.localhost\Ubuntu\home\me"), "Ubuntu")
+            .expect("the wsl.localhost spelling converts");
+    assert_eq!(result, "/home/me");
+}
+
+#[test]
+fn relative_path_is_rejected() {
+    assert!(
+        convert_windows_host_to_wsl_path(Path::new(r"projects\warp"), "Ubuntu").is_err(),
+        "a relative path has no WSL equivalent"
+    );
+}
+
+#[test]
+fn drive_path_round_trips_through_the_forward_converter() {
+    let wsl = convert_windows_host_to_wsl_path(Path::new(r"C:\projects\warp"), "Ubuntu")
+        .expect("converts to WSL form");
+    let back =
+        convert_wsl_to_windows_host_path(&TypedPath::unix(&wsl), "Ubuntu").expect("converts back");
+    assert_eq!(back, PathBuf::from(r"C:\projects\warp"));
+}
+
+#[test]
+fn windows_drive_path_converts_to_msys2_path() {
+    let root = Path::new(r"C:\msys64");
+    let result = convert_windows_native_to_msys2_path(Path::new(r"C:\projects\warp"), root)
+        .expect("a drive-letter path converts");
+    assert_eq!(result, "/c/projects/warp");
+}
+
+#[test]
+fn path_inside_the_msys2_root_converts_to_an_absolute_msys2_path() {
+    let root = Path::new(r"C:\msys64");
+    let result = convert_windows_native_to_msys2_path(Path::new(r"C:\msys64\home\me"), root)
+        .expect("a path under the root converts");
+    assert_eq!(result, "/home/me", "the MSYS2 root is the filesystem root");
+}
+
+#[test]
+fn msys2_conversion_rejects_a_relative_path() {
+    let root = Path::new(r"C:\msys64");
+    assert!(convert_windows_native_to_msys2_path(Path::new(r"projects\warp"), root).is_none());
+}
+
 // ── group_roots_by_common_ancestor tests ─────────────────────────────
 
 mod group_roots_by_common_ancestor_tests {

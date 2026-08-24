@@ -450,6 +450,78 @@ pub fn convert_msys2_to_windows_native_path(
     }
 }
 
+/// Returns true if `component` and `candidate` name the same Windows path component, ignoring
+/// case (drive letters and directory names are case-insensitive on Windows).
+fn windows_components_match(
+    component: &Utf8WindowsComponent,
+    candidate: &Utf8WindowsComponent,
+) -> bool {
+    component.as_str().eq_ignore_ascii_case(candidate.as_str())
+}
+
+/// Converts a Windows-native host path to the path an MSYS2 (Git Bash) shell rooted at
+/// `msys2_root` would use to refer to the same file.
+///
+/// The inverse of [`convert_msys2_to_windows_native_path`]. That function has, among its
+/// branches, a "path under the MSYS2 root" case and a "`/<drive>/…`" case; this mirrors both,
+/// in that order — a path under the root must be checked first, or e.g. `C:\msys64\home\me`
+/// would wrongly take the drive-letter branch and become `/c/msys64/home/me` instead of
+/// `/home/me`.
+///
+/// Returns a `String` rather than a `PathBuf` because an MSYS2 path is not a valid Windows
+/// `Path`; converting would mangle the separators.
+pub fn convert_windows_native_to_msys2_path(host_path: &Path, msys2_root: &Path) -> Option<String> {
+    let host_path = Utf8WindowsPath::new(host_path.to_str()?);
+    let msys2_root = Utf8WindowsPath::new(msys2_root.to_str()?);
+    if !host_path.is_absolute() {
+        return None;
+    }
+
+    let host_components: Vec<_> = host_path.components().collect();
+    let root_components: Vec<_> = msys2_root.components().collect();
+
+    if root_components.len() <= host_components.len()
+        && root_components
+            .iter()
+            .zip(host_components.iter())
+            .all(|(root, host)| windows_components_match(root, host))
+    {
+        let mut msys2_path = String::new();
+        for component in &host_components[root_components.len()..] {
+            msys2_path.push('/');
+            msys2_path.push_str(component.as_str());
+        }
+        return Some(if msys2_path.is_empty() {
+            "/".to_string()
+        } else {
+            msys2_path
+        });
+    }
+
+    let mut components = host_path.components();
+    let drive = match components.next()? {
+        Utf8WindowsComponent::Prefix(prefix) => match prefix.kind() {
+            Utf8WindowsPrefix::Disk(letter) | Utf8WindowsPrefix::VerbatimDisk(letter) => {
+                letter.to_ascii_lowercase()
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    let mut msys2_path = format!("/{drive}");
+    for component in components {
+        match component {
+            Utf8WindowsComponent::RootDir => {}
+            component => {
+                msys2_path.push('/');
+                msys2_path.push_str(component.as_str());
+            }
+        }
+    }
+    Some(msys2_path)
+}
+
 #[derive(Error, Debug)]
 pub enum WSLPathConversionError {
     #[error("Given path was not a UNIX path")]
@@ -564,6 +636,62 @@ pub fn parse_wsl_unc_path(path: &Path) -> Option<WslUncPath> {
             linux_path
         },
     })
+}
+
+/// Converts a Windows host path to the path a shell inside the given WSL distribution would use.
+///
+/// The inverse of [`convert_wsl_to_windows_host_path`], which has two branches and therefore so
+/// does this: a drive-letter path maps to `/mnt/<drive>/…`, and a `\\wsl$\<distro>\…` UNC path
+/// maps back to its Linux path via [`parse_wsl_unc_path`].
+///
+/// Returns a `String` rather than a `PathBuf` because a Linux path is not a valid Windows
+/// `Path`; converting would mangle the separators.
+///
+/// Not a perfect inverse: the forward converter resolves symlinks with `std::fs::read_link` on
+/// the drive-letter branch, and that cannot be undone here.
+pub fn convert_windows_host_to_wsl_path(
+    host_path: &Path,
+    // Neither branch below needs the distro name: a `/mnt/<drive>/…` path is the same in every
+    // distribution, and a `\\wsl$\<distro>\…` UNC path already carries its own distro via
+    // `parse_wsl_unc_path`. Kept for signature symmetry with `convert_wsl_to_windows_host_path`
+    // and because a future caller may want to validate the UNC path's distro against this one.
+    _distro_name: &str,
+) -> Result<String, WSLPathConversionError> {
+    // A UNC path inside the distribution round-trips through the existing parser.
+    if let Some(parsed) = parse_wsl_unc_path(host_path) {
+        return Ok(parsed.linux_path);
+    }
+
+    let path_str = host_path
+        .to_str()
+        .ok_or(WSLPathConversionError::NonUnixPath)?;
+    let windows_path = Utf8WindowsPath::new(path_str);
+    if !windows_path.is_absolute() {
+        return Err(WSLPathConversionError::PathNotAbsolute);
+    }
+
+    let mut components = windows_path.components();
+    let drive = match components.next() {
+        Some(Utf8WindowsComponent::Prefix(prefix)) => match prefix.kind() {
+            Utf8WindowsPrefix::Disk(letter) | Utf8WindowsPrefix::VerbatimDisk(letter) => {
+                letter.to_ascii_lowercase()
+            }
+            _ => return Err(WSLPathConversionError::NonUnixPath),
+        },
+        _ => return Err(WSLPathConversionError::PathNotAbsolute),
+    };
+
+    let mut linux_path = format!("/mnt/{drive}");
+    for component in components {
+        match component {
+            Utf8WindowsComponent::RootDir => {}
+            component => {
+                linux_path.push('/');
+                linux_path.push_str(component.as_str());
+            }
+        }
+    }
+    Ok(linux_path)
 }
 
 #[cfg(windows)]

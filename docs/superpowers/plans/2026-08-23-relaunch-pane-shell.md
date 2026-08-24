@@ -4,7 +4,9 @@
 
 **Goal:** A pane can restart its shell in place, or switch to a different shell, keeping its scrollback, its working directory, and its agent conversation.
 
-**Architecture:** A relaunch is guard → capture → tear down → re-park → start. Phases after teardown reuse the merged lazy-restore machinery (`DeferredShellStart`, `start_deferred_shell`) rather than adding a second way to start a shell in a pane. The pane's `blocklist` is never touched, which is what keeps scrollback and agent history safe. Restart and switch-shell are one code path differing only in the `ShellLaunchData` passed.
+**Architecture:** A relaunch is guard → capture → tear down → build fresh session resources → start. The pane, its `TerminalView`, and its `blocklist` are kept alive throughout, which is what keeps scrollback and agent history safe. Restart and switch-shell are one code path differing only in the `ShellLaunchData` passed.
+
+This deliberately does **not** reuse `DeferredShellStart`. An earlier version of this plan did, on the assumption that parking and starting were reusable for a second session. They are not: `ShellStartupResources` is one-shot, and ending a session fires the exit path that closes the pane. Both facts are set out in the Self-Review at the end, and Tasks 2 and 3 exist to address them.
 
 **Tech Stack:** Rust, in-house `warpui` entity/model framework, `cargo nextest`, `warp_features` feature flags.
 
@@ -230,267 +232,233 @@ git commit -m "feat(path): convert Windows host paths to WSL and MSYS2 form"
 
 ---
 
-### Task 2: End a session without dropping the manager
+### Task 2: Survive a deliberate teardown
 
-The one genuinely new primitive. Everything after this composes from reviewed code.
+**Why this exists.** Ending a session fires `ModelEvent::Exit`, and `TerminalView`'s handler for it (`app/src/terminal/view.rs:11868-11916`) does four things that are correct for a shell that died and wrong for one being restarted: it inserts a "shell process terminated" banner, disables the input editor, emits `Event::Exited` — which `app/src/pane_group/pane/terminal_pane.rs:976-989` turns into `close_pane` — and latches `TerminalModel::handled_exit`, which has no reset anywhere (`terminal_model.rs:1089` sets it false at construction, `:1490` sets it true, nothing else) and makes `is_read_only()` (`:1501`) return true forever.
+
+Without this task, the first production call to any restart primitive closes the pane the feature exists to preserve.
+
+`manual_pty_shutdown_requested` (`view.rs:2946`) is **not** the answer despite looking like it: it gates only the telemetry branch at `:11869`, and its own comment says the pane is torn down afterwards.
 
 **Files:**
-- Modify: `app/src/terminal/local_tty/terminal_manager.rs`
-- Test: `app/src/terminal/local_tty/terminal_manager_tests.rs` if it exists; otherwise add the tests to the existing `mod tests` in `terminal_manager.rs`. Check first — do not create a second test module.
+- Modify: `app/src/terminal/view.rs`, `app/src/terminal/model/terminal_model.rs`
+- Test: `app/src/terminal/view_tests.rs` if it exists; otherwise the existing test module in `view.rs`. Check first — do not create a second module.
 
 **Interfaces:**
-- Consumes: `shutdown_event_loop(&mut self)` (`terminal_manager.rs:629`), `DeferredShellStart` (`:190`), the `deferred_shell` field.
 - Produces:
-  - `pub(super) fn end_session(&mut self) -> bool` — tears the session down, leaves the manager alive. Returns `false` if the event loop could not be joined.
-  - `pub(super) fn repark_shell(&mut self, parked: DeferredShellStart)` — sets `deferred_shell = Some(parked)`.
-
-**Read first:** `shutdown_event_loop` (`:629-652`) and the `Drop` impl above it. `shutdown_event_loop` sends `Message::Shutdown`, tolerates an already-closed channel, and joins `event_loop_handle` via `Option::take`. Because it takes the handle, calling it twice is already safe — the second call logs a warning and returns. Confirm that by reading it rather than trusting this sentence.
+  - `TerminalView::begin_restart(&mut self)` — marks the next `ModelEvent::Exit` as a deliberate restart.
+  - `TerminalView::finish_restart(&mut self)` — clears that mark once the new session is up.
+  - `TerminalModel::reset_exit_state(&mut self)` — clears `handled_exit` so the pane is writable again and a later real exit is still handled.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to the terminal manager's test module:
+Assert that with a restart in progress, `ModelEvent::Exit` does **not** emit `Event::Exited` and does not insert the terminated banner, and that after `finish_restart` a subsequent `Exit` behaves normally again.
 
-```rust
-/// Ending a session leaves the manager usable and re-parkable. This is the
-/// property the whole relaunch feature rests on: `Drop` is not an option,
-/// because the pane and its blocklist must outlive the shell.
-#[test]
-fn end_session_leaves_the_manager_re_parkable() {
-    // Build a manager with an eagerly started shell, end its session, then
-    // re-park it and confirm the parked state is observable again.
-    // Follow the construction used by the existing tests in this module.
-}
-```
+Read the existing tests that drive a `ModelEvent` into a `TerminalView` and copy their construction exactly. `app/src/ai/agent_sdk/driver/terminal_tests.rs:100` shows one way an `Event::Exited` is driven in a test; find the nearest equivalent that delivers a `ModelEvent::Exit` and mirror it. Report which test you mirrored.
 
-**This test body must be written against the module's existing helpers, not invented.** Before writing it, read how the other tests in this module construct a `TerminalManager` and drive it. If the module has no such helper, the manager is only reachable through `PaneGroup`, in which case write this test in `app/src/pane_group/mod_tests.rs` using `mock_pane_group` — the same harness the lazy-restore tests use (see `test_deferred_pane_with_commands_parks_its_shell`) — and assert through `has_deferred_shell()`.
-
-Report in your task report which of the two locations you used and why.
+Do not invent a helper. If no test in the crate delivers `ModelEvent::Exit` to a view, say so in your report and assert instead on the flag's effect on the three observable pieces of state the handler touches: banner present, editor interaction state, and `is_read_only()`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo nextest run -p warp --lib -E 'test(end_session)'`
-Expected: compile error — `end_session` is not defined.
+Run: `cargo nextest run -p warp --lib -E 'test(restart)'`
+Expected: compile error — `begin_restart` is not defined.
 
-- [ ] **Step 3: Implement `end_session` and `repark_shell`**
+- [ ] **Step 3: Add the flag and gate the three effects**
 
-Add to `impl<S> TerminalManager<S>`, directly below `shutdown_event_loop`:
+Add a `restart_in_progress: bool` field to `TerminalView`, initialised `false` beside `manual_pty_shutdown_requested` (`view.rs:4467`). In the `ModelEvent::Exit` arm, gate on it so that when a restart is in progress:
+
+- the terminated banner is **not** inserted,
+- the input editor is **not** disabled,
+- `Event::Exited` is **not** emitted.
+
+Leave the telemetry branch as it is — it is already gated by `manual_pty_shutdown_requested` and is about attribution, not teardown.
 
 ```rust
-    /// Ends the running session while keeping the manager alive.
+    /// Marks the next shell exit as a deliberate restart, so the exit handler
+    /// does not tear the pane down.
     ///
-    /// [`Self::shutdown_event_loop`] does the same teardown from `Drop`, but a
-    /// relaunch cannot drop the manager: the pane, its blocklist, and its agent
-    /// conversation must outlive the shell. Returns whether teardown completed;
-    /// a caller must not park a new shell over a session that failed to end.
-    ///
-    /// Safe to call more than once. `shutdown_event_loop` takes
-    /// `event_loop_handle` out of its `Option`, so a second call finds nothing
-    /// to join and returns.
-    pub(super) fn end_session(&mut self) -> bool {
-        if self.event_loop_handle.is_none() {
-            // Already torn down, or never started. Nothing to do, and reporting
-            // success is correct: the postcondition (no live session) holds.
-            return true;
-        }
-        self.shutdown_event_loop();
-        self.event_loop_handle.is_none()
+    /// `ModelEvent::Exit` cannot distinguish a shell that died from one being
+    /// replaced. Without this, a restart inserts a "process terminated" banner,
+    /// disables the input, and emits `Event::Exited` -- which closes the pane.
+    pub fn begin_restart(&mut self) {
+        self.restart_in_progress = true;
     }
 
-    /// Parks a shell start on a manager whose session has ended, so
-    /// [`Self::start_deferred_shell`] can fork it.
-    ///
-    /// The write counterpart to the crate's single `Option::take` on
-    /// `deferred_shell` (see [`Self::start_deferred_shell`]). Parking over an
-    /// existing parked shell would silently discard it, so this asserts in debug
-    /// builds rather than losing a start.
-    pub(super) fn repark_shell(&mut self, parked: DeferredShellStart) {
-        debug_assert!(
-            self.deferred_shell.is_none(),
-            "re-parking over an already-parked shell discards the first"
-        );
-        self.deferred_shell = Some(parked);
+    /// Clears the restart mark once the replacement session is up, so a later
+    /// real exit is handled normally.
+    pub fn finish_restart(&mut self) {
+        self.restart_in_progress = false;
     }
 ```
 
-If `shutdown_event_loop` turns out not to leave `event_loop_handle` as `None` on failure, the `is_none()` return is wrong — read it and adjust the success check to match what it actually guarantees. Say so in your report if you change it.
+- [ ] **Step 4: Reset the exit latch**
 
-- [ ] **Step 4: Run the test to verify it passes**
+Add to `TerminalModel`:
 
-Run: `cargo nextest run -p warp --lib -E 'test(end_session)'`
-Expected: PASS.
+```rust
+    /// Clears the exit latch so a replaced shell's model is writable again.
+    ///
+    /// `exit` sets `handled_exit` and nothing resets it, so without this a
+    /// restarted pane stays `is_read_only()` forever and the new shell's own
+    /// exit is swallowed by the latch.
+    pub fn reset_exit_state(&mut self) {
+        self.handled_exit = false;
+    }
+```
 
-- [ ] **Step 5: Full verification**
+Call it from `finish_restart` — read how `TerminalView` reaches its model and follow that path. If the model is behind a lock, hold it for as short a scope as possible.
 
-Run: `cargo nextest run -p warp --lib --no-fail-fast` — no failures outside the baseline 21.
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `cargo nextest run -p warp --lib -E 'test(restart)'` — PASS.
+
+Then: `cargo nextest run -p warp --lib --no-fail-fast` — compare the failing set against `.superpowers/sdd/2026-08-17-lazy-shell-startup/baseline-failures.txt`; no failures outside it.
 Then: `cargo check --workspace --exclude command-signatures-v2 --exclude integration` — clean.
 Then: `cargo clippy -p warp --lib -- -D warnings` — clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/src/terminal/local_tty/terminal_manager.rs
-git commit -m "feat(terminal): end a session without dropping the manager"
+git add app/src/terminal
+git commit -m "feat(terminal): let a pane survive a deliberate shell teardown"
 ```
 
 ---
 
-### Task 3: Relaunch a pane's shell
+### Task 3: Make session resources constructible more than once
 
-Wires Tasks 1 and 2 together. No UI yet — this is the model-layer operation the commands will call.
+**Why this exists.** `ShellStartupResources` (`app/src/terminal/local_tty/terminal_manager.rs:170-176`) holds a `mio_channel::Receiver<Message>` and a `ChannelEventListener`. It is constructed at exactly one site — `:510`, inside `create_model_with_manager` — and consumed at `:830`. A second session needs a fresh pair, and there is no way to make one. This task extracts that construction so a restart can call it.
+
+Pure refactor. No behaviour change.
 
 **Files:**
-- Modify: `app/src/terminal/terminal_manager.rs` (the trait), `app/src/terminal/local_tty/terminal_view_adaptor.rs` (the concrete impl), `app/src/terminal/local_tty/terminal_manager.rs`
+- Modify: `app/src/terminal/local_tty/terminal_manager.rs`
+
+**Interfaces:**
+- Produces: a private function returning the freshly-constructed resources plus the matching `event_loop_tx`, callable both from `create_model_with_manager` and from a restart. Name it `build_session_resources`.
+
+- [ ] **Step 1: Read before changing anything**
+
+Read `create_model_with_manager` around `:490-530` and identify every value derived from the channel pair: the `event_loop_tx` stored on the manager, the copy held by `PtyController` (`:457`), and anything `enqueue_init_script` (`:938`) depends on. Write down in your report which of these must be rebuilt for a second session and which are stable across one.
+
+This reading is the task. The extraction is mechanical once it is done; getting it wrong silently cross-wires two sessions.
+
+- [ ] **Step 2: Extract the construction**
+
+Move the construction into a function shaped like:
+
+```rust
+/// Builds one session's worth of event-loop plumbing.
+///
+/// Extracted from `create_model_with_manager` so a restart can build a second
+/// set. `ShellStartupResources` is consumed when the PTY starts, so a manager
+/// that has already run a shell cannot reuse its first set.
+fn build_session_resources(/* the inputs your Step 1 reading identified */)
+    -> (ShellStartupResources, mio_channel::Sender<Message>)
+```
+
+The parameter list is deliberately left to you: which inputs are needed is exactly what Step 1 determines, and a signature written before that reading is a guess.
+
+Call it from `create_model_with_manager` in place of the inline construction. Nothing else changes.
+
+- [ ] **Step 3: Verify nothing changed**
+
+This step has no new test. The refactor is correct exactly when the existing suite is unmoved.
+
+Run: `cargo nextest run -p warp --lib --no-fail-fast` — the failing set must be identical to the baseline file, with no additions and no removals.
+Then: `cargo check --workspace --exclude command-signatures-v2 --exclude integration` — clean.
+Then: `cargo clippy -p warp --lib -- -D warnings` — clean.
+
+Report the before and after failing sets explicitly.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add app/src/terminal/local_tty/terminal_manager.rs
+git commit -m "refactor(terminal): extract per-session event-loop resource construction"
+```
+
+---
+
+### Task 4: `restart_session`
+
+The primitive. Combines Tasks 2 and 3.
+
+**Files:**
+- Modify: `app/src/terminal/local_tty/terminal_manager.rs`, `app/src/terminal/terminal_manager.rs` (trait), `app/src/terminal/local_tty/terminal_view_adaptor.rs`
 - Test: `app/src/pane_group/mod_tests.rs`
 
 **Interfaces:**
-- Consumes: `end_session`, `repark_shell` (Task 2); `convert_windows_host_to_wsl_path`, `convert_windows_native_to_msys2_path` (Task 1); `start_deferred_shell` (`terminal_manager.rs:597`); `ShellLaunchData::{Executable, WSL, MSYS2}` (`crates/warp_terminal/src/shell/mod.rs:783`).
-- Produces: `fn relaunch_shell(&mut self, target: Option<ShellLaunchData>, cwd: Option<PathBuf>, ctx: &mut ModelContext<Box<dyn TerminalManager>>)` on `TerminalManagerTrait`, defaulting to a no-op like `ensure_shell_started` does (`app/src/terminal/terminal_manager.rs:42`). `target: None` means "same shell".
+- Consumes: `begin_restart` / `finish_restart` / `reset_exit_state` (Task 2), `build_session_resources` (Task 3).
+- Produces: `fn restart_session(&mut self, target: Option<ShellLaunchData>, cwd: Option<PathBuf>, ctx)` on `TerminalManagerTrait`, defaulted to a no-op exactly as `ensure_shell_started` is (`app/src/terminal/terminal_manager.rs:42`), with the body living once in `TerminalManager` and both impls forwarding to it.
 
-**Read first:** how `ensure_shell_started` and `has_deferred_shell` are declared on the trait (`app/src/terminal/terminal_manager.rs:36-47`) and implemented in `terminal_view_adaptor.rs`. Follow that shape exactly: a defaulted trait method, with the real body living once in `TerminalManager` and both impls forwarding to it. The existing comment explains why the body is shared rather than duplicated — the same reasoning applies here.
+**Sequence:** mark the restart on the view, shut the event loop down, build fresh resources, start a new session with `target` (or the current shell when `None`) and `cwd`, then clear the mark and reset the exit latch.
 
-- [ ] **Step 1: Write the failing tests**
+**Do not reuse `DeferredShellStart` for this.** It exists for a pane that has never started, and its resources are one-shot. Build the new session through the same path `create_model_with_manager` uses, with the resources from Task 3.
 
-Append to `app/src/pane_group/mod_tests.rs`:
+- [ ] **Step 1: Write the failing test**
 
-```rust
-/// Relaunching preserves the pane's blocklist. This is the guarantee the whole
-/// feature rests on: scrollback and agent history survive because nothing in the
-/// relaunch path touches them.
-#[test]
-fn test_relaunch_preserves_the_blocklist() {
-    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
-    App::test((), |mut app| async move {
-        initialize_app(&mut app);
+Assert that after `restart_session`, the pane is still open and its blocklist is unchanged — same block count, same conversation id. That is the guarantee the whole feature rests on.
 
-        let pane_group = mock_pane_group(&mut app, MockOptions::default());
-        let manager = app
-            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
-            .expect("pane 0 has a terminal manager");
+**Two traps the previous attempt at this task fell into. Avoid both:**
 
-        let before = app.read(|ctx| {
-            manager.read(ctx, |m, ctx| m.block_list().as_ref(ctx).len())
-        });
+1. `App::test`'s executor is cooperative. `ctx.spawn`ed work does not advance unless the test awaits, so a test with no `.await` silently never runs the code it claims to test. Use `ctx.await_spawned_future(..)`; the pattern is at `crates/warpui_core/src/core/mod_tests.rs:2166-2187`.
+2. A test that passes when the implementation is stubbed out is not a test. Before committing, replace `restart_session`'s body with an empty one and confirm your test fails. Report that you did this and what you observed.
 
-        app.update(|ctx| {
-            manager.update(ctx, |m, ctx| m.relaunch_shell(None, None, ctx));
-        });
+Use `mock_pane_group`, as the lazy-restore tests do — see `test_deferred_pane_with_commands_parks_its_shell`.
 
-        let after = app.read(|ctx| {
-            manager.read(ctx, |m, ctx| m.block_list().as_ref(ctx).len())
-        });
-        assert_eq!(before, after, "relaunching must not disturb the blocklist");
-    });
-}
+- [ ] **Step 2: Run the test to verify it fails**
 
-/// A relaunch parks a new shell start, which is what `start_deferred_shell` then forks.
-#[test]
-fn test_relaunch_parks_a_new_shell_start() {
-    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
-    App::test((), |mut app| async move {
-        initialize_app(&mut app);
+Run: `cargo nextest run -p warp --lib -E 'test(restart_session)'`
+Expected: compile error — `restart_session` is not defined.
 
-        let pane_group = mock_pane_group(&mut app, MockOptions::default());
-        let manager = app
-            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
-            .expect("pane 0 has a terminal manager");
+- [ ] **Step 3: Implement it**
 
-        assert!(
-            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
-            "a fresh eager pane has no parked shell"
-        );
+Add the defaulted trait method, the shared body on `TerminalManager`, and the forwarding impls. Follow how `ensure_shell_started` is declared, bodied, and forwarded — the comment at `terminal_manager.rs:600-604` explains why the body is shared rather than duplicated, and the same reasoning applies here.
 
-        app.update(|ctx| {
-            manager.update(ctx, |m, ctx| m.relaunch_shell(None, None, ctx));
-        });
+- [ ] **Step 4: Run the tests to verify they pass**
 
-        assert!(
-            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
-            "relaunch parks a start for the new shell"
-        );
-    });
-}
+Run: `cargo nextest run -p warp --lib -E 'test(restart_session)'` — PASS.
+Then the stub check from Step 1. Then the full suite, workspace check, and clippy as in Task 2 Step 5.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/src/terminal app/src/pane_group/mod_tests.rs
+git commit -m "feat(terminal): restart a pane's session in place"
 ```
 
-`block_list()` accessor spelling and `len()` may differ — read how the existing tests in this file reach a manager's block list and match that. If no such accessor is reachable from the test, assert on the pane's conversation id instead, which `TerminalPaneSnapshot` exposes. Do not delete the test; report what you used.
+---
 
-- [ ] **Step 2: Run the tests to verify they fail**
+### Task 5: Relaunch with the right shell and directory
 
-Run: `cargo nextest run -p warp --lib -E 'test(relaunch)'`
-Expected: compile error — `relaunch_shell` is not defined.
+**Files:**
+- Modify: `app/src/terminal/local_tty/terminal_manager.rs`
+- Test: `app/src/pane_group/mod_tests.rs`
 
-- [ ] **Step 3: Add the trait method**
+**Interfaces:**
+- Consumes: `restart_session` (Task 4); `convert_windows_host_to_wsl_path`, `convert_windows_native_to_msys2_path` (Task 1, in `crates/warp_util/src/path.rs`); `ShellLaunchData::{Executable, WSL, MSYS2}` (`crates/warp_terminal/src/shell/mod.rs:783`).
+- Produces: `native_startup_directory(cwd: &Path, shell: &ShellLaunchData) -> Option<PathBuf>`.
 
-In `app/src/terminal/terminal_manager.rs`, beside `ensure_shell_started`:
+**Verified, not assumed:** `startup_directory` for a WSL shell is in **WSL-native** form. `on_shell_determined` (`terminal_manager.rs:713-719`) substitutes `wsl_shell_starter.home_directory()` only when it is `None`, and otherwise passes the value straight through. A host path handed to a WSL shell lands the user in the wrong directory.
 
-```rust
-    /// Ends this manager's session and parks a fresh start for `target`, or for
-    /// the current shell when `target` is `None`.
-    ///
-    /// `cwd` is the directory the new shell should start in, in **host** form.
-    /// It is converted to the target shell's native form here, because only this
-    /// method knows which shell is being started. Managers that cannot relaunch
-    /// keep the default no-op.
-    fn relaunch_shell(
-        &mut self,
-        _target: Option<ShellLaunchData>,
-        _cwd: Option<PathBuf>,
-        _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
-    ) {
-    }
-```
+- [ ] **Step 1: Write the failing test**
 
-- [ ] **Step 4: Implement the body once in `TerminalManager`**
+Table-driven across the three shell kinds: a host path converts to the target shell's native form. `Executable` is the identity; WSL yields `/mnt/<drive>/…`; MSYS2 yields the MSYS2 form.
 
-In `app/src/terminal/local_tty/terminal_manager.rs`, beside `start_deferred_shell`:
+- [ ] **Step 2: Run to verify it fails**
 
-```rust
-    /// The sole body of `TerminalManagerTrait::relaunch_shell`. Shared for the
-    /// same reason `start_deferred_shell` is: one implementation, two impls
-    /// forwarding to it, so deleting it is a compile error rather than silent
-    /// divergence.
-    pub(super) fn relaunch_shell_impl(
-        &mut self,
-        target: Option<ShellLaunchData>,
-        cwd: Option<PathBuf>,
-        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
-    ) where
-        S: TerminalSurface,
-        <S as Entity>::Event: PtyIntentEvent,
-    {
-        if !self.end_session() {
-            log::error!("Not relaunching: the previous session did not end cleanly");
-            return;
-        }
+Run: `cargo nextest run -p warp --lib -E 'test(native_startup_directory)'`
+Expected: compile error.
 
-        let parked = match self.build_relaunch_parked_state(target, cwd) {
-            Some(parked) => parked,
-            None => {
-                log::error!("Not relaunching: could not build a shell start");
-                return;
-            }
-        };
-        self.repark_shell(parked);
-        self.start_deferred_shell(ctx);
-    }
-```
-
-Then write `build_relaunch_parked_state`, which constructs a `DeferredShellStart` from the manager's current fields plus the requested target and directory. `DeferredShellStart`'s five fields are listed at `terminal_manager.rs:190-198`: `startup_directory`, `env_vars`, `user_default_shell_unsupported_banner_model_handle`, `shell_startup_resources`, and `wsl_name_or_shell_starter`.
-
-Two of those need thought and the rest carry over from the manager unchanged:
-
-- `wsl_name_or_shell_starter` is where the shell choice lives. For `target: None`, reuse what the manager already resolved. For `Some(shell)`, derive it from the `ShellLaunchData` — read how `create_model_with_manager` builds this value from `chosen_shell` and mirror it.
-- `startup_directory` must be in the target shell's **native** form, not host form. This is verified, not assumed: `on_shell_determined` (`terminal_manager.rs:713-719`) substitutes `wsl_shell_starter.home_directory()` only when `startup_directory` is `None`, and otherwise passes the value straight through. Convert with Task 1's functions:
+- [ ] **Step 3: Implement**
 
 ```rust
     /// Converts a host-form directory to the form the target shell expects.
     ///
-    /// Verified against `on_shell_determined`, which passes a `Some`
-    /// `startup_directory` straight to the shell: a host path handed to a WSL
-    /// shell lands the user in the wrong directory.
-    ///
-    /// Returns `None` when conversion fails, which parks the shell with no
-    /// startup directory -- the shell then uses its own default, which is the
-    /// documented fallback for a directory that no longer resolves.
+    /// Returns `None` when conversion fails, which starts the shell with no
+    /// startup directory -- it then uses its own default, the documented
+    /// fallback for a directory that no longer resolves.
     fn native_startup_directory(cwd: &Path, shell: &ShellLaunchData) -> Option<PathBuf> {
         match shell {
             ShellLaunchData::Executable { .. } => Some(cwd.to_path_buf()),
@@ -508,117 +476,74 @@ Two of those need thought and the rest carry over from the manager unchanged:
     }
 ```
 
-`ShellLaunchData` has variants beyond these three (`crates/warp_terminal/src/shell/mod.rs:783-796` includes a Docker sandbox variant). The `_ => None` arm covers them: no conversion is known, so the shell starts in its own default directory. If the compiler warns the arm is unreachable, list the remaining variants explicitly instead.
+`ShellLaunchData` has variants beyond these three; `_ => None` covers them, and the shell then starts in its own default directory. The `msys2_exe_to_root` and `WindowsPath` handling mirrors `ShellLaunchData::maybe_convert_absolute_path` (`crates/warp_terminal/src/shell/mod.rs:811-830`) — read that and mirror its imports.
 
-The `msys2_exe_to_root` / `WindowsPath` handling is copied from `ShellLaunchData::maybe_convert_absolute_path` (`crates/warp_terminal/src/shell/mod.rs:811-830`); read that and mirror its imports.
+Wire it into `restart_session` so the directory it passes is already in native form.
 
-- [ ] **Step 5: Forward from both trait impls**
+- [ ] **Step 4: Verify and commit**
 
-Add `relaunch_shell` to the concrete impl in `terminal_view_adaptor.rs` and to `TuiTerminalManager`'s forwarding impl, both calling `relaunch_shell_impl`. Follow exactly how those two files forward `ensure_shell_started`.
-
-- [ ] **Step 6: Run the tests to verify they pass**
-
-Run: `cargo nextest run -p warp --lib -E 'test(relaunch)'`
-Expected: 2 PASS.
-
-Then: `cargo nextest run -p warp --lib --no-fail-fast` — no failures outside the baseline 21.
-Then: `cargo check --workspace --exclude command-signatures-v2 --exclude integration` — clean.
-Then: `cargo clippy -p warp --lib -- -D warnings` — clean.
-
-- [ ] **Step 7: Commit**
+Tests, full suite, workspace check, clippy as before.
 
 ```bash
 git add app/src/terminal app/src/pane_group/mod_tests.rs
-git commit -m "feat(terminal): relaunch a pane's shell in place"
+git commit -m "feat(terminal): start a relaunched shell in the translated directory"
 ```
 
 ---
 
-### Task 4: The two commands and the confirmation
+### Task 6: The two commands and the confirmation
 
 **Files:**
-- Modify: `app/src/workspace/view.rs` (actions), and the file declaring `WorkspaceAction`
+- Modify: `app/src/workspace/view.rs`, and the file declaring `WorkspaceAction`
 - Create: `app/src/workspace/restart_shell_confirmation_modal.rs`
 - Test: `app/src/workspace/view_tests.rs`
 
 **Interfaces:**
-- Consumes: `relaunch_shell` (Task 3); `AvailableShells::handle(ctx).get_available_shells()` and `display_name_for_shell` (used at `app/src/workspace/view.rs:6931`); `block_list().active_block().is_active_and_long_running()` (`app/src/terminal/input.rs:5016`).
+- Consumes: `restart_session` (Task 4); `AvailableShells::handle(ctx).get_available_shells()` and `display_name_for_shell` (used at `app/src/workspace/view.rs:6931`); `block_list().active_block().is_active_and_long_running()` (`app/src/terminal/input.rs:5016`).
 - Produces: `WorkspaceAction::RestartShell` and `WorkspaceAction::ChangeShell { shell: ShellLaunchData }`.
 
 Neither command gets a default keybinding. The command palette is the entry point.
 
-**Read first:** `app/src/settings_view/transfer_ownership_confirmation_modal.rs` in full. It is the pattern for the confirmation: a small `Entity` with a `ModalViewState<Modal<T>>` field on the host view, added with `ctx.add_typed_action_view(..)`. Mirror its structure rather than inventing one.
+**Read first:** `app/src/settings_view/transfer_ownership_confirmation_modal.rs` in full — the pattern for the confirmation is a small `Entity` with a `ModalViewState<Modal<T>>` field on the host view, added via `ctx.add_typed_action_view(..)`. Mirror it.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `app/src/workspace/view_tests.rs`:
+Assert that restarting a pane with nothing running does **not** prompt. The confirmation exists to protect work in progress; it must not appear when there is none.
 
-```rust
-/// Relaunching a pane with nothing running does not prompt. The confirmation
-/// exists to protect work in progress, so it must not appear when there is none.
-#[test]
-fn test_restart_shell_does_not_prompt_when_nothing_is_running() {
-    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
-    App::test((), |mut app| async move {
-        initialize_app(&mut app);
-        let workspace = mock_workspace(&mut app);
+Add a test-only `pub(crate) fn` on `Workspace` reading the modal state if the assertion needs one. A read-only accessor is acceptable; a production method existing only to make the feature testable is not.
 
-        app.update(|ctx| {
-            workspace.update(ctx, |ws, ctx| {
-                ws.handle_action(&WorkspaceAction::RestartShell, ctx);
-            });
-        });
+Match `mock_workspace` and `handle_action` usage to the existing tests in this file.
 
-        assert!(
-            !app.read(|ctx| workspace.read(ctx, |ws, _| ws.restart_shell_modal_is_open())),
-            "an idle pane restarts without a prompt"
-        );
-    });
-}
-```
-
-`restart_shell_modal_is_open()` is a test-only accessor you add on `Workspace` for this assertion — a one-line `pub(crate) fn` reading the modal state. Adding a read-only accessor is acceptable; adding a production method that exists only to make the feature testable is not.
-
-Match `mock_workspace` and `handle_action` usage to the existing tests in this file rather than the shapes above, which are illustrative of intent, not verified call syntax.
-
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p warp --lib -E 'test(restart_shell_does_not_prompt)'`
 Expected: compile error — `WorkspaceAction::RestartShell` is not defined.
 
 - [ ] **Step 3: Add the actions and the guard**
 
-Add both variants to `WorkspaceAction` and handle them in `Workspace::handle_action`. Both resolve the focused pane's terminal manager, then:
+Both variants resolve the focused pane's terminal manager, then:
 
 ```rust
-// The guard: prompt only when there is work to lose. A running CLI agent is a
-// foreground process and takes this path like any other command.
-let is_busy = /* read the focused pane's active block via
-                 is_active_and_long_running(); see app/src/terminal/input.rs:5016 */;
+// Prompt only when there is work to lose. A running CLI agent is a foreground
+// process and takes this path like any other command.
+let is_busy = /* the focused pane's active block via is_active_and_long_running();
+                 see app/src/terminal/input.rs:5016 */;
 if is_busy {
-    // open the confirmation modal, carrying the target shell so the confirm
-    // handler can complete the relaunch
+    // open the confirmation, carrying the target shell so confirm can complete it
 } else {
-    manager.update(ctx, |m, ctx| m.relaunch_shell(target, cwd, ctx));
+    manager.update(ctx, |m, ctx| m.restart_session(target, cwd, ctx));
 }
 ```
 
-`cwd` comes from the focused terminal view's `pwd_if_local(ctx)` — host form, which is what Task 3's `relaunch_shell` expects.
+`cwd` comes from the focused terminal view's `pwd_if_local(ctx)` — host form, which is what Task 5's conversion expects.
 
 - [ ] **Step 4: Add the confirmation modal**
 
-Create `app/src/workspace/restart_shell_confirmation_modal.rs` following `transfer_ownership_confirmation_modal.rs`. The modal names the running command rather than asking a generic "are you sure" — the point is an informed choice. On confirm, it calls `relaunch_shell`; on cancel, nothing happens and the session is untouched.
+Create the modal following the pattern above. It names the running command rather than asking a generic "are you sure". On confirm it calls `restart_session`; on cancel nothing happens and the session is untouched.
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 5: Verify and commit**
 
-Run: `cargo nextest run -p warp --lib -E 'test(restart_shell_does_not_prompt)'`
-Expected: PASS.
-
-Then: `cargo nextest run -p warp --lib --no-fail-fast` — no failures outside the baseline 21.
-Then: `cargo check --workspace --exclude command-signatures-v2 --exclude integration` — clean.
-Then: `cargo clippy -p warp --lib -- -D warnings` — clean.
-
-- [ ] **Step 6: Commit**
+Tests, full suite, workspace check, clippy.
 
 ```bash
 git add app/src/workspace
@@ -627,10 +552,10 @@ git commit -m "feat(workspace): add restart-shell and change-shell commands"
 
 ---
 
-### Task 5: Resume the agent after the shell comes back
+### Task 7: Resume the agent after the shell comes back
 
 **Files:**
-- Modify: `app/src/workspace/view.rs` or wherever Task 4 placed the relaunch call site
+- Modify: wherever Task 6 placed the restart call site
 - Test: `app/src/pane_group/mod_tests.rs`
 
 **Interfaces:**
@@ -639,85 +564,53 @@ git commit -m "feat(workspace): add restart-shell and change-shell commands"
 
 **The sequencing is already solved — do not rebuild it.** The pending-command queue is a "run this once the shell has bootstrapped" primitive: `set_pending_command_queue` parks commands, and `execute_pending_command` refuses to submit until `block_list().is_bootstrapped()`. Enqueue the agent's resume invocation like any other startup command.
 
-**Capture before teardown.** The resume payload is unreadable once the PTY is gone. Read it in Task 4's action handler, before calling `relaunch_shell`.
+**Capture before teardown.** The resume payload is unreadable once the PTY is gone. Read it in Task 6's action handler, before calling `restart_session`.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `app/src/pane_group/mod_tests.rs`:
+Assert a pane with no agent restarts without enqueueing anything — the common case must not acquire an agent dependency. `has_pending_command_or_awaiting_completion` is at `app/src/terminal/view.rs:16176`; match the accessor spellings to what `mod_tests.rs` already uses.
 
-```rust
-/// A pane with no agent relaunches without trying to resume one. The common
-/// case must not acquire an agent dependency.
-#[test]
-fn test_relaunch_without_an_agent_enqueues_nothing() {
-    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
-    App::test((), |mut app| async move {
-        initialize_app(&mut app);
+- [ ] **Step 2: Run it**
 
-        let pane_group = mock_pane_group(&mut app, MockOptions::default());
-        let manager = app
-            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
-            .expect("pane 0 has a terminal manager");
+Run: `cargo nextest run -p warp --lib -E 'test(without_an_agent)'`
 
-        app.update(|ctx| {
-            manager.update(ctx, |m, ctx| m.relaunch_shell(None, None, ctx));
-        });
-
-        assert!(
-            !app.read(|ctx| pane_group.read(ctx, |group, ctx| group
-                .terminal_view(0, ctx)
-                .is_some_and(|v| v.read(ctx, |view, _| view
-                    .has_pending_command_or_awaiting_completion())))),
-            "no agent means nothing queued"
-        );
-    });
-}
-```
-
-Match the accessor names to what the file already uses — `has_pending_command_or_awaiting_completion` is at `app/src/terminal/view.rs:16176`; the `terminal_view(0, ctx)` spelling is illustrative and must be checked against this file's existing helpers.
-
-- [ ] **Step 2: Run the test to verify it fails or passes**
-
-Run: `cargo nextest run -p warp --lib -E 'test(relaunch_without_an_agent)'`
-
-This one may pass immediately, since nothing enqueues yet. That is fine and expected: it is a regression guard for Step 3, not a red-first test. Note in your report which it was.
+This may pass immediately, since nothing enqueues yet. That is expected: it is a regression guard for Step 3, not a red-first test. Note which it was in your report.
 
 - [ ] **Step 3: Capture and enqueue the resume**
 
-At the call site from Task 4, before `relaunch_shell`:
+At the call site from Task 6, before `restart_session`:
 
-1. Read the focused pane's agent resume state. If there is none, relaunch and stop.
+1. Read the focused pane's agent resume state. If there is none, restart and stop.
 2. If there is one, build `ResumeOptions::ThirdParty(..)` from it.
-3. Relaunch.
+3. Restart.
 4. Enqueue the resume invocation via `set_pending_command_queue`.
 
-**Read `rehydrate_claude_transcript` (`app/src/ai/agent_sdk/driver/harness/claude_code.rs:282`) before writing step 2.** Killing an agent mid-turn truncates its transcript, and resume must mean *resume from the last complete turn*. If that function does not already guarantee this, say so in your report and stop rather than shipping a resume that can replay a partial turn — the spec flags this as unverified, and it is the one case that can corrupt a conversation.
+**Read `rehydrate_claude_transcript` (`app/src/ai/agent_sdk/driver/harness/claude_code.rs:282`) before writing step 2.** Killing an agent mid-turn truncates its transcript, and resume must mean *resume from the last complete turn*. If that function does not already guarantee this, say so in your report and stop rather than shipping a resume that can replay a partial turn.
 
-- [ ] **Step 4: Run the tests**
+- [ ] **Step 4: Verify and commit**
 
-Run: `cargo nextest run -p warp --lib -E 'test(relaunch)'` — all pass.
-
-Then: `cargo nextest run -p warp --lib --no-fail-fast` — no failures outside the baseline 21.
-Then: `cargo check --workspace --exclude command-signatures-v2 --exclude integration` — clean.
-Then: `cargo clippy -p warp --lib -- -D warnings` — clean.
-
-- [ ] **Step 5: Commit**
+Tests, full suite, workspace check, clippy.
 
 ```bash
 git add app/src
-git commit -m "feat(terminal): resume a CLI agent after relaunching its shell"
+git commit -m "feat(terminal): resume a CLI agent after restarting its shell"
 ```
 
 ---
 
 ## Self-Review
 
-**Spec coverage.** Guard on a running process → Task 4 Step 3. Capture-then-teardown ordering → Task 2 (`end_session`) and Task 5 Step 3 (capture before relaunch). Re-park and start → Task 3. cwd translated to native form → Task 1 (converters) and Task 3 Step 4 (`native_startup_directory`). Auto-resume a CLI agent → Task 5. Two separate commands → Task 4. Shell picker reusing `AvailableShells` → Task 4 Step 3. Confirmation modal following the established pattern → Task 4 Step 4. No default keybinding → stated in Task 4's preamble.
+**What changed from the first version of this plan, and why.** Tasks 2 onward were rewritten after Task 2's review found the original approach could not work. The plan had asserted that relaunching could re-park a `DeferredShellStart`, and that "phase 3 is already written and reviewed". Two verified facts contradict that:
 
-**Error handling coverage.** Teardown failure → Task 3 Step 4, which returns early rather than parking over a live session. Shell fails to start → inherited from `on_shell_determined`'s fallback path, unchanged by this plan. Directory no longer resolves → `native_startup_directory` returns `None`, parking with no startup directory so the shell uses its default. Truncated transcript → Task 5 Step 3, which instructs the implementer to verify and stop rather than guess. No agent running → Task 5 Step 1's test.
+- `ShellStartupResources` (`terminal_manager.rs:170-176`) holds a `mio_channel::Receiver<Message>`, is constructed at exactly one site (`:510`), and is consumed at `:830`. A re-parked start can never be given valid resources. Hence Task 3.
+- Ending a session fires `ModelEvent::Exit`, whose handler inserts a terminated banner, disables the editor, and emits `Event::Exited` — which `terminal_pane.rs:976-989` turns into `close_pane`. The first call would have closed the pane. `handled_exit` also latches with no reset, freezing `is_read_only()`. Hence Task 2.
 
-**Placeholder scan.** Three test bodies are deliberately not fully specified: Task 2 Step 1, and the accessor spellings in Tasks 3 and 5. These are not "figure it out" hedges — each names the exact file and existing test to mirror, states what must be asserted, and requires the implementer to report what they used. The alternative would be inventing helper signatures I have not verified, which is how the previous plan on this branch produced a test naming two functions that did not exist.
+**Spec coverage.** Guard on a running process → Task 6 Step 3. Capture before teardown → Task 7 Step 3. Restart in place → Task 4. cwd translated to native form → Tasks 1 and 5. Auto-resume a CLI agent → Task 7. Two separate commands → Task 6. Shell picker reusing `AvailableShells` → Task 6 Step 3. Confirmation modal → Task 6 Step 4. No default keybinding → Task 6 preamble.
 
-**Type consistency.** `relaunch_shell(target, cwd, ctx)` is spelled identically at its trait declaration (Task 3 Step 3), both forwarding impls (Step 5), and all four call sites in Tasks 3-5. `end_session() -> bool` and `repark_shell(DeferredShellStart)` match between Task 2's definition and Task 3's use. `convert_windows_host_to_wsl_path` and `convert_windows_native_to_msys2_path` match between Task 1's definitions and Task 3's `native_startup_directory`. Both return `String`; both call sites wrap in `PathBuf::from`.
+**Error handling.** The spec's "teardown failure aborts the relaunch" requirement is **dropped, deliberately.** Task 2's review established that `shutdown_event_loop` takes the join handle before joining and never restores it, so a boolean success signal is unconditionally true and the guard would be vacuous. Restoring a genuine signal means propagating the `join()` `Result`, which is worth doing but is not what makes this feature work; it is recorded as a follow-up rather than faked here. Directory no longer resolves → `native_startup_directory` returns `None` and the shell uses its default. Truncated transcript → Task 7 Step 3 instructs the implementer to verify and stop rather than guess.
 
-**Known gap this plan does not close.** No test asserts a shell actually *started* after a relaunch — every assertion observes parked state or blocklist identity. A `relaunch_shell` that tore the session down and never respawned would keep these tests green while leaving the pane permanently dead. This is inherited from the lazy-restore design, is recorded in that plan and in this feature's spec, and needs a new observable to close.
+**Placeholder scan.** Task 3 Step 2's signature is deliberately left to the implementer's Step 1 reading, because which inputs must be rebuilt is exactly what that reading determines — writing a signature I had not verified is what produced the defect this plan is recovering from. Task 2 Step 1 and Task 4 Step 1 name the file, the pattern to mirror, and what must be asserted, and require the implementer to report what it used.
+
+**Type consistency.** `restart_session(target, cwd, ctx)` is spelled identically at its trait declaration (Task 4), its call sites (Tasks 5 and 6), and the forwarding impls. `begin_restart` / `finish_restart` / `reset_exit_state` match between Task 2's definitions and Task 4's use. Task 1's converters return `String`; Task 5 wraps in `PathBuf::from`.
+
+**Known gap.** Task 4's test asserts the pane survives and the blocklist is intact, and Step 1 requires stubbing the implementation to prove the test discriminates. But no test asserts the replacement shell reaches a working prompt — that needs a real PTY, which the harness cannot drive. Manual verification before merge is the only cover.

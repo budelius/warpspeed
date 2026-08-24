@@ -2,7 +2,7 @@
 
 **Goal:** A pane can restart its shell in place, or switch to a different shell, keeping its scrollback, its working directory, and its agent conversation.
 
-**Status:** Design approved. Not yet planned or implemented.
+**Status:** Approved, in implementation. The Architecture section carries a correction made after the first implementation attempt disproved its original phase 3.
 
 **Base:** `dev` at `7f2a6aa2`, which carries the merged lazy-session-restore work. This design depends on that machinery and cannot be built on a base without it.
 
@@ -29,24 +29,29 @@ Out of scope, tracked separately: process-per-window, and opening a launch confi
 A relaunch is three phases against one pane's `TerminalManager`. The pane's `blocklist` is never touched, which is what keeps scrollback and agent history safe — not by copying them, but by never putting them at risk.
 
 1. **Guard.** If `block_list().active_block().is_active_and_long_running()` (`app/src/terminal/input.rs:5016`), show what is running and confirm. Otherwise proceed silently. A running CLI agent is a foreground process, so it takes this path too.
-2. **Capture, then tear down.** Read the live working directory and the agent resume payload *before* killing the PTY — both become unreadable afterwards. Then end the session.
-3. **Re-park and start.** Build a fresh `DeferredShellStart` carrying the target shell and the translated directory, park it, and call `start_deferred_shell`.
+2. **Capture, then tear down.** Read the live working directory and the agent resume payload *before* killing the PTY — both become unreadable afterwards. Mark the teardown as deliberate, then end the session.
+3. **Build fresh resources and start.** Construct a new set of per-session event-loop resources, and start a session on the target shell in the translated directory.
 
-Phase 3 is already written and reviewed: it is the machinery merged in `7f2a6aa2`. Restart and switch-shell differ only in the `ShellLaunchData` phase 3 receives, so both commands are one code path.
+### Corrected after implementation
 
-**The new work is teardown.** `TerminalManager` tears down only via `Drop` → `shutdown_event_loop()` (`app/src/terminal/local_tty/terminal_manager.rs:629`). Nothing today ends a session while keeping the manager alive and re-parkable.
+Phase 3 originally read *"Re-park and start"*, and this section claimed it was "already written and reviewed" machinery. **That was wrong**, and the first attempt at implementing it is what found out. Two facts, each verified in the code:
+
+- `ShellStartupResources` (`terminal_manager.rs:170-176`) holds a `mio_channel::Receiver<Message>`. It is constructed at exactly one site — `:510`, inside `create_model_with_manager` — and consumed at `:830`. A re-parked `DeferredShellStart` can never be handed valid resources; a second session needs a fresh channel pair and a re-wired `PtyController`. `DeferredShellStart` was built for a pane that has *never* started.
+- Ending a session fires `ModelEvent::Exit`, and its handler (`app/src/terminal/view.rs:11868-11916`) inserts a "process terminated" banner, disables the input editor, and emits `Event::Exited` — which `terminal_pane.rs:976-989` turns into `close_pane`. The first production call would have closed the pane the feature exists to preserve. `TerminalModel::handled_exit` also latches with no reset anywhere (`terminal_model.rs:1089` false at construction, `:1490` true, nothing else), freezing `is_read_only()` at true.
+
+`manual_pty_shutdown_requested` (`view.rs:2946`) looks like the answer and is not: it gates only the telemetry branch at `:11869`, and its own comment says the pane is torn down afterwards.
+
+**So the new work is two primitives, not one:** a teardown a pane can survive, and a way to construct session resources more than once.
 
 ## Components
 
-**`TerminalManager::end_session()`** — new. Extracts the body of `shutdown_event_loop` into a callable method that shuts down the event loop, joins its handle, and clears session state while leaving the manager alive. `shutdown_event_loop` already tolerates an already-dead channel. The constraint it does not yet carry: session-exit handling must not fire twice, once from teardown and once from the PTY dying.
+**Deliberate-teardown marking** — `TerminalView::begin_restart` / `finish_restart`, plus `TerminalModel::reset_exit_state`. Between them they suppress the three teardown effects (banner, editor disable, `Event::Exited`) for an exit that is a restart rather than a death, and clear the exit latch so the replacement session is writable.
 
-**`TerminalManager::repark_shell(DeferredShellStart)`** — new. Sets `deferred_shell = Some(..)`.
+**`build_session_resources`** — extracts the per-session event-loop construction out of `create_model_with_manager` so a restart can build a second set.
 
-The crate deliberately keeps **exactly one `Option::take` on `deferred_shell`** (`terminal_manager.rs:597-609`), so that deleting the shared body is a compile error at both call sites rather than silent recursion. This adds a write, not a take, so the invariant holds — but the new method belongs beside it, documented with the same reasoning.
+**`restart_session(target, cwd, ctx)`** on `TerminalManagerTrait` — the single entry point, defaulted to a no-op exactly as `ensure_shell_started` is, with the body living once in `TerminalManager` and both impls forwarding to it. `target: None` means "same shell". `cwd` arrives in **host** form and is converted inside, because only this method knows which shell is starting.
 
-**`relaunch_shell(target: Option<ShellLaunchData>, cwd: Option<PathBuf>, ctx)`** on `TerminalManagerTrait` — the single entry point. `target: None` means "same shell". `cwd` is passed in **host** form and converted to the target shell's native form inside, because only this method knows which shell is starting.
-
-**`WorkspaceAction::RestartShell` and `WorkspaceAction::ChangeShell`** — both call `relaunch_shell`; the second opens the shell picker first. Wired like the existing `AddTabWithShell`.
+**`WorkspaceAction::RestartShell` and `WorkspaceAction::ChangeShell`** — both call `restart_session`; the second opens the shell picker first. Wired like the existing `AddTabWithShell`.
 
 Neither command gets a default keybinding in this work. Restart is the one that would benefit, but every unclaimed chord is a collision risk against user bindings and platform conventions, and the command palette is sufficient to use the feature. Assigning one is a separate, reversible decision.
 
@@ -73,7 +78,7 @@ One asymmetry the inverse cannot undo: the forward converter calls `std::fs::rea
 
 `startup_directory` for a WSL shell is in **WSL-native** form. Verified: `on_shell_determined` (`terminal_manager.rs:713-719`) substitutes `wsl_shell_starter.home_directory()` only when `startup_directory` is `None`, and otherwise passes the value through untouched. Handing a host path to a WSL shell would therefore land the user in the wrong directory, or fail outright.
 
-So the flow is: `pwd_if_local()` → host path → convert to the target shell's native form → `DeferredShellStart.startup_directory`. The conversion is the identity for `Executable` shells, and the new converters for WSL and MSYS2.
+So the flow is: `pwd_if_local()` → host path → convert to the target shell's native form → the new session's startup directory. The conversion is the identity for `Executable` shells, and the new converters for WSL and MSYS2.
 
 ### Agent resume
 
@@ -83,7 +88,7 @@ That sequencing already exists and should be reused rather than rebuilt: the pen
 
 ## Error handling
 
-**Teardown does not complete.** `shutdown_event_loop` joins the event-loop thread and reports a failure to join. A relaunch must not proceed on a half-dead session: if the join fails, surface the error in the pane and leave the pane as it is, rather than parking a second shell over a live PTY.
+**Teardown does not complete.** Originally specified as: abort the relaunch if teardown fails. **Dropped, deliberately.** `shutdown_event_loop` takes the join handle out of its `Option` *before* attempting the join and never restores it on failure, so any boolean success signal is unconditionally true and the guard would be vacuous. A genuine signal means propagating the `join()` `Result` — worth doing, but it is not what makes this feature work, and faking it would be worse than recording it. Tracked as a follow-up.
 
 **The new shell fails to start.** The existing failure path applies — the "shell unsupported" banner and fallback-shell selection in `on_shell_determined`. A failed *switch* must not leave the pane shell-less: the pane ends up either on the requested shell or on the fallback, never parked forever.
 
@@ -97,11 +102,11 @@ That sequencing already exists and should be reused rather than rebuilt: the pen
 
 Unit tests observe model state, not real PTYs — the limit inherited from the lazy-restore work.
 
-- Restarting a pane with no running process tears down and re-parks without a prompt, and the new session starts.
+- Restarting a pane with no running process tears down and starts a fresh session without a prompt, and the pane stays open.
 - Restarting with a long-running block set prompts, and declining leaves the session untouched.
 - The blocklist is identical across a relaunch — same block count, same conversation id. This is the guarantee the whole design rests on.
-- Switching shells re-parks with the requested `ShellLaunchData`, not the previous one.
-- The captured directory reaches `DeferredShellStart.startup_directory` in the target shell's native form. Table-driven across Executable / WSL / MSYS2.
+- Switching shells starts the requested `ShellLaunchData`, not the previous one.
+- The captured directory reaches the new session in the target shell's native form. Table-driven across Executable / WSL / MSYS2.
 - The new path converters round-trip against the existing forward converters, and handle UNC paths, drive letters, and non-`/mnt` mount roots.
 - A pane with no agent relaunches without attempting resume.
 

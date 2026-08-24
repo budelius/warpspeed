@@ -715,6 +715,17 @@ impl<T: EventLoopSender> PtyController<T> {
         true
     }
 
+    /// Points this controller at a different event loop.
+    ///
+    /// Used when a session is restarted in place: the controller holds its own
+    /// clone of the sender, and the one it was built with now addresses an
+    /// event loop that has already been joined, so every PTY write would fail
+    /// until it is replaced.
+    #[cfg(feature = "local_tty")]
+    pub fn set_event_loop_sender(&mut self, event_loop_tx: T) {
+        self.event_loop_tx = event_loop_tx;
+    }
+
     /// Sends a message to the event loop. If the send fails with `SendError::Disconnected`, emits
     /// a `PtyDisconnected` event.
     fn send_message_to_event_loop(&self, message: Message, ctx: &mut ModelContext<Self>) {

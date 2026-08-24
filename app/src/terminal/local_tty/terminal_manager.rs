@@ -120,6 +120,28 @@ pub struct TerminalManager<S> {
     /// makes starting idempotent — there is no separate flag or state machine
     /// that could disagree with it, and no way to fork twice.
     pub(super) deferred_shell: Option<DeferredShellStart>,
+
+    /// Everything a *second* session needs that the first one's
+    /// [`DeferredShellStart`] consumed. See [`SessionTemplate`].
+    session_template: SessionTemplate,
+}
+
+/// The inputs a replacement session needs, retained for the lifetime of the
+/// manager because the first session's [`DeferredShellStart`] is moved into
+/// `spawn_shell_start` and gone by the time a restart runs.
+///
+/// The event proxy and (on unix) the dispatcher are the manager's long-lived
+/// async plumbing rather than per-session state -- see
+/// [`TerminalManager::build_session_resources`], which takes clones of exactly
+/// these two. `env_vars` and the banner handle are the pane's own launch
+/// inputs, kept so a restart relaunches *this* pane -- its session focus env
+/// vars included -- rather than a default one.
+struct SessionTemplate {
+    channel_event_proxy: ChannelEventListener,
+    #[cfg(unix)]
+    model_events: ModelHandle<ModelEventDispatcher>,
+    env_vars: HashMap<OsString, OsString>,
+    user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
 }
 
 /// Shared inputs needed to construct a terminal surface for a local PTY.
@@ -219,6 +241,15 @@ where
 
     fn has_deferred_shell(&self) -> bool {
         self.0.is_shell_deferred()
+    }
+
+    fn restart_session(
+        &mut self,
+        target: Option<ShellLaunchData>,
+        cwd: Option<PathBuf>,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) {
+        self.0.restart_session_inner(target, cwd, ctx)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -524,6 +555,14 @@ impl<S> TerminalManager<S> {
             inactive_pty_reads_rx,
             session_sharer: Rc::new(RefCell::new(None)),
             deferred_shell: None,
+            session_template: SessionTemplate {
+                channel_event_proxy,
+                #[cfg(unix)]
+                model_events,
+                env_vars: env_vars.clone(),
+                user_default_shell_unsupported_banner_model_handle:
+                    user_default_shell_unsupported_banner_model_handle.clone(),
+            },
         };
 
         // Run surface-specific wiring after the manager exists, because this
@@ -650,9 +689,26 @@ impl<S> TerminalManager<S> {
         self.remote_server_controller.clone()
     }
 
+    /// Ends this manager's session for good: stops the event loop and closes
+    /// the PTY reads broadcast channel.
+    ///
+    /// Only correct when nothing will use this manager again. Closing the
+    /// broadcast channel is not reversible and a replacement session publishes
+    /// to that same channel, so a restart calls [`Self::stop_event_loop`]
+    /// instead.
+    pub(super) fn shutdown_event_loop(&mut self) {
+        self.stop_event_loop();
+        self.inactive_pty_reads_rx.close();
+    }
+
     /// Sends a shutdown message to the PTY event loop and waits for it to
     /// process that event.
-    pub(super) fn shutdown_event_loop(&mut self) {
+    ///
+    /// Blocking on the join is what makes a restart orderable: the event
+    /// loop's last act before its thread ends is `TerminalModel::exit`, so once
+    /// this returns the replaced session can no longer queue a terminal event,
+    /// and a barrier posted afterwards is necessarily the last one.
+    fn stop_event_loop(&mut self) {
         let shutdown_res = self.event_loop_tx.lock().send(Message::Shutdown);
         // Happens normally if the event loop has already been terminated (so the channel is now gone).
         if let Err(e) = shutdown_res {
@@ -687,8 +743,123 @@ impl<S> TerminalManager<S> {
                 }
             }
         }
+    }
 
-        self.inactive_pty_reads_rx.close();
+    /// The sole body of `TerminalManagerTrait::restart_session`. Shared by the
+    /// concrete `impl TerminalManagerTrait for TerminalManager<TerminalView>`
+    /// (terminal_view_adaptor.rs) and `TuiTerminalManager`'s forwarding impl
+    /// above for the same reason [`Self::start_deferred_shell`] is: the
+    /// sequence below is ordering-sensitive, and a duplicated copy is a copy
+    /// that can drift out of that order.
+    ///
+    /// `target` is the shell to launch, or `None` to relaunch the one this
+    /// pane is already running. `cwd` is the replacement's startup directory.
+    pub(super) fn restart_session_inner(
+        &mut self,
+        target: Option<ShellLaunchData>,
+        cwd: Option<PathBuf>,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        // 1. Mark the restart on the surface *before* anything can exit, so no
+        //    exit produced below is mistaken for a shell that died. Until the
+        //    barrier posted in step 3 comes back round, the view suppresses the
+        //    whole teardown -- including `Event::Exited`, which `TerminalPane`
+        //    turns into `close_pane`.
+        //
+        //    Deliberately not `TerminalView::shutdown_pty`, the other way to
+        //    stop a PTY: that sets `manual_pty_shutdown_requested`, and that
+        //    flag's own doc says it stays true for the view's entire lifetime,
+        //    which would permanently suppress `AgentExitedShellProcess`
+        //    telemetry for every genuine agent-caused exit in the pane
+        //    afterwards. A restart tears the event loop down directly instead
+        //    and leaves that flag alone.
+        self.view
+            .update(ctx, |surface, ctx| surface.on_session_restart_started(ctx));
+
+        // 2. Tear the replaced session down. This joins the event loop thread,
+        //    whose last act is `TerminalModel::exit`, so once it returns that
+        //    session can no longer touch the model: whatever `Exit` it queued
+        //    is already in the event channel, and nothing more can be queued
+        //    behind it. Unlike the drop path this leaves the PTY reads
+        //    broadcast channel open, because the replacement publishes to it.
+        self.stop_event_loop();
+
+        // A parked start is superseded by this restart -- the shell is being
+        // forked here and now. Leaving it parked would fork a second one the
+        // next time the pane is activated.
+        self.deferred_shell = None;
+
+        // 3. Post the restart barrier. It travels the same FIFO channel as the
+        //    replaced shell's own exit, and step 2 guarantees nothing can slip
+        //    in behind it, so the view observing it is proof that the old exit
+        //    has already been delivered and suppressed. That is what lets
+        //    `TerminalView::finish_restart` run at a provably safe point rather
+        //    than a hopeful one. See `TerminalModel::exit_for_restart`.
+        self.model.lock().exit_for_restart();
+
+        // 4. Build a second set of event-loop plumbing. The first set's
+        //    `ShellStartupResources` were consumed when the first shell forked.
+        let (shell_startup_resources, event_loop_tx) = Self::build_session_resources(
+            self.session_template.channel_event_proxy.clone(),
+            #[cfg(unix)]
+            self.session_template.model_events.clone(),
+        );
+        // The PTY controller holds its own clone of the sender, and the one it
+        // was built with now addresses the event loop joined in step 2; every
+        // write it makes would fail until it is repointed.
+        self.pty_controller.update(ctx, |controller, _| {
+            controller.set_event_loop_sender(event_loop_tx.clone());
+        });
+        *self.event_loop_tx.lock() = event_loop_tx;
+
+        // 5. Resolve the shell to launch: the requested target, else the one
+        //    this pane is already running, else the user's preferred shell.
+        let shells = AvailableShells::handle(ctx);
+        let requested = target.or_else(|| self.model.lock().active_shell_launch_data().cloned());
+        let shell = requested
+            .and_then(|launch_data| {
+                shells.read(ctx, |shells, _| {
+                    shells.get_from_shell_launch_data(&launch_data)
+                })
+            })
+            .or_else(|| self.model.lock().get_shell())
+            .unwrap_or_else(|| {
+                shells.read(ctx, |shells, ctx| shells.get_user_preferred_shell(ctx))
+            });
+        let wsl_name_or_shell_starter = ShellStarter::init(shell.clone());
+        // Label the pane with the shell it is launching, not the one it just
+        // replaced -- a restart may be a switch to a different shell.
+        self.model
+            .lock()
+            .set_determining_shell(ShellLaunchState::DeterminingShell {
+                available_shell: Some(shell),
+                display_name: wsl_name_or_shell_starter
+                    .as_ref()
+                    .map(|wsl_name_or_shell_starter| wsl_name_or_shell_starter.name())
+                    .unwrap_or(ShellName::LessDescriptive("Shell".to_owned())),
+            });
+
+        // 6. Fork it through exactly the path `create_model_with_manager` takes
+        //    for an eager pane. `DeferredShellStart` is built fresh here rather
+        //    than reusing a parked one: its `ShellStartupResources` are
+        //    one-shot, and step 4 is where this session's replacements come
+        //    from.
+        Self::spawn_shell_start(
+            DeferredShellStart {
+                startup_directory: cwd,
+                env_vars: self.session_template.env_vars.clone(),
+                user_default_shell_unsupported_banner_model_handle: self
+                    .session_template
+                    .user_default_shell_unsupported_banner_model_handle
+                    .clone(),
+                shell_startup_resources,
+                wsl_name_or_shell_starter,
+            },
+            ctx,
+        );
     }
 }
 

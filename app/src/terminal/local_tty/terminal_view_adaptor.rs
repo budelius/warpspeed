@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
@@ -70,7 +71,9 @@ use crate::terminal::shared_session::{
 };
 use crate::terminal::view::{ConversationRestorationInNewPaneType, Event as TerminalViewEvent};
 use crate::terminal::writeable_pty::terminal_manager_util::wire_up_remote_server_controller_with_view;
-use crate::terminal::{TerminalManager as TerminalManagerTrait, TerminalModel, TerminalView};
+use crate::terminal::{
+    ShellLaunchData, TerminalManager as TerminalManagerTrait, TerminalModel, TerminalView,
+};
 use crate::view_components::ToastFlavor;
 
 const ACL_UPDATE_FAILURE_RESPONSE: &str = "Something went wrong. Please try again.";
@@ -2015,6 +2018,15 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
 
     fn has_deferred_shell(&self) -> bool {
         self.is_shell_deferred()
+    }
+
+    fn restart_session(
+        &mut self,
+        target: Option<ShellLaunchData>,
+        cwd: Option<PathBuf>,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) {
+        self.restart_session_inner(target, cwd, ctx)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -13,7 +13,7 @@ use super::safe_mode_settings::get_secret_obfuscation_mode;
 use super::session_settings::SessionSettings;
 use super::settings::TerminalSettings;
 use super::view::{WARP_PROMPT_HEIGHT_LINES, create_size_info_for_blocklist};
-use super::{BlockPadding, ShellLaunchState, SizeInfo, TerminalModel, color};
+use super::{BlockPadding, ShellLaunchData, ShellLaunchState, SizeInfo, TerminalModel, color};
 use crate::PrivacySettings;
 use crate::ai::blocklist::SerializedBlockListItem;
 use crate::ai::blocklist::telemetry_banner::should_collect_ai_ugc_telemetry;
@@ -44,6 +44,24 @@ pub trait TerminalManager: Any {
     /// Whether a shell start is parked and has not run yet.
     fn has_deferred_shell(&self) -> bool {
         false
+    }
+
+    /// Replaces this manager's shell session in place, keeping the pane, its
+    /// blocklist, and its agent conversation.
+    ///
+    /// `target` is the shell to launch; `None` relaunches the one currently
+    /// running. `cwd` is the replacement shell's startup directory; `None`
+    /// leaves it to the shell.
+    ///
+    /// Managers with no local session to replace (the remote-TTY viewer, the
+    /// mock) keep the default no-op, exactly as [`Self::ensure_shell_started`]
+    /// does -- there is nothing for them to tear down or fork.
+    fn restart_session(
+        &mut self,
+        _target: Option<ShellLaunchData>,
+        _cwd: Option<PathBuf>,
+        _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
+    ) {
     }
 
     /// Returns this [`TerminalManager`] as an [`Any`], to support downcasting.

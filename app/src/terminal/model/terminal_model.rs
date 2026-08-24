@@ -1498,6 +1498,40 @@ impl TerminalModel {
         self.commit_lifecycle_transition(&transition);
     }
 
+    /// Ends the session being replaced and posts the restart barrier: an
+    /// `Event::Exit` carrying [`ExitReason::Restarting`].
+    ///
+    /// The barrier solves an ordering problem a restart otherwise cannot win.
+    /// `Exit` reaches the view asynchronously (here -> the event-proxy channel
+    /// -> the dispatcher -> `handle_terminal_event`), so a restart that clears
+    /// its suppression mark on a fixed timeline can have the replaced shell's
+    /// own `Exit` still queued behind it -- and an unsuppressed exit closes the
+    /// pane. The caller posts this barrier only after the old PTY event loop
+    /// thread has been joined, so nothing can queue an event behind it; because
+    /// everything travels one FIFO channel, a view that observes the barrier
+    /// knows every event the replaced session produced -- its `Exit` included --
+    /// has already been delivered. That is the moment, and the only moment, at
+    /// which the mark can be cleared safely.
+    ///
+    /// Exactly one barrier is posted per call, whether or not the replaced shell
+    /// had already exited, and the model is left writable rather than latched:
+    /// the replacement shell writes into this same model.
+    pub fn exit_for_restart(&mut self) {
+        if self.handled_exit {
+            // The replaced shell already exited and this model has already been
+            // torn down for it, so only the barrier is still owed. Going through
+            // `exit` here would be swallowed by the latch (no barrier at all),
+            // and un-latching first would run the teardown -- and its lifecycle
+            // telemetry transition -- a second time for a single session.
+            self.event_proxy.send_terminal_event(Event::Exit {
+                reason: ExitReason::Restarting,
+            });
+        } else {
+            self.exit(ExitReason::Restarting);
+        }
+        self.handled_exit = false;
+    }
+
     /// Clears the exit latch so a replaced shell's model is writable again.
     ///
     /// `exit` sets `handled_exit` and nothing resets it, so without this a
@@ -2010,6 +2044,18 @@ impl TerminalModel {
 
     pub fn active_shell_launch_data(&self) -> Option<&ShellLaunchData> {
         self.active_shell_launch_data.as_ref()
+    }
+
+    /// Puts this model back into [`ShellLaunchState::DeterminingShell`] for a
+    /// replacement session.
+    ///
+    /// `set_login_shell_spawned` only ever carries the *existing*
+    /// `available_shell` and `display_name` forward, so a restart that
+    /// switches shells would otherwise keep labelling the pane with the shell
+    /// it just replaced.
+    pub fn set_determining_shell(&mut self, shell_launch_state: ShellLaunchState) {
+        self.shell_launch_state = shell_launch_state;
+        self.set_title(None);
     }
 
     pub fn set_login_shell_spawned(&mut self, shell_type: ShellType) {
@@ -3754,6 +3800,13 @@ pub enum ExitReason {
     ProcessKilled,
     /// Shell could not be found/determined
     ShellNotFound,
+    /// The session is being deliberately replaced by
+    /// [`TerminalModel::exit_for_restart`].
+    ///
+    /// Never produced by a shell that died: the PTY event loop only ever reports
+    /// the reasons above. A view can therefore treat this reason as a marker for
+    /// "the session being replaced is fully drained" -- see `exit_for_restart`.
+    Restarting,
 }
 
 #[cfg(test)]

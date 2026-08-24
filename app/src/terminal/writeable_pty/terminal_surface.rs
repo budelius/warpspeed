@@ -84,6 +84,17 @@ where
     #[cfg(feature = "local_tty")]
     fn on_pty_spawn_failed(&mut self, error: anyhow::Error, ctx: &mut ViewContext<Self>);
 
+    /// Called immediately before the manager tears the current session down to
+    /// replace it, so the surface can treat the resulting shell exit as a
+    /// deliberate restart rather than a death.
+    ///
+    /// The surface stays marked until it observes the restart barrier the
+    /// manager posts once the old event loop is gone
+    /// (`ExitReason::Restarting`); surfaces that do not distinguish the two
+    /// keep the default no-op.
+    #[cfg(feature = "local_tty")]
+    fn on_session_restart_started(&mut self, _ctx: &mut ViewContext<Self>) {}
+
     /// Called when termios indicates a likely password prompt is blocking the active block.
     #[cfg(unix)]
     fn on_possible_password_prompt(

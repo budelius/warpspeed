@@ -93,6 +93,7 @@ use crate::terminal::keys::TerminalKeybindings;
 use crate::terminal::local_tty::TerminalManager;
 use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::model::terminal_model::ConversationTranscriptViewerStatus;
+use crate::terminal::model::terminal_model::ExitReason;
 use crate::terminal::resizable_data::ResizableData;
 use crate::terminal::shared_session::{
     IsSharedSessionCreator, SharedSessionActionSource, SharedSessionScrollbackType,
@@ -4517,6 +4518,126 @@ fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
             terminal.shell_launch_data,
             Some(shell_launch_data),
             "a parked pane must re-save the shell it was restored with"
+        );
+    });
+}
+
+/// Restarting a pane's session keeps the pane and everything the user can see
+/// in it: the blocklist it had, and the conversation attached to it.
+///
+/// The hazard this guards is an ordering one. `ModelEvent::Exit` reaches the
+/// view asynchronously, so the shell being replaced can still have its own exit
+/// queued when the restart runs -- which is why the test queues one explicitly
+/// before calling `restart_session`, rather than trusting a teardown to produce
+/// one at a convenient moment. If that exit lands unsuppressed, the view treats
+/// it as a shell that died: it inserts the "process terminated" banner, adds an
+/// initialization block for a session that never bootstrapped, and emits
+/// `Event::Exited`, which `TerminalPane` turns into `close_pane`.
+///
+/// The blocklist is what discriminates here. `Event::Exited` deliberately does
+/// *not* close a pane whose shell never bootstrapped (see the `Event::Exited`
+/// arm in `terminal_pane.rs`), and this harness performs no PTY handshake, so
+/// pane survival alone would hold even with the restart stubbed out. The two
+/// blocks a mishandled exit inserts do not: with `restart_session` stubbed to a
+/// no-op this test fails, and it fails inside the teardown it is supposed to
+/// have suppressed -- the terminated banner's telemetry reaches for singletons
+/// this harness never registers -- before the blocklist assertion is even
+/// reached.
+#[test]
+fn test_restart_session_keeps_the_pane_and_its_blocklist() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+        let view = app
+            .read(|ctx| {
+                pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(0, ctx))
+            })
+            .expect("pane 0 has a terminal view");
+
+        // Give the pane a conversation, so "the restart preserved the
+        // conversation" is a claim about something rather than `None == None`.
+        let conversation_id = app.update(|ctx| {
+            let terminal_surface_id = view.id();
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.start_new_conversation(terminal_surface_id, false, false, false, ctx)
+            })
+        });
+
+        let panes_before =
+            app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count()));
+        let blocks_before =
+            app.read(|ctx| view.as_ref(ctx).model.lock().block_list().blocks().len());
+        let active_conversation_before =
+            app.read(|ctx| view.as_ref(ctx).active_conversation_id(ctx));
+
+        // The shell being replaced reports its own death, exactly as the PTY
+        // event loop does on the way out. This queues an `Exit` on the async
+        // channel that the restart has to order itself against.
+        app.update(|ctx| {
+            manager
+                .read(ctx, |manager, _| manager.model())
+                .lock()
+                .exit(ExitReason::ShellProcessExited);
+        });
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                manager.restart_session(None, None, ctx);
+            });
+        });
+
+        // `App::test`'s executor is cooperative: the dispatcher that turns a
+        // queued terminal event into a `ModelEvent` for this view is a spawned
+        // task, and it makes no progress at all unless the test yields. Without
+        // this loop the queued exit above would simply never be delivered and
+        // the assertions below would hold vacuously.
+        for _ in 0..64 {
+            futures_lite::future::yield_now().await;
+        }
+
+        assert_eq!(
+            app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count())),
+            panes_before,
+            "a restart must not close the pane it is restarting"
+        );
+        assert_eq!(
+            app.read(|ctx| { view.as_ref(ctx).model.lock().block_list().blocks().len() }),
+            blocks_before,
+            "a restart must leave the scrollback alone: no terminated banner, no \
+             initialization block"
+        );
+        assert_eq!(
+            app.read(|ctx| view.as_ref(ctx).active_conversation_id(ctx)),
+            active_conversation_before,
+            "a restart must not change which conversation the pane is on"
+        );
+        assert!(
+            app.read(|ctx| {
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation(&conversation_id)
+                    .is_some_and(|conversation| conversation.status().is_in_progress())
+            }),
+            "a restart must not finalize the pane's in-flight conversation as failed"
         );
     });
 }

@@ -449,7 +449,8 @@ use crate::terminal::model::session::{
     BootstrapSessionType, Session, SessionId, SessionType, Sessions, SessionsEvent,
 };
 use crate::terminal::model::terminal_model::{
-    BlockIndex, BlockSelectionCardinality, SelectedBlocks, TerminalInputState, WithinModel,
+    BlockIndex, BlockSelectionCardinality, ExitReason, SelectedBlocks, TerminalInputState,
+    WithinModel,
 };
 use crate::terminal::model::{ObfuscateSecrets, RespectObfuscatedSecrets, SecretHandle};
 use crate::terminal::model_events::{AnsiHandlerEvent, ModelEvent, ModelEventDispatcher};
@@ -2948,9 +2949,10 @@ pub struct TerminalView {
     /// `true` while this view's shell is being deliberately restarted.
     ///
     /// `ModelEvent::Exit` cannot otherwise distinguish a shell that died from
-    /// one being replaced. While this is set, the exit handler does not
-    /// insert the "process terminated" banner, disable the input editor, or
-    /// emit `Event::Exited` (which would close the pane).
+    /// one being replaced. While this is set, the exit handler does none of a
+    /// teardown's work: no failed conversation, no "process terminated"
+    /// banner, no disabled editor, no initialization block, and no
+    /// `Event::Exited` (which would close the pane).
     restart_in_progress: bool,
 
     ephemeral_message_model: ModelHandle<EphemeralMessageModel>,
@@ -8764,6 +8766,10 @@ impl TerminalView {
     /// `ModelEvent::Exit` cannot distinguish a shell that died from one being
     /// replaced. Without this, a restart inserts a "process terminated" banner,
     /// disables the input, and emits `Event::Exited` -- which closes the pane.
+    ///
+    /// The mark is cleared by [`Self::finish_restart`], which the exit handler
+    /// calls when it sees the restart barrier
+    /// ([`crate::terminal::model::terminal_model::ExitReason::Restarting`]).
     pub fn begin_restart(&mut self) {
         self.restart_in_progress = true;
     }
@@ -8790,6 +8796,13 @@ impl TerminalView {
     /// `reset_exit_state` below removes that protection, so a premature call
     /// here can let the second exit land on a pane that looks restarted but
     /// isn't done exiting yet.
+    ///
+    /// The one call site that establishes this precondition is the
+    /// `ModelEvent::Exit` arm of `handle_terminal_event`, on the restart
+    /// barrier `TerminalModel::exit_for_restart` posts after the replaced
+    /// session's event loop thread has been joined. Observing the barrier is
+    /// proof, not a guess: every terminal event travels one FIFO channel, so
+    /// nothing the old session queued can still be behind it.
     pub fn finish_restart(&mut self, ctx: &mut ViewContext<Self>) {
         self.restart_in_progress = false;
         self.model.lock().reset_exit_state();
@@ -11924,6 +11937,29 @@ impl TerminalView {
                 ctx.request_user_attention();
             }
             ModelEvent::Exit { reason } => {
+                if self.restart_in_progress {
+                    // This exit belongs to a shell being deliberately replaced,
+                    // not to one that died, so *nothing* below runs: no failed
+                    // conversation (the restart exists to preserve it), no
+                    // "process terminated" banner, no disabled editor, no
+                    // initialization block in a pane that is meant to look
+                    // untouched, and above all no `Event::Exited` -- the sole
+                    // emitter of that variant in this crate, which
+                    // `TerminalPane` turns into `close_pane`.
+                    if matches!(reason, ExitReason::Restarting) {
+                        // The restart barrier. `TerminalModel::exit_for_restart`
+                        // posts it only after the replaced session's PTY event
+                        // loop thread has been joined, and every terminal event
+                        // travels one FIFO channel, so observing it here proves
+                        // the replaced shell's own `Exit` (if it had one) has
+                        // already passed through this handler. That is exactly
+                        // the precondition `finish_restart` documents, and this
+                        // is the only place in the crate that can establish it.
+                        self.finish_restart(ctx);
+                    }
+                    return;
+                }
+
                 if !self.manual_pty_shutdown_requested
                     && let Some((conversation_id, command)) =
                         self.maybe_send_agent_exited_shell_telemetry(ctx)
@@ -11942,34 +11978,25 @@ impl TerminalView {
                     });
                 }
 
-                // If a restart is in progress, this exit is the old shell being
-                // deliberately replaced, not a teardown: don't insert the banner,
-                // disable the editor, or emit `Event::Exited` (which would close
-                // the pane out from under the restart).
-                if !self.restart_in_progress {
-                    // If the pty spawn has failed, we've already inserted a banner.
-                    if !self.pty_spawn_failed {
-                        let shell_detail =
-                            self.shell_detail.take().unwrap_or("shell".to_owned());
-                        self.insert_shell_process_terminated_banner(
-                            shell_terminated_banner::TerminationType::Premature {
-                                shell_detail,
-                                reason: *reason,
-                            },
-                            ctx,
-                        );
-                    }
-                    // Mark the editor as disabled to ensure user interactions with
-                    // it are ignored.
-                    self.input.update(ctx, |input, ctx| {
-                        input.editor().update(ctx, |editor, ctx| {
-                            editor.set_interaction_state(
-                                crate::editor::InteractionState::Disabled,
-                                ctx,
-                            );
-                        });
-                    });
+                // If the pty spawn has failed, we've already inserted a banner.
+                if !self.pty_spawn_failed {
+                    let shell_detail = self.shell_detail.take().unwrap_or("shell".to_owned());
+                    self.insert_shell_process_terminated_banner(
+                        shell_terminated_banner::TerminationType::Premature {
+                            shell_detail,
+                            reason: *reason,
+                        },
+                        ctx,
+                    );
                 }
+                // Mark the editor as disabled to ensure user interactions with
+                // it are ignored.
+                self.input.update(ctx, |input, ctx| {
+                    input.editor().update(ctx, |editor, ctx| {
+                        editor
+                            .set_interaction_state(crate::editor::InteractionState::Disabled, ctx);
+                    });
+                });
 
                 // If we failed to bootstrap by the time we exited, show the
                 // bootstrap block so the user might be able to see what went wrong.
@@ -11977,7 +12004,7 @@ impl TerminalView {
                     self.show_initialization_block();
                 }
 
-                if !self.pty_spawn_failed && !self.restart_in_progress {
+                if !self.pty_spawn_failed {
                     ctx.emit(Event::Exited);
                 }
             }
@@ -26582,6 +26609,11 @@ impl TerminalSurface for TerminalView {
         self.pane_configuration.update(ctx, |config, ctx| {
             config.notify_header_content_changed(ctx);
         });
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_session_restart_started(&mut self, _ctx: &mut ViewContext<Self>) {
+        self.begin_restart();
     }
 
     #[cfg(feature = "local_tty")]

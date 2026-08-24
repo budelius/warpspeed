@@ -321,6 +321,33 @@ impl<S> TerminalManager<S> {
         )
     }
 
+    /// Builds one session's worth of event-loop plumbing.
+    ///
+    /// Extracted from `create_model_with_manager` so a restart can build a second
+    /// set. `ShellStartupResources` is consumed when the PTY starts, so a manager
+    /// that has already run a shell cannot reuse its first set.
+    ///
+    /// `channel_event_proxy` and (on unix) `model_events` are long-lived handles
+    /// tied to the manager's async event channels, not to any one shell session --
+    /// callers pass a clone and keep using their own copy afterwards. Only the
+    /// `mio_channel` pair is freshly constructed here, because its `Receiver` is
+    /// moved into the PTY event loop and consumed exactly once per session.
+    fn build_session_resources(
+        channel_event_proxy: ChannelEventListener,
+        #[cfg(unix)] model_events: ModelHandle<ModelEventDispatcher>,
+    ) -> (ShellStartupResources, mio_channel::Sender<Message>) {
+        let (event_loop_tx, event_loop_rx) = mio_channel::channel();
+        (
+            ShellStartupResources {
+                event_loop_rx,
+                channel_event_proxy,
+                #[cfg(unix)]
+                model_events,
+            },
+            event_loop_tx,
+        )
+    }
+
     /// Creates a manager using the supplied type-erasure adapter.
     #[allow(clippy::too_many_arguments)]
     fn create_model_with_manager<PostWire, BoxManager>(
@@ -351,7 +378,6 @@ impl<S> TerminalManager<S> {
         let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
         let (events_tx, events_rx) = async_channel::unbounded();
         let (executor_command_tx, executor_command_rx) = async_channel::unbounded();
-        let (event_loop_tx, event_loop_rx) = mio_channel::channel();
 
         // Create the broadcast channel to receive data from the PTY, but deactivate it immediately.
         // We only want to create active receivers as necessary.
@@ -372,6 +398,12 @@ impl<S> TerminalManager<S> {
                 ctx,
             )
         });
+
+        let (shell_startup_resources, event_loop_tx) = Self::build_session_resources(
+            channel_event_proxy.clone(),
+            #[cfg(unix)]
+            model_events.clone(),
+        );
 
         let preferred_shell = chosen_shell.unwrap_or_else(|| {
             AvailableShells::handle(ctx)
@@ -499,12 +531,6 @@ impl<S> TerminalManager<S> {
         post_wire(&mut terminal_manager, &surface, ctx);
 
         let terminal_surface = surface.clone();
-        let shell_startup_resources = ShellStartupResources {
-            event_loop_rx,
-            channel_event_proxy,
-            #[cfg(unix)]
-            model_events,
-        };
 
         let terminal_manager_model = ctx.add_model(|ctx| match shell_start {
             ShellStartPolicy::Deferred => {

@@ -187,15 +187,7 @@ struct ShellStartupResources {
 /// Only the *fork* -- resolving the starter source and running
 /// `on_shell_determined` -- is deferred. This is what makes an eager and a
 /// deferred pane start the same shell.
-///
-/// `pub(crate)` rather than `pub(super)`: the `#[cfg(test)]` wrappers on
-/// `TerminalManager<TerminalView>` that move a parked start across the
-/// `pane_group` test boundary (see `terminal_view_adaptor::end_session_for_test`
-/// and friends) must be able to name this type. Its fields stay private, and
-/// the crate's single `Option::take` on `deferred_shell` (see
-/// `TerminalManager::start_deferred_shell`) is unaffected -- this only widens
-/// who can hold a value someone else already produced.
-pub(crate) struct DeferredShellStart {
+pub(super) struct DeferredShellStart {
     startup_directory: Option<PathBuf>,
     env_vars: HashMap<OsString, OsString>,
     user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
@@ -671,51 +663,6 @@ impl<S> TerminalManager<S> {
         }
 
         self.inactive_pty_reads_rx.close();
-    }
-
-    /// Ends the running session while keeping the manager alive.
-    ///
-    /// [`Self::shutdown_event_loop`] does the same teardown from `Drop`, but a
-    /// relaunch cannot drop the manager: the pane, its blocklist, and its agent
-    /// conversation must outlive the shell. Returns whether teardown completed;
-    /// a caller must not park a new shell over a session that failed to end.
-    ///
-    /// Safe to call more than once. `shutdown_event_loop` takes
-    /// `event_loop_handle` out of its `Option`, so a second call finds nothing
-    /// to join and returns.
-    ///
-    /// Only called from `#[cfg(test)]` code so far (see
-    /// `terminal_view_adaptor::end_session_for_test`); production relaunch
-    /// orchestration is a later task, hence the `allow` below.
-    #[allow(dead_code)]
-    pub(super) fn end_session(&mut self) -> bool {
-        if self.event_loop_handle.is_none() {
-            // Already torn down, or never started. Nothing to do, and reporting
-            // success is correct: the postcondition (no live session) holds.
-            return true;
-        }
-        self.shutdown_event_loop();
-        self.event_loop_handle.is_none()
-    }
-
-    /// Parks a shell start on a manager whose session has ended, so
-    /// [`Self::start_deferred_shell`] can fork it.
-    ///
-    /// The write counterpart to the crate's single `Option::take` on
-    /// `deferred_shell` (see [`Self::start_deferred_shell`]). Parking over an
-    /// existing parked shell would silently discard it, so this asserts in debug
-    /// builds rather than losing a start.
-    ///
-    /// Only called from `#[cfg(test)]` code so far (see
-    /// `terminal_view_adaptor::repark_shell_for_test`); production relaunch
-    /// orchestration is a later task, hence the `allow` below.
-    #[allow(dead_code)]
-    pub(super) fn repark_shell(&mut self, parked: DeferredShellStart) {
-        debug_assert!(
-            self.deferred_shell.is_none(),
-            "re-parking over an already-parked shell discards the first"
-        );
-        self.deferred_shell = Some(parked);
     }
 }
 

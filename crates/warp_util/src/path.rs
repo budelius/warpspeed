@@ -462,11 +462,17 @@ fn windows_components_match(
 /// Converts a Windows-native host path to the path an MSYS2 (Git Bash) shell rooted at
 /// `msys2_root` would use to refer to the same file.
 ///
-/// The inverse of [`convert_msys2_to_windows_native_path`]. That function has, among its
-/// branches, a "path under the MSYS2 root" case and a "`/<drive>/…`" case; this mirrors both,
-/// in that order — a path under the root must be checked first, or e.g. `C:\msys64\home\me`
-/// would wrongly take the drive-letter branch and become `/c/msys64/home/me` instead of
-/// `/home/me`.
+/// The inverse of [`convert_msys2_to_windows_native_path`]. That function, for a two-component
+/// unix path `/<name>/…`, tries in order: `<name>` is a known MSYS2 root directory (from
+/// [`DIRS_IN_MSYS2_ROOT`]) → root-relative; `<name>` is a single ASCII letter → drive letter;
+/// `<name>` starts with `wsl` (case-insensitive) → WSL UNC. This mirrors that same priority: a
+/// path under `msys2_root` is treated as root-relative only when its first segment below the
+/// root is one of the known root directory names — anything else (including a literal `c`, `d`,
+/// or `wsl-foo` subdirectory of `msys2_root`) falls through to the drive-letter branch instead,
+/// exactly as the forward function would resolve it back. Getting this order wrong breaks the
+/// round trip: e.g. `<git-bash-root>\d\special folder` must become `/c/.../d/special folder`
+/// (drive-relative, round-tripping to itself), not `/d/special folder` (which the forward
+/// function reads as drive `D:`).
 ///
 /// Returns a `String` rather than a `PathBuf` because an MSYS2 path is not a valid Windows
 /// `Path`; converting would mangle the separators.
@@ -480,22 +486,36 @@ pub fn convert_windows_native_to_msys2_path(host_path: &Path, msys2_root: &Path)
     let host_components: Vec<_> = host_path.components().collect();
     let root_components: Vec<_> = msys2_root.components().collect();
 
-    if root_components.len() <= host_components.len()
+    let is_under_root = root_components.len() <= host_components.len()
         && root_components
             .iter()
             .zip(host_components.iter())
-            .all(|(root, host)| windows_components_match(root, host))
-    {
-        let mut msys2_path = String::new();
-        for component in &host_components[root_components.len()..] {
-            msys2_path.push('/');
-            msys2_path.push_str(component.as_str());
+            .all(|(root, host)| windows_components_match(root, host));
+
+    if is_under_root {
+        let remaining = &host_components[root_components.len()..];
+        let first_is_known_root_dir = matches!(
+            remaining.first(),
+            Some(Utf8WindowsComponent::Normal(name))
+                if DIRS_IN_MSYS2_ROOT.contains(&name.as_bytes())
+        );
+        // An empty `remaining` means `host_path == msys2_root`, which mirrors the forward
+        // function's `[RootDir] => msys2_root` branch (unix path "/" maps to the root itself).
+        if remaining.is_empty() || first_is_known_root_dir {
+            let mut msys2_path = String::new();
+            for component in remaining {
+                msys2_path.push('/');
+                msys2_path.push_str(component.as_str());
+            }
+            return Some(if msys2_path.is_empty() {
+                "/".to_string()
+            } else {
+                msys2_path
+            });
         }
-        return Some(if msys2_path.is_empty() {
-            "/".to_string()
-        } else {
-            msys2_path
-        });
+        // Otherwise this is not a recognized root-relative path (e.g. a literal `d` or `wsl-foo`
+        // subdirectory of the root) — fall through to the drive-letter branch below, matching
+        // what `convert_msys2_to_windows_native_path` would actually resolve it back to.
     }
 
     let mut components = host_path.components();

@@ -1003,6 +1003,35 @@ fn msys2_conversion_rejects_a_relative_path() {
     assert!(convert_windows_native_to_msys2_path(Path::new(r"projects\warp"), root).is_none());
 }
 
+#[test]
+#[cfg(windows)]
+fn msys2_root_subdirectory_that_collides_with_drive_syntax_falls_through_to_drive_branch() {
+    // A user can name a real directory "d" directly under the MSYS2 root. The forward converter
+    // (`convert_msys2_to_windows_native_path`) only treats a first segment as root-relative when
+    // it is in `DIRS_IN_MSYS2_ROOT`; a bare `d` is drive syntax there, so the reverse conversion
+    // must not treat `<root>\d\...` as root-relative either, or the round trip lands on a
+    // different drive entirely. This is the case `test_convert_git_bash_to_windows_native_path`
+    // exercises in the forward direction: `/d/special folder` -> `D:\special folder`.
+    let root = Path::new(r"C:\Program Files\Git");
+    let host_path = Path::new(r"C:\Program Files\Git\d\special folder");
+
+    let result = convert_windows_native_to_msys2_path(host_path, root)
+        .expect("a path under the root still converts");
+    assert_eq!(
+        result, "/c/Program Files/Git/d/special folder",
+        "a literal 'd' subdirectory of the root is not root-relative; it stays drive-relative"
+    );
+
+    // Round-tripping through the forward converter this inverts must reproduce the original
+    // path, not silently resolve to a different drive.
+    let round_tripped = convert_msys2_to_windows_native_path(
+        &TypedPath::unix(&result),
+        WindowsPath::new(r"C:\Program Files\Git"),
+    )
+    .expect("the produced MSYS2 path converts back");
+    assert_eq!(round_tripped, PathBuf::from(host_path));
+}
+
 // ── group_roots_by_common_ancestor tests ─────────────────────────────
 
 mod group_roots_by_common_ancestor_tests {

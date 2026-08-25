@@ -24,6 +24,7 @@ fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
                 custom_vertical_tabs_title: Some("DEVOPS agent".to_string()),
                 contents: LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: vec![1, 2, 3],
+                    persistent_session_id: Some(warp_core::SessionId::from(u64::MAX)),
                     cwd: Some("/workspace/devops".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {
                         executable_path: PathBuf::from("/bin/zsh"),

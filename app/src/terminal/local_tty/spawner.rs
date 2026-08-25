@@ -1,4 +1,5 @@
 use anyhow::Result;
+use warp_core::SessionId;
 #[cfg(unix)]
 use warp_errors::report_error;
 use warpui::{AppContext, Entity, SingletonEntity};
@@ -23,6 +24,16 @@ pub trait PtyHandle: Send + Sync {
     /// return false for an exited child (e.g.: for a server-hosted pty), but
     /// will never return true for a living child.
     fn has_process_terminated(&mut self) -> Result<bool>;
+
+    /// The stable identifier used by an external terminal supervisor.
+    fn persistent_session_id(&self) -> Option<SessionId> {
+        None
+    }
+
+    /// Whether child exit must be polled because it cannot signal the app process.
+    fn requires_exit_polling(&self) -> bool {
+        false
+    }
 
     /// Kills the pty process and waits for its successful termination.
     fn kill(&mut self) -> Result<()>;
@@ -155,14 +166,31 @@ impl PtySpawner {
 
     /// Does any work necessary to clean up state in advance of the app
     /// terminating.
-    pub fn prepare_for_app_termination(&mut self) {
-        // Drop the backing `TerminalServer`, if one exists, killing the child
-        // process.
+    pub fn prepare_for_app_termination(
+        &mut self,
+        #[cfg(unix)] persistent_session_ids: Vec<SessionId>,
+    ) {
         #[cfg(unix)]
         if let Some(server) = self.server.take() {
-            log::info!("Tearing down terminal server...");
+            if server.client().is_persistent() {
+                if let Err(error) = server.prepare_for_app_termination(persistent_session_ids) {
+                    log::error!(
+                        "Failed to prepare supervised terminal sessions for app termination: {error:#}"
+                    );
+                }
+            } else {
+                log::info!("Tearing down terminal server...");
+            }
             drop(server);
         }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn persistent_server_client(
+        &self,
+    ) -> Option<std::sync::Arc<crate::terminal::local_tty::server::TerminalServerClient>> {
+        let client = self.server.as_ref()?.client();
+        client.is_persistent().then(|| client.clone())
     }
 
     /// Spawns a pty, returning information about the pty and a handle that can
@@ -170,6 +198,7 @@ impl PtySpawner {
     pub(super) fn spawn_pty(
         &self,
         options: PtyOptions,
+        #[cfg(unix)] persistent_session_id: SessionId,
         is_crash_reporting_enabled: bool,
         #[cfg(windows)] event_loop_tx: super::mio_channel::Sender<
             crate::terminal::writeable_pty::Message,
@@ -183,7 +212,7 @@ impl PtySpawner {
 
         #[cfg(unix)]
         if let Some(server) = &self.server {
-            let result = Self::spawn_pty_via_server(server, options.clone());
+            let result = Self::spawn_pty_via_server(server, options.clone(), persistent_session_id);
             if let Err(err) = result {
                 // Log env var names + sizes for any terminal server failure.
                 // Large env vars are the most common cause (E2BIG on Linux,
@@ -256,16 +285,41 @@ impl PtySpawner {
     fn spawn_pty_via_server(
         server: &TerminalServer,
         options: PtyOptions,
+        persistent_session_id: SessionId,
     ) -> Result<(PtySpawnResult, Box<dyn PtyHandle>)> {
         use crate::terminal::local_tty::server::ServerOwnedPtyHandle;
 
         let client = server.client().clone();
-        let result = client.spawn_pty(options)?;
+        let supervised_session_id = client.is_persistent().then_some(persistent_session_id);
+        let result = client.spawn_pty(options, supervised_session_id)?;
         let handle = Box::new(ServerOwnedPtyHandle {
             pid: result.pid,
+            persistent_session_id: supervised_session_id,
             client,
         });
         Ok((result, handle))
+    }
+
+    #[cfg(unix)]
+    pub(super) fn attach_pty(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>)>> {
+        use crate::terminal::local_tty::server::ServerOwnedPtyHandle;
+
+        let Some(server) = self.server.as_ref() else {
+            return Ok(None);
+        };
+        let client = server.client().clone();
+        let Some(result) = client.attach_session(session_id)? else {
+            return Ok(None);
+        };
+        let handle = Box::new(ServerOwnedPtyHandle {
+            pid: result.pid,
+            persistent_session_id: Some(session_id),
+            client,
+        });
+        Ok(Some((result, handle)))
     }
 }
 

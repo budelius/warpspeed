@@ -250,11 +250,15 @@ impl EventLoop {
                 }
             };
             match message {
-                api::Message::SpawnShellRequest { mut options } => {
+                api::Message::SpawnShellRequest {
+                    mut options,
+                    persistent_session_id: _,
+                    client_pid: _,
+                } => {
                     // No need to close all open file descriptors when spawning a pty from
                     // the terminal server, as it spawns ptys cleanly.
                     options.close_fds = false;
-                    let result = match local_tty::spawn(options) {
+                    let result = match local_tty::spawn(*options) {
                         Ok(pty_spawn_info) => {
                             let child = pty_spawn_info.child;
                             log::info!("Successfully spawned tty with pid: {}", child.id());
@@ -295,7 +299,7 @@ impl EventLoop {
                         );
                     }
                 }
-                api::Message::KillChildRequest { pid } => {
+                api::Message::KillChildRequest { pid, client_pid: _ } => {
                     let result = match self.children.remove(&pid) {
                         Some(mut child) => child.kill().and_then(|_| child.wait()),
                         None => {
@@ -318,21 +322,21 @@ impl EventLoop {
                         return None;
                     };
                 }
-                api::Message::SpawnShellResponse { .. } => {
-                    report_error!(
-                        "Terminal server received unexpected SpawnShellResponse message!"
-                    );
-                }
-                api::Message::KillChildResponse { .. } => {
-                    report_error!("Terminal server received unexpected KillChildResponse message!");
-                }
-                api::Message::WriteLogRequest { .. } => {
-                    report_error!("Terminal server received unexpected WriteLogRequest message!");
-                }
-                api::Message::ChildrenTerminatedRequest { .. } => {
-                    report_error!(
-                        "Terminal server received unexpected ChildrenTerminatedRequest message!"
-                    );
+                api::Message::SpawnShellResponse { .. }
+                | api::Message::KillSessionRequest { .. }
+                | api::Message::KillSessionResponse { .. }
+                | api::Message::AttachSessionRequest { .. }
+                | api::Message::AttachSessionResponse { .. }
+                | api::Message::ChildStatusRequest { .. }
+                | api::Message::ChildStatusResponse { .. }
+                | api::Message::PrepareForTerminationRequest { .. }
+                | api::Message::PrepareForTerminationResponse
+                | api::Message::PingRequest
+                | api::Message::PingResponse
+                | api::Message::KillChildResponse { .. }
+                | api::Message::WriteLogRequest { .. }
+                | api::Message::ChildrenTerminatedRequest { .. } => {
+                    report_error!("Terminal server received an unexpected message");
                 }
             }
         }

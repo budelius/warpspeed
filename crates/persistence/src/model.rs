@@ -429,6 +429,7 @@ pub struct TerminalPane {
     pub conversation_ids: Option<String>,
     /// The active conversation ID if the agent view was open in fullscreen mode.
     pub active_conversation_id: Option<String>,
+    pub persistent_session_id: Option<String>,
 }
 
 #[derive(Identifiable, Queryable, Selectable)]
@@ -607,6 +608,7 @@ pub struct NewTerminalPane {
     pub conversation_ids: Option<String>,
     /// The active conversation ID if the agent view was open in fullscreen mode.
     pub active_conversation_id: Option<String>,
+    pub persistent_session_id: Option<String>,
 }
 
 #[derive(Insertable)]

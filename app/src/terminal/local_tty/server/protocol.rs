@@ -43,7 +43,7 @@ impl AsRawFd for NonblockingSocketFd {
 
 /// The type of the additional data that we might send as a control message
 /// as part of a [`sendmsg`](socket::sendmsg) call.
-type AuxData = [RawFd; 1];
+type AuxData = [RawFd; 2];
 
 /// The data structure that we serialize and send across the socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +77,15 @@ pub(super) fn send_message(
     data: api::Message,
     aux_fd: Option<RawFd>,
 ) -> Result<()> {
+    let aux_fds = aux_fd.as_slice();
+    send_message_with_fds(socket_fd, data, aux_fds)
+}
+
+pub(super) fn send_message_with_fds(
+    socket_fd: impl AsRawFd,
+    data: api::Message,
+    aux_fds: &[RawFd],
+) -> Result<()> {
     let msg = Message::new(data);
     let mut serialized_msg = bincode::serialize(&msg)?;
 
@@ -91,12 +100,11 @@ pub(super) fn send_message(
 
     // If we're sending a file descriptor alongside the message, build the
     // control message that we will send it within.
-    let mut fds = vec![];
-    let mut control_msgs = vec![];
-    if let Some(aux_fd) = aux_fd {
-        fds.push(aux_fd);
-        control_msgs.push(socket::ControlMessage::ScmRights(fds.as_slice()));
-    }
+    let control_msgs = if aux_fds.is_empty() {
+        vec![]
+    } else {
+        vec![socket::ControlMessage::ScmRights(aux_fds)]
+    };
 
     // Push the message data and any control messages across the socket.
     let _len = socket::sendmsg::<()>(
@@ -175,30 +183,37 @@ fn try_receive_message_internal(socket_fd: impl AsRawFd) -> Result<TryReceiveMes
 
     // Extract extra information from Unix domain socket control messages for
     // api::Message variants which require it.
-    if let api::Message::SpawnShellResponse {
-        spawn_result: api::Result::Ok(PtySpawnResult { leader_fd, .. }),
+    let spawn_result = match &mut message.data {
+        api::Message::SpawnShellResponse {
+            spawn_result: api::Result::Ok(spawn_result),
+        }
+        | api::Message::AttachSessionResponse {
+            attach_result: api::Result::Ok(spawn_result),
+        } => Some(spawn_result),
+        _ => None,
+    };
+    if let Some(PtySpawnResult {
+        leader_fd,
+        replay_fd,
         ..
-    } = &mut message.data
+    }) = spawn_result
     {
-        match &cmsgs[..] {
-            [socket::ControlMessageOwned::ScmRights(fds)] => {
-                let Some(received_fd) = fds.first() else {
-                    bail!(
-                        "Received {} fds alongside a SpawnShellResponse message; expected 1",
-                        fds.len()
-                    );
-                };
-                // Set the `leader_fd` field in the `TtySpawnResult` to the
-                // value we received in the control message.
-                *leader_fd = *received_fd;
-            }
-            _ => {
-                bail!(
-                    "Received {} cmsgs alongside a SpawnShellResponse message; expected 1",
-                    cmsgs.len()
-                );
-            }
+        let [socket::ControlMessageOwned::ScmRights(fds)] = &cmsgs[..] else {
+            bail!(
+                "Received {} control messages alongside a PTY response; expected 1",
+                cmsgs.len()
+            );
         };
+        let expected_fds = if replay_fd.is_some() { 2 } else { 1 };
+        ensure!(
+            fds.len() == expected_fds,
+            "Received {} fds alongside a PTY response; expected {expected_fds}",
+            fds.len()
+        );
+        *leader_fd = fds[0];
+        if replay_fd.is_some() {
+            *replay_fd = Some(fds[1]);
+        }
     }
 
     Ok(TryReceiveMessageResult::Success(message.data))

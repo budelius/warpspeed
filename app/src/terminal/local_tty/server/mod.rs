@@ -22,6 +22,7 @@ mod api;
 mod client;
 mod event_loop;
 mod logging;
+mod persistent;
 mod protocol;
 
 use std::collections::HashSet;
@@ -33,6 +34,7 @@ use command::blocking::Command;
 use cvt::cvt;
 use nix::sys::socket;
 use parking_lot::Mutex;
+use warp_core::SessionId;
 use warp_errors::report_error;
 
 pub use self::client::TerminalServerClient;
@@ -62,9 +64,17 @@ pub fn run_terminal_server(args: &warp_cli::TerminalServerArgs) {
     // server process may need to reference them. User-controlled flags are overridden
     // soon after.
     crate::features::init_feature_flags();
+    if let Some(socket_path) = std::env::var_os(PERSISTENT_SERVER_SOCKET_ENV) {
+        if let Err(error) = persistent::run(socket_path.into()) {
+            eprintln!("Terminal session supervisor failed: {error:#}");
+        }
+        return;
+    }
     let event_loop = event_loop::EventLoop::new(args);
     event_loop.run()
 }
+
+const PERSISTENT_SERVER_SOCKET_ENV: &str = "WARP_TERMINAL_SESSION_SUPERVISOR_SOCKET";
 
 /// Spawns a thread to handle fire-and-forget messages sent back from the server.
 fn spawn_message_receiver_thread(socket_fd: RawFd, terminated_children: Arc<Mutex<HashSet<u32>>>) {
@@ -117,18 +127,24 @@ fn spawn_message_receiver_thread(socket_fd: RawFd, terminated_children: Arc<Mute
 /// than communicating with the grandchild via the terminal server as an
 /// intermediary.
 pub(super) struct TerminalServer {
-    /// The terminal server child process.
-    server: std::process::Child,
+    /// The terminal server child process. Persistent supervisors are reaped by
+    /// a background thread instead of being owned by the app lifecycle.
+    server: Option<std::process::Child>,
 
     /// A client for communicating with the terminal server process.
     client: Arc<TerminalServerClient>,
 }
 
 impl TerminalServer {
-    /// Spawns a new terminal server subprocess and returns a structure that
-    /// provides access to a client API and, when dropped, shuts down the
-    /// server.
+    /// Spawns or connects to a terminal server process.
     pub fn new() -> Result<Self> {
+        if crate::features::FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+            return Self::new_persistent();
+        }
+        Self::new_ephemeral()
+    }
+
+    fn new_ephemeral() -> Result<Self> {
         log::info!("Spawning terminal server process...");
 
         // Create a pair of Unix domain sockets which we can use to send
@@ -201,8 +217,64 @@ impl TerminalServer {
                 terminated_children,
             ));
 
-            Ok(Self { server, client })
+            Ok(Self {
+                server: Some(server),
+                client,
+            })
         }
+    }
+
+    fn new_persistent() -> Result<Self> {
+        let socket_path = persistent::socket_path();
+        let client = Arc::new(TerminalServerClient::new_persistent(socket_path.clone()));
+        if client.ping().is_ok() {
+            log::info!("Connected to the terminal session supervisor");
+            return Ok(Self {
+                server: None,
+                client,
+            });
+        }
+
+        log::info!("Spawning terminal session supervisor...");
+        let program =
+            std::env::current_exe().context("Failed to determine path to current executable")?;
+        let mut server = unsafe {
+            Command::new(program)
+                .pre_exec(|| {
+                    cvt(libc::setsid())?;
+                    Ok(())
+                })
+                .env(PERSISTENT_SERVER_SOCKET_ENV, &socket_path)
+                .arg(warp_cli::terminal_server_subcommand())
+                .arg(warp_cli::parent_flag())
+                .spawn()
+                .context("Failed to spawn terminal session supervisor")?
+        };
+
+        for _ in 0..100 {
+            if client.ping().is_ok() {
+                std::thread::spawn(move || {
+                    let _ = server.wait();
+                });
+                return Ok(Self {
+                    server: None,
+                    client,
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let _ = server.kill();
+        let _ = server.wait();
+        anyhow::bail!("Timed out connecting to terminal session supervisor")
+    }
+
+    pub fn prepare_for_app_termination(
+        &self,
+        persistent_session_ids: Vec<SessionId>,
+    ) -> Result<()> {
+        self.client
+            .prepare_for_app_termination(persistent_session_ids)
     }
 
     /// Returns an API client for interacting with the terminal server.
@@ -213,9 +285,10 @@ impl TerminalServer {
 
 impl Drop for TerminalServer {
     fn drop(&mut self) {
-        // Kill the server child process and wait for it to terminate.
-        let _ = self.server.kill();
-        let _ = self.server.wait();
+        if let Some(server) = self.server.as_mut() {
+            let _ = server.kill();
+            let _ = server.wait();
+        }
     }
 }
 
@@ -223,6 +296,7 @@ impl Drop for TerminalServer {
 /// current process.
 pub struct ServerOwnedPtyHandle {
     pub pid: u32,
+    pub persistent_session_id: Option<SessionId>,
     pub client: Arc<TerminalServerClient>,
 }
 
@@ -232,7 +306,16 @@ impl PtyHandle for ServerOwnedPtyHandle {
     }
 
     fn has_process_terminated(&mut self) -> Result<bool> {
-        Ok(self.client.has_child_terminated(self.pid))
+        self.client
+            .has_child_terminated(self.pid, self.persistent_session_id)
+    }
+
+    fn persistent_session_id(&self) -> Option<SessionId> {
+        self.persistent_session_id
+    }
+
+    fn requires_exit_polling(&self) -> bool {
+        self.client.is_persistent()
     }
 
     fn kill(&mut self) -> Result<()> {

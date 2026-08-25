@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::FairMutex;
 use pathfinder_geometry::vector::Vector2F;
 use settings::Setting as _;
+use warp_core::SessionId;
 use warpui::{AppContext, ModelContext, SingletonEntity};
 
 use super::event_listener::ChannelEventListener;
@@ -44,6 +45,19 @@ pub trait TerminalManager: Any {
     /// Whether a shell start is parked and has not run yet.
     fn has_deferred_shell(&self) -> bool {
         false
+    }
+
+    /// Returns the stable identifier of the supervised PTY session, if any.
+    fn persistent_session_id(&self) -> Option<SessionId> {
+        None
+    }
+
+    /// Supplies a supervised PTY session to reattach when this manager starts.
+    fn restore_persistent_session(
+        &mut self,
+        _session_id: SessionId,
+        _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
+    ) {
     }
 
     /// Replaces this manager's shell session in place, keeping the pane, its

@@ -445,6 +445,7 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
                 custom_vertical_tabs_title: None,
                 contents: LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: vec![u8::from(vertical_tabs_panel_open) + 1],
+                    persistent_session_id: None,
                     cwd: Some("/tmp".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {
                         executable_path: PathBuf::from("/bin/zsh"),
@@ -532,6 +533,15 @@ fn test_sqlite_round_trips_launch_config_window_source() {
     };
     let mut window = test_terminal_window_snapshot(false);
     window.launch_config_source = Some(source.clone());
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &mut window.tabs[0].root
+    else {
+        panic!("expected terminal pane");
+    };
+    let persistent_session_id = SessionId::from(u64::MAX);
+    terminal.persistent_session_id = Some(persistent_session_id);
     let app_state = AppState {
         windows: vec![window],
         active_window_index: Some(0),
@@ -546,6 +556,14 @@ fn test_sqlite_round_trips_launch_config_window_source() {
         .expect("app state should be present for the full scope");
 
     assert_eq!(restored.windows[0].launch_config_source, Some(source));
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &restored.windows[0].tabs[0].root
+    else {
+        panic!("expected restored terminal pane");
+    };
+    assert_eq!(terminal.persistent_session_id, Some(persistent_session_id));
 }
 
 #[test]
@@ -590,6 +608,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
                     custom_vertical_tabs_title: Some("Production API".to_string()),
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: vec![42],
+                        persistent_session_id: None,
                         cwd: Some("/tmp".to_string()),
                         shell_launch_data: Some(ShellLaunchData::Executable {
                             executable_path: PathBuf::from("/bin/zsh"),
@@ -758,6 +777,7 @@ fn test_sqlite_round_trips_tab_groups() {
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![1],
+                persistent_session_id: None,
                 cwd: Some("/tmp/grouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -786,6 +806,7 @@ fn test_sqlite_round_trips_tab_groups() {
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![2],
+                persistent_session_id: None,
                 cwd: Some("/tmp/ungrouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -883,6 +904,7 @@ fn test_sqlite_round_trips_pinned_state() {
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![10],
+                persistent_session_id: None,
                 cwd: Some("/tmp/pinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -911,6 +933,7 @@ fn test_sqlite_round_trips_pinned_state() {
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![11],
+                persistent_session_id: None,
                 cwd: Some("/tmp/unpinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -939,6 +962,7 @@ fn test_sqlite_round_trips_pinned_state() {
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![12],
+                persistent_session_id: None,
                 cwd: Some("/tmp/pinned-group".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),

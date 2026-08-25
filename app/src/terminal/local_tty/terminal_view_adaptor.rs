@@ -2020,6 +2020,26 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.is_shell_deferred()
     }
 
+    fn persistent_session_id(&self) -> Option<warp_core::SessionId> {
+        self.persistent_session_id
+    }
+
+    fn restore_persistent_session(
+        &mut self,
+        session_id: warp_core::SessionId,
+        #[cfg_attr(not(unix), allow(unused_variables))] ctx: &mut ModelContext<
+            Box<dyn TerminalManagerTrait>,
+        >,
+    ) {
+        self.persistent_session_id = Some(session_id);
+        #[cfg(unix)]
+        {
+            self.persistent_server_client =
+                crate::terminal::local_tty::spawner::PtySpawner::handle(ctx)
+                    .read(ctx, |spawner, _| spawner.persistent_server_client());
+        }
+    }
+
     fn restart_session(
         &mut self,
         target: Option<ShellLaunchData>,

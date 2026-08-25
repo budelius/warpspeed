@@ -97,6 +97,7 @@ fn test_config_from_snapshot_flattens_single_pane() {
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: vec![],
+                        persistent_session_id: None,
                         cwd: Some("/some/dir".into()),
                         is_active: true,
                         is_read_only: false,
@@ -137,6 +138,7 @@ fn test_config_from_snapshot_filters_panes() {
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: vec![],
+                        persistent_session_id: None,
                         cwd: Some("/path/to/dir".into()),
                         is_active: true,
                         is_read_only: false,
@@ -167,6 +169,7 @@ fn test_config_from_snapshot_filters_panes() {
                     custom_vertical_tabs_title: None,
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: vec![],
+                        persistent_session_id: None,
                         cwd: Some("/some/dir".into()),
                         is_active: true,
                         is_read_only: false,
@@ -373,6 +376,7 @@ fn test_config_with_active_tab_index() {
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                                 uuid: vec![],
+                                persistent_session_id: None,
                                 cwd: Some("/path/to/dir".into()),
                                 is_active: true,
                                 is_read_only: false,
@@ -440,6 +444,7 @@ fn test_config_with_active_tab_index_and_filtered_tabs() {
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                                 uuid: vec![],
+                                persistent_session_id: None,
                                 cwd: Some("/path/to/dir".into()),
                                 is_active: true,
                                 is_read_only: false,
@@ -483,6 +488,7 @@ fn test_config_with_active_tab_being_filtered() {
                             custom_vertical_tabs_title: None,
                             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                                 uuid: vec![],
+                                persistent_session_id: None,
                                 cwd: Some("/path/to/dir".into()),
                                 is_active: true,
                                 is_read_only: false,
@@ -538,6 +544,7 @@ fn from_window_snapshot_saves_only_the_selected_window() {
         custom_vertical_tabs_title: None,
         contents: LeafContents::Terminal(TerminalPaneSnapshot {
             uuid: vec![1],
+            persistent_session_id: None,
             cwd: Some("/devops".to_string()),
             shell_launch_data: None,
             is_active: true,

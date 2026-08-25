@@ -11,6 +11,7 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+use instant::Instant;
 use log::error;
 use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
@@ -335,6 +336,28 @@ where
                 let mut state = State::default();
                 let mut buf = [0u8; READ_BUFFER_SIZE];
 
+                if let Some(mut replay) = self.pty.take_replay_reader() {
+                    loop {
+                        match replay.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(bytes_read) => {
+                                let mut ignored_responses = Vec::new();
+                                state.parser.parse_bytes(
+                                    &mut *self.terminal.lock(),
+                                    &buf[..bytes_read],
+                                    &mut ignored_responses,
+                                );
+                            }
+                            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                            Err(error) => {
+                                log::warn!("Failed to replay detached PTY output: {error:#}");
+                                break;
+                            }
+                        }
+                    }
+                    self.event_listener.send_wakeup_event();
+                }
+
                 // Keep track of whether we've "drained" read and write
                 // readiness.  Once we receive a read or write readiness event,
                 // we won't receive another until the operation would block.
@@ -358,6 +381,8 @@ where
                 // True if the child exiting caused the event loop to wind down
                 // (e.g. CTRL D or `exit`) rather than the inverse.
                 let mut child_exited = false;
+                let child_poll_interval = std::time::Duration::from_millis(250);
+                let mut next_child_poll = Instant::now() + child_poll_interval;
 
                 'event_loop: loop {
                     // Clear the events so that we can reliably equate the absence of events
@@ -367,7 +392,17 @@ where
                     // Wait for events, but only up to the remaining timeout for the synchronous output
                     // update (if any).
                     let sync_state_timeout = state.parser.sync_output_remaining_timeout();
-                    if let Err(err) = self.poll.poll(&mut events, sync_state_timeout) {
+                    let child_poll_timeout = self
+                        .pty
+                        .requires_exit_polling()
+                        .then(|| next_child_poll.saturating_duration_since(Instant::now()));
+                    let poll_timeout = match (sync_state_timeout, child_poll_timeout) {
+                        (Some(sync), Some(child)) => Some(sync.min(child)),
+                        (Some(sync), None) => Some(sync),
+                        (None, Some(child)) => Some(child),
+                        (None, None) => None,
+                    };
+                    if let Err(err) = self.poll.poll(&mut events, poll_timeout) {
                         match err.kind() {
                             ErrorKind::Interrupted => continue,
                             _ => panic!("EventLoop polling error: {err:?}"),
@@ -437,6 +472,16 @@ where
                                 }
                             }
                             _ => (),
+                        }
+                    }
+
+                    if self.pty.requires_exit_polling() && Instant::now() >= next_child_poll {
+                        next_child_poll = Instant::now() + child_poll_interval;
+                        if let Some(local_tty::ChildEvent::Exited) = self.pty.next_child_event() {
+                            self.terminal.lock().exit(ExitReason::ShellProcessExited);
+                            child_exited = true;
+                            self.event_listener.send_wakeup_event();
+                            break 'event_loop;
                         }
                     }
 

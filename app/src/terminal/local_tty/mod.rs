@@ -76,6 +76,14 @@ pub enum ChildEvent {
 pub trait EventedPty: EventedReadWrite {
     fn child_event_token(&self) -> mio::Token;
 
+    fn take_replay_reader(&mut self) -> Option<Box<dyn io::Read + Send>> {
+        None
+    }
+
+    fn requires_exit_polling(&self) -> bool {
+        false
+    }
+
     /// Tries to retrieve an event.
     ///
     /// Returns `Some(event)` on success, or `None` if there are no events to retrieve.

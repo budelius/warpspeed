@@ -17,6 +17,7 @@ pub fn terminal_leaf_snapshot(
         custom_vertical_tabs_title: None,
         contents: LeafContents::Terminal(TerminalPaneSnapshot {
             uuid: Uuid::new_v4().as_bytes().to_vec(),
+            persistent_session_id: None,
             cwd,
             shell_launch_data,
             is_active: true,

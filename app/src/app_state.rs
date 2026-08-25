@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pathfinder_geometry::rect::RectF;
 use serde::{Deserialize, Serialize};
+use warp_core::SessionId;
 use warpui::platform::FullscreenState;
 use warpui::{AppContext, SingletonEntity as _};
 
@@ -68,6 +69,30 @@ pub struct WindowSnapshot {
 }
 
 impl WindowSnapshot {
+    #[cfg(all(feature = "local_tty", unix))]
+    pub(crate) fn persistent_session_ids(&self) -> Vec<SessionId> {
+        fn collect(node: &PaneNodeSnapshot, ids: &mut Vec<SessionId>) {
+            match node {
+                PaneNodeSnapshot::Branch(branch) => {
+                    for (_, child) in &branch.children {
+                        collect(child, ids);
+                    }
+                }
+                PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    contents: LeafContents::Terminal(terminal),
+                    ..
+                }) => ids.extend(terminal.persistent_session_id),
+                PaneNodeSnapshot::Leaf(_) => {}
+            }
+        }
+
+        let mut ids = Vec::new();
+        for tab in &self.tabs {
+            collect(&tab.root, &mut ids);
+        }
+        ids
+    }
+
     /// Returns the agent conversations referenced by this window's terminal panes.
     pub(crate) fn conversation_ids_to_restore(&self) -> Vec<AIConversationId> {
         fn collect(node: &PaneNodeSnapshot, ids: &mut HashSet<AIConversationId>) {
@@ -238,6 +263,8 @@ pub struct AmbientAgentPaneSnapshot {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalPaneSnapshot {
     pub uuid: Vec<u8>,
+    #[serde(default)]
+    pub persistent_session_id: Option<SessionId>,
     pub cwd: Option<String>,
     pub shell_launch_data: Option<ShellLaunchData>,
     pub is_active: bool,

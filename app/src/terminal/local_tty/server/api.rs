@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use warp_core::SessionId;
 
 use crate::terminal::local_tty::{PtyOptions, PtySpawnResult};
 
@@ -31,7 +32,11 @@ impl<T> From<anyhow::Result<T>> for Result<T> {
 pub(super) enum Message {
     /// A message sent from client -> server requesting that the server spawns
     /// a new pty using the provided options.
-    SpawnShellRequest { options: PtyOptions },
+    SpawnShellRequest {
+        options: Box<PtyOptions>,
+        persistent_session_id: Option<SessionId>,
+        client_pid: u32,
+    },
     /// The response for a `SpawnShellRequest`, with the result of the spawn
     /// operation.  Should only be sent from server -> client.
     SpawnShellResponse {
@@ -39,11 +44,43 @@ pub(super) enum Message {
     },
     /// A message sent from client -> server requesting that the server kill the
     /// child process with the provided process ID.
-    KillChildRequest { pid: u32 },
+    KillChildRequest {
+        pid: u32,
+        client_pid: u32,
+    },
     /// The response for a `KillChildRequest`, returning the string message from
     /// an error that occurred during the operation, if any.  Should only be
     /// sent from server -> client.
-    KillChildResponse { error_msg: Option<String> },
+    KillChildResponse {
+        error_msg: Option<String>,
+    },
+    KillSessionRequest {
+        session_id: SessionId,
+        client_pid: u32,
+    },
+    KillSessionResponse {
+        error_msg: Option<String>,
+    },
+    AttachSessionRequest {
+        session_id: SessionId,
+        client_pid: u32,
+    },
+    AttachSessionResponse {
+        attach_result: Result<PtySpawnResult>,
+    },
+    ChildStatusRequest {
+        session_id: SessionId,
+    },
+    ChildStatusResponse {
+        running: bool,
+    },
+    PrepareForTerminationRequest {
+        client_pid: u32,
+        persistent_session_ids: Vec<SessionId>,
+    },
+    PrepareForTerminationResponse,
+    PingRequest,
+    PingResponse,
     /// A message sent from server -> client requesting that a log message be
     /// written to the host application's log.  This has no matching response
     /// message - these requests are fire-and-forget from the server to the
@@ -57,5 +94,7 @@ pub(super) enum Message {
     /// more child processes have terminated.  This has no matching response
     /// message - these requests are fire-and-forget from the server to the
     /// host application.
-    ChildrenTerminatedRequest { pids: Vec<u32> },
+    ChildrenTerminatedRequest {
+        pids: Vec<u32>,
+    },
 }

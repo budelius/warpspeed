@@ -266,6 +266,8 @@ use crate::ai::skills::SkillManager;
 use crate::ai::tui_api_keys::TuiApiKeyRefresher;
 use crate::antivirus::AntivirusInfo;
 use crate::app_state::AppState;
+#[cfg(all(feature = "local_tty", unix))]
+use crate::app_state::get_app_state;
 use crate::autoupdate::{AutoupdateState, RelaunchModel};
 use crate::changelog_model::ChangelogModel;
 use crate::cloud_object::model::actions::{ObjectAction, ObjectActions};
@@ -2677,6 +2679,10 @@ pub(crate) fn app_callbacks(
                 manager.close_notebooks(ctx);
             });
 
+            if FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+                ctx.dispatch_global_action("workspace:save_app", &());
+            }
+
             PersistenceWriter::handle(ctx).update(ctx, |writer, _ctx| {
                 writer.terminate();
             });
@@ -2700,9 +2706,20 @@ pub(crate) fn app_callbacks(
             // when we bring up the new process.  Additionally, this must occur
             // after terminating the persistence writer, so we don't keep track
             // of the fact that the shell sessions terminated.
+            #[cfg(all(feature = "local_tty", unix))]
+            let persistent_session_ids = get_app_state(ctx)
+                .windows
+                .into_iter()
+                .filter(|window| window.launch_config_source.is_some())
+                .flat_map(|window| window.persistent_session_ids())
+                .collect();
+
             #[cfg(feature = "local_tty")]
             terminal::local_tty::spawner::PtySpawner::handle(ctx).update(ctx, |pty_spawner, _| {
-                pty_spawner.prepare_for_app_termination();
+                pty_spawner.prepare_for_app_termination(
+                    #[cfg(unix)]
+                    persistent_session_ids,
+                );
             });
 
             #[cfg(all(feature = "local_tty", windows))]

@@ -517,6 +517,7 @@ impl PaneContent for TerminalPane {
 
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
+                persistent_session_id: None,
                 cwd: None,
                 is_active,
                 is_read_only: false,
@@ -547,6 +548,7 @@ impl PaneContent for TerminalPane {
             } else {
                 LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: self.uuid.clone(),
+                    persistent_session_id: None,
                     cwd: None,
                     is_active,
                     is_read_only: false,
@@ -593,8 +595,13 @@ impl PaneContent for TerminalPane {
                 None => (view.pwd_if_local(app), view.shell_launch_data_if_local(app)),
             };
 
+            let persistent_session_id = self
+                .terminal_manager(app)
+                .read(app, |manager, _| manager.persistent_session_id());
+
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
+                persistent_session_id,
                 cwd,
                 is_active,
                 is_read_only: view.model.lock().is_read_only(),

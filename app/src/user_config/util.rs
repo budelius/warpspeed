@@ -87,7 +87,7 @@ where
 /// valid config file containing one or more items.
 fn parse_multi_item_file<T, F, G>(item: &DirEntry, post_deserialize_fn: F) -> Option<Vec<G>>
 where
-    F: Fn(String, T) -> G,
+    F: Fn(String, usize, T) -> G,
     T: DeserializeOwned,
 {
     if let Some(file_name) = get_file_name(item)
@@ -99,7 +99,10 @@ where
                 return Some(
                     parsed
                         .into_iter()
-                        .map(|val| post_deserialize_fn(file_name.clone(), val))
+                        .enumerate()
+                        .map(|(document_index, val)| {
+                            post_deserialize_fn(file_name.clone(), document_index, val)
+                        })
                         .collect_vec(),
                 );
             }
@@ -160,11 +163,18 @@ pub(super) fn parse_single_theme_dir_entry(item: &DirEntry) -> Option<(ThemeKind
 }
 
 pub(super) fn parse_multi_workflow_dir_entry(item: &DirEntry) -> Option<Vec<Workflow>> {
-    parse_multi_item_file(item, |_, workflow| workflow)
+    parse_multi_item_file(item, |_, _, workflow| workflow)
 }
 
 pub(super) fn parse_multi_launch_config_dir_entry(item: &DirEntry) -> Option<Vec<LaunchConfig>> {
-    parse_multi_item_file(item, |_file_name, config| config)
+    let source_path = item.path().to_path_buf();
+    parse_multi_item_file(item, move |_, document_index, mut config: LaunchConfig| {
+        config.source = Some(crate::launch_configs::launch_config::LaunchConfigSource {
+            path: source_path.clone(),
+            document_index,
+        });
+        config
+    })
 }
 
 pub(super) fn parse_tab_config_dir_entry(

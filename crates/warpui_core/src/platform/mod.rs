@@ -435,7 +435,9 @@ pub trait FontDB: 'static {
     fn text_layout_system(&self) -> &dyn TextLayoutSystem;
 }
 
-#[derive(Clone, Copy, Debug, Default, num_derive::FromPrimitive, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, num_derive::FromPrimitive, PartialEq, Eq, Serialize,
+)]
 pub enum FullscreenState {
     #[default]
     Normal = 0,

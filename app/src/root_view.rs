@@ -19,8 +19,8 @@ use session_sharing_protocol::common::SessionId;
 use settings::Setting as _;
 use url::Url;
 use warp_core::context_flag::ContextFlag;
-use warp_core::safe_error;
 use warp_core::user_preferences::GetUserPreferences as _;
+use warp_core::{safe_error, safe_warn};
 use warp_errors::{report_error, report_if_error};
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
@@ -617,9 +617,7 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
                 active_index = Some(idx);
             } else {
                 open_new_with_workspace_source(
-                    NewWorkspaceSource::FromTemplate {
-                        window_template: window_template.clone(),
-                    },
+                    launch_config_workspace_source(&arg.launch_config, idx, window_template, ctx),
                     ctx,
                 );
             }
@@ -633,9 +631,7 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
                 .expect("Window should exist at idx");
 
             open_new_with_workspace_source(
-                NewWorkspaceSource::FromTemplate {
-                    window_template: window_template.clone(),
-                },
+                launch_config_workspace_source(&arg.launch_config, idx, window_template, ctx),
                 ctx,
             );
         }
@@ -648,6 +644,80 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
         },
         ctx
     );
+}
+
+fn launch_config_workspace_source(
+    launch_config: &launch_config::LaunchConfig,
+    window_index: usize,
+    window_template: &launch_config::WindowTemplate,
+    ctx: &mut AppContext,
+) -> NewWorkspaceSource {
+    let launch_config_source = launch_config.window_source(window_index);
+    let source_is_open = launch_config_source.as_ref().is_some_and(|source| {
+        WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .any(|(_, workspace)| workspace.as_ref(ctx).launch_config_source() == Some(source))
+    });
+    if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+        && !source_is_open
+        && let Some(source) = launch_config_source.as_ref()
+    {
+        match crate::launch_configs::session_store::load(source) {
+            Ok(Some(session)) => {
+                let window_snapshot = session.window;
+                let conversation_ids = window_snapshot.conversation_ids_to_restore();
+                crate::ai::blocklist::BlocklistAIHistoryModel::handle(ctx)
+                    .update(ctx, |history, _| {
+                        history.detach_conversations_for_restore(&conversation_ids)
+                    });
+                crate::ai::restored_conversations::RestoredAgentConversations::handle(ctx)
+                    .update(ctx, |conversations, _| {
+                        conversations.release_conversations(&conversation_ids)
+                    });
+                #[cfg(feature = "local_fs")]
+                let block_lists = if session.block_lists.is_empty() {
+                    crate::persistence::load_restored_blocks_for_launch_config().unwrap_or_else(
+                        |error| {
+                            safe_warn!(
+                                safe: ("Failed to load terminal history for launch config session"),
+                                full: (
+                                    "Failed to load terminal history for launch config session: {error:#}"
+                                )
+                            );
+                            Default::default()
+                        },
+                    )
+                } else {
+                    session.block_lists
+                };
+                #[cfg(not(feature = "local_fs"))]
+                let block_lists = session.block_lists;
+                return NewWorkspaceSource::Restored {
+                    window_snapshot,
+                    block_lists,
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                safe_warn!(
+                    safe: ("Failed to restore launch config session; launching from YAML"),
+                    full: (
+                        "Failed to restore launch config session; launching from YAML: {error:#}"
+                    )
+                );
+            }
+        }
+    }
+
+    NewWorkspaceSource::FromTemplate {
+        window_template: window_template.clone(),
+        launch_config_source: if source_is_open {
+            None
+        } else {
+            launch_config_source
+        },
+    }
 }
 
 fn requires_post_onboarding_login(
@@ -1614,6 +1684,7 @@ pub enum NewWorkspaceSource {
     },
     FromTemplate {
         window_template: launch_config::WindowTemplate,
+        launch_config_source: Option<launch_config::LaunchConfigWindowSource>,
     },
     Restored {
         window_snapshot: WindowSnapshot,

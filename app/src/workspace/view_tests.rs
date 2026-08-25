@@ -47,7 +47,9 @@ use crate::cloud_object::model::view::CloudViewModel;
 use crate::context_chips::prompt::Prompt;
 use crate::editor::Event;
 use crate::gpu_state::GPUState;
-use crate::launch_configs::launch_config::{PaneMode, PaneTemplateType, TabTemplate};
+use crate::launch_configs::launch_config::{
+    LaunchConfigWindowSource, PaneMode, PaneTemplateType, TabTemplate, WindowTemplate,
+};
 use crate::network::NetworkStatus;
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::notebooks::notebook::NotebookView;
@@ -342,6 +344,40 @@ fn restored_workspace(
         )
     });
     workspace
+}
+
+#[test]
+fn launch_config_source_is_preserved_in_window_snapshots() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let source = LaunchConfigWindowSource {
+            path: std::path::PathBuf::from("/home/warp/.warp/launch_configurations/devops.yaml"),
+            document_index: 0,
+            window_index: 1,
+            config_name: "DEVOPS".to_string(),
+        };
+        let template: WindowTemplate =
+            serde_yaml::from_str("tabs:\n  - layout:\n      cwd: /devops\n")
+                .expect("window template should parse");
+        let global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            Workspace::new(
+                global_resource_handles,
+                None,
+                NewWorkspaceSource::FromTemplate {
+                    window_template: template,
+                    launch_config_source: Some(source.clone()),
+                },
+                ctx,
+            )
+        });
+
+        let snapshot = workspace.read(&app, |workspace, ctx| {
+            workspace.snapshot(workspace.window_id, false, ctx)
+        });
+
+        assert_eq!(snapshot.launch_config_source, Some(source));
+    });
 }
 
 fn transferred_tab_workspace(
@@ -5225,6 +5261,7 @@ fn window_snapshot_with_tabs(tab_count: usize, active_tab_index: usize) -> Windo
         left_panel_width: None,
         right_panel_width: None,
         agent_management_filters: None,
+        launch_config_source: None,
         tab_groups: vec![],
     }
 }

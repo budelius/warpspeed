@@ -454,6 +454,7 @@ diesel::table! {
         left_panel_open -> Nullable<Bool>,
         vertical_tabs_panel_open -> Nullable<Bool>,
         team_uid -> Nullable<Text>,
+        launch_config_source -> Nullable<Text>,
     }
 }
 

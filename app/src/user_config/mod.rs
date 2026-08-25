@@ -143,14 +143,21 @@ impl WarpConfig {
         &self.custom_model_router_errors
     }
 
-    /// Saving the newly created launch configuration to the WarpConfig that we currently
-    /// have.
+    /// Applies a saved launch configuration before its filesystem watcher update arrives.
     pub fn append_launch_config(
         &mut self,
         launch_config: &LaunchConfig,
         ctx: &mut ModelContext<Self>,
     ) {
-        if !self.launch_configs.contains(launch_config) {
+        if let Some(source) = launch_config.source.as_ref()
+            && let Some(existing) = self
+                .launch_configs
+                .iter_mut()
+                .find(|existing| existing.source.as_ref() == Some(source))
+        {
+            *existing = launch_config.clone();
+            ctx.emit(WarpConfigUpdateEvent::LaunchConfigs);
+        } else if !self.launch_configs.contains(launch_config) {
             self.launch_configs.push(launch_config.to_owned());
             ctx.emit(WarpConfigUpdateEvent::LaunchConfigs);
         }

@@ -1688,7 +1688,9 @@ impl PaneGroup {
                     .shell_launch_data
                     .as_ref()
                     .and_then(|shell| {
-                        if FeatureFlag::ShellSelector.is_enabled() {
+                        if FeatureFlag::ShellSelector.is_enabled()
+                            || FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+                        {
                             AvailableShells::as_ref(ctx).get_from_shell_launch_data(shell)
                         } else {
                             None

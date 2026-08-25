@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{CommandTemplate, LaunchConfig, PaneMode, PaneTemplateType};
+use super::{CommandTemplate, LaunchConfig, LaunchConfigSource, PaneMode, PaneTemplateType};
 use crate::app_state::{
     AppState, BranchSnapshot, LeafContents, LeafSnapshot, NotebookPaneSnapshot, PaneFlex,
     PaneNodeSnapshot, SplitDirection, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
@@ -35,6 +35,7 @@ fn single_tab_snapshot(root: PaneNodeSnapshot) -> AppState {
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            launch_config_source: None,
             tab_groups: vec![],
         }],
         active_window_index: Some(0),
@@ -61,6 +62,7 @@ fn multi_tab_snapshot(active_tab_index: usize, tabs: Vec<TabSnapshot>) -> AppSta
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            launch_config_source: None,
             tab_groups: vec![],
         }],
         active_window_index: Some(0),
@@ -527,4 +529,57 @@ fn test_config_with_active_tab_being_filtered() {
 
     let template = LaunchConfig::from_snapshot("Test".into(), &state);
     assert_eq!(template.windows[0].active_tab_index, None)
+}
+
+#[test]
+fn from_window_snapshot_saves_only_the_selected_window() {
+    let state = single_tab_snapshot(PaneNodeSnapshot::Leaf(LeafSnapshot {
+        is_focused: true,
+        custom_vertical_tabs_title: None,
+        contents: LeafContents::Terminal(TerminalPaneSnapshot {
+            uuid: vec![1],
+            cwd: Some("/devops".to_string()),
+            shell_launch_data: None,
+            is_active: true,
+            is_read_only: false,
+            input_config: None,
+            llm_model_override: None,
+            active_profile_id: None,
+            conversation_ids_to_restore: vec![],
+            active_conversation_id: None,
+        }),
+    }));
+    let mut selected_window = state.windows[0].clone();
+    selected_window.tabs[0].custom_title = Some("DEVOPS".to_string());
+
+    let config = LaunchConfig::from_window_snapshot("DEVOPS".to_string(), &selected_window);
+
+    assert_eq!(config.windows.len(), 1);
+    assert_eq!(config.windows[0].tabs[0].title.as_deref(), Some("DEVOPS"));
+}
+
+#[test]
+fn window_source_identifies_one_window_in_one_document() {
+    let mut config = LaunchConfig::from_snapshot(
+        "DEVOPS".to_string(),
+        &single_tab_snapshot(PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: LeafContents::Notebook(NotebookPaneSnapshot::CloudNotebook {
+                notebook_id: None,
+                settings: OpenWarpDriveObjectSettings::default(),
+            }),
+        })),
+    );
+    config.source = Some(LaunchConfigSource {
+        path: PathBuf::from("/home/warp/.warp/launch_configurations/devops.yaml"),
+        document_index: 2,
+    });
+
+    let source = config.window_source(0).expect("window source should exist");
+
+    assert_eq!(source.document_index, 2);
+    assert_eq!(source.window_index, 0);
+    assert_eq!(source.config_name, "DEVOPS");
+    assert_eq!(config.window_source(1), None);
 }

@@ -36,6 +36,8 @@ pub use sqlite::database_file_path_for_current_scope;
 pub use sqlite::database_file_path_for_scope;
 #[cfg(any(feature = "local_fs", feature = "integration_tests"))]
 pub use sqlite::establish_ro_connection;
+#[cfg(feature = "local_fs")]
+pub(crate) use sqlite::load_restored_blocks_for_launch_config;
 use uuid::Uuid;
 use warp_core::command::ExitCode;
 use warp_errors::report_error;
@@ -347,6 +349,11 @@ pub enum ModelEvent {
     SaveBlock(BlockCompleted),
     DeleteBlocks(Vec<u8>),
     Snapshot(AppState),
+    SaveLaunchConfigWindowSessions {
+        windows: Vec<crate::app_state::WindowSnapshot>,
+        /// Captures block history before a window's persisted panes can be cleaned up.
+        include_blocks: bool,
+    },
     UpsertWorkflows(Vec<CloudWorkflow>),
     UpsertNotebooks(Vec<CloudNotebook>),
     UpsertFolders(Vec<CloudFolder>),

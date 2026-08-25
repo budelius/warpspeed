@@ -186,6 +186,7 @@ pub fn test_launch_config_single_child_branch() -> Builder {
                     color: None,
                 }],
             }],
+            source: None,
         }
     }
 
@@ -318,6 +319,7 @@ pub fn test_with_launch_config_with_active_tab_index() -> Builder {
                     3
                 ],
             }],
+            source: None,
         }
     }
 
@@ -396,6 +398,7 @@ pub fn test_with_launch_config_with_active_pane() -> Builder {
                     color: None,
                 }],
             }],
+            source: None,
         }
     }
 
@@ -475,6 +478,7 @@ pub fn test_with_launch_config_with_no_active_pane() -> Builder {
                     color: None,
                 }],
             }],
+            source: None,
         }
     }
 

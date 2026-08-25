@@ -23,6 +23,7 @@ use crate::app_state::{
 use crate::auth::UserUid;
 use crate::cloud_object::{CloudObjectPermissions, Owner};
 use crate::code::editor_management::CodeSource;
+use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::notebooks::{CloudNotebook, CloudNotebookModel};
 use crate::persistence::model::ObjectPermissions;
 use crate::persistence::{
@@ -360,6 +361,70 @@ fn test_deduplicate_snapshots() {
 }
 
 #[test]
+fn test_deduplicate_launch_config_window_sessions() {
+    let first = vec![test_terminal_window_snapshot(false)];
+    let latest = vec![test_terminal_window_snapshot(true)];
+    let events = vec![
+        ModelEvent::SaveLaunchConfigWindowSessions {
+            windows: first,
+            include_blocks: false,
+        },
+        ModelEvent::SaveLaunchConfigWindowSessions {
+            windows: latest.clone(),
+            include_blocks: false,
+        },
+    ];
+
+    let filtered = deduplicate_events(events);
+
+    assert_eq!(filtered.len(), 1);
+    match &filtered[0] {
+        ModelEvent::SaveLaunchConfigWindowSessions { windows, .. } => {
+            assert_eq!(windows, &latest)
+        }
+        event => panic!("Expected launch config window sessions, got {event:?}"),
+    }
+}
+
+#[test]
+fn test_deduplicate_preserves_launch_config_sessions_with_blocks() {
+    let checkpoint = vec![test_terminal_window_snapshot(false)];
+    let latest = vec![test_terminal_window_snapshot(true)];
+    let events = vec![
+        ModelEvent::SaveLaunchConfigWindowSessions {
+            windows: vec![],
+            include_blocks: false,
+        },
+        ModelEvent::SaveLaunchConfigWindowSessions {
+            windows: checkpoint.clone(),
+            include_blocks: true,
+        },
+        ModelEvent::SaveLaunchConfigWindowSessions {
+            windows: latest.clone(),
+            include_blocks: false,
+        },
+    ];
+
+    let filtered = deduplicate_events(events);
+
+    assert_eq!(filtered.len(), 2);
+    assert!(matches!(
+        &filtered[0],
+        ModelEvent::SaveLaunchConfigWindowSessions {
+            windows,
+            include_blocks: true,
+        } if windows == &checkpoint
+    ));
+    assert!(matches!(
+        &filtered[1],
+        ModelEvent::SaveLaunchConfigWindowSessions {
+            windows,
+            include_blocks: false,
+        } if windows == &latest
+    ));
+}
+
+#[test]
 fn test_deduplicate_no_snapshots() {
     let original_events = vec![ModelEvent::SaveBlock(BlockCompleted {
         pane_id: vec![1, 2, 3],
@@ -415,6 +480,7 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
         left_panel_width: None,
         right_panel_width: None,
         agent_management_filters: None,
+        launch_config_source: None,
         tab_groups: vec![],
     }
 }
@@ -451,6 +517,35 @@ fn test_sqlite_round_trips_vertical_tabs_panel_open() {
             .collect::<Vec<_>>(),
         vec![false, true]
     );
+}
+
+#[test]
+fn test_sqlite_round_trips_launch_config_window_source() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+    let source = LaunchConfigWindowSource {
+        path: PathBuf::from("/home/warp/.warp/launch_configurations/devops.yaml"),
+        document_index: 1,
+        window_index: 2,
+        config_name: "DEVOPS".to_string(),
+    };
+    let mut window = test_terminal_window_snapshot(false);
+    window.launch_config_source = Some(source.clone());
+    let app_state = AppState {
+        windows: vec![window],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+    let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::Full)
+        .expect("app state should load")
+        .app_state
+        .expect("app state should be present for the full scope");
+
+    assert_eq!(restored.windows[0].launch_config_source, Some(source));
 }
 
 #[test]
@@ -530,6 +625,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            launch_config_source: None,
             tab_groups: vec![],
         }],
         active_window_index: Some(0),
@@ -609,6 +705,7 @@ fn test_sqlite_round_trips_code_pane_with_multiple_tabs() {
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            launch_config_source: None,
             tab_groups: vec![],
         }],
         active_window_index: Some(0),
@@ -728,6 +825,7 @@ fn test_sqlite_round_trips_tab_groups() {
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            launch_config_source: None,
             tab_groups: vec![TabGroupSnapshot {
                 id: group_id,
                 name: Some("Backend".to_string()),
@@ -880,6 +978,7 @@ fn test_sqlite_round_trips_pinned_state() {
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            launch_config_source: None,
             tab_groups: vec![
                 TabGroupSnapshot {
                     id: pinned_group_id,

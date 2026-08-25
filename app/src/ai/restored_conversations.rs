@@ -137,6 +137,14 @@ impl RestoredAgentConversations {
         Some(conversation)
     }
 
+    /// Allows conversations associated with a closed persisted window to be restored again.
+    pub fn release_conversations(&mut self, conversation_ids: &[AIConversationId]) {
+        for conversation_id in conversation_ids {
+            self.taken.remove(conversation_id);
+            self.conversations.remove(conversation_id);
+        }
+    }
+
     /// Takes and returns AIConversations for the given IDs, sorted by first exchange start time.
     pub fn take_conversations(
         &mut self,

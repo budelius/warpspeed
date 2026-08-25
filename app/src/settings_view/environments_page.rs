@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use instant::Instant;
 use pathfinder_geometry::vector::vec2f;
+use serde::{Deserialize, Serialize};
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::theme::color::internal_colors;
 use warp_editor::editor::NavigationKey;
@@ -103,7 +104,7 @@ struct EmptyStateRowConfig {
     icon_size: f32,
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, Deserialize, PartialEq, Serialize)]
 pub enum EnvironmentsPage {
     #[default]
     List,

@@ -10,6 +10,7 @@ use warpui::{AppContext, SingletonEntity, TypedActionView};
 use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::app_state::get_app_state;
+use crate::features::FeatureFlag;
 use crate::network::NetworkStatus;
 use crate::persistence::ModelEvent;
 use crate::root_view::OpenPath;
@@ -135,7 +136,9 @@ fn save_app(_: &(), ctx: &mut AppContext) {
         return;
     }
 
-    if !*GeneralSettings::as_ref(ctx).restore_session {
+    let save_app_state = *GeneralSettings::as_ref(ctx).restore_session;
+    let save_launch_config_sessions = FeatureFlag::PersistentLaunchConfigSessions.is_enabled();
+    if !save_app_state && !save_launch_config_sessions {
         return;
     }
 
@@ -161,9 +164,27 @@ fn save_app(_: &(), ctx: &mut AppContext) {
 
     // Only compute the app state if we're definitely going to use it.
     let app_state = get_app_state(ctx);
-    let event = ModelEvent::Snapshot(app_state);
+    if save_launch_config_sessions {
+        let windows = app_state
+            .windows
+            .iter()
+            .filter(|window| window.launch_config_source.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        if !windows.is_empty()
+            && let Err(err) = model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
+                windows,
+                include_blocks: false,
+            })
+        {
+            report_error!(
+                anyhow::Error::new(err)
+                    .context("Error trying to save launch config window sessions")
+            );
+        }
+    }
 
-    if let Err(err) = model_event_sender.send(event) {
+    if save_app_state && let Err(err) = model_event_sender.send(ModelEvent::Snapshot(app_state)) {
         report_error!(anyhow::Error::new(err).context("Error trying to send model event"));
     }
 }

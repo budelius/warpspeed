@@ -2151,6 +2151,18 @@ impl BlocklistAIHistoryModel {
         }
     }
 
+    /// Removes stale terminal ownership before persisted conversations are rebound.
+    pub fn detach_conversations_for_restore(&mut self, conversation_ids: &[AIConversationId]) {
+        let conversation_ids = conversation_ids.iter().copied().collect::<HashSet<_>>();
+        self.live_conversation_ids_for_terminal_surface
+            .retain(|_, live_ids| {
+                live_ids.retain(|id| !conversation_ids.contains(id));
+                !live_ids.is_empty()
+            });
+        self.active_conversation_for_terminal_surface
+            .retain(|_, id| !conversation_ids.contains(id));
+    }
+
     /// Handle clearing the blocklist for a terminal surface.
     /// The terminal surface will also cancel the active stream on processing the event emitted here.
     pub fn clear_conversations_for_terminal_surface(

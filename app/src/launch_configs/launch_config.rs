@@ -13,11 +13,27 @@ use crate::themes::theme::AnsiColorIdentifier;
 mod tests;
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct LaunchConfigSource {
+    pub path: PathBuf,
+    pub document_index: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct LaunchConfigWindowSource {
+    pub path: PathBuf,
+    pub document_index: usize,
+    pub window_index: usize,
+    pub config_name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub active_window_index: Option<usize>,
     pub windows: Vec<WindowTemplate>,
+    #[serde(skip)]
+    pub source: Option<LaunchConfigSource>,
 }
 
 impl LaunchConfig {
@@ -30,7 +46,28 @@ impl LaunchConfig {
                 .iter()
                 .filter_map(|window| (!window.quake_mode).then_some(window.clone().into()))
                 .collect::<Vec<WindowTemplate>>(),
+            source: None,
         }
+    }
+
+    pub fn from_window_snapshot(name: String, window: &WindowSnapshot) -> Self {
+        Self {
+            name,
+            active_window_index: Some(0),
+            windows: vec![window.clone().into()],
+            source: None,
+        }
+    }
+
+    pub fn window_source(&self, window_index: usize) -> Option<LaunchConfigWindowSource> {
+        self.windows.get(window_index)?;
+        let source = self.source.as_ref()?;
+        Some(LaunchConfigWindowSource {
+            path: source.path.clone(),
+            document_index: source.document_index,
+            window_index,
+            config_name: self.name.clone(),
+        })
     }
 }
 
@@ -305,5 +342,6 @@ pub fn make_mock_single_window_launch_config() -> LaunchConfig {
                 },
             ],
         }],
+        source: None,
     }
 }

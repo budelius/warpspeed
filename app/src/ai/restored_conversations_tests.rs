@@ -47,6 +47,21 @@ fn take_conversation_hands_out_each_conversation_at_most_once() {
 }
 
 #[test]
+fn release_allows_a_persisted_window_to_restore_a_conversation_again() {
+    let conversation_id = AIConversationId::new();
+    let mut store =
+        RestoredAgentConversations::new_seeded(vec![persisted_conversation(conversation_id)]);
+    assert!(store.take_conversation(&conversation_id).is_some());
+
+    store.release_conversations(&[conversation_id]);
+    store
+        .conversations
+        .insert(conversation_id, ai_conversation(conversation_id));
+
+    assert!(store.take_conversation(&conversation_id).is_some());
+}
+
+#[test]
 fn failed_take_does_not_consume_the_restore_opportunity() {
     let conversation_id = AIConversationId::new();
     // No seed and no backing database: the first take fails to load.

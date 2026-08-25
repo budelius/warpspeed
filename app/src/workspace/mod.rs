@@ -405,7 +405,7 @@ pub fn init(app: &mut AppContext) {
         app.register_fixed_bindings([FixedBinding::custom(
             CustomAction::SaveCurrentConfig,
             WorkspaceAction::OpenLaunchConfigSaveModal,
-            "Save new launch configuration",
+            "Save or update launch configuration",
             id!("Workspace"),
         )]);
     }
@@ -1194,7 +1194,7 @@ pub fn init(app: &mut AppContext) {
         .with_custom_action(CustomAction::FilesPalette),
         EditableBinding::new(
             "workspace:open_launch_config_save_modal",
-            "Save new launch configuration",
+            "Save or update launch configuration",
             WorkspaceAction::OpenLaunchConfigSaveModal,
         )
         .with_context_predicate(id!("Workspace"))

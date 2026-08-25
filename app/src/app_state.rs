@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::{InputConfig, SerializedBlockListItem};
 use crate::code::editor_management::CodeSource;
 use crate::drive::OpenWarpDriveObjectSettings;
+use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::root_view::quake_mode_window_id;
 use crate::server::ids::{ServerId, SyncId};
 use crate::settings_view::SettingsSection;
@@ -41,11 +42,12 @@ pub struct PersistedAgentManagementFilters {
     pub filters: AgentManagementFilters,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowSnapshot {
     pub tabs: Vec<TabSnapshot>,
     pub active_tab_index: usize,
     pub team_uid: Option<ServerId>,
+    #[serde(default, with = "optional_rect")]
     pub bounds: Option<RectF>,
     pub fullscreen_state: FullscreenState,
     pub quake_mode: bool,
@@ -58,12 +60,43 @@ pub struct WindowSnapshot {
     pub left_panel_width: Option<f32>,
     pub right_panel_width: Option<f32>,
     pub agent_management_filters: Option<PersistedAgentManagementFilters>,
+    #[serde(default)]
+    pub launch_config_source: Option<LaunchConfigWindowSource>,
     /// Tab groups defined in this window. Group order is implicit from
     /// member tabs' positions, so no explicit ordering is persisted.
     pub tab_groups: Vec<TabGroupSnapshot>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl WindowSnapshot {
+    /// Returns the agent conversations referenced by this window's terminal panes.
+    pub(crate) fn conversation_ids_to_restore(&self) -> Vec<AIConversationId> {
+        fn collect(node: &PaneNodeSnapshot, ids: &mut HashSet<AIConversationId>) {
+            match node {
+                PaneNodeSnapshot::Branch(branch) => {
+                    for (_, child) in &branch.children {
+                        collect(child, ids);
+                    }
+                }
+                PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    contents: LeafContents::Terminal(terminal),
+                    ..
+                }) => {
+                    ids.extend(terminal.conversation_ids_to_restore.iter().copied());
+                    ids.extend(terminal.active_conversation_id);
+                }
+                PaneNodeSnapshot::Leaf(_) => {}
+            }
+        }
+
+        let mut ids = HashSet::new();
+        for tab in &self.tabs {
+            collect(&tab.root, &mut ids);
+        }
+        ids.into_iter().collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TabGroupSnapshot {
     pub id: TabGroupId,
     pub name: Option<String>,
@@ -72,7 +105,7 @@ pub struct TabGroupSnapshot {
     pub pinned: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TabSnapshot {
     pub custom_title: Option<String>,
     pub root: PaneNodeSnapshot,
@@ -92,7 +125,7 @@ impl TabSnapshot {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(
     clippy::large_enum_variant,
     reason = "LeafSnapshot is significantly larger than BranchSnapshot due to nested snapshot types."
@@ -120,20 +153,20 @@ impl PaneNodeSnapshot {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchSnapshot {
     pub direction: SplitDirection,
     pub children: Vec<(PaneFlex, PaneNodeSnapshot)>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LeafSnapshot {
     pub is_focused: bool,
     pub custom_vertical_tabs_title: Option<String>,
     pub contents: LeafContents,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LeafContents {
     Terminal(TerminalPaneSnapshot),
     Notebook(NotebookPaneSnapshot),
@@ -193,7 +226,7 @@ impl LeafContents {
 }
 
 /// Snapshot of an ambient agent pane.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AmbientAgentPaneSnapshot {
     pub uuid: Vec<u8>,
     // `task_id` is purposefully optional,
@@ -202,7 +235,7 @@ pub struct AmbientAgentPaneSnapshot {
 }
 
 /// Snapshot of the contents of a terminal pane.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalPaneSnapshot {
     pub uuid: Vec<u8>,
     pub cwd: Option<String>,
@@ -218,7 +251,7 @@ pub struct TerminalPaneSnapshot {
     pub active_conversation_id: Option<AIConversationId>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NotebookPaneSnapshot {
     CloudNotebook {
         /// The ID of the notebook that was open in this pane. There are 3 possibilities:
@@ -239,7 +272,7 @@ pub enum NotebookPaneSnapshot {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AIDocumentPaneSnapshot {
     Local {
         document_id: String,
@@ -249,12 +282,12 @@ pub enum AIDocumentPaneSnapshot {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CodePaneTabSnapshot {
     pub path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CodePaneSnapShot {
     Local {
         tabs: Vec<CodePaneTabSnapshot>,
@@ -264,7 +297,7 @@ pub enum CodePaneSnapShot {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum WorkflowPaneSnapshot {
     CloudWorkflow {
         workflow_id: Option<SyncId>,
@@ -273,7 +306,7 @@ pub enum WorkflowPaneSnapshot {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EnvVarCollectionPaneSnapshot {
     // CloudEnvVarCollection snapshots operate under the same heuristics
     // as NotebookPaneSnapshot::CloudNotebook
@@ -282,12 +315,12 @@ pub enum EnvVarCollectionPaneSnapshot {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentManagementPaneSnapshot {
     pub mode: EnvironmentsPage,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SettingsPaneSnapshot {
     Local {
         current_page: SettingsSection,
@@ -295,12 +328,12 @@ pub enum SettingsPaneSnapshot {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AIFactPaneSnapshot {
     Personal,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CodeReviewPaneSnapshot {
     Local {
         terminal_uuid: Vec<u8>,
@@ -342,14 +375,55 @@ pub struct RightPanelSnapshot {
 }
 
 /// Copied from pane group model, which should be private to pane group.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SplitDirection {
     Horizontal,
     Vertical,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaneFlex(pub f32);
+
+mod optional_rect {
+    use pathfinder_geometry::rect::RectF;
+    use pathfinder_geometry::vector::Vector2F;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    }
+
+    pub fn serialize<S>(rect: &Option<RectF>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        rect.map(|rect| Rect {
+            x: rect.origin().x(),
+            y: rect.origin().y(),
+            width: rect.size().x(),
+            height: rect.size().y(),
+        })
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<RectF>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<Rect>::deserialize(deserializer).map(|rect| {
+            rect.map(|rect| {
+                RectF::new(
+                    Vector2F::new(rect.x, rect.y),
+                    Vector2F::new(rect.width, rect.height),
+                )
+            })
+        })
+    }
+}
 
 pub fn get_app_state(app: &AppContext) -> AppState {
     let active_window_id = app.windows().active_window();

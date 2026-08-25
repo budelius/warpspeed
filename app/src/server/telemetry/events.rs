@@ -6439,9 +6439,7 @@ impl TelemetryEventDesc for TelemetryEventDiscriminants {
             Self::OpenChangelogLink => "Opened the changelog link within the App",
             Self::ShowInFileExplorer => "Opened a file in Finder by using \"Show in Finder\"",
             Self::OpenLaunchConfigSaveModal => "Opened save launch configuration modal",
-            Self::SaveLaunchConfig => {
-                "Saved current launch configuration of windows, tabs, and panes"
-            }
+            Self::SaveLaunchConfig => "Saved or updated the current window's launch configuration",
             Self::OpenLaunchConfigFile => {
                 "Opened the launch config YAML file from modal once saved successfully"
             }

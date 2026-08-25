@@ -5,6 +5,7 @@ use std::{fs, io};
 use anyhow::{Result, anyhow};
 use itertools::Itertools;
 use repo_metadata::RepositoryUpdate;
+use serde::Deserialize;
 use warpui::{ModelContext, ModelHandle, SingletonEntity};
 
 use super::util::{
@@ -18,7 +19,9 @@ use super::{
 };
 use crate::ai::custom_model_routers::{CustomModelRouter, ModelConfigError};
 use crate::features::FeatureFlag;
-use crate::launch_configs::launch_config::LaunchConfig;
+use crate::launch_configs::launch_config::{
+    LaunchConfig, LaunchConfigSource, LaunchConfigWindowSource, WindowTemplate,
+};
 use crate::tab_configs::{TabConfig, TabConfigError};
 use crate::themes::theme::WarpThemeConfig;
 use crate::warp_managed_paths_watcher::{
@@ -213,6 +216,19 @@ impl super::WarpConfig {
             .map_err(|e| anyhow::anyhow!("could not delete router file: {e}"))
     }
 
+    /// Replaces only the source window while preserving the file's other configurations.
+    #[cfg(feature = "local_fs")]
+    pub fn overwrite_launch_config_window(
+        source: &LaunchConfigWindowSource,
+        window: WindowTemplate,
+    ) -> Result<LaunchConfig> {
+        overwrite_launch_config_window_in_dir(
+            &crate::user_config::launch_configs_dir(),
+            source,
+            window,
+        )
+    }
+
     /// This method takes a file name candidate (appends .yaml if missing) and a LaunchConfig as
     /// arguments. It saves the file and returns the filename used if successful.
     #[cfg(feature = "local_fs")]
@@ -241,6 +257,63 @@ impl super::WarpConfig {
         serde_yaml::to_writer(writer, &launch_config)?;
         Ok(file_name)
     }
+}
+
+#[cfg(feature = "local_fs")]
+fn overwrite_launch_config_window_in_dir(
+    launch_configs_dir: &Path,
+    source: &LaunchConfigWindowSource,
+    window: WindowTemplate,
+) -> Result<LaunchConfig> {
+    let managed_dir = fs::canonicalize(launch_configs_dir)?;
+    let source_path = fs::canonicalize(&source.path)?;
+    if !source_path.starts_with(&managed_dir) {
+        return Err(anyhow!(
+            "Launch configuration is outside the managed directory"
+        ));
+    }
+
+    let file = fs::File::open(&source_path)?;
+    let reader = io::BufReader::new(file);
+    let mut configs = serde_yaml::Deserializer::from_reader(reader)
+        .map(LaunchConfig::deserialize)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let config = configs
+        .get_mut(source.document_index)
+        .ok_or_else(|| anyhow!("Launch configuration document no longer exists"))?;
+    if config.name != source.config_name {
+        return Err(anyhow!("Launch configuration document has changed"));
+    }
+    let target = config
+        .windows
+        .get_mut(source.window_index)
+        .ok_or_else(|| anyhow!("Launch configuration window no longer exists"))?;
+    *target = window;
+
+    let parent = source_path
+        .parent()
+        .ok_or_else(|| anyhow!("Launch configuration path has no parent"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        let mut writer = io::BufWriter::new(temp.as_file_mut());
+        writer.write_all(LAUNCH_CONFIG_COMMENT.as_bytes())?;
+        for config in &configs {
+            serde_yaml::to_writer(&mut writer, config)?;
+        }
+        writer.flush()?;
+    }
+    temp.as_file().sync_all()?;
+    temp.persist(&source_path).map_err(|error| error.error)?;
+
+    let mut updated = configs
+        .into_iter()
+        .nth(source.document_index)
+        .expect("already checked launch configuration document index");
+    updated.source = Some(LaunchConfigSource {
+        path: source.path.clone(),
+        document_index: source.document_index,
+    });
+    Ok(updated)
 }
 
 pub fn load_theme_configs(theme_path: &Path) -> WarpThemeConfig {
@@ -325,3 +398,7 @@ fn update_touches_path(update: &RepositoryUpdate, path: &Path) -> bool {
     repository_update_touches_path(update, path)
         || repository_update_touches_path(update, &canonical_path)
 }
+
+#[cfg(test)]
+#[path = "native_tests.rs"]
+mod tests;

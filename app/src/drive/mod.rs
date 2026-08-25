@@ -31,7 +31,7 @@ use crate::workflows::CloudWorkflow;
 
 type SortByComparator<'a> = dyn FnMut(&&dyn CloudObject, &&dyn CloudObject) -> Ordering + 'a;
 
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Default, Serialize)]
 pub struct OpenWarpDriveObjectSettings {
     /// The folder that should be focused in the Warp Drive when the object is opened.
     pub focused_folder_id: Option<ServerId>,

@@ -285,7 +285,7 @@ use crate::editor::{
 use crate::env_vars::CloudEnvVarCollection;
 use crate::env_vars::manager::{EnvVarCollectionManager, EnvVarCollectionSource};
 use crate::experiments::{BlockOnboarding, Experiment};
-use crate::launch_configs::launch_config::WindowTemplate;
+use crate::launch_configs::launch_config::{LaunchConfigWindowSource, WindowTemplate};
 use crate::launch_configs::save_modal::{LaunchConfigModalEvent, LaunchConfigSaveModal};
 use crate::menu::{
     Event as MenuEvent, MENU_VERTICAL_PADDING, Menu, MenuItem, MenuItemFields, MenuSelectionSource,
@@ -1113,6 +1113,7 @@ pub struct Workspace {
     welcome_tips_view_state: WelcomeTipsViewState,
     welcome_tips_view: ViewHandle<TipsView>,
     model_event_sender: Option<mpsc::SyncSender<ModelEvent>>,
+    launch_config_source: Option<LaunchConfigWindowSource>,
     launch_config_save_modal: ModalViewState<LaunchConfigSaveModal>,
     tab_config_params_modal: ModalViewState<Modal<TabConfigParamsModal>>,
     session_config_modal: ModalViewState<Modal<SessionConfigModal>>,
@@ -3544,6 +3545,7 @@ impl Workspace {
             current_workspace_state: Default::default(),
             previous_workspace_state: None,
             model_event_sender,
+            launch_config_source: None,
             launch_config_save_modal,
             tab_config_params_modal,
             session_config_modal,
@@ -3674,6 +3676,10 @@ impl Workspace {
         });
 
         ws
+    }
+
+    pub(crate) fn launch_config_source(&self) -> Option<&LaunchConfigWindowSource> {
+        self.launch_config_source.as_ref()
     }
 
     #[cfg(any(test, feature = "integration_tests"))]
@@ -4065,6 +4071,7 @@ impl Workspace {
                 window_snapshot,
                 block_lists,
             } => {
+                self.launch_config_source = window_snapshot.launch_config_source.clone();
                 // Clamp up front, once, and reuse this single binding for
                 // both the per-tab eager/deferred decision below and the
                 // final `activate_tab_internal` call (mirroring
@@ -4183,7 +4190,11 @@ impl Workspace {
                 self.activate_tab_internal(active_tab_index, ctx);
                 self.check_and_trigger_onboarding(ctx);
             }
-            NewWorkspaceSource::FromTemplate { window_template } => {
+            NewWorkspaceSource::FromTemplate {
+                window_template,
+                launch_config_source,
+            } => {
+                self.launch_config_source = launch_config_source;
                 self.open_launch_config_window(window_template, ctx);
                 self.check_and_trigger_onboarding(ctx);
             }
@@ -10975,9 +10986,13 @@ impl Workspace {
                 ctx.notify();
             }
             LaunchConfigModalEvent::SuccessfullySavedConfig(launch_config) => {
+                if self.launch_config_source.is_none() {
+                    self.launch_config_source = launch_config.window_source(0);
+                }
                 ctx.update_model(&WarpConfig::handle(ctx), move |warp_config, ctx| {
                     warp_config.append_launch_config(launch_config, ctx);
                 });
+                ctx.dispatch_global_action("workspace:save_app", ());
                 ctx.notify();
             }
             #[cfg(feature = "local_fs")]
@@ -12054,6 +12069,7 @@ impl Workspace {
             left_panel_width,
             right_panel_width,
             agent_management_filters,
+            launch_config_source: self.launch_config_source.clone(),
             tab_groups,
         }
     }
@@ -12107,9 +12123,14 @@ impl Workspace {
         self.current_workspace_state
             .is_launch_config_save_modal_open = true;
 
+        let window_snapshot = self.snapshot(ctx.window_id(), false, ctx);
+        let launch_config_source = FeatureFlag::PersistentLaunchConfigSessions
+            .is_enabled()
+            .then(|| self.launch_config_source.clone())
+            .flatten();
         self.launch_config_save_modal.view.update(ctx, |view, ctx| {
-            view.set_snapshot_source(ctx);
-            view.reset_editor(ctx); // placeholder and clear editor
+            view.set_window_snapshot(window_snapshot, launch_config_source);
+            view.reset_editor(ctx);
             ctx.notify();
         });
 
@@ -28392,6 +28413,24 @@ impl View for Workspace {
 
     /// Update this workspace when it has been closed, but may still be restored.
     fn on_window_closed(&mut self, ctx: &mut ViewContext<Self>) {
+        if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+            && self.launch_config_source.is_some()
+            && let Some(model_event_sender) = self.model_event_sender.as_ref()
+        {
+            let window = self.snapshot(ctx.window_id(), false, ctx);
+            if let Err(error) =
+                model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
+                    windows: vec![window],
+                    include_blocks: true,
+                })
+            {
+                report_error!(
+                    anyhow::Error::new(error)
+                        .context("Failed to save launch config session before window close")
+                );
+            }
+        }
+
         if !self.suppress_detach_panes_on_window_close {
             for pane_group in self.tab_views() {
                 pane_group.update(ctx, |pane_group, ctx| {

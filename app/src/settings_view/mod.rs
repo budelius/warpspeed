@@ -306,7 +306,9 @@ pub enum SettingsViewEvent {
 }
 
 /// Different navigation sections within the settings view
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Copy, Clone, Debug, Default, serde::Deserialize, PartialEq, Eq, Hash, serde::Serialize,
+)]
 pub enum SettingsSection {
     About,
     #[default]

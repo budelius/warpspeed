@@ -915,6 +915,9 @@ pub enum FeatureFlag {
     /// Enables state-mutating recovery for abnormal terminal lifecycle sequences.
     TerminalLifecycleRecovery,
 
+    /// Saves and restores launch configurations as window-scoped sessions.
+    PersistentLaunchConfigSessions,
+
     /// Shows a warning in the agent view when the active conversation's
     /// provider-side prompt cache has expired.
     PromptCacheExpiryWarning,
@@ -1047,6 +1050,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::RestorePromptOnInlineModelSelectorSearch,
     FeatureFlag::WarpControlCli,
     FeatureFlag::TerminalLifecycleRecovery,
+    FeatureFlag::PersistentLaunchConfigSessions,
     FeatureFlag::PromptCacheExpiryWarning,
     FeatureFlag::JupyterNotebookRendering,
     FeatureFlag::MultiLevelOrchestration,

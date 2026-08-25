@@ -4,6 +4,7 @@ use markdown_parser::{
 use pathfinder_geometry::vector::vec2f;
 use serde::{Deserialize, Serialize};
 use warp_core::paths::home_relative_path;
+use warp_core::safe_warn;
 use warp_core::ui::theme::Fill;
 use warpui::accessibility::{AccessibilityContent, WarpA11yRole};
 use warpui::elements::{
@@ -15,16 +16,19 @@ use warpui::keymap::FixedBinding;
 use warpui::ui_components::button::{Button, ButtonVariant};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
-    AppContext, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView, View,
-    ViewContext, ViewHandle,
+    AppContext, Entity, FocusContext, SingletonEntity, TypedActionView, View, ViewContext,
+    ViewHandle,
 };
 
-use crate::app_state::{AppState, get_app_state};
+use crate::app_state::WindowSnapshot;
 use crate::appearance::Appearance;
 use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
 };
-use crate::launch_configs::launch_config::LaunchConfig;
+use crate::features::FeatureFlag;
+use crate::launch_configs::launch_config::{
+    LaunchConfig, LaunchConfigSource, LaunchConfigWindowSource, WindowTemplate,
+};
 use crate::send_telemetry_from_ctx;
 use crate::server::telemetry::TelemetryEvent;
 use crate::user_config::launch_configs_dir;
@@ -39,6 +43,7 @@ const SIDE_PADDING: f32 = 16.;
 const BUTTON_SIZE: f32 = 24.;
 const DOC_LINK_WIDTH: f32 = 120.;
 const SAVE_CONFIG_BUTTON_LABEL: &str = "Save Configuration";
+const UPDATE_CONFIG_BUTTON_LABEL: &str = "Update Configuration";
 const OPEN_FILE_BUTTON_LABEL: &str = "Open YAML File";
 
 pub fn init(app: &mut AppContext) {
@@ -57,33 +62,6 @@ pub fn init(app: &mut AppContext) {
     )]);
 }
 
-/// A model for tracking the current source of the snapshot taken of the window configuration
-///
-/// This is necessary due to a quirk in how the UI Framework handles event handlers / callbacks:
-///
-/// In order to work around Rusts restriction on having two mutable references to the same data,
-/// the framework _removes_ a view from the map of all views before calling a handler (it then
-/// immediately re-inserts it into the map afterwards). This means then when a handler is being
-/// executed in a given View, that View is _not_ in the global map. This means when taking a
-/// snapshot of the current application state (window configuration) the view which calls
-/// `get_app_state` will not be included in the snapshot (since it's not in the global map).
-///
-/// Instead, we create a small Model to cache the snapshot source information (window and view id)
-/// and subscribe to any changes to that model from here. Then the model update handler is
-/// scheduled after the event handler callback completes. This means that the model update handler is
-/// called on the Save Modal directly, rather than the Workspace. This is safe because of two reasons.
-/// First, the Save Modal cannot be launched from the Save Modal. Second, the Save Modal doesn't need
-/// need to be included in the snapshot of the application state (window configuration).
-#[derive(PartialEq)]
-enum SnapshotTrigger {
-    None,
-    StartSnapshot,
-}
-
-impl Entity for SnapshotTrigger {
-    type Event = ();
-}
-
 #[derive(Default)]
 struct SaveModalMouseStates {
     close_button_state: MouseStateHandle,
@@ -92,24 +70,21 @@ struct SaveModalMouseStates {
     open_file_button_state: MouseStateHandle,
 }
 
-/// View that shows up when a user expresses the intent to save their current
-/// app state as a launch config.
+/// Saves the current window as a new or existing launch configuration.
 pub struct LaunchConfigSaveModal {
     editor: ViewHandle<EditorView>,
     mouse_states: SaveModalMouseStates,
-    current_app_state: Option<AppState>,
-    snapshot_source: ModelHandle<SnapshotTrigger>,
+    current_window_snapshot: Option<WindowSnapshot>,
+    launch_config_source: Option<LaunchConfigWindowSource>,
     save_state: SaveState,
-    file_name: Option<String>,
+    file_path: Option<std::path::PathBuf>,
     open_modal_keybinding_str: String,
 }
 
-/// Keeps track of the current lifecycle state of the modal
-/// NotSaved => Success(file_name)
-/// NotSaved => Failure, ideally this shouldn't happen
+/// Keeps track of the current lifecycle state of the modal.
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum SaveState {
-    /// Succeeds to save (String arg is file_name)
+    /// Succeeds to save.
     Success,
     /// Fails to save
     Failure(FailureType),
@@ -184,19 +159,13 @@ impl LaunchConfigSaveModal {
             me.handle_editor_event(event, ctx);
         });
 
-        let snapshot_source = ctx.add_model(|_| SnapshotTrigger::None);
-        ctx.observe(
-            &snapshot_source,
-            LaunchConfigSaveModal::on_snapshot_source_change,
-        );
-
         LaunchConfigSaveModal {
             editor,
             mouse_states: Default::default(),
-            current_app_state: Default::default(),
-            snapshot_source,
+            current_window_snapshot: None,
+            launch_config_source: None,
             save_state: SaveState::NotSaved,
-            file_name: None,
+            file_path: None,
             open_modal_keybinding_str: keybinding_name_to_display_string(
                 "workspace:toggle_launch_config_palette",
                 ctx,
@@ -205,23 +174,13 @@ impl LaunchConfigSaveModal {
         }
     }
 
-    pub fn set_snapshot_source(&mut self, ctx: &mut ViewContext<Self>) {
-        self.snapshot_source.update(ctx, |snapshot_source, ctx| {
-            *snapshot_source = SnapshotTrigger::StartSnapshot;
-            ctx.notify();
-        })
-    }
-
-    fn on_snapshot_source_change(
+    pub fn set_window_snapshot(
         &mut self,
-        source: ModelHandle<SnapshotTrigger>,
-        ctx: &mut ViewContext<Self>,
+        window_snapshot: WindowSnapshot,
+        launch_config_source: Option<LaunchConfigWindowSource>,
     ) {
-        if *source.as_ref(ctx) == SnapshotTrigger::None {
-            return;
-        }
-        let app_state = get_app_state(ctx);
-        self.set_current_app_state(app_state);
+        self.current_window_snapshot = Some(window_snapshot);
+        self.launch_config_source = launch_config_source;
     }
 
     fn handle_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
@@ -243,9 +202,9 @@ impl LaunchConfigSaveModal {
         use crate::util::openable_file_type::resolve_file_target;
 
         if let SaveState::Success = &self.save_state
-            && let Some(file_name) = &self.file_name
+            && let Some(file_path) = &self.file_path
         {
-            let file_path = launch_configs_dir().join(file_name);
+            let file_path = file_path.clone();
             // Resolve target and emit event - workspace will handle all cases
             let settings = EditorSettings::as_ref(ctx);
             let target = resolve_file_target(&file_path, settings, None);
@@ -260,28 +219,66 @@ impl LaunchConfigSaveModal {
 
     #[cfg(feature = "local_fs")]
     fn try_save_launch_config(&mut self, ctx: &mut ViewContext<Self>) {
-        let file_name_candidate = self.editor.as_ref(ctx).buffer_text(ctx);
-        let launch_config_name = file_name_to_human_readable_name(&file_name_candidate);
-        if let Some(app_state) = &self.current_app_state {
-            let launch_config = LaunchConfig::from_snapshot(launch_config_name, app_state);
-            match WarpConfig::save_new_launch_config(file_name_candidate, launch_config.clone()) {
-                Ok(file_name) => {
-                    self.saved_successfully(file_name, ctx);
-                    ctx.emit(LaunchConfigModalEvent::SuccessfullySavedConfig(
-                        launch_config,
-                    ));
-                }
-                Err(e) => {
-                    log::warn!("Failed to save current session as template. error: {e}");
-                    if e.to_string().contains("File already exists") {
-                        self.failed_save(FailureType::FileAlreadyExists, ctx);
-                    } else {
-                        self.failed_save(FailureType::Other, ctx);
+        let Some(window_snapshot) = self.current_window_snapshot.as_ref() else {
+            self.failed_save(FailureType::Other, ctx);
+            return;
+        };
+
+        let result = if let Some(source) = self.launch_config_source.as_ref() {
+            let window_template = WindowTemplate::from(window_snapshot.clone());
+            WarpConfig::overwrite_launch_config_window(source, window_template).and_then(
+                |launch_config| {
+                    if FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+                        crate::launch_configs::session_store::save(source, window_snapshot)?;
                     }
+                    Ok((source.path.clone(), launch_config))
+                },
+            )
+        } else {
+            let file_name_candidate = self.editor.as_ref(ctx).buffer_text(ctx);
+            let launch_config_name = file_name_to_human_readable_name(&file_name_candidate);
+            let mut launch_config =
+                LaunchConfig::from_window_snapshot(launch_config_name, window_snapshot);
+            WarpConfig::save_new_launch_config(file_name_candidate, launch_config.clone()).and_then(
+                |file_name| {
+                    let path = launch_configs_dir().join(file_name);
+                    let source = LaunchConfigSource {
+                        path: path.clone(),
+                        document_index: 0,
+                    };
+                    launch_config.source = Some(source);
+                    if FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+                        let window_source = launch_config
+                            .window_source(0)
+                            .expect("new launch configuration has a source");
+                        crate::launch_configs::session_store::save(
+                            &window_source,
+                            window_snapshot,
+                        )?;
+                    }
+                    Ok((path, launch_config))
+                },
+            )
+        };
+
+        match result {
+            Ok((path, launch_config)) => {
+                self.saved_successfully(path, ctx);
+                ctx.emit(LaunchConfigModalEvent::SuccessfullySavedConfig(
+                    launch_config,
+                ));
+            }
+            Err(error) => {
+                safe_warn!(
+                    safe: ("Failed to save current window as launch configuration"),
+                    full: ("Failed to save current window as launch configuration: {error:#}")
+                );
+                if error.to_string().contains("File already exists") {
+                    self.failed_save(FailureType::FileAlreadyExists, ctx);
+                } else {
+                    self.failed_save(FailureType::Other, ctx);
                 }
             }
-        } else {
-            self.failed_save(FailureType::Other, ctx);
         }
         ctx.notify();
     }
@@ -297,15 +294,12 @@ impl LaunchConfigSaveModal {
     /// Closes the modal
     pub fn close(&mut self, ctx: &mut ViewContext<Self>) {
         self.reset_editor(ctx); // clears editor and resets placeholder
-        self.current_app_state = None;
+        self.current_window_snapshot = None;
+        self.launch_config_source = None;
+        self.file_path = None;
         self.save_state = SaveState::NotSaved;
         ctx.notify();
         ctx.emit(LaunchConfigModalEvent::Close);
-    }
-
-    /// Sets the app state to get all the sessions to put in the yaml on save
-    fn set_current_app_state(&mut self, app_state: AppState) {
-        self.current_app_state = Some(app_state);
     }
 
     fn save_modal_button(
@@ -339,7 +333,11 @@ impl LaunchConfigSaveModal {
     ) -> Box<dyn Element> {
         self.save_modal_button(
             appearance,
-            SAVE_CONFIG_BUTTON_LABEL.to_owned(),
+            if self.launch_config_source.is_some() {
+                UPDATE_CONFIG_BUTTON_LABEL.to_owned()
+            } else {
+                SAVE_CONFIG_BUTTON_LABEL.to_owned()
+            },
             self.mouse_states.save_button_state.clone(),
             disabled,
         )
@@ -436,7 +434,11 @@ impl LaunchConfigSaveModal {
                     1.0,
                     Align::new(
                         Text::new_inline(
-                            "Save Current Configuration",
+                            if let Some(source) = &self.launch_config_source {
+                                format!("Update {}", source.config_name)
+                            } else {
+                                "Save Current Window".to_string()
+                            },
                             appearance.header_font_family(),
                             appearance.header_font_size(),
                         )
@@ -471,8 +473,12 @@ impl LaunchConfigSaveModal {
             .finish()
     }
 
-    pub fn saved_successfully(&mut self, file_name: String, ctx: &mut ViewContext<Self>) {
-        self.set_save_state(SaveState::Success, Some(file_name));
+    pub fn saved_successfully(
+        &mut self,
+        file_path: std::path::PathBuf,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.set_save_state(SaveState::Success, Some(file_path));
         send_telemetry_from_ctx!(
             TelemetryEvent::SaveLaunchConfig {
                 state: SaveState::Success,
@@ -548,7 +554,12 @@ impl LaunchConfigSaveModal {
                 .with_child(
                     self.render_formatted_text_line(appearance, vec![
                         FormattedTextFragment::plain_text("Saved successfully to "),
-                        FormattedTextFragment::inline_code(self.file_name.clone().unwrap_or_default()),
+                        FormattedTextFragment::inline_code(
+                            self.file_path
+                                .as_deref()
+                                .map(home_relative_path)
+                                .unwrap_or_default()
+                        ),
                         FormattedTextFragment::plain_text(".")
                     ])
                     .with_padding_bottom(24.)
@@ -569,38 +580,56 @@ impl LaunchConfigSaveModal {
                 .finish(),
             ),
             SaveState::NotSaved => {
-                let mut text = "This will save your current configuration of windows, tabs \
-                and panes to a file so you can easily open it again".to_string();
-                if self.open_modal_keybinding_str.is_empty() {
-                    text.push('.');
+                if let Some(source) = &self.launch_config_source {
+                    header
+                        .with_child(
+                            self.render_formatted_text_line(
+                                appearance,
+                                vec![FormattedTextFragment::plain_text(format!(
+                                    "This replaces only the window opened from {}. Other Warp windows and launch configurations are not included. Shell and agent recovery state continues saving automatically.",
+                                    source.config_name
+                                ))],
+                            )
+                            .with_padding_bottom(24.)
+                            .finish(),
+                        )
+                        .with_child(link_to_docs)
                 } else {
-                    text.push_str(&format!(" with {}.", self.open_modal_keybinding_str));
+                    let mut text = "This saves the current window's tabs and panes so you can easily open it again. Shell and agent recovery state will save automatically".to_string();
+                    if self.open_modal_keybinding_str.is_empty() {
+                        text.push('.');
+                    } else {
+                        text.push_str(&format!(" with {}.", self.open_modal_keybinding_str));
+                    }
+                    header
+                        .with_child(
+                            self.render_formatted_text_line(
+                                appearance,
+                                vec![FormattedTextFragment::plain_text(text)],
+                            )
+                            .finish(),
+                        )
+                        .with_child(
+                            self.render_formatted_text_line(appearance, vec![
+                                FormattedTextFragment::plain_text("\nThe YAML file is saved to "),
+                                FormattedTextFragment::inline_code(home_relative_path(&launch_configs_dir())),
+                                FormattedTextFragment::plain_text("."),
+                            ])
+                            .with_padding_bottom(24.)
+                            .finish(),
+                        )
+                        .with_child(link_to_docs)
+                        .with_child(self.render_editor(app))
                 }
-                header
-                    .with_child(
-                        self.render_formatted_text_line(appearance, vec![
-                            FormattedTextFragment::plain_text(text)
-                        ]).finish()
-                    )
-                    .with_child(
-                        self.render_formatted_text_line(appearance, vec![
-                            FormattedTextFragment::plain_text("\nThe YAML file is saved to "),
-                            FormattedTextFragment::inline_code(home_relative_path(&launch_configs_dir())),
-                            FormattedTextFragment::plain_text("."),
-                        ])
-                        .with_padding_bottom(24.)
-                        .finish(),
-                    )
-                    .with_child(link_to_docs)
-                    .with_child(self.render_editor(app))
             }
         };
 
         ConstrainedBox::new(
             Container::new(
-                info.with_child(
-                    self.render_button_row(appearance, self.editor.as_ref(app).is_empty(app)),
-                )
+                info.with_child(self.render_button_row(
+                    appearance,
+                    self.launch_config_source.is_none() && self.editor.as_ref(app).is_empty(app),
+                ))
                 .finish(),
             )
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
@@ -613,10 +642,10 @@ impl LaunchConfigSaveModal {
         .finish()
     }
 
-    fn set_save_state(&mut self, save_state: SaveState, file_name: Option<String>) {
+    fn set_save_state(&mut self, save_state: SaveState, file_path: Option<std::path::PathBuf>) {
         self.save_state = save_state;
-        if let Some(file_name) = file_name {
-            self.file_name = Some(file_name);
+        if let Some(file_path) = file_path {
+            self.file_path = Some(file_path);
         }
     }
 }
@@ -628,7 +657,9 @@ impl View for LaunchConfigSaveModal {
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
         if focus_ctx.is_self_focused() {
-            ctx.focus(&self.editor);
+            if self.launch_config_source.is_none() {
+                ctx.focus(&self.editor);
+            }
             ctx.notify();
         }
     }
@@ -655,9 +686,8 @@ impl View for LaunchConfigSaveModal {
     fn accessibility_contents(&self, _ctx: &AppContext) -> Option<AccessibilityContent> {
         Some(AccessibilityContent::new(
             "Save Config Modal",
-            "Type the name of the file to which you want to save your
-            current configuration of windows, tabs, and panes. Use enter to save the
-            launch configuration, esc to quit the save configuration modal.",
+            "Save the current window as a new launch configuration or update the launch
+            configuration that opened it. Use enter to save and escape to close the modal.",
             WarpA11yRole::PopoverRole,
         ))
     }
@@ -677,10 +707,9 @@ impl TypedActionView for LaunchConfigSaveModal {
         };
         match action {
             LaunchConfigSaveAction::Close => self.close(ctx),
-            LaunchConfigSaveAction::Save =>
-            {
+            LaunchConfigSaveAction::Save => {
                 #[cfg(feature = "local_fs")]
-                if !self.editor.as_ref(ctx).is_empty(ctx) {
+                if self.launch_config_source.is_some() || !self.editor.as_ref(ctx).is_empty(ctx) {
                     self.try_save_launch_config(ctx);
                 }
             }

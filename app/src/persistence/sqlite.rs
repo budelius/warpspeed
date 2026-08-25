@@ -75,7 +75,7 @@ use crate::ai::persisted_workspace::EnablementState;
 use crate::app_state::{
     AIFactPaneSnapshot, AmbientAgentPaneSnapshot, AppState, BranchSnapshot, CodePaneSnapShot,
     CodePaneTabSnapshot, CodeReviewPaneSnapshot, EnvVarCollectionPaneSnapshot, LeafContents,
-    LeafSnapshot, LeftPanelSnapshot, NotebookPaneSnapshot, PaneFlex, PaneNodeSnapshot,
+    LeafSnapshot, LeftPanelSnapshot, NotebookPaneSnapshot, PaneFlex, PaneNodeSnapshot, PaneUuid,
     RightPanelSnapshot, SettingsPaneSnapshot, SplitDirection, TabGroupSnapshot, TabSnapshot,
     TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
 };
@@ -112,7 +112,7 @@ use crate::workspace::tab_group::TabGroupId;
 use crate::workspaces::team::Team as TeamMetadata;
 use crate::workspaces::user_profiles::{UserProfileWithUID, user_profile_from_persistence};
 use crate::workspaces::workspace::{Workspace as WorkspaceMetadata, WorkspaceUid};
-use crate::{safe_info, send_telemetry_from_app_ctx};
+use crate::{safe_error, safe_info, send_telemetry_from_app_ctx};
 
 diesel::define_sql_function! {
     fn json_extract(target: diesel::sql_types::Text, path: diesel::sql_types::Text) -> diesel::sql_types::Text;
@@ -466,6 +466,16 @@ pub fn database_file_path_for_scope(scope: &PersistenceScope) -> PathBuf {
 /// Ad-hoc read-only connections should use this instead of hardcoding
 /// [`PersistenceScope::App`], so that a TUI process never reads the GUI's
 /// database.
+pub(crate) fn load_restored_blocks_for_launch_config()
+-> Result<Arc<HashMap<PaneUuid, Vec<crate::ai::blocklist::SerializedBlockListItem>>>> {
+    let path = database_file_path_for_current_scope();
+    let database_url = path
+        .to_str()
+        .ok_or_else(|| anyhow!("Persistence database path is not valid UTF-8"))?;
+    let mut connection = establish_ro_connection(database_url)?;
+    Ok(Arc::new(get_all_restored_blocks(&mut connection)?))
+}
+
 pub fn database_file_path_for_current_scope() -> PathBuf {
     database_file_path_for_scope(&super::current_scope())
 }
@@ -605,6 +615,35 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                             log::info!("Shutting down SQLite writer thread");
                             return;
                         }
+                        ModelEvent::SaveLaunchConfigWindowSessions {
+                            windows,
+                            include_blocks,
+                        } => {
+                            if paused {
+                                log::info!("Ignoring event as SQLite Writer is on pause");
+                                continue;
+                            }
+                            let block_lists = if include_blocks {
+                                get_all_restored_blocks(&mut current_conn)
+                                    .map_err(anyhow::Error::new)
+                            } else {
+                                Ok(HashMap::new())
+                            };
+                            let result = block_lists.and_then(|block_lists| {
+                                crate::launch_configs::session_store::save_windows(
+                                    &windows,
+                                    &block_lists,
+                                )
+                            });
+                            if let Err(error) = result {
+                                safe_error!(
+                                    safe: ("Failed to save launch config window sessions"),
+                                    full: (
+                                        "Failed to save launch config window sessions: {error:#}"
+                                    )
+                                );
+                            }
+                        }
                         event => {
                             if paused {
                                 log::info!("Ignoring event as SQLite Writer is on pause");
@@ -626,11 +665,13 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
 /// * [`ModelEvent::PauseAndRemoveDatabase`]
 /// * [`ModelEvent::ReconstructAndResume`]
 /// * [`ModelEvent::Terminate`]
+/// * [`ModelEvent::SaveLaunchConfigWindowSessions`]
 fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> anyhow::Result<()> {
     match event {
         ModelEvent::PauseAndRemoveDatabase
         | ModelEvent::ReconstructAndResume
-        | ModelEvent::Terminate => {
+        | ModelEvent::Terminate
+        | ModelEvent::SaveLaunchConfigWindowSessions { .. } => {
             panic!("Unhandled control-flow event {event:?}");
         }
         ModelEvent::SaveBlock(BlockCompleted {
@@ -885,24 +926,33 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     report_error!(err.context(format!("SQLite {err_kind} error")));
 }
 
-/// Filter a collection of model events to remove skippable events:
-/// * [`ModelEvent::Snapshot`] includes the entire app state, so we only need the latest one.
+/// Filter a collection of model events to remove superseded snapshots.
 fn deduplicate_events(events: Vec<ModelEvent>) -> Vec<ModelEvent> {
-    let last_snapshot = events
+    let last_snapshot_index = events
         .iter()
+        .rposition(|event| matches!(event, ModelEvent::Snapshot(_)));
+    let last_launch_config_sessions_index = events.iter().rposition(|event| {
+        matches!(
+            event,
+            ModelEvent::SaveLaunchConfigWindowSessions {
+                include_blocks: false,
+                ..
+            }
+        )
+    });
+
+    events
+        .into_iter()
         .enumerate()
-        .rfind(|(_, event)| matches!(event, ModelEvent::Snapshot(_)));
-    match last_snapshot {
-        Some((last_snapshot_index, _)) => events
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, event)| match event {
-                ModelEvent::Snapshot(_) if index < last_snapshot_index => None,
-                event => Some(event),
-            })
-            .collect(),
-        None => events,
-    }
+        .filter_map(|(index, event)| match event {
+            ModelEvent::Snapshot(_) if Some(index) != last_snapshot_index => None,
+            ModelEvent::SaveLaunchConfigWindowSessions {
+                include_blocks: false,
+                ..
+            } if Some(index) != last_launch_config_sessions_index => None,
+            event => Some(event),
+        })
+        .collect()
 }
 
 // Used in the save_app_state function to help make the code more readable.
@@ -985,6 +1035,10 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                     .as_ref()
                     .and_then(|f| serde_json::to_string(f).ok()),
                 team_uid: window.team_uid.map(Into::into),
+                launch_config_source: window
+                    .launch_config_source
+                    .as_ref()
+                    .and_then(|source| serde_json::to_string(source).ok()),
             };
             diesel::insert_into(schema::windows::dsl::windows)
                 .values(new_window)
@@ -2697,6 +2751,9 @@ fn read_sqlite_data(
                         agent_management_filters: window
                             .agent_management_filters
                             .and_then(|s| serde_json::from_str(&s).ok()),
+                        launch_config_source: window
+                            .launch_config_source
+                            .and_then(|source| serde_json::from_str(&source).ok()),
                         tab_groups: tab_groups_snapshots,
                     }
                 },

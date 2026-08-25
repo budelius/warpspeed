@@ -583,7 +583,7 @@ impl TryFrom<PersistedAIAgentActionType> for AIAgentActionType {
 /// blocks are true [`crate::terminal::model::block::Block`]s.
 ///
 /// TODO(roland): now that there is no AI serialized block, consider removing this enum wrapper
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub enum SerializedBlockListItem {
     Command { block: Box<SerializedBlock> },
 }

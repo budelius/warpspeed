@@ -2257,6 +2257,15 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) -> ModalViewState<Modal<Menu<WorkspaceAction>>> {
         let menu = ctx.add_typed_action_view(|_| Menu::new().with_drop_shadow());
+        // Selecting an item dispatches `ChangeShell` and then, independently,
+        // has the menu emit its own `Close` (see `MenuAction::Close` in
+        // menu.rs) -- without this subscription the picker would linger open
+        // after a shell was chosen.
+        ctx.subscribe_to_view(&menu, |me, _, event, ctx| {
+            if matches!(event, MenuEvent::Close { .. }) {
+                me.close_change_shell_menu(ctx);
+            }
+        });
         let modal = ctx.add_typed_action_view(|ctx| {
             Modal::new(Some("Change shell".to_string()), menu, ctx).with_modal_style(
                 UiComponentStyles {

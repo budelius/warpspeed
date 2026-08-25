@@ -307,6 +307,13 @@ pub(crate) fn fork_transcript_at_last_complete_turn(
         todos: HashMap::new(),
     };
     write_envelope(&envelope, config_root).context("Failed to write forked Claude transcript")?;
+    // Mirrors rehydrate_claude_transcript: without a sessions-index.json entry for the new
+    // uuid, `claude --resume` can fail with "No conversation found" even though the jsonl
+    // was written correctly. Best-effort, like the sibling call — log rather than fail the
+    // fork over an index update.
+    if let Err(e) = write_session_index_entry(new_session_id, cwd, config_root) {
+        log::warn!("Failed to update Claude sessions-index.json: {e:#}");
+    }
 
     Ok(Some(ClaudeLocalContinuation {
         command: format!("claude --resume {new_session_id}"),
@@ -321,23 +328,35 @@ pub(crate) fn fork_transcript_at_last_complete_turn(
 /// treat as ground truth — one JSON object per line, opaque beyond `"type"` — plus the
 /// publicly documented Claude Code transcript format: an entry with `"type": "assistant"`
 /// carries a nested `"message"` object mirroring the Anthropic Messages API, including
-/// `message.stop_reason`. That field is `"tool_use"` (or absent/null, on an entry still being
-/// streamed) while the turn continues, and a terminal reason (e.g. `"end_turn"`,
-/// `"max_tokens"`, `"stop_sequence"`) once the assistant has nothing more queued.
+/// `message.stop_reason`. That field is a value from a small, known set once the assistant is
+/// genuinely done (see [`TERMINAL_STOP_REASONS`]); anything else — `"tool_use"` (queued tool
+/// calls), `"pause_turn"` (explicitly "not done, continue"), absent/null (still streaming), or
+/// any value this code doesn't recognise — means the turn continues.
 ///
 /// A turn is therefore "complete" at the last `type: "assistant"` entry whose
-/// `message.stop_reason` is present and not `"tool_use"`. Trimming keeps every entry up to and
-/// including that entry and drops everything after it. If no such entry exists — the
+/// `message.stop_reason` is one of the known-terminal values. Trimming keeps every entry up to
+/// and including that entry and drops everything after it. If no such entry exists — the
 /// transcript is empty, or its first turn was interrupted before a terminal assistant entry
 /// was ever flushed — nothing is resumable and this returns `None`.
+///
+/// This is deliberately an allowlist, not a blacklist: an unrecognised or future
+/// `stop_reason` must be treated as non-terminal, because the failure mode of under-trimming
+/// (resuming a partial turn) is the corruption this task exists to prevent, while
+/// over-trimming (dropping a turn that was actually complete) merely loses some otherwise-
+/// recoverable scrollback. When in doubt, trim more.
 fn trim_to_last_complete_turn(entries: &[Value]) -> Option<&[Value]> {
     let last_complete = entries.iter().rposition(is_terminal_assistant_entry)?;
     Some(&entries[..=last_complete])
 }
 
+/// `message.stop_reason` values that mean the assistant has nothing more queued for this
+/// turn. Anything not in this list — including `"tool_use"`, `"pause_turn"`, and any value
+/// added to the Messages API after this was written — is treated as non-terminal.
+const TERMINAL_STOP_REASONS: &[&str] = &["end_turn", "max_tokens", "stop_sequence", "refusal"];
+
 /// Whether `entry` is a `type: "assistant"` entry whose `message.stop_reason` marks the end
-/// of a turn (present and not `"tool_use"`). See [`trim_to_last_complete_turn`] for the
-/// schema this relies on.
+/// of a turn (one of [`TERMINAL_STOP_REASONS`]). See [`trim_to_last_complete_turn`] for the
+/// schema this relies on and why this is an allowlist.
 fn is_terminal_assistant_entry(entry: &Value) -> bool {
     if entry.get("type").and_then(Value::as_str) != Some("assistant") {
         return false;
@@ -346,7 +365,7 @@ fn is_terminal_assistant_entry(entry: &Value) -> bool {
         .get("message")
         .and_then(|message| message.get("stop_reason"))
         .and_then(Value::as_str)
-        .is_some_and(|reason| reason != "tool_use")
+        .is_some_and(|reason| TERMINAL_STOP_REASONS.contains(&reason))
 }
 
 /// Write a [`ClaudeTranscriptEnvelope`] to a project directory derived from `storage_cwd`,

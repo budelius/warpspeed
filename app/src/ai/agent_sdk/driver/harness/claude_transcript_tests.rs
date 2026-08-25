@@ -298,6 +298,26 @@ fn fork_transcript_trims_to_last_complete_turn() {
             Some(vec![user_entry(), assistant_entry(Some("end_turn"))]),
         ),
         (
+            "pause_turn after a complete one: pause_turn is not terminal, trimmed to the complete turn",
+            vec![
+                user_entry(),
+                assistant_entry(Some("end_turn")),
+                user_entry(),
+                assistant_entry(Some("pause_turn")),
+            ],
+            Some(vec![user_entry(), assistant_entry(Some("end_turn"))]),
+        ),
+        (
+            "unrecognised future stop_reason after a complete one: unknown values are not terminal, trimmed to the complete turn",
+            vec![
+                user_entry(),
+                assistant_entry(Some("end_turn")),
+                user_entry(),
+                assistant_entry(Some("some_future_reason")),
+            ],
+            Some(vec![user_entry(), assistant_entry(Some("end_turn"))]),
+        ),
+        (
             "only a partial first turn: nothing resumable",
             vec![user_entry(), assistant_entry(Some("tool_use"))],
             None,
@@ -328,6 +348,18 @@ fn fork_transcript_trims_to_last_complete_turn() {
                 let forked = read_envelope(new_uuid, cwd, tmp.path()).unwrap();
                 assert_eq!(forked.entries, expected_entries, "case: {description}");
                 assert_eq!(forked.cwd, cwd, "case: {description}");
+
+                // The resume command is only useful if `claude --resume <new_uuid>` can
+                // actually find it — that lookup goes through sessions-index.json.
+                let index: serde_json::Value = serde_json::from_slice(
+                    &fs::read(tmp.path().join("sessions-index.json")).unwrap(),
+                )
+                .unwrap_or_else(|_| panic!("missing/invalid sessions-index.json for case: {description}"));
+                assert_eq!(
+                    index[new_uuid.to_string()]["sessionId"],
+                    new_uuid.to_string(),
+                    "case: {description}"
+                );
             }
             None => {
                 assert!(result.is_none(), "expected None for case: {description}");

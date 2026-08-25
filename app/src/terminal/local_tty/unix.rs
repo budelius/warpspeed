@@ -209,6 +209,7 @@ fn parse_passwd_line(line: &str, uid: u32) -> Option<CurrentUser> {
 pub struct Pty {
     pty_handle: Box<dyn PtyHandle>,
     fd: File,
+    replay: Option<File>,
     token: mio::Token,
     signals: Signals,
     signals_token: mio::Token,
@@ -218,6 +219,7 @@ pub struct Pty {
 pub struct PtySpawnResult {
     pub pid: u32,
     pub leader_fd: i32,
+    pub replay_fd: Option<i32>,
 }
 
 pub(super) fn spawn(options: PtyOptions) -> Result<PtySpawnInfo> {
@@ -584,6 +586,7 @@ fn spawn_command_in_pty(
         result: PtySpawnResult {
             pid: spawned.id(),
             leader_fd: leader,
+            replay_fd: None,
         },
         child: spawned,
     })
@@ -593,6 +596,7 @@ impl Pty {
     /// Create a new pty and return a handle to interact with it.
     pub fn new(
         options: PtyOptions,
+        persistent_session_id: warp_core::SessionId,
         is_crash_reporting_enabled: bool,
         ctx: &mut AppContext,
     ) -> Result<Self> {
@@ -603,10 +607,21 @@ impl Pty {
         let signals = Signals::new([signal_hook::consts::SIGCHLD])
             .context("error preparing signal handling")?;
 
-        let (PtySpawnResult { pid, leader_fd }, pty_handle) = PtySpawner::handle(ctx)
-            .update(ctx, |pty_spawner, ctx| {
-                pty_spawner.spawn_pty(options, is_crash_reporting_enabled, ctx)
-            })?;
+        let (
+            PtySpawnResult {
+                pid,
+                leader_fd,
+                replay_fd,
+            },
+            pty_handle,
+        ) = PtySpawner::handle(ctx).update(ctx, |pty_spawner, ctx| {
+            pty_spawner.spawn_pty(
+                options,
+                persistent_session_id,
+                is_crash_reporting_enabled,
+                ctx,
+            )
+        })?;
 
         log::info!(
             "Successfully spawned child {} process with pid {}",
@@ -622,9 +637,11 @@ impl Pty {
             File::from_raw_fd(leader_fd)
         };
 
+        let replay = replay_fd.map(|fd| unsafe { File::from_raw_fd(fd) });
         let mut pty = Pty {
             pty_handle,
             fd,
+            replay,
             token: PTY_TOKEN,
             signals,
             signals_token: SIGNALS_TOKEN,
@@ -633,12 +650,47 @@ impl Pty {
         Ok(pty)
     }
 
+    pub fn attach(
+        session_id: warp_core::SessionId,
+        size: &SizeInfo,
+        ctx: &mut AppContext,
+    ) -> Result<Option<Self>> {
+        let signals = Signals::new([signal_hook::consts::SIGCHLD])
+            .context("error preparing signal handling")?;
+        let Some((result, pty_handle)) = PtySpawner::handle(ctx)
+            .update(ctx, |pty_spawner, _| pty_spawner.attach_pty(session_id))?
+        else {
+            return Ok(None);
+        };
+        let fd = unsafe {
+            set_nonblocking(result.leader_fd);
+            File::from_raw_fd(result.leader_fd)
+        };
+        let replay = result
+            .replay_fd
+            .map(|replay_fd| unsafe { File::from_raw_fd(replay_fd) });
+        let mut pty = Self {
+            pty_handle,
+            fd,
+            replay,
+            token: PTY_TOKEN,
+            signals,
+            signals_token: SIGNALS_TOKEN,
+        };
+        pty.on_resize(size);
+        Ok(Some(pty))
+    }
+
     pub fn get_pid(&self) -> u32 {
         self.pty_handle.pid()
     }
 
     pub fn get_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+
+    pub fn persistent_session_id(&self) -> Option<warp_core::SessionId> {
+        self.pty_handle.persistent_session_id()
     }
 }
 
@@ -695,25 +747,37 @@ impl EventedReadWrite for Pty {
 impl EventedPty for Pty {
     #[inline]
     fn next_child_event(&mut self) -> Option<ChildEvent> {
-        self.signals.pending().next().and_then(|signal| {
-            if signal != signal_hook::consts::SIGCHLD {
-                return None;
-            }
+        let received_sigchld = self
+            .signals
+            .pending()
+            .any(|signal| signal == signal_hook::consts::SIGCHLD);
+        if !received_sigchld && !self.pty_handle.requires_exit_polling() {
+            return None;
+        }
 
-            match self.pty_handle.has_process_terminated() {
-                Ok(true) => Some(ChildEvent::Exited),
-                Ok(false) => None,
-                Err(e) => {
-                    log::warn!("Error checking child process termination: {e:#}");
-                    None
-                }
+        match self.pty_handle.has_process_terminated() {
+            Ok(true) => Some(ChildEvent::Exited),
+            Ok(false) => None,
+            Err(e) => {
+                log::warn!("Error checking child process termination: {e:#}");
+                None
             }
-        })
+        }
     }
 
     #[inline]
     fn child_event_token(&self) -> mio::Token {
         self.signals_token
+    }
+
+    fn take_replay_reader(&mut self) -> Option<Box<dyn io::Read + Send>> {
+        self.replay
+            .take()
+            .map(|replay| Box::new(replay) as Box<dyn io::Read + Send>)
+    }
+
+    fn requires_exit_polling(&self) -> bool {
+        self.pty_handle.requires_exit_polling()
     }
 
     fn on_resize(&mut self, size: &SizeInfo) {

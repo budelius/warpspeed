@@ -1769,6 +1769,12 @@ impl PaneGroup {
                     ctx,
                 );
 
+                if let Some(session_id) = terminal_snapshot.persistent_session_id {
+                    terminal_manager.update(ctx, |manager, ctx| {
+                        manager.restore_persistent_session(session_id, ctx);
+                    });
+                }
+
                 let terminal_view_id = terminal_view.id();
 
                 let mut pane_data = TerminalPane::new(
@@ -2230,6 +2236,7 @@ impl PaneGroup {
                         report_error!("Failed to get session data for pane, so used a new uuid");
                         LeafContents::Terminal(TerminalPaneSnapshot {
                             uuid: Uuid::new_v4().as_bytes().to_vec(),
+                            persistent_session_id: None,
                             cwd: None,
                             is_active: visible_leaf_is_active_session,
                             is_read_only: false,

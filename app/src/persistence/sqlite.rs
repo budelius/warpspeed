@@ -1324,6 +1324,9 @@ fn save_pane_state(
                 active_conversation_id: terminal_snapshot
                     .active_conversation_id
                     .map(|id| id.to_string()),
+                persistent_session_id: terminal_snapshot
+                    .persistent_session_id
+                    .map(|id| id.as_u64().to_string()),
             };
 
             diesel::insert_into(schema::terminal_panes::dsl::terminal_panes)
@@ -2289,6 +2292,10 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
 
                     LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: terminal_pane.uuid,
+                        persistent_session_id: terminal_pane
+                            .persistent_session_id
+                            .and_then(|id| id.parse::<u64>().ok())
+                            .map(Into::into),
                         cwd: terminal_pane.cwd,
                         is_active: terminal_pane.is_active,
                         is_read_only: false,

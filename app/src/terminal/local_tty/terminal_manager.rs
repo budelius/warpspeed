@@ -29,6 +29,8 @@ use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, Vie
 use super::event_loop::EventLoop;
 use super::shell::{ShellStarter, ShellStarterSource, ShellStarterSourceOrWslName};
 #[cfg(unix)]
+use super::spawner::PtySpawner;
+#[cfg(unix)]
 use super::terminal_attributes::TerminalAttributesPoller;
 use super::{mio_channel, recorder};
 use crate::ai::aws_credentials::AwsCredentialRefresher as _;
@@ -129,6 +131,12 @@ pub struct TerminalManager<S> {
     /// Everything a *second* session needs that the first one's
     /// [`DeferredShellStart`] consumed. See [`SessionTemplate`].
     session_template: SessionTemplate,
+
+    /// Stable identifier used to reattach a PTY supervised outside the app process.
+    pub(super) persistent_session_id: Option<SessionId>,
+    #[cfg(unix)]
+    pub(super) persistent_server_client:
+        Option<Arc<crate::terminal::local_tty::server::TerminalServerClient>>,
 
     /// Which session this manager is currently forking or running.
     ///
@@ -292,6 +300,25 @@ where
         self.0.is_shell_deferred()
     }
 
+    fn persistent_session_id(&self) -> Option<SessionId> {
+        self.0.persistent_session_id
+    }
+
+    fn restore_persistent_session(
+        &mut self,
+        session_id: SessionId,
+        #[cfg_attr(not(unix), allow(unused_variables))] ctx: &mut ModelContext<
+            Box<dyn TerminalManagerTrait>,
+        >,
+    ) {
+        self.0.persistent_session_id = Some(session_id);
+        #[cfg(unix)]
+        {
+            self.0.persistent_server_client =
+                PtySpawner::handle(ctx).read(ctx, |spawner, _| spawner.persistent_server_client());
+        }
+    }
+
     fn restart_session(
         &mut self,
         target: Option<ShellLaunchData>,
@@ -311,7 +338,11 @@ where
 
 impl<S> Drop for TerminalManager<S> {
     fn drop(&mut self) {
+        let session_never_attached = self.event_loop_handle.is_none();
         self.shutdown_event_loop();
+        if session_never_attached {
+            self.cleanup_unattached_persistent_session();
+        }
     }
 }
 
@@ -604,6 +635,9 @@ impl<S> TerminalManager<S> {
             inactive_pty_reads_rx,
             session_sharer: Rc::new(RefCell::new(None)),
             deferred_shell: None,
+            persistent_session_id: None,
+            #[cfg(unix)]
+            persistent_server_client: None,
             session_generation: 0,
             pending_shell_start: None,
             #[cfg(test)]
@@ -824,6 +858,16 @@ impl<S> TerminalManager<S> {
         }
     }
 
+    fn cleanup_unattached_persistent_session(&mut self) {
+        #[cfg(unix)]
+        if let Some(client) = self.persistent_server_client.as_ref()
+            && let Some(session_id) = self.persistent_session_id.take()
+            && let Err(error) = client.kill_session(session_id)
+        {
+            log::warn!("Failed to clean up unattached terminal session: {error:#}");
+        }
+    }
+
     /// The sole body of `TerminalManagerTrait::restart_session`. Shared by the
     /// concrete `impl TerminalManagerTrait for TerminalManager<TerminalView>`
     /// (terminal_view_adaptor.rs) and `TuiTerminalManager`'s forwarding impl
@@ -868,7 +912,11 @@ impl<S> TerminalManager<S> {
         //    Runs before step 3 so `stop_event_loop` can still see that this
         //    pane's shell was parked or still resolving, and log a missing
         //    event loop handle as routine rather than anomalous.
+        let session_never_attached = self.event_loop_handle.is_none();
         self.stop_event_loop();
+        if session_never_attached {
+            self.cleanup_unattached_persistent_session();
+        }
 
         // 3. Retire the replaced session's identity. Any shell start still
         //    resolving belongs to it and is now inert: the callback compares
@@ -879,6 +927,7 @@ impl<S> TerminalManager<S> {
         //    it correct. Nothing can run in between: `join` blocks the main
         //    thread, so no spawned callback is dispatched during step 2.
         self.session_generation = self.session_generation.wrapping_add(1);
+        self.persistent_session_id = None;
         if let Some(pending) = self.pending_shell_start.take() {
             pending.abort();
         }
@@ -1149,10 +1198,21 @@ fn on_shell_determined<S: TerminalSurface>(
         ShellStarter::DockerSandbox(starter) => starter.session_id(),
         ShellStarter::Wsl(starter) => starter.session_id(),
     };
-    manager
-        .model()
-        .lock()
-        .register_session_id(generated_session_id);
+    // Reattach before enqueueing bootstrap input. Sending a fresh init script
+    // to a shell that is already running would execute it as user input.
+    #[cfg(unix)]
+    let attached_pty = manager.persistent_session_id.and_then(|session_id| {
+        let size = manager.model().lock().block_list().size().to_owned();
+        match Pty::attach(session_id, &size, ctx) {
+            Ok(pty) => pty,
+            Err(error) => {
+                log::warn!("Failed to reattach terminal session: {error:#}");
+                None
+            }
+        }
+    });
+    #[cfg(not(unix))]
+    let attached_pty: Option<Pty> = None;
 
     // Enqueue the init shell script (for shells that need it), then create
     // the PTY and start its corresponding event loop.
@@ -1165,30 +1225,54 @@ fn on_shell_determined<S: TerminalSurface>(
     let model = manager.model();
     #[cfg(windows)]
     let event_loop_tx = manager.event_loop_tx.lock().clone();
-    let pty = match manager
-        .enqueue_init_script(&shell_starter, generated_session_id)
-        .context("Failed to write shell init script to the pty")
-        .and_then(|_| {
-            TerminalManager::<S>::create_pty(
-                startup_directory,
-                shell_starter,
-                env_vars,
-                model.clone(),
-                #[cfg(windows)]
-                event_loop_tx,
-                ctx,
-            )
-        }) {
-        Ok(pty) => pty,
-        Err(err) => {
-            report_error!(&err);
-            manager.view.update(ctx, |surface, ctx| {
-                surface.on_pty_spawn_failed(err, ctx);
-            });
-            manager.model().lock().exit(ExitReason::PtySpawnFailed);
-            return;
+    let pty = match attached_pty {
+        Some(pty) => pty,
+        None => match manager
+            .enqueue_init_script(&shell_starter, generated_session_id)
+            .context("Failed to write shell init script to the pty")
+            .and_then(|_| {
+                TerminalManager::<S>::create_pty(
+                    startup_directory,
+                    shell_starter,
+                    env_vars,
+                    model.clone(),
+                    #[cfg(unix)]
+                    generated_session_id,
+                    #[cfg(windows)]
+                    event_loop_tx,
+                    ctx,
+                )
+            }) {
+            Ok(pty) => pty,
+            Err(err) => {
+                report_error!(&err);
+                manager.view.update(ctx, |surface, ctx| {
+                    surface.on_pty_spawn_failed(err, ctx);
+                });
+                manager.model().lock().exit(ExitReason::PtySpawnFailed);
+                return;
+            }
+        },
+    };
+
+    #[cfg(unix)]
+    let active_session_id = pty.persistent_session_id().unwrap_or(generated_session_id);
+    #[cfg(not(unix))]
+    let active_session_id = generated_session_id;
+    manager.persistent_session_id = {
+        #[cfg(unix)]
+        {
+            pty.persistent_session_id()
+        }
+        #[cfg(not(unix))]
+        {
+            None
         }
     };
+    manager
+        .model()
+        .lock()
+        .register_session_id(active_session_id);
 
     #[cfg(feature = "integration_tests")]
     let pid = pty.get_pid();
@@ -1281,6 +1365,7 @@ impl<S> TerminalManager<S> {
         shell_starter: ShellStarter,
         env_vars: HashMap<OsString, OsString>,
         model: Arc<FairMutex<TerminalModel>>,
+        #[cfg(unix)] persistent_session_id: SessionId,
         #[cfg(windows)] event_loop_tx: mio_channel::Sender<Message>,
         ctx: &mut AppContext,
     ) -> anyhow::Result<Pty> {
@@ -1343,6 +1428,8 @@ impl<S> TerminalManager<S> {
 
         Pty::new(
             options,
+            #[cfg(unix)]
+            persistent_session_id,
             is_crash_reporting_enabled,
             #[cfg(windows)]
             event_loop_tx,

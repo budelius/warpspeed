@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
@@ -92,6 +92,7 @@ use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
 use crate::terminal::local_tty::TerminalManager;
 use crate::terminal::local_tty::spawner::PtySpawner;
+use crate::terminal::local_tty::terminal_manager::native_startup_directory;
 use crate::terminal::model::terminal_model::ConversationTranscriptViewerStatus;
 use crate::terminal::model::terminal_model::ExitReason;
 use crate::terminal::resizable_data::ResizableData;
@@ -4841,4 +4842,58 @@ fn test_two_restarts_in_flight_establish_only_one_session() {
             "the last restart's barrier must have come back round and cleared the mark"
         );
     });
+}
+
+/// `native_startup_directory` translates a host-form directory into the
+/// syntax the target shell expects: `Executable` is the identity, `WSL`
+/// yields `/mnt/<drive>/...`, and `MSYS2` yields the MSYS2 form rooted at
+/// the shell's own installation.
+///
+/// Table-driven across the three shell kinds so a regression in any one
+/// conversion shows up as a named failure rather than a single opaque
+/// assertion.
+#[test]
+fn test_native_startup_directory_converts_per_shell_kind() {
+    struct Case {
+        name: &'static str,
+        shell: ShellLaunchData,
+        expected: Option<PathBuf>,
+    }
+
+    let cwd = Path::new(r"C:\projects\warp");
+
+    let cases = [
+        Case {
+            name: "Executable is the identity",
+            shell: ShellLaunchData::Executable {
+                executable_path: PathBuf::from("/usr/bin/fish"),
+                shell_type: ShellType::Fish,
+            },
+            expected: Some(PathBuf::from(r"C:\projects\warp")),
+        },
+        Case {
+            name: "WSL yields /mnt/<drive>/...",
+            shell: ShellLaunchData::WSL {
+                distro: "Ubuntu".to_owned(),
+            },
+            expected: Some(PathBuf::from("/mnt/c/projects/warp")),
+        },
+        Case {
+            name: "MSYS2 yields the MSYS2 form rooted at the shell's install",
+            shell: ShellLaunchData::MSYS2 {
+                executable_path: PathBuf::from(r"C:\msys64\usr\bin\bash.exe"),
+                shell_type: ShellType::Bash,
+            },
+            expected: Some(PathBuf::from("/c/projects/warp")),
+        },
+    ];
+
+    for case in cases {
+        assert_eq!(
+            native_startup_directory(cwd, &case.shell),
+            case.expected,
+            "case: {}",
+            case.name
+        );
+    }
 }

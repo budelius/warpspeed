@@ -2,7 +2,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{SendError, SyncSender};
@@ -16,8 +16,12 @@ use nix::sys::termios::LocalFlags;
 use parking_lot::{FairMutex, Mutex};
 use pathfinder_geometry::vector::Vector2F;
 use settings::Setting as _;
+use typed_path::WindowsPath;
 use warp_core::SessionId;
 use warp_errors::report_error;
+use warp_util::path::{
+    convert_windows_host_to_wsl_path, convert_windows_native_to_msys2_path, msys2_exe_to_root,
+};
 use warpui::r#async::SpawnedFutureHandle;
 use warpui::r#async::executor::Background;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle};
@@ -919,6 +923,18 @@ impl<S> TerminalManager<S> {
             .unwrap_or_else(|| {
                 shells.read(ctx, |shells, ctx| shells.get_user_preferred_shell(ctx))
             });
+        // `cwd` is in host form; translate it to the form the resolved shell
+        // expects before it ever reaches `DeferredShellStart`, so nothing
+        // downstream has to know which shell is being started. When the
+        // shell isn't resolvable yet (e.g. `Config::SystemDefault`) or the
+        // conversion has no equivalent, fall through to `None` -- the shell
+        // then starts in its own default directory rather than the restart
+        // failing.
+        let cwd = cwd.and_then(|host_cwd| {
+            shell
+                .get_valid_shell_path_and_type()
+                .and_then(|launch_data| native_startup_directory(&host_cwd, &launch_data))
+        });
         let wsl_name_or_shell_starter = ShellStarter::init(shell.clone());
         // Label the pane with the shell it is launching, not the one it just
         // replaced -- a restart may be a switch to a different shell.
@@ -964,6 +980,36 @@ impl<S> TerminalManager<S> {
     #[cfg(test)]
     pub(crate) fn established_session_count(&self) -> usize {
         self.established_session_count
+    }
+}
+
+/// Converts a host-form directory to the form the target shell expects.
+///
+/// Returns `None` when conversion fails, which starts the shell with no
+/// startup directory -- it then uses its own default, the documented
+/// fallback for a directory that no longer resolves.
+pub(crate) fn native_startup_directory(cwd: &Path, shell: &ShellLaunchData) -> Option<PathBuf> {
+    match shell {
+        ShellLaunchData::Executable { .. } => Some(cwd.to_path_buf()),
+        ShellLaunchData::WSL { distro } => convert_windows_host_to_wsl_path(cwd, distro)
+            .ok()
+            .map(PathBuf::from),
+        ShellLaunchData::MSYS2 {
+            executable_path, ..
+        } => {
+            let root = msys2_exe_to_root(WindowsPath::new(
+                executable_path.as_os_str().as_encoded_bytes(),
+            ));
+            // `WindowsPathBuf` has no `AsRef<OsStr>` impl on this platform,
+            // so go through `std::path::PathBuf`'s UTF-8 based `TryFrom`
+            // instead of `Path::new(&root)`.
+            let root = PathBuf::try_from(root).ok()?;
+            convert_windows_native_to_msys2_path(cwd, &root).map(PathBuf::from)
+        }
+        // Paths inside a Docker sandbox container are not host paths at all
+        // -- there is no meaningful translation, so the sandbox starts in
+        // its own default directory.
+        ShellLaunchData::DockerSandbox { .. } => None,
     }
 }
 

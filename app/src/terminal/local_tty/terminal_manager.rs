@@ -163,6 +163,16 @@ pub struct TerminalManager<S> {
     /// so the guard needs a hook to be testable at all.
     #[cfg(test)]
     established_session_count: usize,
+
+    /// Test-only: the startup directory most recently handed to
+    /// `create_pty`, in whatever final form `on_shell_determined` settled on
+    /// (native form, the WSL home-directory fallback, or `None`). Nothing in
+    /// production observes this once it crosses into `PtyOptions` -- it ends
+    /// up as an environment variable read by the shell's own bootstrap --
+    /// so, like `established_session_count`, the guard needs a hook to be
+    /// testable at all.
+    #[cfg(test)]
+    last_resolved_startup_directory: Option<PathBuf>,
 }
 
 /// The inputs a replacement session needs, retained for the lifetime of the
@@ -598,6 +608,8 @@ impl<S> TerminalManager<S> {
             pending_shell_start: None,
             #[cfg(test)]
             established_session_count: 0,
+            #[cfg(test)]
+            last_resolved_startup_directory: None,
             session_template: SessionTemplate {
                 channel_event_proxy,
                 #[cfg(unix)]
@@ -923,18 +935,14 @@ impl<S> TerminalManager<S> {
             .unwrap_or_else(|| {
                 shells.read(ctx, |shells, ctx| shells.get_user_preferred_shell(ctx))
             });
-        // `cwd` is in host form; translate it to the form the resolved shell
-        // expects before it ever reaches `DeferredShellStart`, so nothing
-        // downstream has to know which shell is being started. When the
-        // shell isn't resolvable yet (e.g. `Config::SystemDefault`) or the
-        // conversion has no equivalent, fall through to `None` -- the shell
-        // then starts in its own default directory rather than the restart
-        // failing.
-        let cwd = cwd.and_then(|host_cwd| {
-            shell
-                .get_valid_shell_path_and_type()
-                .and_then(|launch_data| native_startup_directory(&host_cwd, &launch_data))
-        });
+        // `cwd` stays in host form here: which shell will actually launch
+        // isn't settled until `ShellStarter::init`'s async resolution
+        // completes -- a `SystemDefault` setting, the out-of-the-box case
+        // for any user who hasn't customized their shell, still has to fall
+        // through `compute_fallback_shell()` before the real shell is
+        // known. `on_shell_determined` converts `cwd` once the real
+        // `ShellStarter` -- and thus the real `ShellLaunchData` -- is
+        // resolved; see `native_startup_directory`.
         let wsl_name_or_shell_starter = ShellStarter::init(shell.clone());
         // Label the pane with the shell it is launching, not the one it just
         // replaced -- a restart may be a switch to a different shell.
@@ -980,6 +988,13 @@ impl<S> TerminalManager<S> {
     #[cfg(test)]
     pub(crate) fn established_session_count(&self) -> usize {
         self.established_session_count
+    }
+
+    /// Test-only: the startup directory most recently handed to
+    /// `create_pty`. See the field doc for why this needs a hook.
+    #[cfg(test)]
+    pub(crate) fn last_resolved_startup_directory_for_test(&self) -> Option<PathBuf> {
+        self.last_resolved_startup_directory.clone()
     }
 }
 
@@ -1057,31 +1072,11 @@ fn on_shell_determined<S: TerminalSurface>(
         }
     };
 
-    // In WSL, default to the WSL home directory, not the native Windows home directory.
-    let startup_directory = if let (ShellStarter::Wsl(wsl_shell_starter), None) =
-        (&shell_starter, &startup_directory)
-    {
-        wsl_shell_starter.home_directory()
-    } else {
-        startup_directory
-    };
-
-    // Show a "shell unsupported" banner, if applicable.
-    if is_fallback_shell
-        && user_default_shell_unsupported_banner_model_handle.as_ref(ctx)
-            == &BannerState::NotDismissed
-    {
-        user_default_shell_unsupported_banner_model_handle.update(ctx, |model, ctx| {
-            *model = BannerState::Open;
-            ctx.notify();
-        })
-    }
-
-    manager
-        .model()
-        .lock()
-        .set_login_shell_spawned(shell_starter.shell_type());
-
+    // The real shell is now resolved -- compute its `ShellLaunchData` here,
+    // ahead of its other uses below, so `native_startup_directory` can
+    // convert `startup_directory` against the shell that is actually about
+    // to launch rather than a setting (e.g. `Config::SystemDefault`) that
+    // may still resolve to something else entirely.
     let shell_launch_data = match &shell_starter {
         ShellStarter::Direct(shell_starter) => ShellLaunchData::Executable {
             executable_path: shell_starter.logical_shell_path().to_owned(),
@@ -1099,6 +1094,46 @@ fn on_shell_determined<S: TerminalSurface>(
             shell_type: shell_starter.shell_type(),
         },
     };
+
+    // `startup_directory` is in host form when it came from a caller (e.g.
+    // a restart's requested `cwd`); translate it to the form the resolved
+    // shell expects. A conversion failure, or a directory that no longer
+    // resolves, falls through to `None` -- the shell then starts in its own
+    // default directory below rather than the restart failing.
+    let startup_directory = startup_directory
+        .and_then(|host_dir| native_startup_directory(&host_dir, &shell_launch_data));
+
+    // In WSL, default to the WSL home directory, not the native Windows home directory.
+    let startup_directory = if let (ShellStarter::Wsl(wsl_shell_starter), None) =
+        (&shell_starter, &startup_directory)
+    {
+        wsl_shell_starter.home_directory()
+    } else {
+        startup_directory
+    };
+
+    // Record the final, native-form directory for tests -- see the field doc
+    // on `TerminalManager::last_resolved_startup_directory`.
+    #[cfg(test)]
+    {
+        manager.last_resolved_startup_directory = startup_directory.clone();
+    }
+
+    // Show a "shell unsupported" banner, if applicable.
+    if is_fallback_shell
+        && user_default_shell_unsupported_banner_model_handle.as_ref(ctx)
+            == &BannerState::NotDismissed
+    {
+        user_default_shell_unsupported_banner_model_handle.update(ctx, |model, ctx| {
+            *model = BannerState::Open;
+            ctx.notify();
+        })
+    }
+
+    manager
+        .model()
+        .lock()
+        .set_login_shell_spawned(shell_starter.shell_type());
 
     // This needs to be done before bootstrapping starts (i.e. before spawning the event loop below).
     manager

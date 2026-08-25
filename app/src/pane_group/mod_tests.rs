@@ -4897,3 +4897,83 @@ fn test_native_startup_directory_converts_per_shell_kind() {
         );
     }
 }
+
+/// A restart's requested directory must survive even when the user has not
+/// customized their shell setting -- `Config::SystemDefault`, the
+/// out-of-the-box configuration for any user who has never touched "Startup
+/// Shell" (`AvailableShell::default()`, and what
+/// `get_user_preferred_shell_setting_fallback` returns for `StartupShell::
+/// Default`).
+///
+/// This is a regression test for a bug where the directory conversion was
+/// gated on `AvailableShell::get_valid_shell_path_and_type()`, which is
+/// `None` for exactly `Config::SystemDefault` -- so for the default
+/// configuration the requested directory collapsed to `None` *before*
+/// `ShellStarter::init` ever resolved which shell was actually about to
+/// launch, regardless of what that shell turned out to be. The fix moved
+/// the conversion to `on_shell_determined`, where the real, resolved
+/// `ShellLaunchData` is available.
+#[test]
+fn test_restart_with_system_default_shell_still_lands_in_the_requested_directory() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+
+        // No shell has run yet (the pane's shell start is deferred), and
+        // nothing in this harness overrides the shell setting, so
+        // `AvailableShells::get_user_preferred_shell` resolves to
+        // `Config::SystemDefault` when the restart asks it to pick a shell.
+        let requested_dir =
+            std::env::current_dir().expect("the test process has a current directory");
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                manager.restart_session(None, Some(requested_dir.clone()), ctx);
+            });
+        });
+
+        // See the identical loop in the restart tests above: the shell
+        // starter resolves through a spawned task, which only makes
+        // progress when this test yields.
+        for _ in 0..64 {
+            futures_lite::future::yield_now().await;
+        }
+
+        let resolved_dir = app.read(|ctx| {
+            manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .last_resolved_startup_directory_for_test()
+            })
+        });
+
+        assert_eq!(
+            resolved_dir,
+            Some(requested_dir),
+            "a restart under the default (unresolved-until-launch) shell setting must still \
+             hand the actually-launched shell the requested directory, not silently drop it"
+        );
+    });
+}

@@ -984,6 +984,10 @@ enum PendingSessionConfigTabConfigChipTutorial {
 /// focused when the user answers the prompt -- are what actually restart.
 struct PendingShellRestart {
     manager: ModelHandle<Box<dyn TerminalManager>>,
+    /// The pane's terminal view, needed after the confirmation resolves to
+    /// enqueue a `claude --resume` continuation (see
+    /// `Workspace::restart_shell_and_resume_agent`).
+    terminal_view: ViewHandle<TerminalView>,
     /// `None` restarts with the same shell; `Some` switches to it.
     target: Option<ShellLaunchData>,
     cwd: Option<PathBuf>,
@@ -12959,15 +12963,115 @@ impl Workspace {
                 .command_to_string();
             self.pending_shell_restart = Some(PendingShellRestart {
                 manager,
+                terminal_view: view,
                 target,
                 cwd,
             });
             self.show_restart_shell_confirmation_modal(running_command, ctx);
         } else {
-            manager.update(ctx, |manager, ctx| {
-                manager.restart_session(target, cwd, ctx);
+            Self::restart_shell_and_resume_agent(manager, view, target, cwd, ctx);
+        }
+    }
+
+    /// Restarts `manager`'s session in place and, if the pane hosted a resumable Claude
+    /// session, enqueues a `claude --resume <uuid>` continuation so it picks back up once
+    /// the replacement shell bootstraps (`set_pending_command_queue` / `execute_pending_command`
+    /// already refuse to submit until then -- this just parks the command like any other
+    /// startup command).
+    ///
+    /// The CLI agent session context must be read *before* `restart_session` runs: it tears
+    /// down the pane's PTY, and the session id lives nowhere else once that happens.
+    ///
+    /// Any failure along the resume path (untracked session, no session id -- e.g. a bare
+    /// `claude` with no plugin, which is unresumable by any mechanism -- no cwd, or a
+    /// transcript-fork error) is logged and otherwise ignored: the shell still restarts with
+    /// no banner, no warning, no extra confirmation. Getting the shell back matters more than
+    /// getting the agent back.
+    fn restart_shell_and_resume_agent(
+        manager: ModelHandle<Box<dyn TerminalManager>>,
+        terminal_view: ViewHandle<TerminalView>,
+        target: Option<ShellLaunchData>,
+        cwd: Option<PathBuf>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let resume_command = Self::resolve_agent_resume_command(terminal_view.id(), ctx);
+
+        manager.update(ctx, |manager, ctx| {
+            manager.restart_session(target, cwd, ctx);
+        });
+
+        if let Some(command) = resume_command {
+            terminal_view.update(ctx, |terminal_view, ctx| {
+                terminal_view.set_pending_command_queue(vec![command], ctx);
             });
         }
+    }
+
+    /// Looks up the tracked CLI agent session for `terminal_view_id` and, if it names a
+    /// resumable Claude session, forks that session's transcript at its last complete turn.
+    /// Returns `None` (logging why, except for the two silent/expected cases) whenever
+    /// resuming isn't possible:
+    /// - no tracked session, or a tracked session for an agent other than Claude
+    ///   (untracked/unsupported -- silent, by decision)
+    /// - no session id (untracked -- silent, by decision)
+    /// - no cwd on record for the session
+    /// - `fork_transcript_at_last_complete_turn` returns `Ok(None)` (nothing survived the trim)
+    /// - resolving the Claude config dir, or the fork itself, fails
+    #[cfg(not(target_family = "wasm"))]
+    fn resolve_agent_resume_command(
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<String> {
+        let session = CLIAgentSessionsModel::as_ref(ctx).session(terminal_view_id)?;
+        if session.agent != crate::terminal::CLIAgent::Claude {
+            return None;
+        }
+        let session_context = session.session_context.clone();
+
+        let session_id = session_context.session_id?;
+        let uuid = match uuid::Uuid::parse_str(&session_id) {
+            Ok(uuid) => uuid,
+            Err(err) => {
+                log::warn!(
+                    "Failed to parse CLI agent session id {session_id:?} as a uuid; \
+                     restarting the shell without resuming the agent: {err:#}"
+                );
+                return None;
+            }
+        };
+
+        let cwd = session_context.cwd.map(PathBuf::from)?;
+
+        let config_root = match claude_transcript::claude_config_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                log::warn!(
+                    "Failed to resolve the Claude config dir; restarting the shell without \
+                     resuming the agent: {err:#}"
+                );
+                return None;
+            }
+        };
+
+        match claude_transcript::fork_transcript_at_last_complete_turn(uuid, &cwd, &config_root) {
+            Ok(Some(continuation)) => Some(continuation.command),
+            Ok(None) => None,
+            Err(err) => {
+                log::warn!(
+                    "Failed to fork the Claude transcript for resume; restarting the shell \
+                     without resuming the agent: {err:#}"
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn resolve_agent_resume_command(
+        _terminal_view_id: EntityId,
+        _ctx: &mut ViewContext<Self>,
+    ) -> Option<String> {
+        None
     }
 
     fn show_restart_shell_confirmation_modal(
@@ -13009,9 +13113,13 @@ impl Workspace {
         match event {
             RestartShellConfirmationEvent::Confirm => {
                 if let Some(pending) = self.pending_shell_restart.take() {
-                    pending.manager.update(ctx, |manager, ctx| {
-                        manager.restart_session(pending.target, pending.cwd, ctx);
-                    });
+                    Self::restart_shell_and_resume_agent(
+                        pending.manager,
+                        pending.terminal_view,
+                        pending.target,
+                        pending.cwd,
+                        ctx,
+                    );
                 }
                 self.close_restart_shell_confirmation_modal(ctx);
             }

@@ -274,10 +274,6 @@ pub(crate) fn rehydrate_claude_transcript(
 /// Returns `Ok(None)` when there is no session file on disk, or when nothing resumable
 /// survives the trim (e.g. the transcript's first turn was interrupted before any complete
 /// assistant response was flushed).
-///
-/// `#[allow(dead_code)]`: not yet called from production code — the pane-restart path that
-/// calls this is wired in by a later task in the same plan (see `task-7-brief.md`).
-#[allow(dead_code)]
 pub(crate) fn fork_transcript_at_last_complete_turn(
     session_id: Uuid,
     cwd: &Path,

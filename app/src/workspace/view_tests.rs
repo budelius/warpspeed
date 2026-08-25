@@ -5418,6 +5418,153 @@ fn restart_shell_reaches_restart_session_when_idle() {
     });
 }
 
+/// A pane with no tracked CLI agent session has nothing to resume: `RestartShell` must
+/// restart without enqueueing any pending command. This is a regression guard rather than a
+/// red-first test -- nothing enqueues a pending command before the resume wiring exists
+/// either, so it can pass before and after that wiring lands.
+#[test]
+fn restart_shell_without_agent_session_enqueues_nothing() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        let has_pending = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+
+            terminal_view.read(ctx, |terminal_view, ctx| {
+                terminal_view.has_pending_command_or_awaiting_completion(ctx)
+            })
+        });
+
+        assert!(
+            !has_pending,
+            "restarting a pane with no tracked CLI agent session must not enqueue a resume \
+             command"
+        );
+    });
+}
+
+/// The pane's Claude session id is captured from `CLIAgentSessionsModel` before
+/// `restart_session` tears the PTY down, then used to fork that session's on-disk transcript
+/// at its last complete turn (Task 7) and enqueue a `claude --resume <uuid>` continuation.
+///
+/// This must discriminate: it asserts on the *forked* uuid, not merely that some command was
+/// enqueued -- a bug that re-enqueued `claude --resume <original_session_id>` (skipping the
+/// fork Task 7 exists for) would also leave the queue non-empty, so a presence-only
+/// assertion could not catch it.
+#[test]
+fn restart_shell_resumes_tracked_claude_session_via_forked_transcript() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: nextest runs each test in its own process, so mutating this process-global
+        // env var cannot race with another test.
+        unsafe {
+            std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        }
+
+        let cwd = std::path::Path::new("/mock/project/for/resume/test");
+        let original_session_id = uuid::Uuid::new_v4();
+
+        // Write a Claude session transcript ending on a complete turn, in the layout
+        // `fork_transcript_at_last_complete_turn` reads from, so the fork has something to
+        // find and trim.
+        let session_dir = tmp.path().join("projects").join(
+            crate::ai::agent_sdk::driver::harness::claude_transcript::encode_cwd(cwd),
+        );
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let entries = [
+            serde_json::json!({ "type": "user", "message": { "role": "user" } }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "stop_reason": "end_turn" },
+            }),
+        ];
+        let body = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            session_dir.join(format!("{original_session_id}.jsonl")),
+            body,
+        )
+        .unwrap();
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(
+                    terminal_view.id(),
+                    crate::terminal::cli_agent_sessions::CLIAgentSession {
+                        agent: crate::terminal::CLIAgent::Claude,
+                        status:
+                            crate::terminal::cli_agent_sessions::CLIAgentSessionStatus::InProgress,
+                        session_context:
+                            crate::terminal::cli_agent_sessions::CLIAgentSessionContext {
+                                cwd: Some(cwd.to_string_lossy().into_owned()),
+                                session_id: Some(original_session_id.to_string()),
+                                ..Default::default()
+                            },
+                        input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        remote_host: None,
+                        draft_text: None,
+                        custom_command_prefix: None,
+                        received_rich_notification: false,
+                    },
+                    ctx,
+                );
+            });
+
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+        });
+
+        let buffer_text = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.read(ctx, |terminal_view, ctx| {
+                terminal_view
+                    .input()
+                    .read(ctx, |input, ctx| input.buffer_text(ctx))
+            })
+        });
+
+        let resume_uuid: uuid::Uuid = buffer_text
+            .strip_prefix("claude --resume ")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a `claude --resume <uuid>` command to be enqueued, got {buffer_text:?}"
+                )
+            })
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| {
+                panic!("enqueued resume command did not end in a uuid: {e:#} ({buffer_text:?})")
+            });
+
+        assert_ne!(
+            resume_uuid, original_session_id,
+            "the enqueued resume command must target the forked transcript's fresh uuid, not \
+             the original Claude session id"
+        );
+    });
+}
+
 /// The confirmation exists to protect a live session, so no way of
 /// dismissing it may skip clearing `pending_shell_restart`. Escape and the
 /// modal's close (X) button both route through `ModalEvent::Close` rather
@@ -5434,8 +5581,12 @@ fn restart_shell_confirmation_dismiss_clears_pending_restart() {
             let manager = workspace
                 .focused_terminal_manager(ctx)
                 .expect("mock workspace has a focused terminal pane");
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
             workspace.pending_shell_restart = Some(PendingShellRestart {
                 manager,
+                terminal_view,
                 target: None,
                 cwd: None,
             });

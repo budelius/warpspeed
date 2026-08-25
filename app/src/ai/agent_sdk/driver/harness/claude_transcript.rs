@@ -257,6 +257,98 @@ pub(crate) fn rehydrate_claude_transcript(
     })
 }
 
+/// Fork a pane-local Claude session at its last complete assistant turn.
+///
+/// A pane-local `claude` process writes its own JSONL incrementally to
+/// `<config_root>/projects/<encoded_cwd>/<session_id>.jsonl` as it runs. If the pane is
+/// restarted while Claude is mid-turn (still streaming a response, or waiting on a tool
+/// result), the on-disk file ends with a partial turn: resuming that session id directly
+/// (`claude --resume <session_id>`) would hand Claude a truncated conversation to continue
+/// from, corrupting the transcript this feature exists to preserve.
+///
+/// This reads the session's JSONL **read-only**, trims it to the last complete turn (see
+/// [`trim_to_last_complete_turn`]), and writes the trimmed copy under a **fresh** uuid via
+/// [`write_envelope`] — Claude's original file is never modified, so a bad trim is always
+/// recoverable by resuming the original session id instead.
+///
+/// Returns `Ok(None)` when there is no session file on disk, or when nothing resumable
+/// survives the trim (e.g. the transcript's first turn was interrupted before any complete
+/// assistant response was flushed).
+///
+/// `#[allow(dead_code)]`: not yet called from production code — the pane-restart path that
+/// calls this is wired in by a later task in the same plan (see `task-7-brief.md`).
+#[allow(dead_code)]
+pub(crate) fn fork_transcript_at_last_complete_turn(
+    session_id: Uuid,
+    cwd: &Path,
+    config_root: &Path,
+) -> Result<Option<ClaudeLocalContinuation>> {
+    let session_file = config_root
+        .join("projects")
+        .join(encode_cwd(cwd))
+        .join(format!("{session_id}.jsonl"));
+    if !session_file.is_file() {
+        return Ok(None);
+    }
+
+    let entries = read_jsonl(&session_file)
+        .with_context(|| format!("Failed to read {}", session_file.display()))?;
+    let Some(trimmed) = trim_to_last_complete_turn(&entries) else {
+        return Ok(None);
+    };
+
+    let new_session_id = Uuid::new_v4();
+    let envelope = ClaudeTranscriptEnvelope {
+        cwd: cwd.to_path_buf(),
+        uuid: new_session_id,
+        claude_version: None,
+        entries: trimmed.to_vec(),
+        subagents: HashMap::new(),
+        todos: HashMap::new(),
+    };
+    write_envelope(&envelope, config_root).context("Failed to write forked Claude transcript")?;
+
+    Ok(Some(ClaudeLocalContinuation {
+        command: format!("claude --resume {new_session_id}"),
+    }))
+}
+
+/// Trim `entries` to the last complete assistant turn, or return `None` if no turn in the
+/// transcript ever completed.
+///
+/// Schema note: the repo has no real Claude Code JSONL fixture to verify against (see the
+/// task-7 report), so this is derived from the shape `write_envelope`/`read_jsonl` already
+/// treat as ground truth — one JSON object per line, opaque beyond `"type"` — plus the
+/// publicly documented Claude Code transcript format: an entry with `"type": "assistant"`
+/// carries a nested `"message"` object mirroring the Anthropic Messages API, including
+/// `message.stop_reason`. That field is `"tool_use"` (or absent/null, on an entry still being
+/// streamed) while the turn continues, and a terminal reason (e.g. `"end_turn"`,
+/// `"max_tokens"`, `"stop_sequence"`) once the assistant has nothing more queued.
+///
+/// A turn is therefore "complete" at the last `type: "assistant"` entry whose
+/// `message.stop_reason` is present and not `"tool_use"`. Trimming keeps every entry up to and
+/// including that entry and drops everything after it. If no such entry exists — the
+/// transcript is empty, or its first turn was interrupted before a terminal assistant entry
+/// was ever flushed — nothing is resumable and this returns `None`.
+fn trim_to_last_complete_turn(entries: &[Value]) -> Option<&[Value]> {
+    let last_complete = entries.iter().rposition(is_terminal_assistant_entry)?;
+    Some(&entries[..=last_complete])
+}
+
+/// Whether `entry` is a `type: "assistant"` entry whose `message.stop_reason` marks the end
+/// of a turn (present and not `"tool_use"`). See [`trim_to_last_complete_turn`] for the
+/// schema this relies on.
+fn is_terminal_assistant_entry(entry: &Value) -> bool {
+    if entry.get("type").and_then(Value::as_str) != Some("assistant") {
+        return false;
+    }
+    entry
+        .get("message")
+        .and_then(|message| message.get("stop_reason"))
+        .and_then(Value::as_str)
+        .is_some_and(|reason| reason != "tool_use")
+}
+
 /// Write a [`ClaudeTranscriptEnvelope`] to a project directory derived from `storage_cwd`,
 /// without mutating `envelope.cwd`.
 ///

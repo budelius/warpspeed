@@ -232,6 +232,151 @@ fn write_session_index_entry_overwrites_same_session() {
     assert_eq!(index[uuid.to_string()]["cwd"], "/new/cwd");
 }
 
+/// Build a synthetic `type: "assistant"` entry with the given `message.stop_reason`
+/// (`None` models an entry still streaming, or one Claude never finished flushing).
+fn assistant_entry(stop_reason: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "type": "assistant",
+        "message": { "role": "assistant", "stop_reason": stop_reason },
+    })
+}
+
+fn user_entry() -> serde_json::Value {
+    serde_json::json!({ "type": "user", "message": { "role": "user" } })
+}
+
+/// Write `entries` as the on-disk JSONL for `uuid` under `tmp`'s `projects/<encoded_cwd>/`
+/// directory, matching the layout `fork_transcript_at_last_complete_turn` reads from.
+fn write_session_file(tmp: &Path, cwd: &Path, uuid: Uuid, entries: &[serde_json::Value]) {
+    let projects_dir = tmp.join("projects").join(encode_cwd(cwd));
+    fs::create_dir_all(&projects_dir).unwrap();
+    fs::write(
+        projects_dir.join(format!("{uuid}.jsonl")),
+        entries_to_jsonl(entries).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Extract the trailing uuid from a `"claude --resume <uuid>"` continuation command.
+fn resume_uuid(command: &str) -> Uuid {
+    command
+        .strip_prefix("claude --resume ")
+        .expect("command should be a `claude --resume <uuid>` string")
+        .parse()
+        .expect("trailing token should be a uuid")
+}
+
+#[test]
+fn fork_transcript_trims_to_last_complete_turn() {
+    // Table-driven over the entry sequences Step 1 established: complete turn, trailing
+    // partial turn, and only-ever-partial. Each case gets its own tmp dir / session id so
+    // the fork write for one case cannot leak into another's assertions.
+    let cases: Vec<(&str, Vec<serde_json::Value>, Option<Vec<serde_json::Value>>)> = vec![
+        (
+            "ends on a complete turn: nothing is trimmed",
+            vec![user_entry(), assistant_entry(Some("end_turn"))],
+            Some(vec![user_entry(), assistant_entry(Some("end_turn"))]),
+        ),
+        (
+            "trailing partial turn after a complete one: partial turn dropped",
+            vec![
+                user_entry(),
+                assistant_entry(Some("end_turn")),
+                user_entry(),
+                assistant_entry(None),
+            ],
+            Some(vec![user_entry(), assistant_entry(Some("end_turn"))]),
+        ),
+        (
+            "mid tool-use turn, never resolved, after a complete one: trimmed to the complete turn",
+            vec![
+                user_entry(),
+                assistant_entry(Some("end_turn")),
+                user_entry(),
+                assistant_entry(Some("tool_use")),
+            ],
+            Some(vec![user_entry(), assistant_entry(Some("end_turn"))]),
+        ),
+        (
+            "only a partial first turn: nothing resumable",
+            vec![user_entry(), assistant_entry(Some("tool_use"))],
+            None,
+        ),
+        (
+            "only a user entry, no assistant response ever flushed: nothing resumable",
+            vec![user_entry()],
+            None,
+        ),
+        ("empty transcript: nothing resumable", vec![], None),
+    ];
+
+    for (description, entries, expected) in cases {
+        let tmp = TempDir::new().unwrap();
+        let cwd = Path::new("/my/project");
+        let old_uuid = Uuid::new_v4();
+        write_session_file(tmp.path(), cwd, old_uuid, &entries);
+
+        let result = fork_transcript_at_last_complete_turn(old_uuid, cwd, tmp.path()).unwrap();
+
+        match expected {
+            Some(expected_entries) => {
+                let continuation = result
+                    .unwrap_or_else(|| panic!("expected Some(..) for case: {description}"));
+                let new_uuid = resume_uuid(&continuation.command);
+                assert_ne!(new_uuid, old_uuid, "case: {description}");
+
+                let forked = read_envelope(new_uuid, cwd, tmp.path()).unwrap();
+                assert_eq!(forked.entries, expected_entries, "case: {description}");
+                assert_eq!(forked.cwd, cwd, "case: {description}");
+            }
+            None => {
+                assert!(result.is_none(), "expected None for case: {description}");
+            }
+        }
+    }
+}
+
+#[test]
+fn fork_transcript_missing_session_file_returns_none() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = Path::new("/my/project");
+    let session_id = Uuid::new_v4();
+
+    // No session file written at all.
+    let result = fork_transcript_at_last_complete_turn(session_id, cwd, tmp.path()).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn fork_transcript_never_mutates_the_original_file() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = Path::new("/my/project");
+    let old_uuid = Uuid::new_v4();
+    let entries = vec![
+        user_entry(),
+        assistant_entry(Some("end_turn")),
+        user_entry(),
+        assistant_entry(None), // trailing partial turn, so a trim actually happens
+    ];
+    write_session_file(tmp.path(), cwd, old_uuid, &entries);
+
+    let original_path = tmp
+        .path()
+        .join("projects")
+        .join(encode_cwd(cwd))
+        .join(format!("{old_uuid}.jsonl"));
+    let original_bytes = fs::read(&original_path).unwrap();
+
+    let result = fork_transcript_at_last_complete_turn(old_uuid, cwd, tmp.path()).unwrap();
+    assert!(result.is_some(), "sanity: a trim should have happened");
+
+    let bytes_after = fs::read(&original_path).unwrap();
+    assert_eq!(
+        original_bytes, bytes_after,
+        "forking must never mutate Claude's original session file"
+    );
+}
+
 #[test]
 fn write_session_index_entry_overwrites_malformed_file() {
     let tmp = TempDir::new().unwrap();

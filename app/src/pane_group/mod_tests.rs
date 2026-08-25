@@ -4709,3 +4709,136 @@ fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
         );
     });
 }
+/// Two restarts in a row establish exactly one session, not two.
+///
+/// `restart_session_inner` is a single synchronous main-thread body with no
+/// `await`, and a spawned start's callback is dispatched only through the app's
+/// task callbacks, which run when the test yields. So two calls inside one
+/// `app.update` closure reproduce the superseded-start interleaving exactly,
+/// with no timing dependence: both starts are outstanding, and neither callback
+/// has run.
+///
+/// What that interleaving used to do: the first start's `on_shell_determined`
+/// installs its event loop handle, and the second *overwrites* it. The first
+/// thread is then dropped un-joined -- a detached PTY reader and an orphaned
+/// shell process for the app's lifetime, with two event loops writing into one
+/// blocklist. None of that surfaces in production: no log line, no error, just
+/// stray shells. `established_session_count` exists so it surfaces here.
+///
+/// The blocking sleep is load-bearing rather than a timing hack. It lets the
+/// first start's *background* future resolve while the foreground executor
+/// stays parked, so its callback is guaranteed to be delivered rather than
+/// aborted -- which is the case the generation counter has to handle, and the
+/// reason a bare "is a start pending?" flag with an `abort()` would not do.
+/// `ModelContext::spawn` honours an abort only at the future's next poll, so
+/// once that future has resolved the abort is a no-op and the guard is the only
+/// thing left. Under-sleeping can only make the abort win, which would make
+/// this test pass for a weaker reason, never fail spuriously.
+#[test]
+fn test_two_restarts_in_flight_establish_only_one_session() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: "/".into(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+        let view = app
+            .read(|ctx| {
+                pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(0, ctx))
+            })
+            .expect("pane 0 has a terminal view");
+
+        let exited_count = Rc::new(RefCell::new(0usize));
+        let exited_count_handle = exited_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&view, move |_, event, _| {
+                if let TerminalViewEvent::Exited = event {
+                    *exited_count_handle.borrow_mut() += 1;
+                }
+            });
+        });
+
+        let panes_before =
+            app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count()));
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                manager.restart_session(None, None, ctx);
+            });
+        });
+
+        // Let the first start's background future resolve while the foreground
+        // executor stays parked: `sleep` blocks this thread, and spawn
+        // callbacks only run when the test awaits. The abort the second restart
+        // issues is therefore a no-op, and the generation guard is on its own.
+        std::thread::sleep(Duration::from_millis(250));
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                manager.restart_session(None, None, ctx);
+            });
+        });
+
+        for _ in 0..64 {
+            futures_lite::future::yield_now().await;
+        }
+
+        assert_eq!(
+            app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .established_session_count()
+            })),
+            1,
+            "a superseded shell start must be discarded, not allowed to install a second event \
+             loop over the live one -- that detaches the first thread and orphans its shell"
+        );
+        assert!(
+            app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .has_running_event_loop()
+            })),
+            "the surviving session must be the last restart's, not nothing at all"
+        );
+
+        // Two restarts also put two barriers in the channel at once. The second
+        // arrives after the first has already cleared the mark, and must still
+        // not be mistaken for a shell that died.
+        assert_eq!(
+            *exited_count.borrow(),
+            0,
+            "neither restart's barrier may reach `Event::Exited`, which closes the pane"
+        );
+        assert_eq!(
+            app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count())),
+            panes_before,
+            "back-to-back restarts must not close the pane"
+        );
+        assert!(
+            !app.read(|ctx| view.as_ref(ctx).is_restart_in_progress()),
+            "the last restart's barrier must have come back round and cleared the mark"
+        );
+    });
+}

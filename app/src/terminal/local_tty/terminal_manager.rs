@@ -147,6 +147,18 @@ pub struct TerminalManager<S> {
     /// `on_shell_determined` yet, retained so a restart can cancel its
     /// background work. Best effort only -- see `session_generation`.
     pending_shell_start: Option<SpawnedFutureHandle>,
+
+    /// Test-only: how many times a PTY event loop has been installed on this
+    /// manager.
+    ///
+    /// This is the quantity [`Self::session_generation`] exists to protect. A
+    /// superseded start that is not discarded installs a *second* event loop,
+    /// overwriting `event_loop_handle` and detaching the first thread along
+    /// with its shell process. Nothing in production observes that -- there is
+    /// no log line and no error, just a stray shell for the app's lifetime --
+    /// so the guard needs a hook to be testable at all.
+    #[cfg(test)]
+    established_session_count: usize,
 }
 
 /// The inputs a replacement session needs, retained for the lifetime of the
@@ -580,6 +592,8 @@ impl<S> TerminalManager<S> {
             deferred_shell: None,
             session_generation: 0,
             pending_shell_start: None,
+            #[cfg(test)]
+            established_session_count: 0,
             session_template: SessionTemplate {
                 channel_event_proxy,
                 #[cfg(unix)]
@@ -944,6 +958,13 @@ impl<S> TerminalManager<S> {
     pub(crate) fn has_running_event_loop(&self) -> bool {
         self.event_loop_handle.is_some()
     }
+
+    /// Test-only: how many PTY event loops this manager has installed over its
+    /// lifetime. See [`Self::established_session_count`].
+    #[cfg(test)]
+    pub(crate) fn established_session_count(&self) -> usize {
+        self.established_session_count
+    }
 }
 
 /// Callback invoked upon determining the shell to be spawned when starting the event loop.
@@ -1102,6 +1123,10 @@ fn on_shell_determined<S: TerminalSurface>(
     );
 
     manager.event_loop_handle = Some(event_loop_handle);
+    #[cfg(test)]
+    {
+        manager.established_session_count += 1;
+    }
     #[cfg(feature = "integration_tests")]
     {
         manager.pid = Some(pid);

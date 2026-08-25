@@ -11937,26 +11937,37 @@ impl TerminalView {
                 ctx.request_user_attention();
             }
             ModelEvent::Exit { reason } => {
-                if self.restart_in_progress {
-                    // This exit belongs to a shell being deliberately replaced,
-                    // not to one that died, so *nothing* below runs: no failed
-                    // conversation (the restart exists to preserve it), no
-                    // "process terminated" banner, no disabled editor, no
-                    // initialization block in a pane that is meant to look
-                    // untouched, and above all no `Event::Exited` -- the sole
-                    // emitter of that variant in this crate, which
-                    // `TerminalPane` turns into `close_pane`.
-                    if matches!(reason, ExitReason::Restarting) {
-                        // The restart barrier. `TerminalModel::exit_for_restart`
-                        // posts it only after the replaced session's PTY event
-                        // loop thread has been joined, and every terminal event
-                        // travels one FIFO channel, so observing it here proves
-                        // the replaced shell's own `Exit` (if it had one) has
+                // A barrier is never a shell that died, so it is classified
+                // before the restart flag is even consulted. `restart_session`
+                // posts one per restart, and back-to-back restarts can put two
+                // in the channel at once: the first clears the flag, and if the
+                // second were then treated as an ordinary exit it would insert
+                // a "Shell process exited prematurely!" banner and emit
+                // `Event::Exited` -- the feature's own marker delivering the
+                // exact failure the feature exists to prevent.
+                if matches!(reason, ExitReason::Restarting) {
+                    if self.restart_in_progress {
+                        // `TerminalModel::exit_for_restart` posts this only
+                        // after the replaced session's PTY event loop thread
+                        // has been joined, and every terminal event travels one
+                        // FIFO channel, so observing it here proves the
+                        // replaced shell's own `Exit` (if it had one) has
                         // already passed through this handler. That is exactly
                         // the precondition `finish_restart` documents, and this
                         // is the only place in the crate that can establish it.
                         self.finish_restart(ctx);
                     }
+                    return;
+                }
+
+                if self.restart_in_progress {
+                    // A shell being deliberately replaced, not one that died, so
+                    // *nothing* below runs: no failed conversation (the restart
+                    // exists to preserve it), no "process terminated" banner, no
+                    // disabled editor, no initialization block in a pane that is
+                    // meant to look untouched, and above all no `Event::Exited`
+                    // -- the sole emitter of that variant in this crate, which
+                    // `TerminalPane` turns into `close_pane`.
                     return;
                 }
 
@@ -16266,6 +16277,23 @@ impl TerminalView {
 
     pub fn is_login_shell_bootstrapped(&self) -> bool {
         self.is_login_shell_bootstrapped
+    }
+
+    /// Test-only: marks this view as having completed the login-shell bootstrap
+    /// handshake, which unit-test harnesses never perform for real.
+    ///
+    /// Needed to model "the shell came up, then exited", because several exit
+    /// behaviours (`TerminalPane`'s keep-open branch, which banner is shown)
+    /// fork on this flag.
+    #[cfg(test)]
+    pub(crate) fn set_login_shell_bootstrapped_for_test(&mut self) {
+        self.is_login_shell_bootstrapped = true;
+    }
+
+    /// Test-only: whether a deliberate restart is still waiting for its barrier.
+    #[cfg(test)]
+    pub(crate) fn is_restart_in_progress(&self) -> bool {
+        self.restart_in_progress
     }
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
         self.awaiting_pending_command_completion
@@ -26614,6 +26642,26 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn on_session_restart_started(&mut self, _ctx: &mut ViewContext<Self>) {
         self.begin_restart();
+
+        // Both of these are set once and never cleared, so without this the
+        // replacement session inherits the replaced one's verdict about itself.
+        //
+        // `is_login_shell_bootstrapped` gates `TerminalPane`'s keep-open branch
+        // for `Event::Exited` and the initialization block below. Restarting
+        // *into a misconfigured shell* is the whole point of the shell-switch
+        // path, and a stale `true` means that when the replacement dies before
+        // bootstrapping, the pane is closed -- destroying the scrollback and
+        // conversation the restart existed to preserve -- and the output
+        // explaining why is suppressed. A pane forked into the same bad shell
+        // stays open; a restarted one must behave the same.
+        self.is_login_shell_bootstrapped = false;
+
+        // `pty_spawn_failed` suppresses both the terminated banner and the
+        // `Event::Exited` emission. Restarting is the obvious recovery from a
+        // failed spawn, so a stale `true` leaves the recovered pane unable to
+        // ever report a later clean shell death: no banner, no close, a pane
+        // sitting open around a dead shell.
+        self.pty_spawn_failed = false;
     }
 
     #[cfg(feature = "local_tty")]

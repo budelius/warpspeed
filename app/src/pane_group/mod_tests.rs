@@ -101,6 +101,7 @@ use crate::terminal::shared_session::{
 };
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::terminal::view::Event as TerminalViewEvent;
 use crate::test_util::pane_snapshots::{single_terminal_leaf_snapshot, terminal_leaf_snapshot};
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseStack;
@@ -4523,28 +4524,34 @@ fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
 }
 
 /// Restarting a pane's session keeps the pane and everything the user can see
-/// in it: the blocklist it had, and the conversation attached to it.
+/// in it -- and leaves it able to report a *real* shell death afterwards.
 ///
-/// The hazard this guards is an ordering one. `ModelEvent::Exit` reaches the
-/// view asynchronously, so the shell being replaced can still have its own exit
-/// queued when the restart runs -- which is why the test queues one explicitly
-/// before calling `restart_session`, rather than trusting a teardown to produce
-/// one at a convenient moment. If that exit lands unsuppressed, the view treats
-/// it as a shell that died: it inserts the "process terminated" banner, adds an
-/// initialization block for a session that never bootstrapped, and emits
-/// `Event::Exited`, which `TerminalPane` turns into `close_pane`.
+/// The hazard is an ordering one. `ModelEvent::Exit` reaches the view
+/// asynchronously, so the shell being replaced can still have its own exit
+/// queued when the restart runs. That is why this test queues one explicitly
+/// rather than trusting a teardown to produce one at a convenient moment. An
+/// exit that lands unsuppressed is treated as a shell that died: the "process
+/// terminated" banner, an initialization block for a session that never
+/// bootstrapped, and `Event::Exited` -- which `TerminalPane` turns into
+/// `close_pane`.
 ///
-/// The blocklist is what discriminates here. `Event::Exited` deliberately does
-/// *not* close a pane whose shell never bootstrapped (see the `Event::Exited`
-/// arm in `terminal_pane.rs`), and this harness performs no PTY handshake, so
-/// pane survival alone would hold even with the restart stubbed out. The two
-/// blocks a mishandled exit inserts do not: with `restart_session` stubbed to a
-/// no-op this test fails, and it fails inside the teardown it is supposed to
-/// have suppressed -- the terminated banner's telemetry reaches for singletons
-/// this harness never registers -- before the blocklist assertion is even
-/// reached.
+/// The pane is marked bootstrapped first, because that is the only state in
+/// which an unsuppressed exit actually reaches `close_pane`, and it is the
+/// state any pane a user would think to restart is in.
+///
+/// Both halves of the guarantee are asserted, because each catches a different
+/// way of getting this wrong:
+///
+/// - *during* the restart, the queued exit must not reach `Event::Exited`. A
+///   restart that never marks the pane fails here.
+/// - *after* it, a genuine exit must reach `Event::Exited` again. A restart
+///   whose barrier never comes back round -- so the mark is set forever --
+///   passes the first half and fails this one. Without it, deleting the
+///   `finish_restart` call from the exit handler leaves every assertion
+///   holding, while in production the pane silently swallows every later shell
+///   death and can never be closed.
 #[test]
-fn test_restart_session_keeps_the_pane_and_its_blocklist() {
+fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
@@ -4574,6 +4581,19 @@ fn test_restart_session_keeps_the_pane_and_its_blocklist() {
             })
             .expect("pane 0 has a terminal view");
 
+        // `Event::Exited` is the only thing that closes a pane on shell death,
+        // and it is emitted by exactly one place in the crate. Counting it is
+        // the most direct statement of what a restart must and must not do.
+        let exited_count = Rc::new(RefCell::new(0usize));
+        let exited_count_handle = exited_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&view, move |_, event, _| {
+                if let TerminalViewEvent::Exited = event {
+                    *exited_count_handle.borrow_mut() += 1;
+                }
+            });
+        });
+
         // Give the pane a conversation, so "the restart preserved the
         // conversation" is a claim about something rather than `None == None`.
         let conversation_id = app.update(|ctx| {
@@ -4581,6 +4601,15 @@ fn test_restart_session_keeps_the_pane_and_its_blocklist() {
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
                 history.start_new_conversation(terminal_surface_id, false, false, false, ctx)
             })
+        });
+
+        // The replaced shell had come up. This is the case that matters: an
+        // unsuppressed exit only reaches `close_pane` for a pane that
+        // bootstrapped (`terminal_pane.rs` keeps an unbootstrapped one open so
+        // the user can read what went wrong), and it is the state any pane the
+        // user would think to restart is actually in.
+        app.update(|ctx| {
+            view.update(ctx, |view, _| view.set_login_shell_bootstrapped_for_test());
         });
 
         let panes_before =
@@ -4616,12 +4645,17 @@ fn test_restart_session_keeps_the_pane_and_its_blocklist() {
         }
 
         assert_eq!(
+            *exited_count.borrow(),
+            0,
+            "the replaced shell's exit must not reach `Event::Exited`, which closes the pane"
+        );
+        assert_eq!(
             app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count())),
             panes_before,
             "a restart must not close the pane it is restarting"
         );
         assert_eq!(
-            app.read(|ctx| { view.as_ref(ctx).model.lock().block_list().blocks().len() }),
+            app.read(|ctx| view.as_ref(ctx).model.lock().block_list().blocks().len()),
             blocks_before,
             "a restart must leave the scrollback alone: no terminated banner, no \
              initialization block"
@@ -4638,6 +4672,40 @@ fn test_restart_session_keeps_the_pane_and_its_blocklist() {
                     .is_some_and(|conversation| conversation.status().is_in_progress())
             }),
             "a restart must not finalize the pane's in-flight conversation as failed"
+        );
+        assert!(
+            !app.read(|ctx| view.as_ref(ctx).is_restart_in_progress()),
+            "the restart barrier must have come back round and cleared the mark"
+        );
+        assert!(
+            app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .has_running_event_loop()
+            })),
+            "the restart must have forked a replacement session, not just torn the old one down"
+        );
+
+        // Now the replacement comes up and the user exits it for real. The pane
+        // must behave exactly like one that was never restarted.
+        app.update(|ctx| {
+            view.update(ctx, |view, _| view.set_login_shell_bootstrapped_for_test());
+            manager
+                .read(ctx, |manager, _| manager.model())
+                .lock()
+                .exit(ExitReason::ShellProcessExited);
+        });
+        for _ in 0..64 {
+            futures_lite::future::yield_now().await;
+        }
+
+        assert_eq!(
+            *exited_count.borrow(),
+            1,
+            "a genuine shell death after the restart must still reach `Event::Exited`; a mark \
+             that is never cleared silently swallows every later exit"
         );
     });
 }

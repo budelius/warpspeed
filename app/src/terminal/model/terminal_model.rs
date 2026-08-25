@@ -1534,9 +1534,10 @@ impl TerminalModel {
 
     /// Clears the exit latch so a replaced shell's model is writable again.
     ///
-    /// `exit` sets `handled_exit` and nothing resets it, so without this a
-    /// restarted pane stays `is_read_only()` forever and the new shell's own
-    /// exit is swallowed by the latch.
+    /// `exit` sets `handled_exit`, and the only other thing that clears it is
+    /// [`Self::exit_for_restart`], so without this a restarted pane stays
+    /// `is_read_only()` forever and the new shell's own exit is swallowed by
+    /// the latch.
     pub fn reset_exit_state(&mut self) {
         self.handled_exit = false;
     }

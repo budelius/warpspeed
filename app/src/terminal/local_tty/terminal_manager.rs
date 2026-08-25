@@ -18,6 +18,7 @@ use pathfinder_geometry::vector::Vector2F;
 use settings::Setting as _;
 use warp_core::SessionId;
 use warp_errors::report_error;
+use warpui::r#async::SpawnedFutureHandle;
 use warpui::r#async::executor::Background;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle};
 
@@ -124,6 +125,28 @@ pub struct TerminalManager<S> {
     /// Everything a *second* session needs that the first one's
     /// [`DeferredShellStart`] consumed. See [`SessionTemplate`].
     session_template: SessionTemplate,
+
+    /// Which session this manager is currently forking or running.
+    ///
+    /// [`Self::spawn_shell_start`] captures this, and its callback refuses to
+    /// run `on_shell_determined` against any other value. A restart bumps it,
+    /// which is what makes an already-in-flight start inert.
+    ///
+    /// Aborting the pending future is not sufficient on its own:
+    /// `ModelContext::spawn` honours an abort only at the future's next poll,
+    /// so a start whose future has already resolved still delivers its
+    /// callback. Without this counter, a restart racing an in-flight start
+    /// creates a second PTY whose `event_loop_handle` *overwrites* the first --
+    /// detaching that thread, orphaning its shell process for the app's
+    /// lifetime, and interleaving two shells into one blocklist. The window is
+    /// at least one tick for every eager pane and seconds for a WSL shell,
+    /// whose starter resolution shells out to `wsl ... printenv`.
+    session_generation: u64,
+
+    /// The shell start that has been spawned but has not reached
+    /// `on_shell_determined` yet, retained so a restart can cancel its
+    /// background work. Best effort only -- see `session_generation`.
+    pending_shell_start: Option<SpawnedFutureHandle>,
 }
 
 /// The inputs a replacement session needs, retained for the lifetime of the
@@ -555,6 +578,8 @@ impl<S> TerminalManager<S> {
             inactive_pty_reads_rx,
             session_sharer: Rc::new(RefCell::new(None)),
             deferred_shell: None,
+            session_generation: 0,
+            pending_shell_start: None,
             session_template: SessionTemplate {
                 channel_event_proxy,
                 #[cfg(unix)]
@@ -584,8 +609,7 @@ impl<S> TerminalManager<S> {
                 box_manager(terminal_manager)
             }
             ShellStartPolicy::Eager => {
-                let terminal_manager = box_manager(terminal_manager);
-                Self::spawn_shell_start(
+                terminal_manager.spawn_shell_start(
                     DeferredShellStart {
                         startup_directory,
                         env_vars,
@@ -595,7 +619,7 @@ impl<S> TerminalManager<S> {
                     },
                     ctx,
                 );
-                terminal_manager
+                box_manager(terminal_manager)
             }
         });
 
@@ -608,7 +632,13 @@ impl<S> TerminalManager<S> {
     /// Resolves the shell starter off the main thread and hands the result to
     /// [`on_shell_determined`]. This is the body the eager path runs at
     /// construction and the deferred path runs from `ensure_shell_started`.
+    ///
+    /// The spawned start is stamped with the current
+    /// [`Self::session_generation`], and its callback discards itself if the
+    /// manager has moved on to another session by the time the shell starter
+    /// resolves.
     pub(super) fn spawn_shell_start(
+        &mut self,
         parked: DeferredShellStart,
         ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
     ) where
@@ -623,7 +653,8 @@ impl<S> TerminalManager<S> {
             wsl_name_or_shell_starter,
         } = parked;
 
-        ctx.spawn(
+        let generation = self.session_generation;
+        let handle = ctx.spawn(
             async move {
                 match wsl_name_or_shell_starter {
                     Some(starter_source) => starter_source.to_shell_starter_source().await,
@@ -640,6 +671,20 @@ impl<S> TerminalManager<S> {
                     return;
                 };
 
+                if terminal_manager.session_generation != generation {
+                    // A restart superseded this start while its shell starter
+                    // was resolving. Running on from here would fork a PTY for
+                    // a session that no longer exists and overwrite the live
+                    // session's event loop handle, detaching that thread.
+                    log::info!(
+                        "Discarding a superseded shell start: it belongs to session {generation}, \
+                         but this pane is now on session {}",
+                        terminal_manager.session_generation
+                    );
+                    return;
+                }
+                terminal_manager.pending_shell_start = None;
+
                 on_shell_determined(
                     terminal_manager,
                     startup_directory,
@@ -651,6 +696,10 @@ impl<S> TerminalManager<S> {
                 )
             },
         );
+
+        // Retained so a restart can cancel the background work (for WSL, a
+        // `wsl ... printenv SHELL` subprocess) where it still can.
+        self.pending_shell_start = Some(handle);
     }
 
     /// The sole body of `TerminalManagerTrait::ensure_shell_started`. Both the
@@ -669,7 +718,7 @@ impl<S> TerminalManager<S> {
         let Some(parked) = self.deferred_shell.take() else {
             return;
         };
-        Self::spawn_shell_start(parked, ctx);
+        self.spawn_shell_start(parked, ctx);
     }
 
     /// The sole body of `TerminalManagerTrait::has_deferred_shell`. See
@@ -725,21 +774,21 @@ impl<S> TerminalManager<S> {
                 }
             }
             _ => {
-                if self.deferred_shell.is_some() {
-                    // Routine: this pane's shell was deferred and never
-                    // started (e.g. a background launch-config tab the user
-                    // never visited), so no event loop was ever spawned and
-                    // there is nothing to join. A 141-pane launch config can
-                    // close 135 such panes at once; logging each as a warning
-                    // would be spurious noise, not a signal of anything wrong.
+                if self.deferred_shell.is_some() || self.pending_shell_start.is_some() {
+                    // Routine: this pane's shell was deferred and never started
+                    // (e.g. a background launch-config tab the user never
+                    // visited), or its start is still resolving, so no event
+                    // loop was ever spawned and there is nothing to join. A
+                    // 141-pane launch config can close 135 such panes at once,
+                    // and a user can restart a pane repeatedly; logging either
+                    // as a warning would be spurious noise.
                     log::debug!(
-                        "No event loop handle to join when dropping terminal manager: shell was deferred and never started."
+                        "No event loop handle to join when stopping terminal session: no shell has started yet."
                     );
                 } else {
-                    // Anomalous: this manager was never deferred (or its
-                    // deferred shell was already consumed), so a shell should
-                    // have been started and produced an event loop handle.
-                    log::warn!("No event loop handle to join when dropping terminal manager.");
+                    // Anomalous: a shell should have been started and produced
+                    // an event loop handle.
+                    log::warn!("No event loop handle to join when stopping terminal session.");
                 }
             }
         }
@@ -765,7 +814,7 @@ impl<S> TerminalManager<S> {
     {
         // 1. Mark the restart on the surface *before* anything can exit, so no
         //    exit produced below is mistaken for a shell that died. Until the
-        //    barrier posted in step 3 comes back round, the view suppresses the
+        //    barrier posted in step 5 comes back round, the view suppresses the
         //    whole teardown -- including `Event::Exited`, which `TerminalPane`
         //    turns into `close_pane`.
         //
@@ -785,14 +834,41 @@ impl<S> TerminalManager<S> {
         //    is already in the event channel, and nothing more can be queued
         //    behind it. Unlike the drop path this leaves the PTY reads
         //    broadcast channel open, because the replacement publishes to it.
+        //
+        //    Runs before step 3 so `stop_event_loop` can still see that this
+        //    pane's shell was parked or still resolving, and log a missing
+        //    event loop handle as routine rather than anomalous.
         self.stop_event_loop();
 
-        // A parked start is superseded by this restart -- the shell is being
-        // forked here and now. Leaving it parked would fork a second one the
-        // next time the pane is activated.
+        // 3. Retire the replaced session's identity. Any shell start still
+        //    resolving belongs to it and is now inert: the callback compares
+        //    generations and discards itself rather than forking a PTY whose
+        //    event loop handle would overwrite -- and thereby detach -- the one
+        //    this restart is about to install. Aborting is only a best-effort
+        //    way to stop the background work early; the counter is what makes
+        //    it correct. Nothing can run in between: `join` blocks the main
+        //    thread, so no spawned callback is dispatched during step 2.
+        self.session_generation = self.session_generation.wrapping_add(1);
+        if let Some(pending) = self.pending_shell_start.take() {
+            pending.abort();
+        }
+
+        // A parked start is superseded too -- the shell is being forked here
+        // and now. Leaving it parked would fork a second one the next time the
+        // pane is activated.
         self.deferred_shell = None;
 
-        // 3. Post the restart barrier. It travels the same FIFO channel as the
+        // 4. Stop the replaced session's terminal-attributes poller, which
+        //    holds its PTY fd on a repeating timer. `on_shell_determined` would
+        //    otherwise simply overwrite the handle once the replacement is up,
+        //    leaving the old poller to `tcgetattr` a closed -- and possibly
+        //    already recycled -- descriptor in between.
+        #[cfg(unix)]
+        if let Some(poller) = self.terminal_attributes_poller.take() {
+            poller.update(ctx, |poller, _| poller.stop_polling());
+        }
+
+        // 5. Post the restart barrier. It travels the same FIFO channel as the
         //    replaced shell's own exit, and step 2 guarantees nothing can slip
         //    in behind it, so the view observing it is proof that the old exit
         //    has already been delivered and suppressed. That is what lets
@@ -800,7 +876,7 @@ impl<S> TerminalManager<S> {
         //    than a hopeful one. See `TerminalModel::exit_for_restart`.
         self.model.lock().exit_for_restart();
 
-        // 4. Build a second set of event-loop plumbing. The first set's
+        // 6. Build a second set of event-loop plumbing. The first set's
         //    `ShellStartupResources` were consumed when the first shell forked.
         let (shell_startup_resources, event_loop_tx) = Self::build_session_resources(
             self.session_template.channel_event_proxy.clone(),
@@ -815,7 +891,7 @@ impl<S> TerminalManager<S> {
         });
         *self.event_loop_tx.lock() = event_loop_tx;
 
-        // 5. Resolve the shell to launch: the requested target, else the one
+        // 7. Resolve the shell to launch: the requested target, else the one
         //    this pane is already running, else the user's preferred shell.
         let shells = AvailableShells::handle(ctx);
         let requested = target.or_else(|| self.model.lock().active_shell_launch_data().cloned());
@@ -842,12 +918,12 @@ impl<S> TerminalManager<S> {
                     .unwrap_or(ShellName::LessDescriptive("Shell".to_owned())),
             });
 
-        // 6. Fork it through exactly the path `create_model_with_manager` takes
+        // 8. Fork it through exactly the path `create_model_with_manager` takes
         //    for an eager pane. `DeferredShellStart` is built fresh here rather
         //    than reusing a parked one: its `ShellStartupResources` are
-        //    one-shot, and step 4 is where this session's replacements come
+        //    one-shot, and step 6 is where this session's replacements come
         //    from.
-        Self::spawn_shell_start(
+        self.spawn_shell_start(
             DeferredShellStart {
                 startup_directory: cwd,
                 env_vars: self.session_template.env_vars.clone(),
@@ -860,6 +936,13 @@ impl<S> TerminalManager<S> {
             },
             ctx,
         );
+    }
+
+    /// Test-only: whether a PTY event loop is currently running for this
+    /// manager's session.
+    #[cfg(test)]
+    pub(crate) fn has_running_event_loop(&self) -> bool {
+        self.event_loop_handle.is_some()
     }
 }
 

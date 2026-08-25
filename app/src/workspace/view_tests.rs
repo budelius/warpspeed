@@ -5297,3 +5297,28 @@ fn test_session_restore_out_of_range_active_index_starts_last_tab() {
         );
     });
 }
+
+/// The restart confirmation exists to protect work in progress. A freshly
+/// created pane has nothing running in it, so `RestartShell` must restart
+/// immediately without prompting.
+#[test]
+fn restart_shell_does_not_prompt() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+        });
+
+        app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                assert!(
+                    !workspace.restart_shell_confirmation_modal.is_open(),
+                    "restarting a pane with nothing running must not prompt"
+                );
+            });
+        });
+    });
+}

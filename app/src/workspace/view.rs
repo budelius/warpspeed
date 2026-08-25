@@ -146,6 +146,9 @@ use super::hoa_onboarding::{
 use super::lightbox_view::{LightboxParams, LightboxView, LightboxViewEvent};
 use super::native_modal::{NativeModal, NativeModalEvent};
 use super::one_time_modal_model::OneTimeModalEvent;
+use super::restart_shell_confirmation_modal::{
+    RestartShellConfirmationEvent, RestartShellConfirmationModal,
+};
 use super::rewind_confirmation_dialog::{
     RewindConfirmationDialog, RewindConfirmationEvent, RewindDialogSource,
 };
@@ -434,7 +437,10 @@ use crate::terminal::view::{
     SyncInputType, TerminalAction,
 };
 use crate::terminal::warpify::settings::WarpifySettings;
-use crate::terminal::{self, BlockListSettings, SizeInfo, TerminalModel, TerminalView};
+use crate::terminal::{
+    self, BlockListSettings, ShellLaunchData, SizeInfo, TerminalManager, TerminalModel,
+    TerminalView,
+};
 use crate::themes::theme::{AnsiColorIdentifier, RespectSystemTheme, ThemeKind};
 use crate::themes::theme_chooser::{ThemeChooser, ThemeChooserEvent, ThemeChooserMode};
 use crate::themes::theme_creator_modal::{ThemeCreatorModal, ThemeCreatorModalEvent};
@@ -972,6 +978,17 @@ enum PendingSessionConfigTabConfigChipTutorial {
     },
 }
 
+/// Captured at the moment a restart/change-shell is found to need
+/// confirmation, so the manager, target shell, and cwd that were resolved
+/// against the focused pane at that time -- not whatever pane happens to be
+/// focused when the user answers the prompt -- are what actually restart.
+struct PendingShellRestart {
+    manager: ModelHandle<Box<dyn TerminalManager>>,
+    /// `None` restarts with the same shell; `Some` switches to it.
+    target: Option<ShellLaunchData>,
+    cwd: Option<PathBuf>,
+}
+
 fn query_for_rewind_prefill(inputs: &[AIAgentInput]) -> Option<String> {
     inputs.iter().find_map(AIAgentInput::display_query)
 }
@@ -1108,6 +1125,16 @@ pub struct Workspace {
     pending_session_config_tab_config_chip_tutorial:
         Option<PendingSessionConfigTabConfigChipTutorial>,
     new_worktree_modal: ModalViewState<Modal<NewWorktreeModal>>,
+    /// Confirmation shown before restarting or changing a pane's shell while
+    /// a long-running foreground command is still active in it, so work in
+    /// progress isn't silently lost.
+    restart_shell_confirmation_modal: ModalViewState<Modal<RestartShellConfirmationModal>>,
+    /// Picker listing the currently available shells, opened by
+    /// `ToggleChangeShellMenu`; selecting an entry dispatches `ChangeShell`.
+    change_shell_menu_modal: ModalViewState<Modal<Menu<WorkspaceAction>>>,
+    /// The manager, target shell, and cwd for a restart/change-shell that is
+    /// waiting on confirmation from `restart_shell_confirmation_modal`.
+    pending_shell_restart: Option<PendingShellRestart>,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
@@ -2196,6 +2223,56 @@ impl Workspace {
         ModalViewState::new(modal)
     }
 
+    fn build_restart_shell_confirmation_modal(
+        ctx: &mut ViewContext<Self>,
+    ) -> ModalViewState<Modal<RestartShellConfirmationModal>> {
+        let body = ctx.add_typed_action_view(|_| RestartShellConfirmationModal::new());
+        ctx.subscribe_to_view(&body, |me, _, event, ctx| {
+            me.handle_restart_shell_confirmation_modal_body_event(event, ctx);
+        });
+        let modal = ctx.add_typed_action_view(|ctx| {
+            Modal::new(Some("Restart shell?".to_string()), body, ctx).with_modal_style(
+                UiComponentStyles {
+                    width: Some(420.),
+                    ..Default::default()
+                },
+            )
+        });
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
+            if matches!(event, ModalEvent::Close) {
+                me.close_restart_shell_confirmation_modal(ctx);
+            }
+        });
+        ModalViewState::new(modal)
+    }
+
+    /// Builds the shell picker opened by `ToggleChangeShellMenu`. Reuses the
+    /// generic `Menu` component -- the same one the new-tab dropdown uses to
+    /// list individual shells -- wrapped in a `Modal` for centered
+    /// presentation and Escape-to-close. Selecting an entry dispatches
+    /// `WorkspaceAction::ChangeShell`, which bubbles up to `Workspace`
+    /// unimpeded, since `Modal<Menu<WorkspaceAction>>` only intercepts its
+    /// own `ModalAction`.
+    fn build_change_shell_menu_modal(
+        ctx: &mut ViewContext<Self>,
+    ) -> ModalViewState<Modal<Menu<WorkspaceAction>>> {
+        let menu = ctx.add_typed_action_view(|_| Menu::new().with_drop_shadow());
+        let modal = ctx.add_typed_action_view(|ctx| {
+            Modal::new(Some("Change shell".to_string()), menu, ctx).with_modal_style(
+                UiComponentStyles {
+                    width: Some(320.),
+                    ..Default::default()
+                },
+            )
+        });
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
+            if matches!(event, ModalEvent::Close) {
+                me.close_change_shell_menu(ctx);
+            }
+        });
+        ModalViewState::new(modal)
+    }
+
     fn build_remove_tab_config_confirmation_dialog(
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<RemoveTabConfigConfirmationDialog> {
@@ -3067,6 +3144,8 @@ impl Workspace {
 
         let tab_config_params_modal = Self::build_tab_config_params_modal(ctx);
         let new_worktree_modal = Self::build_new_worktree_modal(ctx);
+        let restart_shell_confirmation_modal = Self::build_restart_shell_confirmation_modal(ctx);
+        let change_shell_menu_modal = Self::build_change_shell_menu_modal(ctx);
 
         let session_config_modal = Self::build_session_config_modal(ctx);
 
@@ -3465,6 +3544,9 @@ impl Workspace {
             show_session_config_tab_config_chip: false,
             pending_session_config_tab_config_chip_tutorial: None,
             new_worktree_modal,
+            restart_shell_confirmation_modal,
+            change_shell_menu_modal,
+            pending_shell_restart: None,
             close_session_confirmation_dialog,
             rewind_confirmation_dialog,
             delete_conversation_confirmation_dialog,
@@ -12783,6 +12865,189 @@ impl Workspace {
             ctx,
         );
         ctx.notify();
+    }
+
+    /// Returns the terminal view for the focused pane in the active tab, if
+    /// the focused pane is a terminal pane.
+    fn focused_terminal_view(
+        &self,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<ViewHandle<TerminalView>> {
+        self.active_tab_pane_group()
+            .read(ctx, |pane_group, ctx| pane_group.focused_session_view(ctx))
+    }
+
+    /// Returns the terminal manager for the focused pane in the active tab,
+    /// if the focused pane is a terminal pane.
+    fn focused_terminal_manager(
+        &self,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<ModelHandle<Box<dyn TerminalManager>>> {
+        self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
+            let focused_pane_id = pane_group.focused_pane_id(ctx);
+            let pane_index = pane_group
+                .visible_pane_ids()
+                .into_iter()
+                .position(|id| id == focused_pane_id)?;
+            pane_group.terminal_manager(pane_index, ctx)
+        })
+    }
+
+    /// Restarts the focused pane's session, switching to `target` if given
+    /// (or keeping the same shell if `None`). Prompts for confirmation first
+    /// if the pane has a long-running foreground command -- a running CLI
+    /// agent counts too, since it is itself a foreground process -- so work
+    /// in progress isn't silently lost.
+    fn start_shell_restart(
+        &mut self,
+        target: Option<ShellLaunchData>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(manager) = self.focused_terminal_manager(ctx) else {
+            return;
+        };
+        let Some(view) = self.focused_terminal_view(ctx) else {
+            return;
+        };
+
+        let is_busy = manager
+            .as_ref(ctx)
+            .model()
+            .lock()
+            .block_list()
+            .active_block()
+            .is_active_and_long_running();
+        let cwd = view.as_ref(ctx).pwd_if_local(ctx).map(PathBuf::from);
+
+        if is_busy {
+            let running_command = manager
+                .as_ref(ctx)
+                .model()
+                .lock()
+                .block_list()
+                .active_block()
+                .command_to_string();
+            self.pending_shell_restart = Some(PendingShellRestart {
+                manager,
+                target,
+                cwd,
+            });
+            self.show_restart_shell_confirmation_modal(running_command, ctx);
+        } else {
+            manager.update(ctx, |manager, ctx| {
+                manager.restart_session(target, cwd, ctx);
+            });
+        }
+    }
+
+    fn show_restart_shell_confirmation_modal(
+        &mut self,
+        running_command: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.restart_shell_confirmation_modal
+            .view
+            .update(ctx, |modal, ctx| {
+                modal.body().update(ctx, |body, ctx| {
+                    body.set_running_command(running_command);
+                    ctx.notify();
+                });
+            });
+        self.restart_shell_confirmation_modal.open();
+        ctx.notify();
+    }
+
+    fn close_restart_shell_confirmation_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        self.restart_shell_confirmation_modal.close();
+        ctx.notify();
+    }
+
+    fn handle_restart_shell_confirmation_modal_body_event(
+        &mut self,
+        event: &RestartShellConfirmationEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            RestartShellConfirmationEvent::Confirm => {
+                if let Some(pending) = self.pending_shell_restart.take() {
+                    pending.manager.update(ctx, |manager, ctx| {
+                        manager.restart_session(pending.target, pending.cwd, ctx);
+                    });
+                }
+                self.close_restart_shell_confirmation_modal(ctx);
+            }
+            RestartShellConfirmationEvent::Cancel => {
+                // The session is left untouched -- just drop the pending
+                // restart's manager handle along with the target/cwd we'd
+                // resolved for it.
+                self.pending_shell_restart = None;
+                self.close_restart_shell_confirmation_modal(ctx);
+            }
+        }
+    }
+
+    /// Opens (or closes, if already open) the shell picker, listing the
+    /// currently available shells so the user can restart the focused
+    /// pane's session with a different shell.
+    fn toggle_change_shell_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.change_shell_menu_modal.is_open() {
+            self.close_change_shell_menu(ctx);
+            return;
+        }
+
+        let items = self.change_shell_menu_items(ctx);
+        self.change_shell_menu_modal.view.update(ctx, |modal, ctx| {
+            modal.body().update(ctx, |menu, ctx| {
+                menu.set_items(items, ctx);
+            });
+        });
+        self.change_shell_menu_modal.open();
+        ctx.notify();
+    }
+
+    fn close_change_shell_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        self.change_shell_menu_modal.close();
+        ctx.notify();
+    }
+
+    /// Builds the shell picker's menu items from the currently available
+    /// shells, mirroring the technique the new-tab dropdown uses to list
+    /// individual shells (see `unified_new_session_menu_items`). Shells that
+    /// don't resolve to a launchable `ShellLaunchData` (e.g. the "System
+    /// default" placeholder) are left out -- restarting with "the same
+    /// shell" is already what `RestartShell` does.
+    #[cfg(feature = "local_tty")]
+    fn change_shell_menu_items(
+        &self,
+        ctx: &mut ViewContext<Self>,
+    ) -> Vec<MenuItem<WorkspaceAction>> {
+        AvailableShells::handle(ctx).read(ctx, |model, _| {
+            model
+                .get_available_shells()
+                .filter_map(|shell| {
+                    let shell_launch_data = shell.get_valid_shell_path_and_type()?;
+                    let shell_name = model.display_name_for_shell(shell);
+                    let icon = ShellIndicatorType::try_from(&shell_launch_data)
+                        .ok()
+                        .map(|shell_indicator_type| shell_indicator_type.to_icon())
+                        .unwrap_or(icons::Icon::Terminal);
+                    let item = MenuItemFields::new(shell_name)
+                        .with_on_select_action(WorkspaceAction::ChangeShell {
+                            shell: shell_launch_data,
+                        })
+                        .with_icon(icon);
+                    Some(item.into_item())
+                })
+                .collect()
+        })
+    }
+
+    #[cfg(not(feature = "local_tty"))]
+    fn change_shell_menu_items(
+        &self,
+        _ctx: &mut ViewContext<Self>,
+    ) -> Vec<MenuItem<WorkspaceAction>> {
+        Vec::new()
     }
 
     fn add_new_session_tab_with_default_mode(
@@ -24285,6 +24550,9 @@ impl TypedActionView for Workspace {
             AddTabWithShell { shell, source } => {
                 self.add_tab_with_shell(shell.clone(), *source, ctx)
             }
+            RestartShell => self.start_shell_restart(None, ctx),
+            ToggleChangeShellMenu => self.toggle_change_shell_menu(ctx),
+            ChangeShell { shell } => self.start_shell_restart(Some(shell.clone()), ctx),
             AddGetStartedTab => self.add_get_started_tab(ctx),
             AddAmbientAgentTab => self.add_ambient_agent_tab(ctx),
             AddAgentTab => self.add_terminal_tab_with_new_agent_view(ctx),
@@ -27506,6 +27774,14 @@ impl View for Workspace {
 
         if self.new_worktree_modal.is_open() {
             stack.add_child(self.new_worktree_modal.render());
+        }
+
+        if self.restart_shell_confirmation_modal.is_open() {
+            stack.add_child(self.restart_shell_confirmation_modal.render());
+        }
+
+        if self.change_shell_menu_modal.is_open() {
+            stack.add_child(self.change_shell_menu_modal.render());
         }
 
         if self.workflow_modal.as_ref(app).is_open() {

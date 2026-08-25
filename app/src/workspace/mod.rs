@@ -16,6 +16,7 @@ mod lightbox_view;
 mod native_modal;
 mod one_time_modal_model;
 mod registry;
+mod restart_shell_confirmation_modal;
 pub mod rewind_confirmation_dialog;
 pub mod sync_inputs;
 pub mod tab_group;
@@ -971,6 +972,27 @@ pub fn init(app: &mut AppContext) {
     )
     .with_group(bindings::BindingGroup::Settings.as_str())
     .with_context_predicate(id!("Workspace"))]);
+
+    // Restart/change shell — command-palette-only by design: every unclaimed
+    // chord risks colliding with a user's own binding, so neither ships with
+    // a default keybinding. Both prompt for confirmation first if the pane
+    // has a long-running foreground command.
+    app.register_editable_bindings([
+        EditableBinding::new(
+            "workspace:restart_shell",
+            "Restart shell",
+            WorkspaceAction::RestartShell,
+        )
+        .with_group(bindings::BindingGroup::Terminal.as_str())
+        .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
+            "workspace:change_shell",
+            "Change shell",
+            WorkspaceAction::ToggleChangeShellMenu,
+        )
+        .with_group(bindings::BindingGroup::Terminal.as_str())
+        .with_context_predicate(id!("Workspace")),
+    ]);
 
     app.register_editable_bindings([EditableBinding::new(
         "workspace:cycle_active_tab_color",

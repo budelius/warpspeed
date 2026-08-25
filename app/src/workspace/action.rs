@@ -40,6 +40,7 @@ use crate::server::telemetry::{
 use crate::settings_view::{SettingsAction as SettingsTabAction, SettingsSection};
 use crate::tab::{NewSessionMenuItem, SelectedTabColor};
 use crate::tab_configs::TabConfig;
+use crate::terminal::ShellLaunchData;
 use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::themes::theme::AnsiColorIdentifier;
@@ -267,6 +268,24 @@ pub enum WorkspaceAction {
     AddTabWithShell {
         shell: AvailableShell,
         source: AddTabWithShellSource,
+    },
+    /// Restarts the focused pane's session with the same shell, in place --
+    /// preserving scrollback, the blocklist, and any agent conversation, and
+    /// landing back in the same working directory. Prompts for confirmation
+    /// if the pane has a long-running foreground command (a running CLI
+    /// agent counts too, since it is itself a foreground process).
+    RestartShell,
+    /// Opens (or closes, if already open) the shell picker, which lists the
+    /// currently available shells so the user can restart the focused
+    /// pane's session with a different shell. Selecting an entry there
+    /// dispatches `ChangeShell`.
+    ToggleChangeShellMenu,
+    /// Restarts the focused pane's session using `shell`, in place.
+    /// Dispatched when an entry is selected from the picker opened by
+    /// `ToggleChangeShellMenu`. Prompts for confirmation the same way
+    /// `RestartShell` does.
+    ChangeShell {
+        shell: ShellLaunchData,
     },
     AddGetStartedTab,
     AddAmbientAgentTab,
@@ -1059,6 +1078,12 @@ impl WorkspaceAction {
             | ToggleTabConfigsMenu
             | ToggleNewSessionMenu { .. }
             | SelectNewSessionMenuItem(_)
+            // Restarting or changing a pane's shell mutates session content, not
+            // the persisted tab/pane layout, and the picker toggle is a plain
+            // menu open/close -- none of these need a save.
+            | RestartShell
+            | ToggleChangeShellMenu
+            | ChangeShell { .. }
             | ToggleTabBarOverflowMenu
             | CheckForUpdate
             | SetA11yVerbosityLevel(_)

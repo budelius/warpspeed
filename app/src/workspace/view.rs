@@ -12966,7 +12966,16 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// The single close path for the confirmation modal -- reached from
+    /// Confirm, Cancel, Escape, and the modal's close (X) button alike (the
+    /// latter two route through `ModalEvent::Close`). Always drops
+    /// `pending_shell_restart`, so no dismissal path can leave a live
+    /// `ModelHandle` to the terminal manager sitting around uncleared:
+    /// previously `ModalEvent::Close` (Escape / the X button) closed the
+    /// modal without clearing it, since only the explicit `Cancel` handler
+    /// did that.
     fn close_restart_shell_confirmation_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        self.pending_shell_restart = None;
         self.restart_shell_confirmation_modal.close();
         ctx.notify();
     }
@@ -12986,10 +12995,10 @@ impl Workspace {
                 self.close_restart_shell_confirmation_modal(ctx);
             }
             RestartShellConfirmationEvent::Cancel => {
-                // The session is left untouched -- just drop the pending
+                // The session is left untouched --
+                // `close_restart_shell_confirmation_modal` drops the pending
                 // restart's manager handle along with the target/cwd we'd
                 // resolved for it.
-                self.pending_shell_restart = None;
                 self.close_restart_shell_confirmation_modal(ctx);
             }
         }

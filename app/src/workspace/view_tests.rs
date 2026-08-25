@@ -72,6 +72,7 @@ use crate::tab_configs::tab_config::{TabConfigPaneNode, TabConfigPaneType};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
+use crate::terminal::local_tty::TerminalManager as LocalTtyTerminalManager;
 use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::shared_session::{
     SharedSessionScrollbackType, SharedSessionSource, SharedSessionStatus,
@@ -5317,6 +5318,103 @@ fn restart_shell_does_not_prompt() {
                 assert!(
                     !workspace.restart_shell_confirmation_modal.is_open(),
                     "restarting a pane with nothing running must not prompt"
+                );
+            });
+        });
+    });
+}
+
+/// `restart_shell_does_not_prompt` only proves the prompt stays closed --
+/// which is also what a silent no-op implementation would produce. This
+/// proves `RestartShell` actually reaches `restart_session` and installs a
+/// new PTY event loop, using the same `established_session_count` hook
+/// `pane_group::mod_tests`'s concurrent-restart test relies on.
+#[test]
+fn restart_shell_reaches_restart_session_when_idle() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        let established_before = workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane")
+                .read(ctx, |manager, _| {
+                    manager
+                        .as_any()
+                        .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                        .expect("mock workspace panes use the local-tty manager")
+                        .established_session_count()
+                })
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+        });
+
+        // restart_session spawns the new shell's startup in the background;
+        // let the cooperative executor drive it to completion.
+        for _ in 0..64 {
+            futures_lite::future::yield_now().await;
+        }
+
+        let established_after = workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane")
+                .read(ctx, |manager, _| {
+                    manager
+                        .as_any()
+                        .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                        .expect("mock workspace panes use the local-tty manager")
+                        .established_session_count()
+                })
+        });
+
+        assert_eq!(
+            established_after,
+            established_before + 1,
+            "RestartShell on an idle pane must reach restart_session and install a new PTY \
+             event loop, not silently no-op"
+        );
+    });
+}
+
+/// The confirmation exists to protect a live session, so no way of
+/// dismissing it may skip clearing `pending_shell_restart`. Escape and the
+/// modal's close (X) button both route through `ModalEvent::Close` rather
+/// than the explicit Cancel action -- this exercises that path directly by
+/// calling the same handler the `ModalEvent::Close` subscription invokes.
+#[test]
+fn restart_shell_confirmation_dismiss_clears_pending_restart() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let manager = workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            workspace.pending_shell_restart = Some(PendingShellRestart {
+                manager,
+                target: None,
+                cwd: None,
+            });
+            workspace.restart_shell_confirmation_modal.open();
+
+            // What the `ModalEvent::Close` subscription on the modal
+            // (Escape / the close button) invokes.
+            workspace.close_restart_shell_confirmation_modal(ctx);
+        });
+
+        app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                assert!(
+                    workspace.pending_shell_restart.is_none(),
+                    "dismissing the confirmation modal via Escape/close-button must not leave \
+                     a pending restart holding a live terminal manager handle"
                 );
             });
         });

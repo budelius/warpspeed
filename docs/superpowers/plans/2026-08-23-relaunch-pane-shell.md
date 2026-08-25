@@ -552,65 +552,135 @@ git commit -m "feat(workspace): add restart-shell and change-shell commands"
 
 ---
 
-### Task 7: Resume the agent after the shell comes back
+### Task 7: Fork a Claude transcript at its last complete turn
+
+**Why this replaces the original Task 7.** The first version assumed a restart could capture `ResumeOptions::ThirdParty(ResumePayload)` and hand it back after the shell returned. It cannot. `ResumePayload::Claude` has exactly one producer — `fetch_resume_payload` (`app/src/ai/agent_sdk/driver/harness/claude_code.rs:115-124`) — which takes a server-minted `AIConversationId` and fetches the envelope over HTTP. That is the headless cloud driver's mechanism. A `claude` the user typed into a pane has neither a server conversation id nor a server-stored envelope.
+
+The second assumption was that `rehydrate_claude_transcript` guaranteed resumption from the last complete turn. It does not: `claude_transcript.rs:243-258` sets `envelope.cwd`, writes the envelope, writes a session-index entry, and returns a resume command. No entry is inspected and nothing is dropped. Worse, for a pane-local agent that function is never reached at all — Claude writes its own JSONL incrementally to `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`, so `claude --resume <uuid>` picks up whatever partial turn was flushed when the shell was killed.
+
+This task builds the missing piece.
+
+**Decision, already made — do not revisit.** Trim by **forking**: read the session file, trim a copy to the last complete turn, and write it under a **new** UUID. Never mutate Claude's original file. A bad trim must be recoverable, and the CLI's on-disk format is not ours to own.
 
 **Files:**
-- Modify: wherever Task 6 placed the restart call site
-- Test: `app/src/pane_group/mod_tests.rs`
+- Modify: `app/src/ai/agent_sdk/driver/harness/claude_transcript.rs`
+- Test: the existing test module for that file. Find it before adding one; do not create a second module.
 
 **Interfaces:**
-- Consumes: `ResumeOptions::ThirdParty(Box<ResumePayload>)` (`app/src/ai/agent_sdk/driver.rs:452`); `set_pending_command_queue(&mut self, commands: Vec<String>, ctx: &mut ViewContext<Self>)` (`app/src/terminal/view.rs:9537`).
+- Consumes: `ClaudeTranscriptEnvelope` (`claude_transcript.rs:36-50`) with `entries: Vec<Value>`; `write_envelope(envelope, config_root)` (`:200`); `claude_config_dir()` (`:89`); `encode_cwd`.
+- Produces: `pub(crate) fn fork_transcript_at_last_complete_turn(session_id: Uuid, cwd: &Path, config_root: &Path) -> Result<Option<ClaudeLocalContinuation>>` — reads the session's JSONL, trims, writes a new session under a fresh UUID, and returns the resume command for it. `Ok(None)` when there is no session file or nothing resumable survives the trim.
+
+- [ ] **Step 1: Determine what a turn boundary actually is**
+
+`entries` is `Vec<Value>` — untyped JSON. **You cannot write the trim until you know the entry shape.** Read `entries_to_jsonl` and the surrounding parsing in `claude_transcript.rs`, and read any test fixtures in the repo that contain real Claude JSONL entries (`grep -rl '"type":"assistant"' --include=*.jsonl --include=*.rs .` is a reasonable start).
+
+Write down in your report: which field(s) identify an entry's role, what marks the end of an assistant turn, and how an interrupted turn differs from a complete one on disk. If the repo contains no real fixture, say so — and derive the boundary from the writer side (what Warp itself serialises) rather than inventing a schema.
+
+This reading is the task. The trim is mechanical once it is done, and a guessed schema silently drops good turns or keeps bad ones.
+
+- [ ] **Step 2: Write the failing tests**
+
+Table-driven over synthetic entry sequences built from what Step 1 established. At minimum:
+
+- a transcript ending on a complete assistant turn is returned unchanged in content, under a new UUID
+- a transcript ending mid-assistant-turn has that trailing partial turn dropped
+- a transcript containing only a partial first turn yields `Ok(None)` — nothing resumable
+- a session id with no file on disk yields `Ok(None)`, not an error
+- the **original file is byte-identical afterwards** — this is the decision above, and it needs a test, not a comment
+
+Use `tempfile::TempDir` as `config_root`. Do not write into the real `~/.claude`.
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run: `cargo nextest run -p warp --lib -E 'test(fork_transcript)'`
+Expected: compile error — the function is not defined.
+
+- [ ] **Step 4: Implement**
+
+Read the session JSONL for `session_id` under `config_root`, parse into `Vec<Value>`, trim to the last complete turn per Step 1, mint a fresh `Uuid`, build a `ClaudeTranscriptEnvelope` with the trimmed entries, and hand it to the existing `write_envelope`. Return `ClaudeLocalContinuation { command: format!("claude --resume {new_id}") }`.
+
+Reuse `write_envelope` rather than writing JSONL yourself — it already handles the projects directory, the cwd encoding, subagents, and todos.
+
+- [ ] **Step 5: Verify and commit**
+
+Run: `cargo nextest run -p warp --lib -E 'test(fork_transcript)'` — all pass.
+Then: `cargo nextest run -p warp --lib --no-fail-fast` — failing SET matches `.superpowers/sdd/2026-08-17-lazy-shell-startup/baseline-failures.txt` exactly. Note `test_restart_session_keeps_the_pane_and_rearms_its_exit_handling` is known timing-sensitive; if it fails once and passes in isolation, say so.
+Then: `cargo check --workspace --exclude command-signatures-v2 --exclude integration` — clean.
+Then: `cargo clippy -p warp --lib -- -D warnings` — clean.
+
+```bash
+git add app/src/ai/agent_sdk/driver/harness/claude_transcript.rs
+git commit -m "feat(agent): fork a Claude transcript at its last complete turn"
+```
+
+---
+
+### Task 8: Resume the agent after the shell comes back
+
+**Files:**
+- Modify: wherever Task 6 placed the restart call site in `app/src/workspace/view.rs`
+- Test: `app/src/workspace/view_tests.rs`
+
+**Interfaces:**
+- Consumes: `fork_transcript_at_last_complete_turn` (Task 7); `set_pending_command_queue(&mut self, commands: Vec<String>, ctx)` (`app/src/terminal/view.rs:9537`); `CLIAgentSession.session_context.session_id`.
 - Produces: no new public API.
 
-**The sequencing is already solved — do not rebuild it.** The pending-command queue is a "run this once the shell has bootstrapped" primitive: `set_pending_command_queue` parks commands, and `execute_pending_command` refuses to submit until `block_list().is_bootstrapped()`. Enqueue the agent's resume invocation like any other startup command.
+**Sequencing is already solved — do not rebuild it.** The pending-command queue is a "run this once the shell has bootstrapped" primitive: `set_pending_command_queue` parks commands and `execute_pending_command` refuses to submit until `block_list().is_bootstrapped()`. Enqueue the resume command like any other startup command. Do not detect bootstrap yourself.
 
-**Capture before teardown.** The resume payload is unreadable once the PTY is gone. Read it in Task 6's action handler, before calling `restart_session`.
+**Capture before teardown.** The session id is unreadable once the PTY is gone. Read it in the action handler, before `restart_session` is called.
 
-- [ ] **Step 1: Write the failing test**
+**Decision, already made — do not revisit.** A bare `claude` with no plugin has `session_id: None` and is unresumable by any mechanism. In that case the pane **restarts normally and says nothing**: no banner, no warning, no extra confirmation. The rendered conversation stays on screen; the user relaunches the agent themselves.
 
-Assert a pane with no agent restarts without enqueueing anything — the common case must not acquire an agent dependency. `has_pending_command_or_awaiting_completion` is at `app/src/terminal/view.rs:16176`; match the accessor spellings to what `mod_tests.rs` already uses.
+- [ ] **Step 1: Write the failing tests**
 
-- [ ] **Step 2: Run it**
+Two cases:
+- a pane with no agent session restarts and enqueues nothing
+- a pane with a tracked agent session enqueues exactly one `claude --resume <new-uuid>` command, where the uuid is the forked one, not the original
 
-Run: `cargo nextest run -p warp --lib -E 'test(without_an_agent)'`
+The second is the one that must discriminate: removing the enqueue has to make it fail. If the enqueue genuinely cannot be observed in the harness, say so explicitly with what you tried, rather than leaving an assertion that passes against a no-op. Earlier tasks added `#[cfg(test)]` observation hooks where needed — check whether one already gives you what you need before adding another.
 
-This may pass immediately, since nothing enqueues yet. That is expected: it is a regression guard for Step 3, not a red-first test. Note which it was in your report.
+- [ ] **Step 2: Run to verify they fail**
 
-- [ ] **Step 3: Capture and enqueue the resume**
+Run: `cargo nextest run -p warp --lib -E 'test(agent_resume) or test(restart_shell)'`
 
-At the call site from Task 6, before `restart_session`:
+The no-agent case may pass immediately, since nothing enqueues yet. That is expected — it is a regression guard, not a red-first test. Say which it was.
 
-1. Read the focused pane's agent resume state. If there is none, restart and stop.
-2. If there is one, build `ResumeOptions::ThirdParty(..)` from it.
+- [ ] **Step 3: Implement**
+
+In the restart action handler, before calling `restart_session`:
+
+1. Read the focused pane's `CLIAgentSession.session_context.session_id`. If `None`, restart and stop — no enqueue, no message.
+2. If `Some(id)`, call `fork_transcript_at_last_complete_turn`. If it returns `Ok(None)`, restart and stop.
 3. Restart.
-4. Enqueue the resume invocation via `set_pending_command_queue`.
+4. Enqueue the returned command via `set_pending_command_queue`.
 
-**Read `rehydrate_claude_transcript` (`app/src/ai/agent_sdk/driver/harness/claude_code.rs:282`) before writing step 2.** Killing an agent mid-turn truncates its transcript, and resume must mean *resume from the last complete turn*. If that function does not already guarantee this, say so in your report and stop rather than shipping a resume that can replay a partial turn.
+A failure inside the fork must not fail the restart. Log it and restart without resuming — the shell coming back matters more than the agent coming back.
 
 - [ ] **Step 4: Verify and commit**
 
-Tests, full suite, workspace check, clippy.
+Same four gates as Task 7.
 
 ```bash
-git add app/src
-git commit -m "feat(terminal): resume a CLI agent after restarting its shell"
+git add app/src/workspace app/src/terminal
+git commit -m "feat(workspace): resume a CLI agent after restarting its shell"
 ```
 
 ---
 
 ## Self-Review
 
-**What changed from the first version of this plan, and why.** Tasks 2 onward were rewritten after Task 2's review found the original approach could not work. The plan had asserted that relaunching could re-park a `DeferredShellStart`, and that "phase 3 is already written and reviewed". Two verified facts contradict that:
+**What changed from earlier versions of this plan, and why.**
 
-- `ShellStartupResources` (`terminal_manager.rs:170-176`) holds a `mio_channel::Receiver<Message>`, is constructed at exactly one site (`:510`), and is consumed at `:830`. A re-parked start can never be given valid resources. Hence Task 3.
-- Ending a session fires `ModelEvent::Exit`, whose handler inserts a terminated banner, disables the editor, and emits `Event::Exited` — which `terminal_pane.rs:976-989` turns into `close_pane`. The first call would have closed the pane. `handled_exit` also latches with no reset, freezing `is_read_only()`. Hence Task 2.
+Tasks 2 onward were rewritten once already, after the original Task 2's review disproved the approach: `ShellStartupResources` is one-shot (`terminal_manager.rs:170-176`, built at `:510`, consumed at `:830`), so a re-parked `DeferredShellStart` can never be handed valid resources; and ending a session fires `ModelEvent::Exit`, whose handler emits `Event::Exited` and closes the pane. Tasks 2 and 3 exist to address those.
 
-**Spec coverage.** Guard on a running process → Task 6 Step 3. Capture before teardown → Task 7 Step 3. Restart in place → Task 4. cwd translated to native form → Tasks 1 and 5. Auto-resume a CLI agent → Task 7. Two separate commands → Task 6. Shell picker reusing `AvailableShells` → Task 6 Step 3. Confirmation modal → Task 6 Step 4. No default keybinding → Task 6 preamble.
+Task 7 was then rewritten a second time, after its own investigation found the resume mechanism it named does not exist for pane-local agents, and the last-complete-turn guarantee it relied on was never there. That investigation is summarised in Task 7's preamble. The replacement forks the transcript rather than mutating Claude's file, and does nothing when a session is untracked.
 
-**Error handling.** The spec's "teardown failure aborts the relaunch" requirement is **dropped, deliberately.** Task 2's review established that `shutdown_event_loop` takes the join handle before joining and never restores it, so a boolean success signal is unconditionally true and the guard would be vacuous. Restoring a genuine signal means propagating the `join()` `Result`, which is worth doing but is not what makes this feature work; it is recorded as a follow-up rather than faked here. Directory no longer resolves → `native_startup_directory` returns `None` and the shell uses its default. Truncated transcript → Task 7 Step 3 instructs the implementer to verify and stop rather than guess.
+**Spec coverage.** Guard on a running process → Task 6. Capture before teardown → Task 8 Step 3. Restart in place → Task 4. cwd translated to native form → Tasks 1 and 5. Auto-resume a CLI agent → Tasks 7 and 8. Two separate commands → Task 6. Shell picker reusing `AvailableShells` → Task 6. Confirmation modal → Task 6. No default keybinding → Task 6.
 
-**Placeholder scan.** Task 3 Step 2's signature is deliberately left to the implementer's Step 1 reading, because which inputs must be rebuilt is exactly what that reading determines — writing a signature I had not verified is what produced the defect this plan is recovering from. Task 2 Step 1 and Task 4 Step 1 name the file, the pattern to mirror, and what must be asserted, and require the implementer to report what it used.
+**Error handling.** The spec's "teardown failure aborts the relaunch" requirement was dropped deliberately: `shutdown_event_loop` takes the join handle before joining and never restores it, so a boolean success signal is unconditionally true and the guard would be vacuous. Recorded as a follow-up rather than faked. Directory no longer resolves → `native_startup_directory` returns `None` and the shell uses its default. Transcript fork fails → Task 8 Step 3 restarts without resuming. Agent session untracked → Task 8 restarts silently, by decision.
 
-**Type consistency.** `restart_session(target, cwd, ctx)` is spelled identically at its trait declaration (Task 4), its call sites (Tasks 5 and 6), and the forwarding impls. `begin_restart` / `finish_restart` / `reset_exit_state` match between Task 2's definitions and Task 4's use. Task 1's converters return `String`; Task 5 wraps in `PathBuf::from`.
+**Placeholder scan.** Task 7 Step 1 deliberately does not specify the entry schema, because determining it from real data is the task — a guessed schema silently drops good turns or keeps bad ones, and guessing an unverified interface is what forced both rewrites of this plan.
 
-**Known gap.** Task 4's test asserts the pane survives and the blocklist is intact, and Step 1 requires stubbing the implementation to prove the test discriminates. But no test asserts the replacement shell reaches a working prompt — that needs a real PTY, which the harness cannot drive. Manual verification before merge is the only cover.
+**Type consistency.** `fork_transcript_at_last_complete_turn(session_id, cwd, config_root) -> Result<Option<ClaudeLocalContinuation>>` is spelled identically at its definition (Task 7) and its call site (Task 8 Step 3). `ClaudeLocalContinuation { command: String }` is the existing type returned by `rehydrate_claude_transcript`. `set_pending_command_queue` takes `Vec<String>`, which is what `command` provides.
+
+**Known gaps.** No test asserts the replacement shell reaches a working prompt — that needs a real PTY. Codex has the same transcript problem as Claude and is **not** covered by these tasks; only Claude sessions resume. And the fork leaves a duplicate transcript per restart, which nothing prunes.

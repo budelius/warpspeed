@@ -324,8 +324,13 @@ where
         target: Option<ShellLaunchData>,
         cwd: Option<PathBuf>,
         ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
-    ) {
-        self.0.restart_session_inner(target, cwd, ctx)
+    ) -> bool {
+        self.0.restart_session_inner(target, cwd, ctx);
+        true
+    }
+
+    fn supports_session_restart(&self) -> bool {
+        true
     }
 
     fn as_any(&self) -> &dyn Any {

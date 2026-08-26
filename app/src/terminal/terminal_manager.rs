@@ -70,12 +70,34 @@ pub trait TerminalManager: Any {
     /// Managers with no local session to replace (the remote-TTY viewer, the
     /// mock) keep the default no-op, exactly as [`Self::ensure_shell_started`]
     /// does -- there is nothing for them to tear down or fork.
+    ///
+    /// Returns whether a session was actually replaced. Callers must not act on
+    /// a restart they only *asked* for: the agent-resume continuation is parked
+    /// in the pane's pending-command queue and fires on the next
+    /// `BlockCompleted`, so enqueueing it against a manager that did nothing
+    /// injects `claude --resume <uuid>` into a live, untouched shell. See
+    /// [`Self::supports_session_restart`] for deciding before the fact.
+    #[must_use = "a manager that cannot restart returns false; acting on it anyway \
+                  injects a resume command into a shell that never restarted"]
     fn restart_session(
         &mut self,
         _target: Option<ShellLaunchData>,
         _cwd: Option<PathBuf>,
         _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
-    ) {
+    ) -> bool {
+        false
+    }
+
+    /// Whether [`Self::restart_session`] can do anything for this manager.
+    ///
+    /// The restart/change-shell commands are registered once, process-wide, and
+    /// the binding registry's `with_enabled` predicate takes no context -- so
+    /// there is no way to hide them per pane. This lets the *caller* decline
+    /// before it puts a confirmation modal or a shell picker in front of the
+    /// user promising something that will not happen: an SSH pane, the
+    /// shared-session viewer and the mock all answer `false`.
+    fn supports_session_restart(&self) -> bool {
+        false
     }
 
     /// Returns this [`TerminalManager`] as an [`Any`], to support downcasting.

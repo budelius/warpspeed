@@ -12944,6 +12944,19 @@ impl Workspace {
             return;
         };
 
+        // An SSH pane, the shared-session viewer and the mock all inherit
+        // `TerminalManager::restart_session`'s no-op default. Declining here is
+        // what keeps the command from putting a confirmation modal in front of
+        // the user -- and then, on Confirm, parking a `claude --resume` in a
+        // shell that was never restarted.
+        if !manager.as_ref(ctx).supports_session_restart() {
+            log::debug!(
+                "Ignoring a shell restart for a pane whose terminal manager has no local \
+                 session to replace"
+            );
+            return;
+        }
+
         let is_busy = manager
             .as_ref(ctx)
             .model()
@@ -12996,15 +13009,47 @@ impl Workspace {
     ) {
         let resume_command = Self::resolve_agent_resume_command(terminal_view.id(), ctx);
 
-        manager.update(ctx, |manager, ctx| {
-            manager.restart_session(target, cwd, ctx);
+        let restarted = manager.update(ctx, |manager, ctx| {
+            manager.restart_session(target, cwd, ctx)
         });
+
+        if !restarted {
+            // Nothing was torn down, so there is nothing to resume into and the
+            // tracked session below is still the live one. Parking the resume
+            // command anyway would fire `claude --resume <uuid>` into an
+            // untouched shell on its next `BlockCompleted`.
+            log::warn!(
+                "The pane's terminal manager declined the restart; leaving its session, and \
+                 any tracked CLI agent, alone"
+            );
+            return;
+        }
+
+        // The restart killed the PTY, so the agent that owned this session is
+        // gone. Dropping the tracked session is what stops the agent UI showing
+        // a live session for a dead process -- and, more importantly, what stops
+        // a *second* restart before the resumed agent's `SessionStart` hook
+        // re-registers from reading the pre-restart id again and forking the
+        // pre-restart transcript, silently discarding everything the resumed
+        // session added. Deliberately after `resolve_agent_resume_command`: the
+        // session id lives nowhere else.
+        Self::clear_tracked_agent_session(terminal_view.id(), ctx);
 
         if let Some(command) = resume_command {
             terminal_view.update(ctx, |terminal_view, ctx| {
                 terminal_view.set_pending_command_queue(vec![command], ctx);
             });
         }
+    }
+
+    /// Drops the CLI agent session tracked against `terminal_view_id`, if any.
+    ///
+    /// Idempotent, and a no-op when nothing is tracked: `remove_session` only
+    /// emits `Ended` when it actually removed something.
+    fn clear_tracked_agent_session(terminal_view_id: EntityId, ctx: &mut ViewContext<Self>) {
+        CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+            sessions.remove_session(terminal_view_id, ctx);
+        });
     }
 
     /// Looks up the tracked CLI agent session for `terminal_view_id` and, if it names a
@@ -13139,6 +13184,21 @@ impl Workspace {
     fn toggle_change_shell_menu(&mut self, ctx: &mut ViewContext<Self>) {
         if self.change_shell_menu_modal.is_open() {
             self.close_change_shell_menu(ctx);
+            return;
+        }
+
+        // Same reason `start_shell_restart` declines: offering a shell picker
+        // for a pane that cannot restart promises a switch that will not
+        // happen. Checked before opening rather than on selection, so the user
+        // is never shown the list at all.
+        let can_restart = self
+            .focused_terminal_manager(ctx)
+            .is_some_and(|manager| manager.as_ref(ctx).supports_session_restart());
+        if !can_restart {
+            log::debug!(
+                "Ignoring a change-shell request for a pane whose terminal manager has no \
+                 local session to replace"
+            );
             return;
         }
 

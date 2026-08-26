@@ -26677,7 +26677,26 @@ impl TerminalSurface for TerminalView {
         // process that no longer exists. `insert_shell_process_terminated_banner`
         // and `show_initialization_block` re-add both if the replacement dies
         // the same way.
-        self.inline_banners_state.shell_process_terminated_banner = None;
+        //
+        // Both halves of the banner have to go. `insert_shell_process_terminated_banner`
+        // writes the state *and* inserts a blocklist entry, and only the state
+        // drives rendering: dropping the state alone leaves the entry behind as
+        // a `is_hidden: false` item of `INLINE_BANNER_HEIGHT`, so the pane grows
+        // a blank 2.5-line band above the new prompt and the layout logs
+        // "Missing banner element for ID" on every pass. Every other dismissal
+        // in this file pairs the two for exactly that reason -- see
+        // `dismiss_alias_expansion_banner`, and the "leaving empty space"
+        // comment in `insert_notifications_discovery_banner`.
+        if let Some(banner) = self
+            .inline_banners_state
+            .shell_process_terminated_banner
+            .take()
+        {
+            self.model
+                .lock()
+                .block_list_mut()
+                .remove_inline_banner(banner.banner_id);
+        }
         // Back to what the *setting* says rather than a flat `false`:
         // `show_initialization_block` forces the block on regardless of the
         // user's preference, and undoing that force is what this is for. A user

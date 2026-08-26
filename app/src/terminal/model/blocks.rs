@@ -1249,6 +1249,20 @@ impl BlockList {
         std::mem::take(&mut self.dirty_rich_content_items)
     }
 
+    /// Test-only: how many inline banners the blocklist currently holds.
+    ///
+    /// An inline banner lives in two places -- the view's
+    /// `inline_banners_state`, which drives rendering, and a blocklist entry,
+    /// which reserves its height. Clearing only the first leaves a blank band,
+    /// so a test asserting a banner is *gone* has to be able to see this half.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn inline_banner_count(&self) -> usize {
+        self.removable_blocklist_item_positions
+            .keys()
+            .filter(|item| matches!(item, RemovableBlocklistItem::InlineBanner(_)))
+            .count()
+    }
+
     pub fn remove_inline_banner(&mut self, banner_id: InlineBannerId) {
         self.remove_item_from_blocklist(RemovableBlocklistItem::InlineBanner(banner_id));
     }

@@ -5132,6 +5132,11 @@ fn test_restart_clears_the_replaced_shells_post_mortem_state() {
                 view.has_shell_process_terminated_banner_for_test(),
                 "precondition: the replaced shell must have pinned its terminated banner"
             );
+            assert_eq!(
+                view.model.lock().block_list().inline_banner_count(),
+                1,
+                "precondition: the pinned banner must also hold a blocklist entry, which is \n                 what reserves its height"
+            );
             assert!(
                 view.pty_spawn_failed_for_test(),
                 "precondition: the replaced shell must have recorded a spawn failure"
@@ -5161,6 +5166,16 @@ fn test_restart_clears_the_replaced_shells_post_mortem_state() {
                 !view.has_shell_process_terminated_banner_for_test(),
                 "the replaced shell's terminated banner must not stay pinned above the \
                  replacement's prompt"
+            );
+            // The half that is easy to forget. Only the state drives
+            // rendering, so dropping it alone leaves the blocklist entry
+            // behind as a visible-height item with nothing to draw: a blank
+            // 2.5-line band above the new prompt, and "Missing banner element
+            // for ID" logged on every layout pass.
+            assert_eq!(
+                view.model.lock().block_list().inline_banner_count(),
+                0,
+                "clearing the banner's state without removing its blocklist entry leaves a \n                 blank band where the banner used to be"
             );
             assert!(
                 !view.model.lock().block_list().show_bootstrap_block(),

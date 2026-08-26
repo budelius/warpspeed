@@ -12917,7 +12917,18 @@ impl Workspace {
         &self,
         ctx: &mut ViewContext<Self>,
     ) -> Option<ModelHandle<Box<dyn TerminalManager>>> {
-        self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
+        self.focused_terminal_manager_in(ctx)
+    }
+
+    /// [`Self::focused_terminal_manager`] against a plain [`AppContext`].
+    ///
+    /// `keymap_context` is handed only an `&AppContext`, and it needs this to
+    /// publish whether the focused pane can restart its shell.
+    fn focused_terminal_manager_in(
+        &self,
+        app: &AppContext,
+    ) -> Option<ModelHandle<Box<dyn TerminalManager>>> {
+        self.active_tab_pane_group().read(app, |pane_group, ctx| {
             let focused_pane_id = pane_group.focused_pane_id(ctx);
             let pane_index = pane_group
                 .visible_pane_ids()
@@ -27059,6 +27070,19 @@ impl View for Workspace {
             .any_pane_being_dragged(app)
         {
             context.set.insert("Workspace_PaneDragging");
+        }
+
+        // Restart/change shell are registered once, process-wide, so this is
+        // what keeps them off panes that cannot honour them -- an SSH pane, the
+        // shared-session viewer. The command palette builds its list through
+        // `bindings_for_context`, which filters candidates on their context
+        // predicate, and empty-trigger bindings are not exempt: without this
+        // flag both commands are offered on every pane and do nothing on most.
+        if self
+            .focused_terminal_manager_in(app)
+            .is_some_and(|manager| manager.as_ref(app).supports_session_restart())
+        {
+            context.set.insert("Workspace_PaneCanRestartShell");
         }
 
         // TODO: This is temporary. We currently check if any code pane is open where it should

@@ -977,6 +977,13 @@ pub fn init(app: &mut AppContext) {
     // chord risks colliding with a user's own binding, so neither ships with
     // a default keybinding. Both prompt for confirmation first if the pane
     // has a long-running foreground command.
+    //
+    // `Workspace_PaneCanRestartShell` keeps both off panes whose terminal
+    // manager has no local session to replace. The palette builds its command
+    // list through `bindings_for_context`, which filters candidates on exactly
+    // this predicate, so an SSH pane is never offered a restart that would do
+    // nothing. `EnabledPredicate` cannot express this -- it is a bare
+    // `fn() -> bool` with no context -- but a context predicate can.
     app.register_editable_bindings([
         EditableBinding::new(
             "workspace:restart_shell",
@@ -984,14 +991,14 @@ pub fn init(app: &mut AppContext) {
             WorkspaceAction::RestartShell,
         )
         .with_group(bindings::BindingGroup::Terminal.as_str())
-        .with_context_predicate(id!("Workspace")),
+        .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanRestartShell")),
         EditableBinding::new(
             "workspace:change_shell",
             "Change shell",
             WorkspaceAction::ToggleChangeShellMenu,
         )
         .with_group(bindings::BindingGroup::Terminal.as_str())
-        .with_context_predicate(id!("Workspace")),
+        .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanRestartShell")),
     ]);
 
     app.register_editable_bindings([EditableBinding::new(

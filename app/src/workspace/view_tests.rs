@@ -6119,6 +6119,105 @@ fn restart_shell_confirmation_close_event_clears_pending_restart() {
     });
 }
 
+/// A pane whose terminal manager cannot restart must be offered neither the
+/// confirmation nor the picker, and must have nothing enqueued against it.
+///
+/// `add_loading_conversation_pane` builds its pane on `MockTerminalManager`,
+/// which takes every trait default -- so it answers `false` to both
+/// `restart_session` and `supports_session_restart`, exactly as the remote-TTY
+/// viewer and the shared-session viewer do. That makes it a faithful stand-in
+/// for an SSH pane here.
+#[test]
+fn restart_and_change_shell_decline_on_a_pane_that_cannot_restart() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .update(ctx, |pane_group, ctx| {
+                    pane_group.add_loading_conversation_pane(Direction::Right, None, ctx);
+                });
+        });
+
+        let supports = workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_manager(ctx)
+                .expect("the new pane is focused and has a terminal manager")
+                .read(ctx, |manager, _| manager.supports_session_restart())
+        });
+        assert!(
+            !supports,
+            "precondition: the focused pane must be the mock-manager one, which cannot              restart -- otherwise this test proves nothing about declining"
+        );
+
+        // Make it busy. Without this the two guards are indistinguishable: an
+        // idle pane takes `restart_shell_and_resume_agent`, whose `false` from
+        // `restart_session` already prevents the damage, so removing
+        // `start_shell_restart`'s capability check would change nothing
+        // observable. Busy is the case where the check earns its place --
+        // un-gated, the user gets a confirmation modal for a restart that
+        // cannot happen, and answering Yes does nothing.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_manager(ctx)
+                .expect("the new pane has a terminal manager")
+                .read(ctx, |manager, _| manager.model())
+                .lock()
+                .simulate_long_running_block("sleep 100", "");
+        });
+
+        // The palette filters candidate bindings through their context
+        // predicate, so this flag's absence is what actually hides the two
+        // commands. Asserted directly: everything below only proves they are
+        // inert once dispatched, which is the second line of defence.
+        assert!(
+            !app.read(|ctx| workspace
+                .read(ctx, |workspace, ctx| workspace.keymap_context(ctx))
+                .set
+                .contains("Workspace_PaneCanRestartShell")),
+            "a pane that cannot restart must not publish the keymap flag its restart and              change-shell bindings are predicated on, or the palette lists them anyway"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+            workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);
+        });
+
+        app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                assert!(
+                    !workspace.restart_shell_confirmation_modal.is_open(),
+                    "a pane that cannot restart must not be asked to confirm a restart that                      will not happen"
+                );
+                assert!(
+                    !workspace.change_shell_menu_modal.is_open(),
+                    "a pane that cannot restart must not be offered a shell picker that                      cannot switch it"
+                );
+                assert!(
+                    workspace.pending_shell_restart.is_none(),
+                    "declining must not park a pending restart"
+                );
+            });
+        });
+
+        let has_pending = workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_view(ctx)
+                .expect("the new pane has a terminal view")
+                .read(ctx, |terminal_view, ctx| {
+                    terminal_view.has_pending_command_or_awaiting_completion(ctx)
+                })
+        });
+        assert!(
+            !has_pending,
+            "nothing may be enqueued against a shell that was never restarted; a parked              `claude --resume` would fire into the live one on its next `BlockCompleted`"
+        );
+    });
+}
+
 /// The picker lists shells you can switch *to*. The "System default" entry is
 /// not one: it is a setting placeholder that resolves to no launchable shell,
 /// and "restart with whatever I'm already configured for" is what plain
@@ -6193,6 +6292,16 @@ fn toggle_change_shell_menu_opens_then_closes_the_picker() {
         initialize_app(&mut app);
 
         let workspace = mock_workspace(&mut app);
+
+        // The other half of the predicate: a pane that *can* restart must
+        // publish the flag, or the commands are hidden from every pane.
+        assert!(
+            app.read(|ctx| workspace
+                .read(ctx, |workspace, ctx| workspace.keymap_context(ctx))
+                .set
+                .contains("Workspace_PaneCanRestartShell")),
+            "a local pane must publish the keymap flag its restart and change-shell bindings              are predicated on, or the palette never lists them"
+        );
 
         workspace.update(&mut app, |workspace, ctx| {
             workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);

@@ -79,6 +79,8 @@ use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::shared_session::{
     SharedSessionScrollbackType, SharedSessionSource, SharedSessionStatus,
 };
+use crate::modal::ModalAction;
+use crate::test_util::assert_eventually_within;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseSettings;
 #[cfg(feature = "local_fs")]
@@ -5390,11 +5392,25 @@ fn restart_shell_reaches_restart_session_when_idle() {
             workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
         });
 
-        // restart_session spawns the new shell's startup in the background;
-        // let the cooperative executor drive it to completion.
-        for _ in 0..64 {
-            futures_lite::future::yield_now().await;
-        }
+        // `restart_session` spawns the new shell's startup in the background and
+        // forks a real shell; wait for the session count to actually move
+        // rather than for a fixed number of scheduler turns.
+        assert_eventually_within!(
+            std::time::Duration::from_secs(10) => workspace.update(&mut app, |workspace, ctx| {
+                workspace
+                    .focused_terminal_manager(ctx)
+                    .expect("mock workspace has a focused terminal pane")
+                    .read(ctx, |manager, _| {
+                        manager
+                            .as_any()
+                            .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                            .expect("mock workspace panes use the local-tty manager")
+                            .established_session_count()
+                    })
+            }) == established_before + 1,
+            "RestartShell on an idle pane must reach restart_session and install a new PTY \
+             event loop, not silently no-op (waited 10s)"
+        );
 
         let established_after = workspace.update(&mut app, |workspace, ctx| {
             workspace
@@ -5565,6 +5581,146 @@ fn restart_shell_resumes_tracked_claude_session_via_forked_transcript() {
     });
 }
 
+/// A restart kills the PTY, so the agent that owned the tracked session is gone
+/// with it. The tracked session must go too.
+///
+/// `remove_session` is called from exactly two places -- a User block completing
+/// and a pane detaching -- and neither fires on a restart, so the entry
+/// survived with its pre-restart id. Two consequences: the agent UI shows a live
+/// session for a dead agent, and a *second* restart before the resumed agent's
+/// `SessionStart` hook re-registers reads that same original id again and forks
+/// the **pre-restart** transcript, silently discarding everything the resumed
+/// session added.
+///
+/// The second restart below is the point of the test: asserting only that the
+/// entry is gone would also pass for an implementation that re-keyed it to
+/// something stale.
+#[test]
+fn restart_shell_clears_the_tracked_agent_session_so_a_second_restart_cannot_refork_it() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: nextest runs each test in its own process, so mutating this process-global
+        // env var cannot race with another test.
+        unsafe {
+            std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        }
+
+        let cwd = std::path::Path::new("/mock/project/for/clearing/test");
+        let original_session_id = uuid::Uuid::new_v4();
+
+        let session_dir = tmp.path().join("projects").join(
+            crate::ai::agent_sdk::driver::harness::claude_transcript::encode_cwd(cwd),
+        );
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let entries = [
+            serde_json::json!({ "type": "user", "message": { "role": "user" } }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "stop_reason": "end_turn" },
+            }),
+        ];
+        let body = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            session_dir.join(format!("{original_session_id}.jsonl")),
+            body,
+        )
+        .unwrap();
+
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view_id = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(
+                    terminal_view.id(),
+                    crate::terminal::cli_agent_sessions::CLIAgentSession {
+                        agent: crate::terminal::CLIAgent::Claude,
+                        status:
+                            crate::terminal::cli_agent_sessions::CLIAgentSessionStatus::InProgress,
+                        session_context:
+                            crate::terminal::cli_agent_sessions::CLIAgentSessionContext {
+                                cwd: Some(cwd.to_string_lossy().into_owned()),
+                                session_id: Some(original_session_id.to_string()),
+                                ..Default::default()
+                            },
+                        input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        remote_host: None,
+                        draft_text: None,
+                        custom_command_prefix: None,
+                        received_rich_notification: false,
+                    },
+                    ctx,
+                );
+            });
+
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+            terminal_view.id()
+        });
+
+        assert!(
+            app.read(|ctx| CLIAgentSessionsModel::as_ref(ctx)
+                .session(terminal_view_id)
+                .is_none()),
+            "the restart tore down the PTY, so the agent that owned this session is gone; \
+             leaving it tracked shows a live session for a dead agent"
+        );
+
+        // The command the *first* restart parked, so the second restart's
+        // outcome can be compared against it.
+        let first_resume = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.read(ctx, |terminal_view, ctx| {
+                terminal_view
+                    .input()
+                    .read(ctx, |input, ctx| input.buffer_text(ctx))
+            })
+        });
+        assert!(
+            first_resume.starts_with("claude --resume "),
+            "precondition: the first restart must have parked a resume command, or the second \
+             restart has nothing to differ from ({first_resume:?})"
+        );
+
+        // A second restart, before any `SessionStart` hook has re-registered a
+        // session. With the entry cleared there is nothing to resume, so nothing
+        // new is parked; with the entry still holding the *original* id, this
+        // would fork the pre-restart transcript all over again.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+        });
+
+        let second_resume = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.read(ctx, |terminal_view, ctx| {
+                terminal_view
+                    .input()
+                    .read(ctx, |input, ctx| input.buffer_text(ctx))
+            })
+        });
+        assert_eq!(
+            second_resume, first_resume,
+            "a second restart with no re-registered session must park nothing new; re-forking \
+             the pre-restart transcript silently discards everything the resumed session added"
+        );
+    });
+}
+
 /// The confirmation exists to protect a live session, so no way of
 /// dismissing it may skip clearing `pending_shell_restart`. Escape and the
 /// modal's close (X) button both route through `ModalEvent::Close` rather
@@ -5606,5 +5762,501 @@ fn restart_shell_confirmation_dismiss_clears_pending_restart() {
                 );
             });
         });
+    });
+}
+
+/// Reads the focused pane's PTY-session count, the same hook
+/// `restart_shell_reaches_restart_session_when_idle` uses. "Did a restart
+/// happen?" is exactly this number moving.
+fn focused_established_session_count(
+    workspace: &warpui::ViewHandle<Workspace>,
+    app: &mut App,
+) -> usize {
+    workspace.update(app, |workspace, ctx| {
+        workspace
+            .focused_terminal_manager(ctx)
+            .expect("mock workspace has a focused terminal pane")
+            .read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("mock workspace panes use the local-tty manager")
+                    .established_session_count()
+            })
+    })
+}
+
+/// The shell the focused pane is currently labelled as launching.
+fn focused_pane_shell(
+    workspace: &warpui::ViewHandle<Workspace>,
+    app: &mut App,
+) -> Option<crate::terminal::available_shells::AvailableShell> {
+    workspace.update(app, |workspace, ctx| {
+        workspace
+            .focused_terminal_manager(ctx)
+            .expect("mock workspace has a focused terminal pane")
+            .read(ctx, |manager, _| {
+                manager.model().lock().shell_launch_state().available_shell()
+            })
+    })
+}
+
+/// The startup directory the focused pane's shell was actually launched with.
+fn focused_resolved_startup_dir(
+    workspace: &warpui::ViewHandle<Workspace>,
+    app: &mut App,
+) -> Option<std::path::PathBuf> {
+    workspace.update(app, |workspace, ctx| {
+        workspace
+            .focused_terminal_manager(ctx)
+            .expect("mock workspace has a focused terminal pane")
+            .read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("mock workspace panes use the local-tty manager")
+                    .last_resolved_startup_directory_for_test()
+            })
+    })
+}
+
+/// Any launchable shell this machine actually has, for use as a switch target.
+fn a_launchable_shell(app: &mut App) -> ShellLaunchData {
+    app.read(|ctx| {
+        AvailableShells::handle(ctx).read(ctx, |shells, _| {
+            shells
+                .get_available_shells()
+                .find_map(|shell| shell.get_valid_shell_path_and_type())
+        })
+    })
+    .expect("this machine must list at least one launchable shell for the harness to work")
+}
+
+/// The confirmation exists to protect work in progress, so a pane with a
+/// long-running foreground command must be *asked* about, not restarted.
+///
+/// The busy branch of `start_shell_restart` had no test at all: every existing
+/// case ran against an idle pane, so an implementation that never prompted
+/// passed them all.
+#[test]
+fn restart_shell_prompts_when_the_pane_is_busy() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        let established_before = focused_established_session_count(&workspace, &mut app);
+
+        // A real long-running foreground command, through the same helper the
+        // model's own tests use -- not a hand-set flag.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane")
+                .read(ctx, |manager, _| manager.model())
+                .lock()
+                .simulate_long_running_block("sleep 100", "");
+        });
+        let is_busy = workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane")
+                .read(ctx, |manager, _| {
+                    manager
+                        .model()
+                        .lock()
+                        .block_list()
+                        .active_block()
+                        .is_active_and_long_running()
+                })
+        });
+        assert!(
+            is_busy,
+            "precondition: the pane must actually look busy, or this test proves nothing about \
+             the busy branch"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::RestartShell, ctx);
+        });
+
+        app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                assert!(
+                    workspace.restart_shell_confirmation_modal.is_open(),
+                    "restarting a pane with a long-running command must ask first"
+                );
+                assert!(
+                    workspace.pending_shell_restart.is_some(),
+                    "the restart the user is being asked about must be parked, or answering \
+                     Yes has nothing to act on"
+                );
+            });
+        });
+        assert_eq!(
+            focused_established_session_count(&workspace, &mut app),
+            established_before,
+            "the pane must not be restarted while the user is still being asked"
+        );
+    });
+}
+
+/// Answering Yes must restart with *the pending restart's* target and cwd.
+///
+/// The Confirm arm had no test. One that dropped `pending.target` (restarting
+/// into the same shell instead of switching) or `pending.cwd` (dumping the user
+/// in their home directory) would have passed everything: the modal still
+/// closes, the pending restart is still cleared, and a restart still happens.
+/// So this asserts on both values specifically.
+#[test]
+fn restart_shell_confirmation_confirm_restarts_with_the_pending_target_and_cwd() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        let target = a_launchable_shell(&mut app);
+        let cwd = std::env::current_dir().expect("the test process has a current directory");
+        let shell_before = focused_pane_shell(&workspace, &mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let manager = workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            workspace.pending_shell_restart = Some(PendingShellRestart {
+                manager,
+                terminal_view,
+                target: Some(target.clone()),
+                cwd: Some(cwd.clone()),
+            });
+            workspace.restart_shell_confirmation_modal.open();
+
+            workspace.handle_restart_shell_confirmation_modal_body_event(
+                &RestartShellConfirmationEvent::Confirm,
+                ctx,
+            );
+        });
+
+        // Step 7 of `restart_session_inner` is synchronous, so the switch is
+        // already visible.
+        assert_eq!(
+            focused_pane_shell(&workspace, &mut app)
+                .as_ref()
+                .and_then(|shell| shell.get_valid_shell_path_and_type()),
+            Some(target.clone()),
+            "Confirm must carry the pending restart's target through; dropping it silently \
+             turns a shell *switch* into a plain relaunch"
+        );
+        assert_ne!(
+            focused_pane_shell(&workspace, &mut app),
+            shell_before,
+            "the pane must be relabelled for the shell it switched to"
+        );
+
+        app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                assert!(
+                    !workspace.restart_shell_confirmation_modal.is_open(),
+                    "answering the confirmation must close it"
+                );
+                assert!(
+                    workspace.pending_shell_restart.is_none(),
+                    "a consumed pending restart must not stay parked, holding a live manager \
+                     handle"
+                );
+            });
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(10) => focused_resolved_startup_dir(&workspace, &mut app)
+                .is_some(),
+            "the replacement shell never reached `create_pty` within 10s, so there is no \
+             resolved startup directory to assert on"
+        );
+        // Compared against the *converted* form, because the target shell may
+        // well not be a plain executable: on a machine whose first listed shell
+        // is a WSL distro this is the `/mnt/<drive>/...` path, and asserting on
+        // the raw host path would fail for the right reasons in the wrong test.
+        // That also means this assertion exercises `native_startup_directory`'s
+        // non-identity arms wherever the machine has such a shell.
+        let expected = crate::terminal::local_tty::terminal_manager::native_startup_directory(
+            &cwd, &target,
+        );
+        assert!(
+            expected.is_some(),
+            "precondition: the target shell must be able to accept the test process's own \
+             directory, or there is no cwd to carry through"
+        );
+        assert_eq!(
+            focused_resolved_startup_dir(&workspace, &mut app),
+            expected,
+            "Confirm must carry the pending restart's cwd through to the replacement shell; \
+             dropping it restarts the user somewhere else entirely"
+        );
+    });
+}
+
+/// Answering No must leave the session completely alone.
+///
+/// The Cancel arm had no test either -- and a Cancel arm that restarted anyway
+/// would have passed every existing one, since they only ever look at whether
+/// the modal closed and the pending restart was cleared, both of which Cancel
+/// does correctly.
+#[test]
+fn restart_shell_confirmation_cancel_does_not_restart() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        let target = a_launchable_shell(&mut app);
+        let established_before = focused_established_session_count(&workspace, &mut app);
+        let shell_before = focused_pane_shell(&workspace, &mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let manager = workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            workspace.pending_shell_restart = Some(PendingShellRestart {
+                manager,
+                terminal_view,
+                target: Some(target),
+                cwd: std::env::current_dir().ok(),
+            });
+            workspace.restart_shell_confirmation_modal.open();
+
+            workspace.handle_restart_shell_confirmation_modal_body_event(
+                &RestartShellConfirmationEvent::Cancel,
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            focused_established_session_count(&workspace, &mut app),
+            established_before,
+            "answering No must not tear the session down and fork a replacement"
+        );
+        assert_eq!(
+            focused_pane_shell(&workspace, &mut app),
+            shell_before,
+            "answering No must not switch the pane to the target shell it was asked about"
+        );
+        app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                assert!(
+                    !workspace.restart_shell_confirmation_modal.is_open(),
+                    "answering No must close the confirmation"
+                );
+                assert!(
+                    workspace.pending_shell_restart.is_none(),
+                    "answering No must drop the pending restart's manager handle"
+                );
+            });
+        });
+    });
+}
+
+/// Escape and the modal's close (X) button do not reach the Cancel action at
+/// all -- they emit `ModalEvent::Close`, and only the subscription set up in
+/// `build_restart_shell_confirmation_modal` turns that into a clear.
+///
+/// `restart_shell_confirmation_dismiss_clears_pending_restart` calls the close
+/// helper directly, so the subscription -- which *is* the fix -- is never
+/// involved and deleting it breaks nothing. This drives the real event instead:
+/// it emits `ModalEvent::Close` from the modal itself, exactly as
+/// `Modal::handle_action(ModalAction::Close)` does for Escape and the X button.
+#[test]
+fn restart_shell_confirmation_close_event_clears_pending_restart() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        let modal_view = workspace.update(&mut app, |workspace, ctx| {
+            let manager = workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            workspace.pending_shell_restart = Some(PendingShellRestart {
+                manager,
+                terminal_view,
+                target: None,
+                cwd: None,
+            });
+            workspace.restart_shell_confirmation_modal.open();
+            workspace.restart_shell_confirmation_modal.view.clone()
+        });
+
+        // What Escape and the X button do, through the modal's own action
+        // handler -- the emitter, not the handler being tested.
+        app.update(|ctx| {
+            modal_view.update(ctx, |modal, ctx| {
+                modal.handle_action(&ModalAction::Close, ctx);
+            });
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => app.read(|ctx| {
+                workspace.read(ctx, |workspace, _| workspace.pending_shell_restart.is_none())
+            }),
+            "dismissing the confirmation with Escape or the close button must clear the \
+             pending restart; without the `ModalEvent::Close` subscription it stays parked, \
+             holding a live terminal manager handle (waited 5s)"
+        );
+        app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                assert!(
+                    !workspace.restart_shell_confirmation_modal.is_open(),
+                    "the modal must actually be closed afterwards"
+                );
+            });
+        });
+    });
+}
+
+/// The picker lists shells you can switch *to*. The "System default" entry is
+/// not one: it is a setting placeholder that resolves to no launchable shell,
+/// and "restart with whatever I'm already configured for" is what plain
+/// `RestartShell` does.
+///
+/// Nothing referenced `change_shell_menu_items` before this, so the
+/// `get_valid_shell_path_and_type()?` filter -- the entire reason the
+/// placeholder does not appear -- was unguarded.
+#[test]
+fn change_shell_menu_items_omit_the_system_default_placeholder() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        // Whether the machine running this happens to list the placeholder is
+        // not something the test can afford to depend on: without one present,
+        // a picker that filtered nothing would produce an identical list.
+        let (total, launchable) = app.update(|ctx| {
+            AvailableShells::handle(ctx).update(ctx, |shells, _| {
+                let mut listed = shells.get_available_shells().cloned().collect::<Vec<_>>();
+                // `AvailableShell::default()` *is* the `Config::SystemDefault`
+                // placeholder -- the out-of-the-box "Startup Shell" setting.
+                listed.insert(0, AvailableShell::default());
+                shells.set_shells_for_test(listed);
+
+                let total = shells.get_available_shells().count();
+                let launchable = shells
+                    .get_available_shells()
+                    .filter(|shell| shell.get_valid_shell_path_and_type().is_some())
+                    .count();
+                (total, launchable)
+            })
+        });
+        assert_eq!(
+            total,
+            launchable + 1,
+            "precondition: exactly the injected `SystemDefault` placeholder must resolve to no \
+             launchable shell"
+        );
+
+        let items = workspace.update(&mut app, |workspace, ctx| {
+            workspace.change_shell_menu_items(ctx)
+        });
+
+        assert_eq!(
+            items.len(),
+            launchable,
+            "the picker must list exactly the launchable shells: an unfiltered list would \
+             offer a `System default` entry that resolves to nothing to switch to"
+        );
+        assert!(
+            items.iter().all(|item| matches!(
+                item,
+                MenuItem::Item(fields)
+                    if matches!(
+                        fields.on_select_action(),
+                        Some(WorkspaceAction::ChangeShell { .. })
+                    )
+            )),
+            "every picker entry must dispatch `ChangeShell`; an entry that dispatches anything \
+             else cannot switch the pane's shell"
+        );
+    });
+}
+
+/// `ToggleChangeShellMenu` is a toggle: invoking it a second time closes the
+/// picker rather than rebuilding it open. Untested until now.
+#[test]
+fn toggle_change_shell_menu_opens_then_closes_the_picker() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);
+        });
+        assert!(
+            app.read(|ctx| workspace
+                .read(ctx, |workspace, _| workspace.change_shell_menu_modal.is_open())),
+            "the first `ToggleChangeShellMenu` must open the picker"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);
+        });
+        assert!(
+            !app.read(|ctx| workspace
+                .read(ctx, |workspace, _| workspace.change_shell_menu_modal.is_open())),
+            "the second `ToggleChangeShellMenu` must close the picker, not leave it open"
+        );
+    });
+}
+
+/// Choosing a shell must close the picker.
+///
+/// Selecting an item dispatches `ChangeShell` and, independently, has the menu
+/// emit its own `MenuEvent::Close` -- so without the subscription in
+/// `build_change_shell_menu_modal` the picker lingers open on top of the pane
+/// it just restarted. That subscription is the whole of commit `21273eee` and
+/// nothing referenced it.
+#[test]
+fn selecting_a_shell_closes_the_change_shell_picker() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+
+        let menu = workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);
+            workspace
+                .change_shell_menu_modal
+                .view
+                .read(ctx, |modal, _| modal.body().clone())
+        });
+        assert!(
+            app.read(|ctx| workspace
+                .read(ctx, |workspace, _| workspace.change_shell_menu_modal.is_open())),
+            "precondition: the picker must be open before a selection can close it"
+        );
+
+        // What `Menu` emits after an item is chosen (`MenuAction::Close` in
+        // menu.rs), rather than calling the workspace's close helper directly.
+        app.update(|ctx| {
+            menu.update(ctx, |_, ctx| {
+                ctx.emit(MenuEvent::Close {
+                    via_select_item: true,
+                });
+            });
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => app.read(|ctx| {
+                workspace.read(ctx, |workspace, _| !workspace.change_shell_menu_modal.is_open())
+            }),
+            "choosing a shell must close the picker; without the menu's `Close` subscription \
+             it lingers open over the pane it just restarted (waited 5s)"
+        );
     });
 }

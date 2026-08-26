@@ -19,6 +19,17 @@ impl AntivirusInfo {
         Self(None)
     }
 
+    /// Test-only: an inert instance that never scans.
+    ///
+    /// `new` kicks off a real background antivirus scan on Windows, which a
+    /// unit test has no business doing -- but the terminal's shell-death path
+    /// reads this singleton for telemetry, so a test that lets a shell die
+    /// needs it registered or the effect panics.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_for_test() -> Self {
+        Self(None)
+    }
+
     /// Returns the currently running antivirus software if any.
     /// If called before the antivirus is computed (i.e. before
     /// [`AntivirusInfoEvent::ScannedComplete`] is emitted), this function returns [`None`].

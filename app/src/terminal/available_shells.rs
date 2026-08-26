@@ -428,6 +428,19 @@ pub struct AvailableShells {
     shell_counts: HashMap<String, usize>,
 }
 
+impl AvailableShells {
+    /// Test-only: replaces the discovered shell list.
+    ///
+    /// What `AvailableShells::new` finds is a property of the machine running
+    /// the test -- in particular whether the `Config::SystemDefault`
+    /// placeholder is present at all. A test that needs to prove something
+    /// about how that placeholder is *handled* has to be able to put one there.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_shells_for_test(&mut self, shells: Vec<AvailableShell>) {
+        self.shells = shells;
+    }
+}
+
 #[cfg(not(feature = "local_tty"))]
 impl AvailableShells {
     pub fn get_available_shells(&self) -> impl Iterator<Item = &AvailableShell> {

@@ -86,6 +86,8 @@ use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
 use crate::terminal::ShellLaunchData;
+use crate::terminal::available_shells::AvailableShells;
+use crate::terminal::TerminalSurface;
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
@@ -103,6 +105,7 @@ use crate::terminal::shared_session::{
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
 use crate::terminal::view::Event as TerminalViewEvent;
+use crate::test_util::assert_eventually_within;
 use crate::test_util::pane_snapshots::{single_terminal_leaf_snapshot, terminal_leaf_snapshot};
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseStack;
@@ -126,6 +129,11 @@ fn initialize_app_with_history(app: &mut App, conversations: Vec<AgentConversati
     initialize_settings_for_tests(app);
 
     app.add_singleton_model(|_ctx| ServerApiProvider::new_for_test());
+    // The shell-death path reads this for telemetry. Inert in tests: the real
+    // constructor kicks off a background antivirus scan on Windows.
+    app.add_singleton_model(|_ctx| crate::antivirus::AntivirusInfo::new_for_test());
+    // Read by the same shell-death telemetry path.
+    app.add_singleton_model(crate::system::SystemInfo::new);
     // Disabled (`None`) IapManager so shared-session viewer code that reads the
     // singleton doesn't panic in tests; it is an inert no-op.
     app.add_singleton_model(|ctx| {
@@ -4632,18 +4640,40 @@ fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
 
         app.update(|ctx| {
             manager.update(ctx, |manager, ctx| {
-                manager.restart_session(None, None, ctx);
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
             });
         });
 
         // `App::test`'s executor is cooperative: the dispatcher that turns a
         // queued terminal event into a `ModelEvent` for this view is a spawned
         // task, and it makes no progress at all unless the test yields. Without
-        // this loop the queued exit above would simply never be delivered and
+        // this wait the queued exit above would simply never be delivered and
         // the assertions below would hold vacuously.
-        for _ in 0..64 {
-            futures_lite::future::yield_now().await;
-        }
+        //
+        // The condition is the restart barrier coming back round. That is the
+        // strongest available proof the exit was already delivered *and*
+        // suppressed: the barrier travels the same FIFO channel behind the
+        // exit, so observing it means the exit is behind us. Waiting on it,
+        // rather than on a yield budget, is what keeps the assertions below
+        // from passing vacuously when a loaded machine hands this test fewer
+        // scheduler turns than usual.
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| {
+                !view.as_ref(ctx).is_restart_in_progress()
+                    && manager.read(ctx, |manager, _| {
+                        manager
+                            .as_any()
+                            .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                            .expect("panes in this harness use the local-tty manager")
+                            .has_running_event_loop()
+                    })
+            }),
+            "the restart barrier never came back round with a live replacement event loop \
+             within 10s; the restart did not complete"
+        );
 
         assert_eq!(
             *exited_count.borrow(),
@@ -4698,9 +4728,17 @@ fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
                 .lock()
                 .exit(ExitReason::ShellProcessExited);
         });
-        for _ in 0..64 {
-            futures_lite::future::yield_now().await;
-        }
+        // Waiting for the exit to be *delivered*, not for a yield budget to run
+        // out. On timeout this fails with the same complaint the assertion
+        // below makes, so a swallowed exit is still reported as a swallowed
+        // exit rather than as a timeout of unclear cause.
+        assert_eventually_within!(
+            Duration::from_secs(10) => *exited_count.borrow() == 1,
+            "a genuine shell death after the restart must still reach `Event::Exited`; a mark \
+             that is never cleared silently swallows every later exit (waited 10s, saw {} of \
+             them)",
+            *exited_count.borrow()
+        );
 
         assert_eq!(
             *exited_count.borrow(),
@@ -4781,7 +4819,10 @@ fn test_two_restarts_in_flight_establish_only_one_session() {
 
         app.update(|ctx| {
             manager.update(ctx, |manager, ctx| {
-                manager.restart_session(None, None, ctx);
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
             });
         });
 
@@ -4793,13 +4834,30 @@ fn test_two_restarts_in_flight_establish_only_one_session() {
 
         app.update(|ctx| {
             manager.update(ctx, |manager, ctx| {
-                manager.restart_session(None, None, ctx);
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
             });
         });
 
-        for _ in 0..64 {
-            futures_lite::future::yield_now().await;
-        }
+        // The surviving restart's barrier clearing the mark, with a live event
+        // loop behind it, is what says both restarts have run all the way
+        // through the view. A yield budget only says "some scheduler turns
+        // happened".
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| {
+                !view.as_ref(ctx).is_restart_in_progress()
+                    && manager.read(ctx, |manager, _| {
+                        manager
+                            .as_any()
+                            .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                            .expect("panes in this harness use the local-tty manager")
+                            .has_running_event_loop()
+                    })
+            }),
+            "neither restart's barrier came back round with a live event loop within 10s"
+        );
 
         assert_eq!(
             app.read(|ctx| manager.read(ctx, |manager, _| {
@@ -4948,16 +5006,31 @@ fn test_restart_with_system_default_shell_still_lands_in_the_requested_directory
 
         app.update(|ctx| {
             manager.update(ctx, |manager, ctx| {
-                manager.restart_session(None, Some(requested_dir.clone()), ctx);
+                assert!(
+                    manager.restart_session(None, Some(requested_dir.clone()), ctx),
+                    "a local-tty manager must report that it restarted"
+                );
             });
         });
 
-        // See the identical loop in the restart tests above: the shell
-        // starter resolves through a spawned task, which only makes
-        // progress when this test yields.
-        for _ in 0..64 {
-            futures_lite::future::yield_now().await;
-        }
+        // The shell starter resolves through a spawned task, which only makes
+        // progress when this test yields -- and it forks a real shell, so how
+        // long that takes is a property of the machine, not of a yield count.
+        // Wait for the directory to actually be resolved.
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| {
+                manager.read(ctx, |manager, _| {
+                    manager
+                        .as_any()
+                        .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                        .expect("panes in this harness use the local-tty manager")
+                        .last_resolved_startup_directory_for_test()
+                        .is_some()
+                })
+            }),
+            "the restarted shell never reached `create_pty` within 10s, so there is no \
+             resolved startup directory to assert on"
+        );
 
         let resolved_dir = app.read(|ctx| {
             manager.read(ctx, |manager, _| {
@@ -4974,6 +5047,466 @@ fn test_restart_with_system_default_shell_still_lands_in_the_requested_directory
             Some(requested_dir),
             "a restart under the default (unresolved-until-launch) shell setting must still \
              hand the actually-launched shell the requested directory, not silently drop it"
+        );
+    });
+}
+
+/// Builds a deferred-shell single-pane group and returns its manager and view.
+///
+/// Every restart test below wants exactly this and nothing else; spelling it
+/// out four more times is four more places for the harness to drift.
+fn restartable_pane(
+    app: &mut App,
+) -> (
+    warpui::ViewHandle<PaneGroup>,
+    ModelHandle<Box<dyn crate::terminal::TerminalManager>>,
+    warpui::ViewHandle<TerminalView>,
+) {
+    let pane_group = mock_pane_group(
+        app,
+        MockOptions {
+            layout: PanesLayout::Template {
+                template: PaneTemplateType::PaneTemplate {
+                    is_focused: Some(true),
+                    cwd: "/".into(),
+                    commands: vec![],
+                    pane_mode: PaneMode::Terminal,
+                    shell: None,
+                },
+                shell_start: ShellStartPolicy::Deferred,
+            },
+            ..Default::default()
+        },
+    );
+    let manager = app
+        .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+        .expect("pane 0 has a terminal manager");
+    let view = app
+        .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(0, ctx)))
+        .expect("pane 0 has a terminal view");
+    (pane_group, manager, view)
+}
+
+/// The replaced shell's post-mortem must not outlive it.
+///
+/// Four pieces of state are written by a shell dying and never cleared by
+/// anything else: the pinned "shell exited" banner, the forced-on
+/// initialization block, `pty_spawn_failed`, and `is_login_shell_bootstrapped`.
+/// A user whose shell config broke -- the case the feature exists for -- fixes
+/// it, restarts, and must get a clean pane, not a healthy prompt sitting under
+/// a banner describing a process that no longer exists.
+///
+/// Asserted on the state directly, one assertion per assignment, so deleting
+/// any single reset in `on_session_restart_started` fails exactly one
+/// assertion and names which. The two behavioural consequences are covered
+/// separately by the two tests below, because a state assertion alone cannot
+/// show that the stale value is what actually breaks the pane.
+#[test]
+fn test_restart_clears_the_replaced_shells_post_mortem_state() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+
+        // The banner is only pinned for a shell that *had* come up
+        // (`insert_shell_process_terminated_banner` routes an unbootstrapped
+        // death into a rich-content block instead, which is scrollback and
+        // deliberately survives a restart).
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.on_pty_spawn_failed(anyhow::Error::msg("mock spawn failure"), ctx);
+            });
+            view.update(ctx, |view, _| {
+                view.model
+                    .lock()
+                    .block_list_mut()
+                    .set_show_bootstrap_block(true);
+            });
+        });
+
+        // Preconditions: without these the test could pass against a pane that
+        // never had a post-mortem to clear.
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(
+                view.has_shell_process_terminated_banner_for_test(),
+                "precondition: the replaced shell must have pinned its terminated banner"
+            );
+            assert!(
+                view.pty_spawn_failed_for_test(),
+                "precondition: the replaced shell must have recorded a spawn failure"
+            );
+            assert!(
+                view.is_login_shell_bootstrapped_for_test(),
+                "precondition: the replaced shell must be marked bootstrapped"
+            );
+            assert!(
+                view.model.lock().block_list().show_bootstrap_block(),
+                "precondition: the initialization block must be showing"
+            );
+        });
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
+            });
+        });
+
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(
+                !view.has_shell_process_terminated_banner_for_test(),
+                "the replaced shell's terminated banner must not stay pinned above the \
+                 replacement's prompt"
+            );
+            assert!(
+                !view.model.lock().block_list().show_bootstrap_block(),
+                "the initialization block forced on by the replaced shell's failure must not \
+                 stay forced on across a restart"
+            );
+            assert!(
+                !view.pty_spawn_failed_for_test(),
+                "a restart is the recovery from a failed spawn; leaving the flag set makes the \
+                 recovered pane unable to ever report a later shell death"
+            );
+            assert!(
+                !view.is_login_shell_bootstrapped_for_test(),
+                "the replacement has not bootstrapped yet, so the replaced shell's verdict \
+                 about itself must not carry over"
+            );
+        });
+    });
+}
+
+/// The behavioural half of `is_login_shell_bootstrapped = false`.
+///
+/// Restarting *into a misconfigured shell* is the whole point of the
+/// shell-switch path. `TerminalPane` keeps an unbootstrapped pane open on
+/// `Event::Exited` precisely so the user can read what went wrong -- but only
+/// if the view still knows the replacement never bootstrapped. A stale `true`
+/// closes the pane instead, destroying the scrollback and conversation the
+/// restart existed to preserve.
+///
+/// Deliberately does *not* re-mark the pane bootstrapped after the restart:
+/// `test_restart_session_keeps_the_pane_and_rearms_its_exit_handling` does,
+/// which is exactly why it cannot notice this reset going missing.
+#[test]
+fn test_a_restart_that_dies_before_bootstrapping_keeps_the_pane_open() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (pane_group, manager, view) = restartable_pane(&mut app);
+
+        let exited_count = Rc::new(RefCell::new(0usize));
+        let exited_count_handle = exited_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&view, move |_, event, _| {
+                if let TerminalViewEvent::Exited = event {
+                    *exited_count_handle.borrow_mut() += 1;
+                }
+            });
+        });
+
+        // The shell being replaced had come up: this is the state any pane a
+        // user would think to restart is actually in, and the state that makes
+        // an unsuppressed exit reach `close_pane`.
+        app.update(|ctx| {
+            view.update(ctx, |view, _| view.set_login_shell_bootstrapped_for_test());
+        });
+
+        let panes_before =
+            app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count()));
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
+            });
+        });
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| !view.as_ref(ctx).is_restart_in_progress()),
+            "the restart barrier never came back round within 10s"
+        );
+
+        // The replacement dies without ever bootstrapping -- the broken-config
+        // case. This exit is *not* suppressed: the barrier has already cleared
+        // the mark.
+        app.update(|ctx| {
+            manager
+                .read(ctx, |manager, _| manager.model())
+                .lock()
+                .exit(ExitReason::ShellProcessExited);
+        });
+        assert_eventually_within!(
+            Duration::from_secs(10) => *exited_count.borrow() > 0,
+            "the replacement's death must still be delivered as `Event::Exited`; nothing was \
+             delivered within 10s"
+        );
+
+        assert_eq!(
+            app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count())),
+            panes_before,
+            "a replacement shell that dies before bootstrapping must leave the pane open so \
+             the user can read what went wrong -- exactly as a freshly forked pane does"
+        );
+        // Which banner the death produces forks on the same flag, and unlike
+        // the pane count it is observable in this harness: an unbootstrapped
+        // death inserts a rich-content explanation into the blocklist, while a
+        // bootstrapped one pins the terse inline "shell exited" banner. A stale
+        // `true` therefore shows the user the wrong post-mortem for a shell
+        // that never came up.
+        assert!(
+            !app.read(|ctx| view
+                .as_ref(ctx)
+                .has_shell_process_terminated_banner_for_test()),
+            "a replacement that never bootstrapped must not report its death with the \n             bootstrapped shell's inline banner"
+        );
+    });
+}
+
+/// The behavioural half of `pty_spawn_failed = false`.
+///
+/// `pty_spawn_failed` suppresses both the terminated banner and the
+/// `Event::Exited` emission. Restarting is the obvious recovery from a failed
+/// spawn, so a stale `true` leaves the recovered pane permanently unable to
+/// report a later clean shell death: no banner, no close, a pane sitting open
+/// around a dead shell.
+#[test]
+fn test_a_pane_restarted_after_a_spawn_failure_can_still_report_a_shell_death() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+
+        let exited_count = Rc::new(RefCell::new(0usize));
+        let exited_count_handle = exited_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&view, move |_, event, _| {
+                if let TerminalViewEvent::Exited = event {
+                    *exited_count_handle.borrow_mut() += 1;
+                }
+            });
+        });
+
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.on_pty_spawn_failed(anyhow::Error::msg("mock spawn failure"), ctx);
+            });
+        });
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
+            });
+        });
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| !view.as_ref(ctx).is_restart_in_progress()),
+            "the restart barrier never came back round within 10s"
+        );
+
+        // The replacement comes up and the user exits it for real.
+        let exits_before = *exited_count.borrow();
+        app.update(|ctx| {
+            view.update(ctx, |view, _| view.set_login_shell_bootstrapped_for_test());
+            manager
+                .read(ctx, |manager, _| manager.model())
+                .lock()
+                .exit(ExitReason::ShellProcessExited);
+        });
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => *exited_count.borrow() > exits_before,
+            "a pane recovered by restarting out of a spawn failure must still report a later \
+             clean shell death; `pty_spawn_failed` left set swallows it forever (waited 10s)"
+        );
+    });
+}
+
+/// A restart with a `target` is a shell *switch*, and step 7 of
+/// `restart_session_inner` must prefer that target over the shell the pane is
+/// already running -- then relabel the pane for the shell it is launching, not
+/// the one it just replaced.
+///
+/// Asserted synchronously, before any yield: step 7 has no `await` in it, so
+/// the label and the resolved shell are already settled when
+/// `restart_session` returns. That keeps this test independent of whether the
+/// target shell can actually be forked on the machine running it.
+///
+/// Discriminates on the resolved `AvailableShell`, not on a display string: an
+/// implementation that dropped `target` would fall through to
+/// `get_user_preferred_shell`, which in this harness is
+/// `Config::SystemDefault` -- whose `get_valid_shell_path_and_type()` is
+/// `None`, so the comparison below fails loudly rather than coincidentally
+/// matching.
+#[test]
+fn test_restart_with_a_target_shell_switches_to_it_and_relabels_the_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+
+        // Any launchable shell the machine actually has. `AvailableShells`
+        // always lists at least the user's preferred shell, and everything
+        // except the `SystemDefault` placeholder resolves to launch data.
+        let Some(target) = app.read(|ctx| {
+            AvailableShells::handle(ctx).read(ctx, |shells, _| {
+                shells
+                    .get_available_shells()
+                    .find_map(|shell| shell.get_valid_shell_path_and_type())
+            })
+        }) else {
+            panic!(
+                "this machine lists no launchable shell at all, so there is no shell to switch \
+                 to; the harness, not the code under test, is broken"
+            );
+        };
+
+        let shell_before = app.read(|ctx| {
+            view.as_ref(ctx)
+                .model
+                .lock()
+                .shell_launch_state()
+                .available_shell()
+        });
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(
+                    manager.restart_session(Some(target.clone()), None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
+            });
+        });
+
+        let shell_after = app.read(|ctx| {
+            view.as_ref(ctx)
+                .model
+                .lock()
+                .shell_launch_state()
+                .available_shell()
+        });
+
+        assert_eq!(
+            shell_after
+                .as_ref()
+                .and_then(|shell| shell.get_valid_shell_path_and_type()),
+            Some(target),
+            "a restart with a target must launch that target, not the shell the pane was \
+             already running and not the user's preferred shell"
+        );
+        assert_ne!(
+            shell_after, shell_before,
+            "`set_determining_shell` must relabel the pane for the shell it is switching to; \
+             carrying the replaced shell's label forward leaves the pane header lying"
+        );
+    });
+}
+
+/// A restart's directory is converted against the shell that *actually*
+/// launches, in `on_shell_determined` -- which is what puts
+/// `native_startup_directory`'s WSL arm on the restart path rather than
+/// leaving it a pure function nothing calls.
+///
+/// `test_native_startup_directory_converts_per_shell_kind` proves the
+/// conversion is correct; `test_restart_with_system_default_shell_still_lands_
+/// in_the_requested_directory` proves the *identity* (`Executable`) arm is
+/// reached. Neither can show that a non-identity arm is reached, because for
+/// `Executable` a call site that forgot to convert is indistinguishable from
+/// one that did.
+///
+/// Environment-conditional by necessity: reaching the WSL arm end-to-end means
+/// a WSL distro really resolving and really forking. Where none is installed
+/// there is nothing to switch to and the test reports that rather than failing
+/// -- a false red here would be exactly the flake this branch is removing.
+#[test]
+#[cfg_attr(not(windows), ignore = "WSL shells only exist on Windows")]
+fn test_restart_switching_to_wsl_converts_the_directory_to_the_wsl_form() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+
+        let wsl_target = app.read(|ctx| {
+            AvailableShells::handle(ctx).read(ctx, |shells, _| {
+                shells.get_available_shells().find_map(|shell| {
+                    match shell.get_valid_shell_path_and_type() {
+                        Some(data @ ShellLaunchData::WSL { .. }) => Some(data),
+                        _ => None,
+                    }
+                })
+            })
+        });
+        let Some(wsl_target) = wsl_target else {
+            log::info!(
+                "no WSL distro is available on this machine; skipping the WSL directory \
+                 conversion test"
+            );
+            return;
+        };
+
+        let requested_dir =
+            std::env::current_dir().expect("the test process has a current directory");
+        let expected = native_startup_directory(&requested_dir, &wsl_target).expect(
+            "the WSL arm must be able to convert the test process's own directory; if it \
+             cannot, the conversion itself is broken and the table-driven test says so",
+        );
+        assert_ne!(
+            expected, requested_dir,
+            "precondition: the WSL form must differ from the host form, or this test cannot \
+             tell a converted directory from an unconverted one"
+        );
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(
+                    manager.restart_session(
+                        Some(wsl_target.clone()),
+                        Some(requested_dir.clone()),
+                        ctx
+                    ),
+                    "a local-tty manager must report that it restarted"
+                );
+            });
+        });
+
+        // Forking a WSL shell is a cold start; give it room.
+        assert_eventually_within!(
+            Duration::from_secs(30) => app.read(|ctx| {
+                manager.read(ctx, |manager, _| {
+                    manager
+                        .as_any()
+                        .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                        .expect("panes in this harness use the local-tty manager")
+                        .last_resolved_startup_directory_for_test()
+                        .is_some()
+                })
+            }),
+            "the WSL shell never reached `create_pty` within 30s"
+        );
+        let _ = &view;
+
+        let resolved_dir = app.read(|ctx| {
+            manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .last_resolved_startup_directory_for_test()
+            })
+        });
+
+        assert_eq!(
+            resolved_dir,
+            Some(expected),
+            "a restart that switches to WSL must hand the WSL shell the `/mnt/<drive>/...` \
+             form of the requested directory; handing it the Windows host path starts the \
+             shell somewhere else entirely"
         );
     });
 }

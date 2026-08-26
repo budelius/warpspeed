@@ -30,3 +30,37 @@ macro_rules! assert_eventually {
     }};
 }
 pub(crate) use assert_eventually;
+
+/// Wall-clock-bounded sibling of [`assert_eventually!`].
+///
+/// Use this, not a tick or yield budget, whenever the condition waits on work
+/// that leaves the cooperative executor entirely -- a tokio round-trip, a
+/// forked shell, a joined thread. A fixed budget prices that work in scheduler
+/// turns, and how much wall clock a turn buys is exactly what CI load changes;
+/// when the budget runs short the test fails *false-red*, blaming the code for
+/// the machine being busy. Seconds are the unit such a wait is actually
+/// specified in, so wait in seconds.
+///
+/// Polls `$cond` until it holds or `$timeout` elapses, sleeping briefly between
+/// polls so the executor can run the work being waited on. Panics with the
+/// given message on timeout.
+macro_rules! assert_eventually_within {
+    ($timeout:expr_2021 => $cond:expr_2021, $($arg:tt)+) => {{
+        let deadline = std::time::Instant::now() + $timeout;
+        let mut pass = false;
+        loop {
+            if $cond {
+                pass = true;
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            warpui::r#async::Timer::after(std::time::Duration::from_millis(5)).await;
+        }
+        if !pass {
+            panic!("{}", format_args!($($arg)+));
+        }
+    }};
+}
+pub(crate) use assert_eventually_within;

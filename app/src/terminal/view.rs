@@ -16295,6 +16295,32 @@ impl TerminalView {
     pub(crate) fn is_restart_in_progress(&self) -> bool {
         self.restart_in_progress
     }
+
+    /// Test-only: whether the "shell process terminated" banner is currently
+    /// pinned above the blocklist. Both the banner and the flag below are
+    /// written once by the death of a shell and outlive it unless a restart
+    /// clears them, so a test needs to see them from outside.
+    #[cfg(test)]
+    pub(crate) fn has_shell_process_terminated_banner_for_test(&self) -> bool {
+        self.inline_banners_state
+            .shell_process_terminated_banner
+            .is_some()
+    }
+
+    /// Test-only: whether this view believes its PTY failed to spawn, which
+    /// suppresses both the terminated banner and `Event::Exited`.
+    #[cfg(test)]
+    pub(crate) fn pty_spawn_failed_for_test(&self) -> bool {
+        self.pty_spawn_failed
+    }
+
+    /// Test-only: whether this view has completed the login-shell bootstrap
+    /// handshake. The counterpart to
+    /// [`Self::set_login_shell_bootstrapped_for_test`].
+    #[cfg(test)]
+    pub(crate) fn is_login_shell_bootstrapped_for_test(&self) -> bool {
+        self.is_login_shell_bootstrapped
+    }
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
         self.awaiting_pending_command_completion
             || !self.pending_command_queue.is_empty()
@@ -26640,8 +26666,29 @@ impl TerminalSurface for TerminalView {
     }
 
     #[cfg(feature = "local_tty")]
-    fn on_session_restart_started(&mut self, _ctx: &mut ViewContext<Self>) {
+    fn on_session_restart_started(&mut self, ctx: &mut ViewContext<Self>) {
         self.begin_restart();
+
+        // The dead shell's post-mortem must not outlive it. Both of these are
+        // written once and never cleared, so a pane that restarts out of a
+        // broken shell config -- the case the whole feature exists for -- keeps
+        // "Shell process exited prematurely!" and the initialization block
+        // pinned above the healthy new prompt, permanently, describing a
+        // process that no longer exists. `insert_shell_process_terminated_banner`
+        // and `show_initialization_block` re-add both if the replacement dies
+        // the same way.
+        self.inline_banners_state.shell_process_terminated_banner = None;
+        // Back to what the *setting* says rather than a flat `false`:
+        // `show_initialization_block` forces the block on regardless of the
+        // user's preference, and undoing that force is what this is for. A user
+        // who asked to see the bootstrap block keeps seeing it across a restart.
+        let should_show_bootstrap_block = *BlockVisibilitySettings::as_ref(ctx)
+            .should_show_bootstrap_block
+            .value();
+        self.model
+            .lock()
+            .block_list_mut()
+            .set_show_bootstrap_block(should_show_bootstrap_block);
 
         // Both of these are set once and never cleared, so without this the
         // replacement session inherits the replaced one's verdict about itself.

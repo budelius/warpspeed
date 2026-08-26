@@ -2501,6 +2501,10 @@ impl BlockList {
         );
     }
 
+    pub fn show_bootstrap_block(&self) -> bool {
+        self.show_warp_bootstrap_block
+    }
+
     pub fn set_show_bootstrap_block(&mut self, show_bootstrap_block: bool) {
         self.show_warp_bootstrap_block = show_bootstrap_block;
         self.update_blocks_and_sumtree(

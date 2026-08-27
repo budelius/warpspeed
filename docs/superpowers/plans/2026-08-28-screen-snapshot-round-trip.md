@@ -26,7 +26,20 @@ Each produces working, testable software. Plans 2 through 4 are written after th
 - **Cross-platform.** Nothing in this plan may be `#[cfg(unix)]`. This is why the new module goes at `local_tty/screen.rs` and **not** `local_tty/server/screen.rs` as the spec's component table says — `local_tty/server` is `#[cfg(unix)]` (`local_tty/mod.rs:10`) and the Windows supervisor needs this code too. Update the spec's table when this lands.
 - Tests live in a sibling file wired with `#[cfg(test)] #[path = "..._tests.rs"] mod tests;`, matching `persistent.rs` / `persistent_tests.rs`.
 - Doc comments on every public item, per `AGENTS.md`.
-- Build gate: `cargo build -p warp_terminal`. Test gate: `cargo test -p warp_terminal`.
+- Build gate: `cargo build -p warp_terminal`. Test gate: `cargo test -p warp_terminal --lib -- <module>`.
+- **The baseline is not green, so "all tests pass" is not a usable gate.** Measured on an
+  untouched checkout of this branch (552 tests):
+  - `local_tty::windows::child::tests::test_event_is_emitted_when_child_exits` fails
+    deterministically with `Os { code: 5, PermissionDenied }` — the sandbox denies process
+    creation. Environmental, unrelated to this work.
+  - `model::grid::grid_handler::secrets::tests::*` fail **nondeterministically**: one run failed
+    `test_secret_redaction_secret_remains_after_resize`, the next failed
+    `test_secret_redacted_after_byte_processing` and
+    `test_secret_redacted_after_multiple_byte_processing` instead. Each passes in isolation, so it
+    is shared state across tests running in parallel. Pre-existing.
+  The gate is therefore **no new failures outside that set**, checked by running the touched
+  modules directly. Note that piping cargo to `tail` masks its exit code; use `${PIPESTATUS[0]}`.
+  The flaky secrets tests are worth fixing, but that is not this plan's job.
 
 ---
 

@@ -3055,6 +3055,13 @@ impl BlockList {
     pub(super) fn start_active_block(&mut self) {
         self.cache_active_prompt_data();
 
+        // A non-in-band command starting on the active block displaces any in-band command that
+        // was written to the same line editor, so that command's completion will never arrive.
+        // Release the count rather than letting it wedge -- `PtyController::write_command` calls
+        // `TerminalModel::end_in_band_command_output` for exactly the same reason.
+        self.in_flight_in_band_command_count = 0;
+        self.active_block_mut().started_in_band_command = false;
+
         self.active_block_mut().start();
         self.early_output.reset_user_input();
     }
@@ -3299,7 +3306,10 @@ impl BlockList {
             "Completing active block with next ID disposition {next_block_id_disposition:?}"
         );
         let active_block_was_finished = self.active_block().finished();
-        if self.active_block().is_for_in_band_command {
+        // Release against the start marker, not `is_for_in_band_command`: preexec recomputes the
+        // latter from whatever command the shell reported, so a generator whose bytes never
+        // reached the line editor completes with it cleared and would leak the count forever.
+        if self.active_block().started_in_band_command() {
             self.in_flight_in_band_command_count =
                 self.in_flight_in_band_command_count.saturating_sub(1);
         }

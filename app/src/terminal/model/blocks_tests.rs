@@ -2654,3 +2654,87 @@ fn agent_transcript_navigable_items_include_prompts_and_user_shell_blocks() {
         ]
     );
 }
+
+/// The in-flight in-band count gates `TerminalView::is_input_box_visible`, which in turn gates
+/// whether the terminal (rather than the input editor) takes keyboard focus while a long-running
+/// command is in the foreground. A count that never returns to zero leaves the pane's keystrokes
+/// going to the input editor for the rest of the session.
+#[test]
+fn in_band_start_is_released_when_its_block_completes_normally() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+
+    block_list.start_active_block_for_in_band_command();
+    assert!(block_list.is_writing_or_executing_in_band_command());
+
+    block_list.preexec(PreexecValue {
+        command: "warp_run_generator_command 1234 'git symbolic-ref --short HEAD'".to_owned(),
+        session_id: None,
+    });
+    command_finished_and_precmd(&mut block_list);
+
+    assert!(!block_list.is_writing_or_executing_in_band_command());
+}
+
+/// The generator's bytes do not always reach the line editor -- a foreground process can eat
+/// them, or the user's own command can win the race -- in which case preexec reports a command
+/// that is not a generator at all. The start still has to be released when the block completes:
+/// `is_for_in_band_command` is recomputed by preexec for display purposes and cannot be trusted
+/// for accounting.
+#[test]
+fn in_band_start_is_released_when_a_different_command_runs_on_its_block() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+
+    block_list.start_active_block_for_in_band_command();
+    assert!(block_list.is_writing_or_executing_in_band_command());
+
+    block_list.preexec(PreexecValue {
+        command: "claude".to_owned(),
+        session_id: None,
+    });
+    command_finished_and_precmd(&mut block_list);
+
+    assert!(
+        !block_list.is_writing_or_executing_in_band_command(),
+        "an in-band start must be released when its block completes, whatever command actually ran"
+    );
+}
+
+/// A user command starting on the active block displaces any in-band command that was written to
+/// the same line editor, so that in-band command's completion will never arrive. Release the
+/// count rather than letting it wedge, mirroring the `end_in_band_command_output` reset that
+/// `PtyController::write_command` already performs for the same reason.
+#[test]
+fn starting_a_user_command_releases_a_stranded_in_band_start() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+
+    block_list.start_active_block_for_in_band_command();
+    assert!(block_list.is_writing_or_executing_in_band_command());
+
+    block_list.start_active_block();
+
+    assert!(!block_list.is_writing_or_executing_in_band_command());
+}
+
+/// Completing a block that Warp never started for an in-band command must not push the count
+/// below zero, however the shell reports the command.
+#[test]
+fn completing_an_unstarted_in_band_command_does_not_underflow_the_count() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+
+    block_list.start_active_block();
+    block_list.preexec(PreexecValue {
+        command: "warp_run_generator_command 1234 foo".to_owned(),
+        session_id: None,
+    });
+    command_finished_and_precmd(&mut block_list);
+
+    assert!(!block_list.is_writing_or_executing_in_band_command());
+
+    // A real in-band command afterwards still registers.
+    block_list.start_active_block_for_in_band_command();
+    assert!(block_list.is_writing_or_executing_in_band_command());
+}

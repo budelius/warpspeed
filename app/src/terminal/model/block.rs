@@ -356,6 +356,16 @@ pub struct Block {
     /// model because they may be shown for debugging purposes.
     pub(super) is_for_in_band_command: bool,
 
+    /// `true` if this block's execution was started by
+    /// [`super::blocks::Blocks::start_active_block_for_in_band_command`].
+    ///
+    /// Distinct from `is_for_in_band_command`, which [`Self::apply_preexec`] recomputes from the
+    /// command the shell actually reported, and which therefore describes *display* rather than
+    /// accounting. The two disagree whenever the generator's bytes never reached the line editor
+    /// -- a foreground process ate them, or the user's own command won the race -- and it is
+    /// exactly then that the in-flight count still has to be released.
+    pub(super) started_in_band_command: bool,
+
     /// `true` if this command block corresponds to a startup command in an oz environment executed
     /// in cloud mode.
     is_oz_environment_startup_command: bool,
@@ -1000,6 +1010,7 @@ impl Block {
             block_index,
             shell_host: None,
             is_for_in_band_command: false,
+            started_in_band_command: false,
             env_var_metadata: None,
             interaction_mode: InteractionMode::default(),
             block_banner: None,
@@ -1263,7 +1274,14 @@ impl Block {
     /// menu item.
     pub fn start_for_in_band_command(&mut self) {
         self.is_for_in_band_command = true;
+        self.started_in_band_command = true;
         self.start();
+    }
+
+    /// `true` if this block's execution was started for an in-band command; see
+    /// [`Self::started_in_band_command`].
+    pub fn started_in_band_command(&self) -> bool {
+        self.started_in_band_command
     }
 
     /// This block's minimal metadata. Until the block has received its metadata (either from a

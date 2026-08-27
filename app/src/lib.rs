@@ -817,6 +817,10 @@ pub fn run() -> Result<()> {
                 return debug_dump::run();
             }
             #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::DumpSettingsSchema { output_path } => {
+                return settings::schema_generation::dump_settings_schema(output_path.as_deref());
+            }
+            #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::PrintTelemetryEvents => {
                 return TelemetryEvent::print_telemetry_events_json();
             }
@@ -845,7 +849,7 @@ fn run_worker_command(worker: &warp_cli::WorkerCommand) -> Result<()> {
     match worker {
         #[cfg(all(feature = "local_tty", unix))]
         warp_cli::WorkerCommand::TerminalServer(args) => {
-            crate::terminal::local_tty::server::run_terminal_server(args);
+            crate::terminal::local_tty::run_terminal_server(args);
             Ok(())
         }
         #[cfg(feature = "plugin_host")]
@@ -2296,6 +2300,7 @@ pub(crate) fn initialize_app(
             ctx,
         )
     });
+    ai::custom_endpoints::init(launch_mode, ctx);
 
     // LogManager must be registered before any subsystem (e.g. MCP, LSP) that creates file-based loggers.
     ctx.add_singleton_model(|_| simple_logger::manager::LogManager::new());

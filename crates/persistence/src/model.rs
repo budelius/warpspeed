@@ -111,6 +111,7 @@ pub struct Team {
     pub name: String,
     pub server_uid: String,
     pub billing_metadata_json: Option<String>,
+    pub feature_model_choice_json: Option<String>,
 }
 
 #[derive(Insertable, AsChangeset)]
@@ -119,6 +120,7 @@ pub struct NewTeam {
     pub name: String,
     pub server_uid: String,
     pub billing_metadata_json: Option<String>,
+    pub feature_model_choice_json: Option<String>,
 }
 
 #[derive(Identifiable, Queryable)]
@@ -129,6 +131,7 @@ pub struct TeamMemberRow {
     pub user_uid: String,
     pub email: String,
     pub role: String,
+    pub is_disabled: bool,
 }
 
 #[derive(Insertable)]
@@ -138,6 +141,7 @@ pub struct NewTeamMember {
     pub user_uid: String,
     pub email: String,
     pub role: String,
+    pub is_disabled: bool,
 }
 
 #[derive(Identifiable, Insertable, Queryable)]
@@ -146,6 +150,7 @@ pub struct Workspace {
     pub name: String,
     pub server_uid: String,
     pub is_selected: bool,
+    pub feature_model_choice_json: Option<String>,
 }
 
 #[derive(Insertable, AsChangeset)]
@@ -154,6 +159,7 @@ pub struct NewWorkspace {
     pub name: String,
     pub server_uid: String,
     pub is_selected: bool,
+    pub feature_model_choice_json: Option<String>,
 }
 
 #[derive(Identifiable, Insertable, Queryable)]
@@ -1229,6 +1235,18 @@ pub struct AgentConversationData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AIAgentActionId(pub String);
+
+impl From<AIAgentActionId> for ai_types::AIAgentActionId {
+    fn from(value: AIAgentActionId) -> Self {
+        Self::from(value.0)
+    }
+}
+
+impl From<ai_types::AIAgentActionId> for AIAgentActionId {
+    fn from(value: ai_types::AIAgentActionId) -> Self {
+        AIAgentActionId(String::from(value))
+    }
+}
 
 pub type TokenUsageCategory = String;
 

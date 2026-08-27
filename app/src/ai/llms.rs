@@ -20,7 +20,7 @@ use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamScope, UserWorkspaces, UserWorkspacesEvent};
 
 /// Checks if a user's' API key is being used for the given provider.
 /// Returns `true` if BYO API key is enabled and a key exists for the provider.
@@ -61,77 +61,63 @@ impl ByoKeySource {
 /// configured team-managed key is used when available.
 pub fn first_party_key_source_for_provider(
     provider: &LLMProvider,
+    scope: &dyn TeamScope,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
     let workspaces = UserWorkspaces::as_ref(app);
-    if workspaces.are_member_byo_keys_allowed() && is_using_api_key_for_provider(provider, app) {
+    if workspaces.are_member_byo_keys_allowed(scope) && is_using_api_key_for_provider(provider, app)
+    {
         return Some(ByoKeySource::UserProvided);
     }
-    if is_using_team_first_party_key_for_provider(provider, app) {
+    if workspaces.has_team_first_party_key(scope, *provider) {
         return Some(ByoKeySource::TeamProvided);
     }
     None
 }
 
-pub fn is_using_first_party_key_for_provider(provider: &LLMProvider, app: &AppContext) -> bool {
-    first_party_key_source_for_provider(provider, app).is_some()
-}
-
-fn is_using_team_first_party_key_for_provider(provider: &LLMProvider, app: &AppContext) -> bool {
-    UserWorkspaces::as_ref(app)
-        .current_workspace()
-        .is_some_and(|workspace| {
-            workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                && workspace
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
-                        team_byo.first_party_enabled
-                            && team_byo
-                                .first_party_keys
-                                .iter()
-                                .any(|key| key.provider == *provider)
-                    })
-        })
-}
-
-pub fn byo_key_source_for_model(llm: &LLMInfo, app: &AppContext) -> Option<ByoKeySource> {
+pub fn byo_key_source_for_model(
+    llm: &LLMInfo,
+    scope: &dyn TeamScope,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
+    let workspaces = UserWorkspaces::as_ref(app);
     let is_custom_endpoint = LLMPreferences::as_ref(app)
         .custom_llm_info_for_id(&llm.id)
         .is_some();
-    if is_custom_endpoint && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed() {
+    if is_custom_endpoint && workspaces.are_member_byo_endpoints_allowed(scope) {
         return Some(ByoKeySource::UserProvided);
     }
-    if is_using_team_byo_endpoint_for_model(llm, app) {
+    if workspaces.has_team_byo_endpoint(scope, &llm.id) {
         return Some(ByoKeySource::TeamProvided);
     }
-    first_party_key_source_for_provider(&llm.provider, app)
+    first_party_key_source_for_provider(&llm.provider, scope, app)
 }
 
-fn is_using_team_byo_endpoint_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    UserWorkspaces::as_ref(app)
-        .current_workspace()
-        .is_some_and(|workspace| {
-            workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                && workspace
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
-                        team_byo.endpoints_enabled
-                            && team_byo.endpoints.iter().any(|endpoint| {
-                                endpoint.enabled
-                                    && endpoint.models.iter().any(|model| {
-                                        model.enabled && model.config_key == llm.id.as_str()
-                                    })
-                            })
-                    })
-        })
+pub fn should_show_key_icon_for_model(
+    llm: &LLMInfo,
+    scope: &dyn TeamScope,
+    app: &AppContext,
+) -> bool {
+    byo_key_source_for_model(llm, scope, app).is_some()
 }
 
-pub fn should_show_key_icon_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    byo_key_source_for_model(llm, app).is_some()
+/// Whether `scope`'s team lets this member reach `llm` at all.
+///
+/// Only a member's *own* custom endpoints can be withheld this way. Everything else, including
+/// a team-managed endpoint, arrives in the workspace's server-provided catalog rather than in
+/// `custom_llms`, and no team narrows that catalog today.
+///
+/// Applied where a member picks or names a model, not inside the catalog. The catalog also
+/// answers team-neutral questions -- resolving a stored id, reconciling a stored preference --
+/// and those must not turn on the team a member happens to be in.
+pub fn is_model_allowed_for_scope(
+    prefs: &LLMPreferences,
+    llm: &LLMInfo,
+    scope: &dyn TeamScope,
+    app: &AppContext,
+) -> bool {
+    prefs.custom_llm_info_for_id(&llm.id).is_none()
+        || UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed(scope)
 }
 
 fn should_show_host_icon_for_model(
@@ -249,8 +235,19 @@ impl DisableReason {
 /// Returns `true` when the model is usable for the current user: not disabled,
 /// or disabled for a reason that doesn't block requests (see
 /// [`DisableReason::should_clear_preference`]).
+///
+/// Deliberately team-neutral, unlike [`first_party_key_source_for_provider`]. This decides
+/// whether a *stored* preference survives, and a profile is a cloud object that follows the
+/// user between devices and teams, so a team-scoped answer here would propagate a clear
+/// everywhere. A team that forbids a credential blocks it where the user acts instead.
+///
+/// The plan entitlement is the whole question: `has_byok_key` only reaches the
+/// `RequiresUpgrade` arm, and the team-managed key half would always be `false` there anyway,
+/// since `has_team_first_party_key` requires managed BYOK/BYOE (enterprise) while
+/// `RequiresUpgrade` is a free-plan reason. That invariant is product shape, not something the
+/// types or the server contract enforce; it stops holding if enterprise gains such a tier.
 fn is_usable_llm(info: &LLMInfo, app: &AppContext) -> bool {
-    let has_byok_key = is_using_first_party_key_for_provider(&info.provider, app);
+    let has_byok_key = is_using_api_key_for_provider(&info.provider, app);
     info.disable_reason
         .as_ref()
         .is_none_or(|reason| !reason.should_clear_preference(has_byok_key))
@@ -517,7 +514,7 @@ impl AvailableLLMs {
         })
     }
 
-    fn info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
+    pub(crate) fn info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
         self.choices.iter().find(|info| info.id == *id)
     }
 
@@ -598,7 +595,7 @@ impl ModelsByFeature {
     ///
     /// For models that are available across multiple features,
     /// any one of the metadata will be returned.
-    fn info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
+    pub(crate) fn info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
         self.agent_mode.info_for_id(id)
     }
 }
@@ -793,7 +790,7 @@ impl LLMPreferences {
         }
 
         let base_llm_for_terminal_view = HashMap::new();
-        let custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(ctx).keys());
+        let custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(ctx).custom_endpoints());
 
         let mut me = Self {
             models_by_feature,
@@ -1163,8 +1160,7 @@ impl LLMPreferences {
     }
 
     fn custom_inference_enabled(app: &AppContext) -> bool {
-        let workspaces = UserWorkspaces::as_ref(app);
-        workspaces.is_custom_inference_enabled(app) && workspaces.are_member_byo_endpoints_allowed()
+        UserWorkspaces::as_ref(app).is_byo_endpoint_enabled_for_any_team(app)
     }
 
     /// Resolves a custom model router by its `config_key`/`LLMId`.
@@ -1323,11 +1319,11 @@ impl LLMPreferences {
         }
     }
 
-    /// Reads the user's current `ApiKeyManager.custom_endpoints` and replaces `custom_llms`
+    /// Reads the user's current joined custom endpoints and replaces `custom_llms`
     /// with synthetic `LLMInfo`s. Called on every `ApiKeyManagerEvent::KeysUpdated`, so adds,
     /// edits, and removals all propagate immediately.
     fn rebuild_custom_llms(&mut self, app: &AppContext) {
-        self.custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(app).keys());
+        self.custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(app).custom_endpoints());
     }
 
     fn sanitize_disabled_custom_model_preferences(&mut self, ctx: &mut ModelContext<Self>) {
@@ -1954,8 +1950,8 @@ fn get_new_agent_mode_choices(
 ///
 /// Endpoints with empty URL or API key, and models with empty name or config_key, are
 /// skipped — they shouldn't surface in the picker until the user finishes configuring them.
-fn build_custom_llm_infos(keys: &ai::api_keys::ApiKeys) -> Vec<LLMInfo> {
-    keys.custom_endpoints
+fn build_custom_llm_infos(endpoints: &[CustomEndpoint]) -> Vec<LLMInfo> {
+    endpoints
         .iter()
         .filter(|ep| !ep.url.trim().is_empty() && !ep.api_key.is_empty())
         .flat_map(|endpoint| {

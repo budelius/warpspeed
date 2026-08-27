@@ -384,6 +384,7 @@ diesel::table! {
         user_uid -> Text,
         email -> Text,
         role -> Text,
+        is_disabled -> Bool,
     }
 }
 
@@ -401,6 +402,7 @@ diesel::table! {
         name -> Text,
         server_uid -> Text,
         billing_metadata_json -> Nullable<Text>,
+        feature_model_choice_json -> Nullable<Text>,
     }
 }
 
@@ -507,6 +509,7 @@ diesel::table! {
         name -> Text,
         server_uid -> Text,
         is_selected -> Bool,
+        feature_model_choice_json -> Nullable<Text>,
     }
 }
 

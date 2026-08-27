@@ -332,7 +332,7 @@ fn custom_llm_infos_built_from_endpoints() {
         )],
         ..Default::default()
     };
-    let infos = build_custom_llm_infos(&keys);
+    let infos = build_custom_llm_infos(&keys.custom_endpoints);
     assert_eq!(infos.len(), 2);
     assert_eq!(infos[0].display_name, "fast");
     assert_eq!(infos[0].id.as_str(), "uuid-1");
@@ -355,7 +355,7 @@ fn custom_llm_display_name_uses_alias_when_present() {
         )],
         ..Default::default()
     };
-    let infos = build_custom_llm_infos(&keys);
+    let infos = build_custom_llm_infos(&keys.custom_endpoints);
     assert_eq!(infos[0].display_name, "My Alias");
 }
 
@@ -370,7 +370,7 @@ fn custom_llm_display_name_falls_back_to_name_when_alias_missing() {
         )],
         ..Default::default()
     };
-    let infos = build_custom_llm_infos(&keys);
+    let infos = build_custom_llm_infos(&keys.custom_endpoints);
     assert_eq!(infos[0].display_name, "raw-name");
 }
 
@@ -394,7 +394,7 @@ fn custom_endpoint_usage_display_label_resolves_alias_name_and_generic_fallback(
         agent_mode_models_unavailable: false,
         last_update: None,
         base_llm_for_terminal_view: HashMap::new(),
-        custom_llms: build_custom_llm_infos(&keys),
+        custom_llms: build_custom_llm_infos(&keys.custom_endpoints),
         custom_model_routers: Vec::new(),
     };
 
@@ -430,7 +430,7 @@ fn custom_llm_infos_skip_endpoints_with_empty_api_key() {
         ],
         ..Default::default()
     };
-    let infos = build_custom_llm_infos(&keys);
+    let infos = build_custom_llm_infos(&keys.custom_endpoints);
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].id.as_str(), "uuid-y");
 }
@@ -449,7 +449,7 @@ fn custom_llm_infos_skip_models_without_config_key() {
         )],
         ..Default::default()
     };
-    let infos = build_custom_llm_infos(&keys);
+    let infos = build_custom_llm_infos(&keys.custom_endpoints);
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].display_name, "ready");
 }
@@ -465,7 +465,7 @@ fn removing_model_row_purges_from_custom_llms() {
         )],
         ..Default::default()
     };
-    assert_eq!(build_custom_llm_infos(&before).len(), 2);
+    assert_eq!(build_custom_llm_infos(&before.custom_endpoints).len(), 2);
 
     let after = ai::api_keys::ApiKeys {
         custom_endpoints: vec![endpoint(
@@ -476,7 +476,7 @@ fn removing_model_row_purges_from_custom_llms() {
         )],
         ..Default::default()
     };
-    let infos = build_custom_llm_infos(&after);
+    let infos = build_custom_llm_infos(&after.custom_endpoints);
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].id.as_str(), "uuid-b");
     assert!(infos.iter().all(|i| i.id.as_str() != "uuid-a"));
@@ -501,7 +501,7 @@ fn removing_endpoint_purges_all_its_models_from_custom_llms() {
         ],
         ..Default::default()
     };
-    assert_eq!(build_custom_llm_infos(&before).len(), 3);
+    assert_eq!(build_custom_llm_infos(&before.custom_endpoints).len(), 3);
 
     let after = ai::api_keys::ApiKeys {
         custom_endpoints: vec![endpoint(
@@ -512,7 +512,7 @@ fn removing_endpoint_purges_all_its_models_from_custom_llms() {
         )],
         ..Default::default()
     };
-    let infos = build_custom_llm_infos(&after);
+    let infos = build_custom_llm_infos(&after.custom_endpoints);
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].id.as_str(), "uuid-k1");
 }
@@ -537,7 +537,7 @@ fn is_cloud_runnable_oz_model_id_classifies_ids() {
         agent_mode_models_unavailable: false,
         last_update: None,
         base_llm_for_terminal_view: HashMap::new(),
-        custom_llms: build_custom_llm_infos(&keys),
+        custom_llms: build_custom_llm_infos(&keys.custom_endpoints),
         custom_model_routers: Vec::new(),
     };
 
@@ -700,11 +700,15 @@ fn active_models_fall_back_to_usable_choice_or_custom_endpoint_when_default_disa
 }
 
 /// Runs picker-query assertions with searchable, selectable, and disabled model fixtures plus
-/// the app singletons consulted by model eligibility logic.
-fn with_model_picker_query_test_context(f: impl FnOnce(&LLMPreferences, &AppContext) + 'static) {
+/// the app singletons consulted by model eligibility logic. The scope is teamless: these
+/// fixtures exercise ordering and filtering, not team credential policy.
+fn with_model_picker_query_test_context(
+    f: impl FnOnce(&LLMPreferences, &dyn TeamScope, &AppContext) + 'static,
+) {
     App::test((), |app| async move {
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
         app.add_singleton_model(UserWorkspaces::default_mock);
+        let scope = UserWorkspaces::teamless_context_resolver_for_test();
         app.read(|app_ctx| {
             let agent_mode = AvailableLLMs::new(
                 "auto".into(),
@@ -727,7 +731,7 @@ fn with_model_picker_query_test_context(f: impl FnOnce(&LLMPreferences, &AppCont
                 custom_llms: Vec::new(),
                 custom_model_routers: Vec::new(),
             };
-            f(&preferences, app_ctx);
+            f(&preferences, &scope(app_ctx), app_ctx);
         });
     });
 }
@@ -1062,11 +1066,12 @@ fn preferences_for_profile_model_tests() -> LLMPreferences {
 
 #[test]
 fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
-    with_model_picker_query_test_context(|preferences, app| {
+    with_model_picker_query_test_context(|preferences, scope, app| {
         let all = query_model_picker_choices(
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "",
+            scope,
             app,
         );
         assert_eq!(
@@ -1083,6 +1088,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "gpt 5",
+            scope,
             app,
         );
         assert_eq!(filtered.len(), 1);

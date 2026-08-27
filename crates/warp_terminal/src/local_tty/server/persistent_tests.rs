@@ -11,11 +11,11 @@ use instant::Instant;
 use warp_core::SessionId;
 
 use super::*;
-use crate::terminal::SizeInfo;
-use crate::terminal::local_tty::PtyOptions;
-use crate::terminal::local_tty::server::{api, protocol};
-use crate::terminal::local_tty::shell::{DirectShellStarter, ShellStarter};
-use crate::terminal::shell::ShellType;
+use crate::SizeInfo;
+use crate::local_tty::PtyOptions;
+use crate::local_tty::server::{api, protocol};
+use crate::local_tty::shell::{DirectShellStarter, ShellStarter};
+use crate::shell::ShellType;
 
 fn request(supervisor: &mut Supervisor, message: api::Message) -> api::Message {
     let (client, server) = UnixStream::pair().unwrap();

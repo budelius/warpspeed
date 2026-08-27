@@ -140,7 +140,7 @@ pub(super) struct TerminalServer {
 impl TerminalServer {
     /// Spawns or connects to a terminal server process.
     pub fn new() -> Result<Self> {
-        if crate::features::FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+        if warp_core::features::FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
             return Self::new_persistent();
         }
         Self::new_ephemeral()

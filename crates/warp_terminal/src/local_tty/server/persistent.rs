@@ -14,7 +14,7 @@ use tempfile::NamedTempFile;
 use warp_core::SessionId;
 
 use super::{api, protocol};
-use crate::terminal::local_tty::{self, PtySpawnResult};
+use crate::local_tty::{self, PtySpawnResult};
 
 const SOCKET_FILE_NAME: &str = "terminal-session-supervisor-v1.sock";
 const OUTPUT_DIRECTORY_NAME: &str = "terminal_session_output";

@@ -189,10 +189,13 @@ impl PtySpawner {
         }
     }
 
+    /// `pub`, not `pub(super)`: the app crate's `TerminalManager` calls this to
+    /// hold on to the supervisor client, and that is a different crate now that
+    /// this module lives in `warp_terminal`.
     #[cfg(unix)]
-    pub(super) fn persistent_server_client(
+    pub fn persistent_server_client(
         &self,
-    ) -> Option<std::sync::Arc<crate::terminal::local_tty::server::TerminalServerClient>> {
+    ) -> Option<std::sync::Arc<crate::local_tty::server::TerminalServerClient>> {
         let client = self.server.as_ref()?.client();
         client.is_persistent().then(|| client.clone())
     }
@@ -299,7 +302,7 @@ impl PtySpawner {
         &self,
         session_id: SessionId,
     ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>)>> {
-        use crate::terminal::local_tty::server::ServerOwnedPtyHandle;
+        use crate::local_tty::server::ServerOwnedPtyHandle;
 
         let Some(server) = self.server.as_ref() else {
             return Ok(None);

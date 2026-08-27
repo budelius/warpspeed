@@ -7,6 +7,7 @@ pub mod docker_sandbox;
 pub mod event_loop;
 pub mod mio_channel;
 pub mod recorder;
+pub mod screen;
 #[cfg(unix)]
 pub mod server;
 pub mod shell;

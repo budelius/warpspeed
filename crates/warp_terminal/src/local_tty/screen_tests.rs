@@ -30,6 +30,21 @@ fn assert_detach_boundary_equivalence(a: &[u8], b: &[u8]) {
     );
 }
 
+/// Guards the equivalence tests against passing vacuously. They compare
+/// `visible_text` to `visible_text`, so an implementation that always returned
+/// the empty string would satisfy every one of them.
+#[test]
+fn visible_text_reflects_the_bytes_that_were_fed() {
+    let mut screen = screen(20, 5);
+    screen.feed(b"hello world");
+
+    assert!(
+        screen.visible_text().contains("hello world"),
+        "visible_text lost the fed bytes, got {:?}",
+        screen.visible_text()
+    );
+}
+
 #[test]
 fn plain_text_survives_the_detach_boundary() {
     assert_detach_boundary_equivalence(b"hello", b" world");

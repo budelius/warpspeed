@@ -20,21 +20,29 @@
 #     a long stretch, so on `dev` it is opt-in and on version tags it is
 #     automatic.
 #
-# Container caveat: script/linux/install_build_deps sources script/warp_sudo,
-# which shells out to `sudo` unconditionally. These images run as root and have
-# no sudo, so it is installed first and WARP_SKIP_SUDO_PROMPT bypasses the
-# interactive confirmation.
+# Build image
+# -----------
+# The compile jobs run on a prebuilt image, `docker/ci/Dockerfile`, with Warp's
+# Linux build dependencies already installed. They previously ran
+# `script/linux/install_build_deps` in a `before_script`, which cannot work on
+# this runner: its containers are not root and have no sudo, so every apt-get
+# failed and the job never reached cargo. Baking the dependencies in removes the
+# privileged step altogether, and stops every job re-downloading protoc.
 #
-# Verified: config passes GitLab's CI lint, and `fmt` has completed a real run.
-# The compile jobs have not yet completed one -- expect the first `clippy` to
-# need adjustment.
+# The image tag tracks the channel in rust-toolchain.toml. When that is bumped,
+# rebuild and republish the image and update `image:` below -- see the header of
+# docker/ci/Dockerfile for the two commands.
+#
+# Verified: config passes GitLab's CI lint, `fmt` has completed a real run, and
+# the image builds and compiles the workspace locally. The compile jobs have not
+# yet completed a run on the runner itself.
 
 stages:
   - lint
   - build
 
 default:
-  image: rust:1-bookworm
+  image: registry.gitlab.com/martin-wieser/warpspeed/ci:1.92.0
   tags:
     - obachan-staging-oss
   interruptible: true
@@ -60,6 +68,9 @@ cache:
 
 fmt:
   stage: lint
+  # rustfmt needs no system libraries, so this job stays on the stock image
+  # rather than pulling the much larger build image to parse source files.
+  image: rust:1-bookworm
   variables:
     # rustfmt only parses -- it never reads the ONNX models or the Windows
     # PDBs, so skip the ~147 MB LFS payload and the system packages entirely.
@@ -74,14 +85,12 @@ fmt:
 clippy:
   stage: lint
   timeout: 3h
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends sudo
-    - ./script/linux/install_build_deps
-    - rustup component add clippy
   script:
+    - cat /etc/warpspeed-ci-image
     - df -h / | tail -1
-    # Scoped to the `warp` package: command-signatures-v2 needs Node/yarn and
-    # `integration` needs libclang, neither of which this image provides.
+    # Scoped to the `warp` package: command-signatures-v2 needs Node/yarn,
+    # which this image does not provide. (`integration` was excluded for
+    # libclang too, but the build image now ships libclang-dev.)
     - cargo clippy -p warp --lib --locked -- -D warnings
     - df -h / | tail -1
   rules:
@@ -91,10 +100,8 @@ clippy:
 build:warpspeed:
   stage: build
   timeout: 3h
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends sudo
-    - ./script/linux/install_build_deps
   script:
+    - cat /etc/warpspeed-ci-image
     - df -h / | tail -1
     - cargo build -p warp --release --bin warpspeed --locked
     - df -h / | tail -1

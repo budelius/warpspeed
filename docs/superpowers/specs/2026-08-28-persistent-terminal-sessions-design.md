@@ -91,10 +91,8 @@ Instead a snapshot is **a self-contained repaint byte sequence**:
 struct ScreenSnapshot {
     columns: u16,
     rows: u16,
-    cell_width_px: u16,   // HeadlessScreen needs these to build a SizeInfo
-    cell_height_px: u16,
-    repaint: Vec<u8>,     // reset, modes, alt-screen, SGR + text per row,
-                          // scroll region, cursor position and visibility
+    repaint: Vec<u8>,     // alt-screen mode, reset, scroll region,
+                          // SGR + text per row, cursor position
 }
 ```
 
@@ -111,7 +109,7 @@ All paths under `crates/warp_terminal/src/local_tty/` unless noted.
 | Component | State | Purpose |
 |---|---|---|
 | `server/persistent.rs` `Supervisor` | extend | Session table, owns child + PTY, TTL and GC |
-| `server/screen.rs` `HeadlessScreen` | new | Drives the existing `model/grid` `GridHandler` with no UI; seeds from a snapshot, parses detached bytes, renders a snapshot |
+| `screen.rs` `HeadlessScreen` | new | Drives the existing `model/grid` `GridHandler` with no UI; seeds from a snapshot, parses detached bytes, renders a snapshot. Sits at `local_tty/screen.rs`, **not** under `server/`, because `server` is `#[cfg(unix)]` and the Windows backend needs it too |
 | `model/grid/render_ansi.rs` | new | Grid to repaint byte sequence |
 | `server/transport.rs` `Transport` | new | Framed message stream, plus an **optional** `lend_endpoint()` capability |
 | `server/protocol.rs`, `server/api.rs` | extend | Version 2 message set; version encoded in the socket/pipe name |
@@ -172,13 +170,22 @@ and pipe name moves to `v2`.
 
 ## Testing
 
-**The discriminating test.** Feed identical byte streams to the app's grid and to `HeadlessScreen`,
-then assert the resulting screens are equal. If seeding and parsing are not equivalent, nothing
-downstream is trustworthy. Written first.
+**The discriminating test — detach-boundary equivalence.** For byte streams `A` and `B`:
 
-**The renderer round-trip.** bytes to grid A, render to bytes, feed to grid B, assert A equals B.
-This is the property that makes the ANSI-snapshot design sound, and it fails loudly for any escape
-sequence the renderer cannot reproduce.
+```
+feed(A ++ B)  ==  seed(render(feed(A))) then feed(B)
+```
+
+Detaching mid-stream and reattaching must be indistinguishable from never having detached. This is
+the property the whole design rests on, and it is written first.
+
+Note that "feed the same bytes to the app grid and to `HeadlessScreen`, assert equality" would be a
+much weaker test, because both sides are the same `GridHandler` — it largely proves `GridHandler`
+equals itself. The equivalence that matters is across the *snapshot*, not across two consumers.
+
+With `B` empty the property degenerates to the **renderer round-trip** (bytes to grid, render,
+feed, assert equal), so that case is covered by the same test rather than a separate one. It fails
+loudly for any escape sequence the renderer cannot reproduce.
 
 Then:
 

@@ -10019,6 +10019,97 @@ fn back_button_label_resolves_token_only_parent_linkage() {
     });
 }
 
+/// A single left-click on a block selects it, and that selection sticks until something clears
+/// it. While a foreground program owns the pane, the arrow keys belong to that program: a
+/// lingering block selection must not silently swallow them, or an interactive selector (Claude
+/// Code's question prompt, an `fzf` list, a `git add -p` menu) becomes impossible to navigate.
+///
+/// Left/right, page up/down, home/end, enter and typed characters all already route to the PTY
+/// first while a command is long-running; up/down were the exception.
+#[test]
+fn up_and_down_reach_the_pty_during_a_long_running_command_with_a_block_selected() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            {
+                let mut model = view.model.lock();
+                model.simulate_long_running_block("claude", "");
+            }
+            assert!(view.is_long_running());
+
+            let block_index = view.model.lock().block_list().active_block_index();
+            view.reset_selection_to_single_block(block_index, ctx);
+            assert!(
+                !view.selected_blocks.is_empty(),
+                "clicking a block should select it"
+            );
+
+            view.handle_action(&TerminalAction::Up, ctx);
+            view.handle_action(&TerminalAction::Down, ctx);
+        });
+
+        assert_eq!(
+            *pty_writes.borrow(),
+            vec![b"\x1b[A".to_vec(), b"\x1b[B".to_vec()],
+            "up/down must be forwarded to the foreground program, not consumed by the block selection"
+        );
+    })
+}
+
+/// With no command running, up/down still drive blocklist navigation and write nothing to the
+/// PTY -- the fix above must not take that away.
+#[test]
+fn up_and_down_navigate_blocks_when_no_command_is_running() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            assert!(!view.is_long_running());
+
+            let block_index = view.model.lock().block_list().active_block_index();
+            view.reset_selection_to_single_block(block_index, ctx);
+            assert!(!view.selected_blocks.is_empty());
+
+            view.handle_action(&TerminalAction::Up, ctx);
+            view.handle_action(&TerminalAction::Down, ctx);
+
+            assert!(
+                !view.selected_blocks.is_empty(),
+                "blocklist navigation should keep a selection"
+            );
+        });
+
+        assert!(
+            pty_writes.borrow().is_empty(),
+            "blocklist navigation must not write to the PTY, got {:?}",
+            pty_writes.borrow()
+        );
+    })
+}
+
 /// `ModelEvent::Exit` is written for a shell that died: it inserts the "process
 /// terminated" banner, disables the input editor, and emits `Event::Exited` (which
 /// closes the pane, per `terminal_pane.rs`). A deliberate restart needs none of that
@@ -10141,6 +10232,7 @@ fn restart_in_progress_suppresses_exit_teardown_and_finish_restart_restores_it()
         );
     });
 }
+
 /// `reset_exit_state` (called from `finish_restart`) restores the model's writability, but the
 /// exit handler's editor-disable (`InteractionState::Disabled`) is separate state that only that
 /// handler sets and nothing else clears. A shell that dies before bootstrapping leaves the pane

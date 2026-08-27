@@ -22959,6 +22959,21 @@ impl TerminalView {
     }
 
     fn terminal_up(&mut self, ctx: &mut ViewContext<Self>) {
+        // A foreground program owns the arrow keys, whether or not a block happens to still be
+        // selected from an earlier click. Checking the selection first made a stale selection
+        // silently swallow up/down, leaving interactive selectors (a CLI agent's question
+        // prompt, `fzf`, `git add -p`) impossible to navigate until something else cleared it.
+        // Left/right, page up/down, home/end, enter and typed characters all already route to
+        // the PTY first here; `write_user_bytes_to_pty` clears the selection just as they do.
+        if self.is_long_running() {
+            let sequence =
+                EscCodes::build_escape_sequence(self.model.lock().deref(), &[EscCodes::ARROW_UP]);
+            // Falls through to blocklist navigation when the write is refused (the agent has
+            // control of this block), rather than dropping the keystroke.
+            if self.write_user_bytes_to_pty(sequence, ctx) {
+                return;
+            }
+        }
         if !self.selected_blocks.is_empty() {
             let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
             match input_mode {
@@ -22973,10 +22988,6 @@ impl TerminalView {
                     );
                 }
             }
-        } else if self.is_long_running() {
-            let sequence =
-                EscCodes::build_escape_sequence(self.model.lock().deref(), &[EscCodes::ARROW_UP]);
-            self.write_user_bytes_to_pty(sequence, ctx);
         }
     }
 
@@ -23112,6 +23123,14 @@ impl TerminalView {
     }
 
     fn terminal_down(&mut self, ctx: &mut ViewContext<Self>) {
+        // See `terminal_up`: the foreground program takes precedence over a stale block selection.
+        if self.is_long_running() {
+            let sequence =
+                EscCodes::build_escape_sequence(self.model.lock().deref(), &[EscCodes::ARROW_DOWN]);
+            if self.write_user_bytes_to_pty(sequence, ctx) {
+                return;
+            }
+        }
         if !self.selected_blocks.is_empty() {
             let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
             match input_mode {
@@ -23126,10 +23145,6 @@ impl TerminalView {
                     self.select_less_recent_block(false /* is_cmd_down */, ctx);
                 }
             }
-        } else if self.is_long_running() {
-            let sequence =
-                EscCodes::build_escape_sequence(self.model.lock().deref(), &[EscCodes::ARROW_DOWN]);
-            self.write_user_bytes_to_pty(sequence, ctx);
         }
     }
 

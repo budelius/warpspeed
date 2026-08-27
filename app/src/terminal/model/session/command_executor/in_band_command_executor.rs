@@ -64,12 +64,27 @@ pub struct InBandCommandExecutor {
     pending_commands: Arc<Mutex<VecDeque<CommandExecutionInfo>>>,
 }
 
+/// The maximum number of characters an in-band command's output may occupy before we conclude
+/// that its terminating marker was lost and stop capturing.
+///
+/// In-band generator payloads are small (a branch name, a diff stat), so any capture that runs
+/// past this has almost certainly lost its `end_in_band_command_output` marker -- the shell was
+/// interrupted mid-payload, or the foreground process changed underneath it. Capturing diverts
+/// every printable byte away from the grid, so without this bound a lost marker leaves the pane
+/// rendering nothing at all, with no way back short of restarting the session.
+const MAX_IN_BAND_OUTPUT_CHARS: usize = 128 * 1024;
+
 /// Output is written as if it's going to a grid, but we store it as a string. This
 /// struct manages some cursor state so we can properly handle some cursor mutations
 /// that might happen during in-band output.
 pub struct InBandCommandOutputReceiver {
-    output: String,
-    /// Current coordinates of the cursor.
+    /// Captured output, held as `char`s rather than a `String` because the cursor arithmetic
+    /// below counts grid cells. Cells and UTF-8 bytes only agree for ASCII, so indexing a
+    /// `String` by a cell count both truncates at the wrong place and can split a multi-byte
+    /// character (which panics).
+    output: Vec<char>,
+    /// Current coordinates of the cursor, in the same (viewport-relative) space as the rows
+    /// handed to [`Self::goto`].
     point: Point,
     /// Whether the cursor needs to wrap before receiving more input.
     /// This is functionally the same as input_needs_wrap on GridStorage::Cursor.
@@ -78,6 +93,8 @@ pub struct InBandCommandOutputReceiver {
     num_rows: usize,
     /// The width of the grid.
     num_cols: usize,
+    /// Set once the capture passes [`MAX_IN_BAND_OUTPUT_CHARS`]; see that constant.
+    overflowed: bool,
 }
 
 /// Tracks the cursor during in-band output so we arbitrary cursor mutations
@@ -90,20 +107,30 @@ impl InBandCommandOutputReceiver {
             needs_wrap: false,
             num_rows: grid_size.rows,
             num_cols: grid_size.columns,
+            overflowed: false,
         }
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.output
+    pub fn to_output_string(&self) -> String {
+        self.output.iter().collect()
+    }
+
+    /// `true` once the capture has grown past [`MAX_IN_BAND_OUTPUT_CHARS`], meaning the caller
+    /// should abandon it and resume rendering PTY output to the grid.
+    pub fn has_overflowed(&self) -> bool {
+        self.overflowed
     }
 
     /// Add a character and advance the cursor.
     pub fn input(&mut self, c: char) {
         if self.needs_wrap {
-            self.point.row = min(self.num_rows - 1, self.point.row + 1);
+            self.point.row = min(self.num_rows.saturating_sub(1), self.point.row + 1);
             self.point.col = 0;
         }
         self.output.push(c);
+        if self.output.len() > MAX_IN_BAND_OUTPUT_CHARS {
+            self.overflowed = true;
+        }
         if self.point.col + 1 >= self.num_cols {
             self.needs_wrap = true;
         } else {
@@ -122,7 +149,12 @@ impl InBandCommandOutputReceiver {
                 distance += 1;
             }
             self.point = self.point.wrapping_sub(self.num_cols, distance);
-            self.output.truncate(self.output.len() - distance);
+            // `distance` is a cell count, and the cursor can legitimately sit ahead of what we
+            // have captured -- the capture starts empty wherever the cursor happened to be, and
+            // cells the generator never wrote to are not in `output`. Saturate rather than
+            // underflow.
+            let keep = self.output.len().saturating_sub(distance);
+            self.output.truncate(keep);
         } else {
             log::warn!("Moving cursor forward during in-band output, which is unhandled");
         }
@@ -130,7 +162,7 @@ impl InBandCommandOutputReceiver {
 
     /// Moves the cursor to the beginning of the following row.
     pub fn carriage_return(&mut self) {
-        self.point.row = min(self.num_rows - 1, self.point.row + 1);
+        self.point.row = min(self.num_rows.saturating_sub(1), self.point.row + 1);
         self.point.col = 0;
         self.needs_wrap = false;
     }

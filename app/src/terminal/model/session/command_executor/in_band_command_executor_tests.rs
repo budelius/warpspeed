@@ -542,3 +542,105 @@ fn test_cancelling_command_queues_up_next_command_command() {
             .await;
     });
 }
+
+/// A receiver sized like a real pane, starting with the cursor at `start`.
+fn receiver_at(start: Point) -> InBandCommandOutputReceiver {
+    let size = SizeInfo::new_without_font_metrics(/*rows=*/ 24, /*cols=*/ 80);
+    InBandCommandOutputReceiver::new(start, &size)
+}
+
+fn feed(receiver: &mut InBandCommandOutputReceiver, text: &str) {
+    for c in text.chars() {
+        receiver.input(c);
+    }
+}
+
+/// A cursor move to a point the capture has not reached must not underflow.
+///
+/// This is the pane-freezing case: the capture starts wherever the cursor happens to be, and a
+/// generator (ConPTY in particular) routinely emits an absolute cursor move before it has printed
+/// anything. Subtracting a cell distance from an empty capture used to underflow, panicking the
+/// PTY reader thread and leaving the pane permanently dead.
+#[test]
+fn goto_before_anything_is_captured_does_not_underflow() {
+    let mut receiver = receiver_at(Point::new(30, 12));
+
+    receiver.goto(0, 0);
+
+    assert_eq!(receiver.to_output_string(), "");
+    assert!(!receiver.has_overflowed());
+}
+
+/// The same rewind, but with a partial capture: only what was captured can be dropped.
+#[test]
+fn goto_rewinding_past_the_capture_clears_it_rather_than_underflowing() {
+    let mut receiver = receiver_at(Point::new(5, 0));
+    feed(&mut receiver, "abc");
+
+    receiver.goto(0, 0);
+
+    assert_eq!(receiver.to_output_string(), "");
+}
+
+/// Cursor distances count grid cells, so the rewind must drop characters, not bytes. Truncating a
+/// `String` by a cell count lands mid-character on any non-ASCII output and panics.
+#[test]
+fn goto_rewinds_by_characters_not_bytes() {
+    let mut receiver = receiver_at(Point::new(0, 0));
+    feed(&mut receiver, "제제제");
+
+    receiver.goto(0, 2);
+
+    assert_eq!(receiver.to_output_string(), "제제");
+}
+
+#[test]
+fn goto_rewinds_mixed_width_output_by_characters() {
+    let mut receiver = receiver_at(Point::new(0, 0));
+    feed(&mut receiver, "héllo");
+
+    receiver.goto(0, 3);
+
+    assert_eq!(receiver.to_output_string(), "hél");
+}
+
+/// A forward cursor move is unsupported and must leave the capture untouched.
+#[test]
+fn goto_forward_leaves_the_capture_alone() {
+    let mut receiver = receiver_at(Point::new(0, 0));
+    feed(&mut receiver, "abc");
+
+    receiver.goto(4, 0);
+
+    assert_eq!(receiver.to_output_string(), "abc");
+}
+
+/// A capture that never sees its terminating marker has to give up: while it is running, every
+/// printable byte is diverted away from the grid, so an unbounded capture renders the pane blind.
+#[test]
+fn capture_reports_overflow_past_the_size_limit() {
+    let mut receiver = receiver_at(Point::new(0, 0));
+
+    for _ in 0..MAX_IN_BAND_OUTPUT_CHARS {
+        receiver.input('x');
+    }
+    assert!(
+        !receiver.has_overflowed(),
+        "a capture at the limit is still within budget"
+    );
+
+    receiver.input('x');
+    assert!(receiver.has_overflowed());
+}
+
+/// A grid with no rows must not underflow the wrap bookkeeping.
+#[test]
+fn wrapping_in_a_zero_row_grid_does_not_underflow() {
+    let size = SizeInfo::new_without_font_metrics(/*rows=*/ 0, /*cols=*/ 1);
+    let mut receiver = InBandCommandOutputReceiver::new(Point::new(0, 0), &size);
+
+    feed(&mut receiver, "ab");
+    receiver.carriage_return();
+
+    assert_eq!(receiver.to_output_string(), "ab");
+}

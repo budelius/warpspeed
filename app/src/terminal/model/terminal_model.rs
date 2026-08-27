@@ -73,7 +73,7 @@ use crate::terminal::model::completions::{
     ShellCompletion, ShellCompletionUpdate, ShellData as CompletionsShellData,
 };
 use crate::terminal::model::escape_sequences::ModeProvider;
-use crate::terminal::model::grid::IndexRegion;
+use crate::terminal::model::grid::{Dimensions as _, IndexRegion};
 use crate::terminal::model::index::VisibleRow;
 use crate::terminal::model::iterm_image::{ITermImage, ITermImageMetadata};
 use crate::terminal::model::secrets::ObfuscateSecrets;
@@ -2665,6 +2665,15 @@ impl ansi::Handler for TerminalModel {
             let is_receiving_prompt_chars = self.block_list.active_block().is_receiving_prompt();
             if !is_receiving_prompt_chars {
                 output.input(c);
+                if output.has_overflowed() {
+                    // The terminating marker never arrived. Capturing diverts every printable
+                    // byte away from the grid, so staying in this state renders the pane blind
+                    // until the session is restarted. Drop the capture and resume rendering.
+                    log::warn!(
+                        "Abandoning in-band command output capture: no terminating marker arrived before the size limit. Resuming normal rendering."
+                    );
+                    self.is_receiving_in_band_command_output = IsReceivingInBandCommandOutput::No;
+                }
                 return;
             }
         } else if let IsReceivingCompletionsOutput::Yes {
@@ -3280,11 +3289,21 @@ impl ansi::Handler for TerminalModel {
     }
 
     fn start_in_band_command_output(&mut self) {
-        let starting_cursor_point = self
-            .block_list()
-            .active_block()
-            .grid_handler()
-            .cursor_point();
+        // `InBandCommandOutputReceiver::goto` is fed the viewport-relative rows that
+        // `Handler::goto` carries, so the starting point has to be in that same space.
+        // `GridHandler::cursor_point` is absolute (it includes the scrollback), and handing that
+        // in makes the receiver believe the cursor is `history_size` rows further down the grid
+        // than it is -- so the first absolute cursor move the generator emits computes a
+        // rewind distance of thousands of cells against an all-but-empty capture.
+        let starting_cursor_point = {
+            let grid_handler = self.block_list().active_block().grid_handler();
+            let history_size = grid_handler.history_size();
+            let cursor_point = grid_handler.cursor_point();
+            Point::new(
+                cursor_point.row.saturating_sub(history_size),
+                cursor_point.col,
+            )
+        };
         self.is_receiving_in_band_command_output = IsReceivingInBandCommandOutput::Yes {
             output: InBandCommandOutputReceiver::new(
                 starting_cursor_point,
@@ -3297,7 +3316,9 @@ impl ansi::Handler for TerminalModel {
     fn end_in_band_command_output(&mut self, from_osc_sequence: bool) {
         match &mut self.is_receiving_in_band_command_output {
             IsReceivingInBandCommandOutput::Yes { output } => {
-                match validate_and_decode_in_band_command_output_to_bytes(output.as_str()) {
+                match validate_and_decode_in_band_command_output_to_bytes(
+                    &output.to_output_string(),
+                ) {
                     Ok(decoded_bytes) => {
                         match ExecutedExecutorCommandEvent::parse_generator_payload(decoded_bytes) {
                             Ok(event) => {

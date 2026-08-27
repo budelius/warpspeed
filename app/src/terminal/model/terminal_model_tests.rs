@@ -18,7 +18,6 @@ use crate::terminal::model::ObfuscateSecrets;
 use crate::terminal::model::ansi::{CompletionMetadata, Handler, Processor};
 use crate::terminal::model::block::BlockId;
 use crate::terminal::model::bootstrap::BootstrapStage;
-use crate::terminal::model::grid::Dimensions as _;
 use crate::terminal::model::image_map::StoredImageMetadata;
 use crate::terminal::model::index::Side;
 use crate::terminal::model::selection::ExpandedSelectionRange;

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
@@ -17,12 +17,62 @@ use super::{api, protocol};
 use crate::local_tty::{self, PtySpawnResult};
 
 const SOCKET_FILE_NAME: &str = "terminal-session-supervisor-v1.sock";
+const SOCKET_DIRECTORY_NAME: &str = "terminal-session-supervisor";
 const OUTPUT_DIRECTORY_NAME: &str = "terminal_session_output";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long a single request/response exchange may take before the peer is
+/// abandoned.
+///
+/// The supervisor serves one connection at a time, so without this a peer that
+/// connects and then never speaks -- stalled, or hostile -- parks the daemon
+/// forever: `maintain_sessions` stops running, detached PTY buffers fill, and
+/// every detached shell blocks on write. The client sets the same bound because
+/// `spawn_pty` runs on the app's main thread, where a wedged supervisor would
+/// otherwise hang the UI.
+pub(super) const IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How much output one detached session may spool before the oldest is dropped.
+const MAX_SPOOLED_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
+/// How much of the spool survives compaction. A replay wants the most recent
+/// output, so compaction keeps the tail.
+const RETAINED_SPOOL_BYTES: u64 = 4 * 1024 * 1024;
+const SPOOL_TRUNCATION_NOTICE: &[u8] =
+    b"
+
+[warp] Earlier output from this detached session was discarded.
+
+";
+
+/// How long the supervisor lingers with nothing to supervise before exiting.
+///
+/// Without this the daemon is immortal: it is `setsid()`'d and nothing reaps it,
+/// so an app crash leaves it running past logout. Sessions that are merely
+/// detached still count as work, so this only fires once every supervised shell
+/// has genuinely exited.
+const IDLE_SHUTDOWN_DELAY: Duration = Duration::from_secs(60);
+
+/// The directory holding the supervisor socket.
+///
+/// `XDG_RUNTIME_DIR` when the platform provides one -- it is per-user and
+/// already 0700 -- and the app's state directory otherwise. Deliberately never
+/// `/tmp`: both components of the old name (the uid and a hash of the state
+/// directory) are derivable by any local user, so in a world-writable directory
+/// an attacker could pre-bind the path and be handed `SpawnShellRequest` -- the
+/// working directory and the complete environment, injected API keys and cloud
+/// credentials included -- and could answer with an fd of their choosing as the
+/// PTY the user types into.
+fn socket_directory() -> PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(warp_core::paths::state_dir);
+    base.join(SOCKET_DIRECTORY_NAME)
+}
+
 pub(super) fn socket_path() -> PathBuf {
     let state_directory_hash = Sha256::digest(warp_core::paths::state_dir().as_os_str().as_bytes());
-    PathBuf::from("/tmp").join(format!(
+    socket_directory().join(format!(
         "{}-{}-{}",
         SOCKET_FILE_NAME,
         nix::unistd::getuid().as_raw(),
@@ -36,6 +86,7 @@ struct SupervisedSession {
     attached_client_pid: Option<u32>,
     preserve_for_client_pid: Option<u32>,
     detached_output: NamedTempFile,
+    spooled_output_bytes: u64,
 }
 
 impl SupervisedSession {
@@ -52,6 +103,44 @@ impl SupervisedSession {
         }
     }
 
+    /// Appends to the detached spool, compacting it if it has grown past
+    /// [`MAX_SPOOLED_OUTPUT_BYTES`].
+    ///
+    /// Without a bound a detached `yes` fills the disk and then replays in full
+    /// on reattach.
+    fn spool_output(&mut self, bytes: &[u8]) -> Result<()> {
+        self.detached_output.write_all(bytes)?;
+        self.spooled_output_bytes += bytes.len() as u64;
+        if self.spooled_output_bytes > MAX_SPOOLED_OUTPUT_BYTES {
+            self.compact_spool()?;
+        }
+        Ok(())
+    }
+
+    /// Drops the oldest spooled output, keeping the most recent
+    /// [`RETAINED_SPOOL_BYTES`] behind a notice that output was lost.
+    fn compact_spool(&mut self) -> Result<()> {
+        let file = self.detached_output.as_file_mut();
+        file.flush()?;
+        let length = file.metadata()?.len();
+        if length <= RETAINED_SPOOL_BYTES {
+            self.spooled_output_bytes = length;
+            return Ok(());
+        }
+
+        file.seek(std::io::SeekFrom::Start(length - RETAINED_SPOOL_BYTES))?;
+        let mut tail = Vec::with_capacity(RETAINED_SPOOL_BYTES as usize);
+        file.read_to_end(&mut tail)?;
+
+        file.set_len(0)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.write_all(SPOOL_TRUNCATION_NOTICE)?;
+        file.write_all(&tail)?;
+        file.flush()?;
+        self.spooled_output_bytes = file.metadata()?.len();
+        Ok(())
+    }
+
     fn drain_detached_output(&mut self) -> Result<()> {
         if self.attached_client_pid.is_some() {
             return Ok(());
@@ -62,8 +151,7 @@ impl SupervisedSession {
             match self.leader.read(&mut buffer) {
                 Ok(0) => return Ok(()),
                 Ok(bytes_read) => self
-                    .detached_output
-                    .write_all(&buffer[..bytes_read])
+                    .spool_output(&buffer[..bytes_read])
                     .context("Failed to spool detached terminal output")?,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -134,6 +222,7 @@ impl Supervisor {
                             attached_client_pid: Some(client_pid),
                             preserve_for_client_pid: None,
                             detached_output,
+                            spooled_output_bytes: 0,
                         },
                     );
                     result.leader_fd = response_fd;
@@ -248,6 +337,12 @@ impl Supervisor {
         if preserving {
             if let Some(session) = self.sessions.get_mut(&session_id) {
                 session.attached_client_pid = None;
+                // Consume the mark. It exists so a client can shut itself down
+                // without taking its sessions with it, and that is a one-shot
+                // request: leaving it set means every later kill for this
+                // session reports success without killing anything, and the
+                // shell can never be terminated again.
+                session.preserve_for_client_pid = None;
             }
             return None;
         }
@@ -286,6 +381,7 @@ impl Supervisor {
                 &mut session.detached_output,
                 NamedTempFile::new_in(&self.output_directory)?,
             );
+            session.spooled_output_bytes = 0;
             replay.as_file_mut().seek(std::io::SeekFrom::Start(0))?;
 
             session.attached_client_pid = Some(client_pid);
@@ -331,33 +427,125 @@ impl Supervisor {
     }
 }
 
+/// Creates the socket's directory as 0700 and refuses to use one that anybody
+/// else could write into.
+///
+/// This is what actually protects the socket: inside a directory only this user
+/// may write, no other local user can pre-create the socket path at all.
+fn prepare_socket_directory(directory: &Path) -> Result<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .with_context(|| format!("Failed to create supervisor socket directory {directory:?}"))?;
+
+    // `symlink_metadata`, not `metadata`: a symlink planted here must be
+    // rejected rather than followed to whatever it points at.
+    let metadata = std::fs::symlink_metadata(directory)
+        .with_context(|| format!("Failed to inspect supervisor socket directory {directory:?}"))?;
+    if !metadata.file_type().is_dir() {
+        bail!("Supervisor socket directory {directory:?} is not a directory");
+    }
+    if metadata.uid() != nix::unistd::getuid().as_raw() {
+        bail!("Supervisor socket directory {directory:?} is owned by another user");
+    }
+    // `recursive(true)` applies the mode only to directories it creates, so a
+    // pre-existing directory can still be group- or world-writable.
+    if metadata.mode() & 0o077 != 0 {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).with_context(
+            || format!("Failed to restrict supervisor socket directory {directory:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+/// Binds the listener, refusing to displace a live supervisor and refusing to
+/// adopt a path we do not own.
+fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket() {
+                bail!("Supervisor socket path {socket_path:?} is not a socket");
+            }
+            if metadata.uid() != nix::unistd::getuid().as_raw() {
+                bail!("Supervisor socket {socket_path:?} is owned by another user");
+            }
+            // A successful connect means a supervisor is already serving this
+            // path. Previously the unlink was skipped in exactly that case and
+            // the bind below was left to fail, which handed the name to whoever
+            // got there first; now it is an explicit refusal.
+            if UnixStream::connect(socket_path).is_ok() {
+                bail!("Another terminal supervisor is already listening on {socket_path:?}");
+            }
+            std::fs::remove_file(socket_path).with_context(|| {
+                format!("Failed to remove stale supervisor socket {socket_path:?}")
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to inspect supervisor socket {socket_path:?}"));
+        }
+    }
+
+    // Bind under a umask that denies everyone else, so the socket is 0600 from
+    // the instant it exists. `chmod`-ing after the bind leaves a window in
+    // which the socket is connectable by other users.
+    let previous_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o177));
+    let listener = UnixListener::bind(socket_path);
+    nix::sys::stat::umask(previous_umask);
+    listener.with_context(|| format!("Failed to bind terminal supervisor socket {socket_path:?}"))
+}
+
+/// Makes an accepted connection blocking and bounds every read and write on it.
+///
+/// The listener is non-blocking and on some platforms the accepted socket
+/// inherits that, while the exchange below is written against a blocking
+/// socket. The timeouts are what stop one silent peer from parking the daemon.
+fn configure_stream(stream: &UnixStream) -> Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    Ok(())
+}
+
 pub(super) fn run(socket_path: PathBuf) -> Result<()> {
     let socket_directory = socket_path
         .parent()
         .ok_or_else(|| anyhow!("Terminal supervisor socket has no parent directory"))?;
-    std::fs::create_dir_all(socket_directory)?;
+    prepare_socket_directory(socket_directory)?;
     let output_directory = warp_core::paths::state_dir().join(OUTPUT_DIRECTORY_NAME);
     std::fs::create_dir_all(&output_directory)?;
 
-    if socket_path.exists() && UnixStream::connect(&socket_path).is_err() {
-        std::fs::remove_file(&socket_path)?;
-    }
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("Failed to bind terminal supervisor socket {socket_path:?}"))?;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+    let listener = bind_listener(&socket_path)?;
     listener.set_nonblocking(true)?;
     let _socket_guard = SocketGuard(&socket_path);
     let mut supervisor = Supervisor::new(output_directory);
+    let mut idle_since: Option<Instant> = Some(Instant::now());
 
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                if let Err(error) = configure_stream(&stream) {
+                    log::error!("Terminal supervisor connection setup failed: {error:#}");
+                    continue;
+                }
                 if let Err(error) = supervisor.handle_connection(stream) {
                     log::error!("Terminal supervisor request failed: {error:#}");
                 }
+                idle_since = None;
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 supervisor.maintain_sessions();
+                if supervisor.sessions.is_empty() {
+                    let idle_since = idle_since.get_or_insert_with(Instant::now);
+                    if idle_since.elapsed() >= IDLE_SHUTDOWN_DELAY {
+                        log::info!("Terminal supervisor exiting: nothing left to supervise");
+                        return Ok(());
+                    }
+                } else {
+                    idle_since = None;
+                }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}

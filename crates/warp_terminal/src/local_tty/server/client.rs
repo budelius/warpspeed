@@ -54,6 +54,11 @@ impl TerminalServerClient {
             }
             Connection::Persistent(socket_path) => {
                 let stream = UnixStream::connect(socket_path)?;
+                // `spawn_pty` and the exit-status polling run on the app's main
+                // thread, so an unbounded wait here is a hung UI whenever the
+                // supervisor is wedged or stops reading.
+                stream.set_read_timeout(Some(super::persistent::IO_TIMEOUT))?;
+                stream.set_write_timeout(Some(super::persistent::IO_TIMEOUT))?;
                 protocol::send_message(stream.as_fd(), message, Option::<RawFd>::None)?;
                 protocol::receive_message(stream.as_fd())
             }

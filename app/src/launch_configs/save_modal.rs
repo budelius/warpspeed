@@ -248,9 +248,13 @@ impl LaunchConfigSaveModal {
                     };
                     launch_config.source = Some(source);
                     if FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
-                        let window_source = launch_config
-                            .window_source(0)
-                            .expect("new launch configuration has a source");
+                        // The source was just assigned above, so this is not
+                        // expected to be empty -- but a panic here would take
+                        // the whole app down for a routine save, so report it
+                        // as a failed save instead.
+                        let window_source = launch_config.window_source(0).ok_or_else(|| {
+                            anyhow::anyhow!("Newly saved launch configuration has no window source")
+                        })?;
                         crate::launch_configs::session_store::save(
                             &window_source,
                             window_snapshot,

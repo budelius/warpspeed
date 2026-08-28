@@ -644,8 +644,13 @@ fn launch_config_workspace_source(
                     });
                 #[cfg(feature = "local_fs")]
                 let block_lists = if session.block_lists.is_empty() {
-                    crate::persistence::load_restored_blocks_for_launch_config().unwrap_or_else(
-                        |error| {
+                    // Only the panes of the window being restored -- this runs
+                    // on the UI thread, and reading every block in the database
+                    // stalls it in proportion to the user's whole history.
+                    let pane_uuids =
+                        crate::launch_configs::session_store::terminal_pane_uuids(&window_snapshot);
+                    crate::persistence::load_restored_blocks_for_launch_config(&pane_uuids)
+                        .unwrap_or_else(|error| {
                             safe_warn!(
                                 safe: ("Failed to load terminal history for launch config session"),
                                 full: (
@@ -653,8 +658,7 @@ fn launch_config_workspace_source(
                                 )
                             );
                             Default::default()
-                        },
-                    )
+                        })
                 } else {
                     session.block_lists
                 };

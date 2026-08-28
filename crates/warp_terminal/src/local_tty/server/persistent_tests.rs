@@ -72,7 +72,7 @@ fn detached_output_is_replayed_when_session_reattaches() {
         .sessions
         .get_mut(&session_id)
         .unwrap()
-        .attached_client_pid = None;
+        .attached_client = None;
 
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -235,7 +235,7 @@ fn spooled_output_is_capped_and_keeps_the_most_recent_bytes() {
             .spawn()
             .unwrap(),
         leader: File::open("/dev/null").unwrap(),
-        attached_client_pid: None,
+        attached_client: None,
         preserve_for_client_pid: None,
         detached_output: tempfile::NamedTempFile::new_in(root.path()).unwrap(),
         spooled_output_bytes: 0,
@@ -323,5 +323,45 @@ fn a_preserved_session_can_still_be_killed_afterwards() {
     assert!(
         !supervisor.sessions.contains_key(&session_id),
         "a second kill must terminate the session rather than silently succeeding"
+    );
+}
+
+#[test]
+fn a_recycled_pid_does_not_keep_a_session_attached() {
+    // Our own PID is certainly alive, so a bare liveness check cannot tell
+    // these apart; the recorded start time is what does.
+    let live = ClientProcess::new(std::process::id());
+    assert!(live.is_running());
+
+    let recycled = ClientProcess {
+        pid: std::process::id(),
+        start_time: live.start_time.map(|value| value.wrapping_add(1)),
+    };
+
+    if live.start_time.is_some() {
+        assert!(
+            !recycled.is_running(),
+            "a PID whose start time does not match the process that attached must count as gone"
+        );
+    } else {
+        // No start time available on this platform: documented fallback to the
+        // previous liveness-only behaviour.
+        assert!(recycled.is_running());
+    }
+}
+
+#[test]
+fn a_dead_client_releases_its_session() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let client = ClientProcess::new(pid);
+    child.wait().unwrap();
+
+    assert!(
+        !client.is_running(),
+        "a client that has exited must not hold its session attached"
     );
 }

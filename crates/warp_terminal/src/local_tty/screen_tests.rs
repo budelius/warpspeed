@@ -56,3 +56,49 @@ fn plain_text_survives_the_detach_boundary() {
 fn rendering_and_reseeding_reproduces_the_screen() {
     assert_detach_boundary_equivalence(b"first line\r\nsecond line", b"");
 }
+
+/// Every cell's appearance, in a form that is cheap to compare and readable
+/// when it differs.
+///
+/// Deliberately not "compare the two rendered repaints": a renderer that drops
+/// attributes uniformly produces equal bytes on both sides and satisfies that
+/// comparison while losing every color. Reading the cells is what actually
+/// detects the loss.
+fn cell_appearance(screen: &HeadlessScreen) -> Vec<String> {
+    let grid = screen.grid_for_test();
+    let mut cells = Vec::new();
+    for row in 0..grid.total_rows() {
+        for column in 0..grid.columns() {
+            let cell = &grid.grid_storage()[Point::new(row, column)];
+            if cell.c == ' ' {
+                continue;
+            }
+            cells.push(format!(
+                "{:?} fg={:?} bg={:?} flags={:?}",
+                cell.c, cell.fg, cell.bg, cell.flags
+            ));
+        }
+    }
+    cells
+}
+
+/// A reattached screen that kept its text but lost its colors is visibly wrong,
+/// and `visible_text` cannot see that.
+#[test]
+fn text_attributes_survive_the_detach_boundary() {
+    let styled = b"\x1b[31mred\x1b[0m plain \x1b[1mbold\x1b[0m";
+
+    let mut continuous = screen(40, 3);
+    continuous.feed(styled);
+
+    let reattached = HeadlessScreen::from_snapshot(
+        &continuous.snapshot(),
+        ChannelEventListener::new_for_test(),
+    );
+
+    assert_eq!(
+        cell_appearance(&continuous),
+        cell_appearance(&reattached),
+        "attributes were lost across the snapshot boundary"
+    );
+}

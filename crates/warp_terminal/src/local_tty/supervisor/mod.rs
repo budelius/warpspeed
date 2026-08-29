@@ -5,7 +5,9 @@
 //! Unix-specific, so they live here where the Windows backend can share them.
 
 pub mod framing;
+pub mod loopback;
 pub mod message;
 pub mod ring;
+pub mod transport;
 
 pub use message::{AttachedSession, Message, PROTOCOL_VERSION, SessionSummary};

@@ -214,6 +214,33 @@ pub(super) fn get_all_restored_blocks(
     let terminal_sessions = schema::terminal_panes::table
         .select(model::TerminalSession::as_select())
         .load::<model::TerminalSession>(conn)?;
+    restored_blocks_for_sessions(conn, terminal_sessions)
+}
+
+/// As [`get_all_restored_blocks`], but only for the given panes.
+///
+/// Restoring one launch config window needs the blocks belonging to that
+/// window's panes, and nothing else. Reading the whole table to find them costs
+/// the caller the user's entire terminal history, which matters because the
+/// launch-config restore path runs on the UI thread.
+pub(super) fn get_restored_blocks_for_panes(
+    conn: &mut SqliteConnection,
+    pane_uuids: &[Vec<u8>],
+) -> Result<PersistedBlocks, diesel::result::Error> {
+    if pane_uuids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let terminal_sessions = schema::terminal_panes::table
+        .filter(schema::terminal_panes::columns::uuid.eq_any(pane_uuids))
+        .select(model::TerminalSession::as_select())
+        .load::<model::TerminalSession>(conn)?;
+    restored_blocks_for_sessions(conn, terminal_sessions)
+}
+
+fn restored_blocks_for_sessions(
+    conn: &mut SqliteConnection,
+    terminal_sessions: Vec<model::TerminalSession>,
+) -> Result<PersistedBlocks, diesel::result::Error> {
 
     let block_lists = Block::belonging_to(&terminal_sessions)
         .select(Block::as_select())

@@ -1,3 +1,12 @@
 *.pdb filter=lfs diff=lfs merge=lfs -text
 crates/input_classifier/models/** filter=lfs diff=lfs merge=lfs -text
 crates/input_classifier/models/**/*tokenizer.json -filter -diff -merge text linguist-generated=true
+
+# Shell scripts and the toolchain pin must check out with LF even on Windows.
+# They are executed on Linux -- by CI, by docker/ci/Dockerfile, and by anyone
+# building in WSL -- where a CRLF shebang makes the kernel look for an
+# interpreter named `bash\r` and the script dies with a "No such file or
+# directory" that names a file which plainly exists.
+script/** text eol=lf
+*.sh text eol=lf
+rust-toolchain.toml text eol=lf

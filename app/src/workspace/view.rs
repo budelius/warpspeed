@@ -28745,8 +28745,14 @@ impl View for Workspace {
 
     /// Update this workspace when it has been closed, but may still be restored.
     fn on_window_closed(&mut self, ctx: &mut ViewContext<Self>) {
+        // `restore_session` is the setting through which a user says their
+        // terminal contents must not be written to disk, so it gates this even
+        // when the launch-config session feature is on. Without the check the
+        // snapshot below is persisted with `include_blocks: true` -- scrollback
+        // and all -- for anyone who turned session restore off.
         if !self.window_process_restart_in_progress
             && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+            && *GeneralSettings::as_ref(ctx).restore_session
             && self.launch_config_source.is_some()
             && let Some(model_event_sender) = self.model_event_sender.as_ref()
         {

@@ -91,7 +91,8 @@ use crate::code::editor_management::CodeSource;
 use crate::drive::OpenWarpDriveObjectSettings;
 use crate::notebooks::NotebookId;
 use crate::persistence::block_list::{
-    get_all_restored_blocks, process_ai_queries_for_nld_history_match,
+    get_all_restored_blocks, get_restored_blocks_for_panes,
+    process_ai_queries_for_nld_history_match,
     process_ai_queries_for_uparrow_prompt, read_recent_ai_queries,
 };
 use crate::persistence::model::{
@@ -460,22 +461,31 @@ pub fn database_file_path_for_scope(scope: &PersistenceScope) -> PathBuf {
     }
 }
 
+/// Loads the restored blocks belonging to a launch config session.
+///
+/// `pane_uuids` are the terminal panes of the window being restored. Passing
+/// them keeps this from reading every block in the database: this runs on the
+/// UI thread, so its cost is a stall the user sees.
+pub(crate) fn load_restored_blocks_for_launch_config(
+    pane_uuids: &[Vec<u8>],
+) -> Result<Arc<HashMap<PaneUuid, Vec<crate::ai::blocklist::SerializedBlockListItem>>>> {
+    let path = database_file_path_for_current_scope();
+    let database_url = path
+        .to_str()
+        .ok_or_else(|| anyhow!("Persistence database path is not valid UTF-8"))?;
+    let mut connection = establish_ro_connection(database_url)?;
+    Ok(Arc::new(get_restored_blocks_for_panes(
+        &mut connection,
+        pane_uuids,
+    )?))
+}
+
 /// The database file path for the scope this process's persistence was
 /// initialized with (see [`super::current_scope`]).
 ///
 /// Ad-hoc read-only connections should use this instead of hardcoding
 /// [`PersistenceScope::App`], so that a TUI process never reads the GUI's
 /// database.
-pub(crate) fn load_restored_blocks_for_launch_config()
--> Result<Arc<HashMap<PaneUuid, Vec<crate::ai::blocklist::SerializedBlockListItem>>>> {
-    let path = database_file_path_for_current_scope();
-    let database_url = path
-        .to_str()
-        .ok_or_else(|| anyhow!("Persistence database path is not valid UTF-8"))?;
-    let mut connection = establish_ro_connection(database_url)?;
-    Ok(Arc::new(get_all_restored_blocks(&mut connection)?))
-}
-
 pub fn database_file_path_for_current_scope() -> PathBuf {
     database_file_path_for_scope(&super::current_scope())
 }
@@ -1319,7 +1329,15 @@ fn save_pane_state(
                 active_profile_id: terminal_snapshot
                     .active_profile_id
                     .as_ref()
-                    .and_then(|sync_id| serde_json::to_string(sync_id).ok()),
+                    .and_then(|sync_id| match serde_json::to_string(sync_id) {
+                        Ok(serialized) => Some(serialized),
+                        Err(error) => {
+                            log::warn!(
+                                "Dropping active profile id from a persisted terminal pane: {error}"
+                            );
+                            None
+                        }
+                    }),
                 conversation_ids,
                 active_conversation_id: terminal_snapshot
                     .active_conversation_id
@@ -2301,7 +2319,18 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                         uuid: terminal_pane.uuid,
                         persistent_session_id: terminal_pane
                             .persistent_session_id
-                            .and_then(|id| id.parse::<u64>().ok())
+                            .and_then(|id| match id.parse::<u64>() {
+                                Ok(parsed) => Some(parsed),
+                                Err(error) => {
+                                    // Dropping this silently is indistinguishable
+                                    // from the pane never having had a session,
+                                    // and the supervised shell is then orphaned.
+                                    log::warn!(
+                                        "Ignoring unparseable persistent session id for a restored terminal pane: {error}"
+                                    );
+                                    None
+                                }
+                            })
                             .map(Into::into),
                         cwd: terminal_pane.cwd,
                         is_active: terminal_pane.is_active,

@@ -184,7 +184,10 @@ pub(crate) fn load(source: &LaunchConfigWindowSource) -> Result<Option<RestoredW
     load_from_dir(&sessions_dir(), source)
 }
 
-fn terminal_pane_uuids(window: &WindowSnapshot) -> Vec<Vec<u8>> {
+/// The uuids of every terminal pane in a window snapshot.
+///
+/// Callers restoring a window use these to read only the blocks they need.
+pub(crate) fn terminal_pane_uuids(window: &WindowSnapshot) -> Vec<Vec<u8>> {
     fn collect(node: &PaneNodeSnapshot, uuids: &mut Vec<Vec<u8>>) {
         match node {
             PaneNodeSnapshot::Branch(branch) => {

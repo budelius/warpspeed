@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use warp_core::SessionId;
 
+use super::transport::Endpoint;
 use crate::local_tty::screen::ScreenSnapshot;
 
 /// The protocol version, carried in the socket and pipe name so a client never
@@ -66,6 +67,12 @@ pub struct AttachedSession {
     /// `true` when output was discarded because the ring wrapped, so the pane
     /// can say so rather than presenting a silent gap as continuous output.
     pub output_was_dropped: bool,
+
+    /// The borrowed PTY endpoint, when the transport could carry one.
+    ///
+    /// `None` means output arrives as streamed messages instead -- the case for
+    /// every transport that leaves the machine.
+    pub endpoint: Option<Endpoint>,
 }
 
 /// A session as shown in the detached-sessions drawer.

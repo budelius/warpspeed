@@ -12,7 +12,7 @@
 //! either way, which is what makes a remote transport possible at all.
 
 use anyhow::Result;
-use warp_core::SessionId;
+use serde::{Deserialize, Serialize};
 
 use super::message::Message;
 
@@ -20,16 +20,27 @@ use super::message::Message;
 ///
 /// The contents are platform-specific; callers hand this back to the platform
 /// layer rather than interpreting `raw` themselves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {
     /// The child process id, which the app needs on every platform.
     pub pid: u32,
 
-    /// A file descriptor on Unix, a handle value on Windows.
+    /// A file descriptor on Unix, a handle value on Windows. Meaningful only
+    /// inside the process the endpoint was lent to.
     pub raw: i64,
 }
 
 /// A bidirectional channel carrying [`Message`]s to and from the supervisor.
+///
+/// ## Why lending is not a method here
+///
+/// Lending is something the *supervisor* does to a client, not something a
+/// client pulls. On Windows the supervisor duplicates its handle into the
+/// client process and the resulting value travels inside the attach response;
+/// on Unix the descriptor travels beside that response over `SCM_RIGHTS`, and
+/// the transport fills it in as it decodes. Either way the endpoint reaches the
+/// caller through [`super::message::AttachedSession`], so the trait only has to
+/// say whether this transport can carry one at all.
 pub trait Transport {
     /// Sends one message.
     fn send(&mut self, message: &Message) -> Result<()>;
@@ -37,11 +48,10 @@ pub trait Transport {
     /// Receives one message, or `None` if a whole one has not arrived yet.
     fn receive(&mut self) -> Result<Option<Message>>;
 
-    /// Borrows the session's PTY endpoint, when this transport can do that.
+    /// Whether an endpoint can reach a client over this transport.
     ///
-    /// `None` means the capability does not exist here -- which is different
-    /// from an attempt that failed, reported as `Some(Err(..))`. Callers that
-    /// see `None` must stream instead of waiting for a descriptor that is never
-    /// coming.
-    fn lend_endpoint(&mut self, session_id: SessionId) -> Option<Result<Endpoint>>;
+    /// `false` for anything that leaves the machine: a descriptor cannot cross
+    /// a network, so those callers stream output through [`Message`]s instead
+    /// of waiting for an endpoint that is never coming.
+    fn lends_endpoints(&self) -> bool;
 }

@@ -15,11 +15,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use parking_lot::Mutex;
-use warp_core::SessionId;
 
 use super::framing::{read_message, write_message};
 use super::message::Message;
-use super::transport::{Endpoint, Transport};
+use super::transport::Transport;
 
 /// A byte queue shared by the two ends of a loopback pair.
 type Channel = Arc<Mutex<VecDeque<u8>>>;
@@ -85,10 +84,10 @@ impl Transport for LoopbackTransport {
         Ok(message)
     }
 
-    fn lend_endpoint(&mut self, _session_id: SessionId) -> Option<Result<Endpoint>> {
+    fn lends_endpoints(&self) -> bool {
         // A loopback has no PTY behind it, which is exactly the condition every
         // remote transport is in.
-        None
+        false
     }
 }
 

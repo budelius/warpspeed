@@ -150,6 +150,7 @@ impl SessionTable {
                 buffered_output: Vec::new(),
                 sequence: session.ring.sequence(),
                 output_was_dropped: true,
+                endpoint: None,
             })
         } else {
             Ok(AttachedSession {
@@ -157,6 +158,7 @@ impl SessionTable {
                 buffered_output,
                 sequence: session.ring.sequence(),
                 output_was_dropped: false,
+                endpoint: None,
             })
         }
     }

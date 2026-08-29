@@ -35,11 +35,11 @@ fn a_transport_that_lends_no_endpoint_still_carries_messages() {
 /// absence rather than assuming a descriptor is always available.
 #[test]
 fn loopback_reports_that_it_cannot_lend_an_endpoint() {
-    let (mut client, _supervisor) = LoopbackTransport::pair();
+    let (client, _supervisor) = LoopbackTransport::pair();
 
     assert!(
-        client.lend_endpoint(SessionId::from(1u64)).is_none(),
-        "loopback must report that it has no lending capability"
+        !client.lends_endpoints(),
+        "loopback must report that it cannot carry an endpoint"
     );
 }
 

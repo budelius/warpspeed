@@ -25,7 +25,7 @@ use crate::model::secrets::{ObfuscateSecrets, RespectObfuscatedSecrets};
 /// `repaint` is a self-contained ANSI sequence that reconstructs the screen when
 /// fed to any terminal: the screen mode, an erase, the visible text with its
 /// attributes, then the cursor placed where it belongs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScreenSnapshot {
     /// Screen width in columns.
     pub columns: u16,

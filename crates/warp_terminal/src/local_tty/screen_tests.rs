@@ -102,3 +102,64 @@ fn text_attributes_survive_the_detach_boundary() {
         "attributes were lost across the snapshot boundary"
     );
 }
+
+/// The case the whole design exists for. A full-screen application detached
+/// mid-draw is what the raw byte spool got wrong: replaying its output paints
+/// garbage.
+#[test]
+fn alternate_screen_survives_the_detach_boundary() {
+    let draw = b"\x1b[?1049h\x1b[H\x1b[2Jtop row\r\n\r\nbottom row\x1b[2;3H";
+
+    assert_detach_boundary_equivalence(draw, b" more");
+}
+
+/// Guards the test above against passing vacuously. If the snapshot dropped the
+/// mode and both sides simply drew on the primary screen, their text would
+/// still match while a real reattach landed on the wrong screen entirely.
+#[test]
+fn alternate_screen_mode_survives_the_detach_boundary() {
+    let mut continuous = screen(20, 5);
+    continuous.feed(b"\x1b[?1049hinside the tui");
+    assert!(
+        continuous.is_alternate_screen_active(),
+        "test setup failed to enter the alternate screen"
+    );
+
+    let reattached = HeadlessScreen::from_snapshot(
+        &continuous.snapshot(),
+        ChannelEventListener::new_for_test(),
+    );
+
+    assert!(
+        reattached.is_alternate_screen_active(),
+        "reattached screen fell back to the primary screen"
+    );
+}
+
+/// A scroll region set by a TUI decides where later output lands. If the
+/// snapshot does not restore it, everything after reattach scrolls wrongly.
+#[test]
+fn scroll_region_survives_the_detach_boundary() {
+    assert_detach_boundary_equivalence(b"\x1b[2;4r\x1b[3;1Hinside", b"\r\nnext");
+}
+
+/// Same guard as for the alternate screen: the equivalence check above compares
+/// text, and a small fixture's text can match even when the region was lost.
+/// This reads the region itself.
+#[test]
+fn scroll_region_is_restored_by_a_snapshot() {
+    let mut continuous = screen(20, 5);
+    continuous.feed(b"\x1b[2;4r");
+    let expected = continuous.grid_for_test().scroll_region().clone();
+
+    let reattached = HeadlessScreen::from_snapshot(
+        &continuous.snapshot(),
+        ChannelEventListener::new_for_test(),
+    );
+
+    assert_eq!(
+        expected,
+        reattached.grid_for_test().scroll_region().clone(),
+        "scroll region was lost across the snapshot boundary"
+    );
+}

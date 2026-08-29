@@ -159,12 +159,25 @@ pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
 
     let columns = grid.columns();
     let rows = grid.total_rows();
+
+    // A scroll region set by a full-screen application decides where later
+    // output lands, so it has to be restored before any of that output arrives.
+    // DECSTBM is 1-based and inclusive, and it homes the cursor -- which is why
+    // it goes here rather than after the content, whose final act is to place
+    // the cursor.
+    let region = grid.scroll_region();
+    if region.start.0 != 0 || region.end.0 != rows {
+        out.extend_from_slice(format!("\x1b[{};{}r", region.start.0 + 1, region.end.0).as_bytes());
+    }
+
     let mut active_style = CellStyle::default();
 
     for row in 0..rows {
-        if row > 0 {
-            out.extend_from_slice(b"\r\n");
-        }
+        // Each row is positioned absolutely rather than reached with a newline.
+        // A newline at the bottom of a scroll region scrolls it, and DECSTBM
+        // above has already moved the cursor, so walking the screen with "\r\n"
+        // puts content on the wrong rows.
+        out.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
 
         // Blank cells at the end of a row are already blank from the erase
         // above, so they are held back and only written if more content

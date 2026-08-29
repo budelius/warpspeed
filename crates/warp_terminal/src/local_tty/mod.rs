@@ -8,6 +8,7 @@ pub mod event_loop;
 pub mod mio_channel;
 pub mod recorder;
 pub mod screen;
+pub mod screen_handler;
 #[cfg(unix)]
 pub mod server;
 pub mod shell;

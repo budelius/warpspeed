@@ -163,3 +163,31 @@ fn scroll_region_is_restored_by_a_snapshot() {
         "scroll region was lost across the snapshot boundary"
     );
 }
+
+/// Wide characters occupy two cells. If the renderer emits the spacer cell as
+/// its own character, every column after it shifts on reattach.
+#[test]
+fn wide_characters_survive_the_detach_boundary() {
+    assert_detach_boundary_equivalence("日本語 text".as_bytes(), b" more");
+}
+
+/// Warp stamps OSC 8 hyperlinks into cells, but a snapshot does not carry them,
+/// so a reattached session shows the text without the link. Recorded
+/// deliberately: when the renderer learns to emit OSC 8, this test fails and
+/// should be replaced by one asserting the link survives.
+#[test]
+fn hyperlinks_are_not_yet_carried_by_a_snapshot() {
+    let linked = b"\x1b]8;;https://example.com\x1b\\link text\x1b]8;;\x1b\\";
+
+    let mut screen = screen(40, 3);
+    screen.feed(linked);
+
+    assert!(
+        !screen
+            .snapshot()
+            .repaint
+            .windows(4)
+            .any(|window| window == b"\x1b]8;"),
+        "renderer now emits OSC 8 -- carry hyperlinks and update this test"
+    );
+}

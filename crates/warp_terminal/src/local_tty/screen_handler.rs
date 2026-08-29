@@ -11,7 +11,6 @@
 //! `model/ansi/handler.rs`. When a required method is added there, the compiler
 //! fails here; regenerate rather than hand-patching.
 
-use std::collections::HashMap;
 use std::io;
 
 use warpui_core::color::ColorU;
@@ -19,13 +18,8 @@ use warpui_core::color::ColorU;
 use super::screen::HeadlessScreen;
 use crate::model::ansi;
 use crate::model::ansi::*;
-use crate::model::completions::*;
-use crate::model::image_map::StoredImageMetadata;
 use crate::model::index::VisibleRow;
-use crate::model::iterm_image::{ITermImage, ITermImageMetadata};
-use crate::model::kitty::{KittyAction, KittyChunk, KittyResponse};
 use crate::model::selection::ScrollDelta;
-use crate::model::session::SessionId;
 use crate::model::{KeyboardModes, KeyboardModesApplyBehavior};
 
 impl ansi::Handler for HeadlessScreen {

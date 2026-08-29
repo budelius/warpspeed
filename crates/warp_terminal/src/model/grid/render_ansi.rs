@@ -4,6 +4,17 @@
 //! reconstruct it. It exists so a detached session's screen can travel over the
 //! supervisor protocol as bytes rather than as a serialized cell format, which
 //! would otherwise have to be versioned forever.
+//!
+//! ## What a snapshot does not carry
+//!
+//! - **OSC 8 hyperlinks.** Cells hold a `HyperlinkId` into the grid's registry;
+//!   the repaint emits the text without the link, so a reattached session shows
+//!   it as ordinary text. Covered by
+//!   `hyperlinks_are_not_yet_carried_by_a_snapshot`.
+//! - **Inline images.** iTerm2 and Kitty payloads live in the grid's `ImageMap`
+//!   and are not re-emitted.
+//! - **Scrollback.** Only the current screen is rendered. Scrollback is
+//!   restored by the app from sqlite, not by the supervisor.
 
 use super::Dimensions;
 use super::cell::{Cell, Flags};
@@ -186,6 +197,17 @@ pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
 
         for column in 0..columns {
             let cell = &grid.grid_storage()[Point::new(row, column)];
+
+            // A wide character already occupies the spacer's column. Emitting
+            // anything for the spacer would push the rest of the row right by
+            // one column per wide character.
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER))
+            {
+                continue;
+            }
+
             let content = cell.content_for_display();
             let is_blank = matches!(content, CharOrStr::Char(' '));
             let style = CellStyle::of(cell);

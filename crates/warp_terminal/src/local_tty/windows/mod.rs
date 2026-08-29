@@ -1,6 +1,7 @@
 mod child;
 mod conpty_api;
 mod environment;
+mod handle_lending;
 mod pipes;
 mod proc_thread_attribute_list;
 

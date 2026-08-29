@@ -3517,12 +3517,7 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         };
 
     let text_content = if let TypedPane::Terminal(terminal_pane) = &props.typed {
-        render_terminal_row_content(
-            &props,
-            terminal_pane.terminal_view(app).as_ref(app),
-            appearance,
-            app,
-        )
+        render_terminal_row_content(&props, terminal_pane, appearance, app)
     } else {
         let has_indicator =
             props.typed.badge(app).is_some() || has_unread_activity(&props.typed, app);
@@ -3785,7 +3780,7 @@ fn build_vertical_tabs_summary_data(
                 has_unread_activity |=
                     has_unread_activity_for_terminal_view(terminal_view.id(), app);
                 let title_text = terminal_view.terminal_title_from_shell();
-                let working_directory = resolved_terminal_working_directory(terminal_view, app);
+                let working_directory = resolved_terminal_working_directory(terminal_pane, app);
                 let working_directory_text = working_directory
                     .clone()
                     .filter(|wd| !wd.trim().is_empty())
@@ -4088,7 +4083,7 @@ fn terminal_pane_search_text_fragments(
     let terminal_view = terminal_pane.terminal_view(app);
     let terminal_view = terminal_view.as_ref(app);
     let title_text = terminal_view.terminal_title_from_shell();
-    let working_directory = resolved_terminal_working_directory(terminal_view, app)
+    let working_directory = resolved_terminal_working_directory(terminal_pane, app)
         .unwrap_or_else(|| title_text.clone());
     let agent_text = terminal_agent_text(terminal_view, app);
     let (conversation_display_title, cli_agent_title) =
@@ -4377,10 +4372,12 @@ pub(super) fn pane_summary_kind(
 /// Returns the best available working-directory string for a terminal pane,
 /// incorporating cloud environment name and setup status for ambient agent sessions.
 fn resolved_terminal_working_directory(
-    terminal_view: &TerminalView,
+    terminal_pane: &TerminalPane,
     app: &AppContext,
 ) -> Option<String> {
-    let working_directory = terminal_view
+    let terminal_view = terminal_pane.terminal_view(app);
+    let terminal_view = terminal_view.as_ref(app);
+    let working_directory = terminal_pane
         .display_working_directory(app)
         .filter(|wd| !wd.trim().is_empty());
     cloud_agent_working_directory_and_env(terminal_view, working_directory.as_deref(), app)
@@ -4417,17 +4414,19 @@ fn cloud_agent_working_directory_and_env(
 
 fn render_terminal_row_content(
     props: &PaneProps<'_>,
-    terminal_view: &TerminalView,
+    terminal_pane: &TerminalPane,
     appearance: &Appearance,
     app: &AppContext,
 ) -> Box<dyn Element> {
+    let terminal_view = terminal_pane.terminal_view(app);
+    let terminal_view = terminal_view.as_ref(app);
     let theme = appearance.theme();
     let main_text_color = theme.main_text_color(theme.background());
     let sub_text_color = theme.sub_text_color(theme.background());
     let primary_info = *TabSettings::as_ref(app).vertical_tabs_primary_info.value();
 
     let title_text = terminal_view.terminal_title_from_shell();
-    let working_directory = resolved_terminal_working_directory(terminal_view, app)
+    let working_directory = resolved_terminal_working_directory(terminal_pane, app)
         .unwrap_or_else(|| title_text.clone());
 
     let git_branch = terminal_view.current_git_branch(app);
@@ -4447,6 +4446,7 @@ fn render_terminal_row_content(
                 || {
                     render_terminal_primary_line_for_view(
                         terminal_view,
+                        &working_directory,
                         appearance,
                         main_text_color,
                         app,
@@ -4483,7 +4483,13 @@ fn render_terminal_row_content(
                 appearance,
                 app,
             ),
-            render_terminal_primary_line_for_view(terminal_view, appearance, sub_text_color, app),
+            render_terminal_primary_line_for_view(
+                terminal_view,
+                &working_directory,
+                appearance,
+                sub_text_color,
+                app,
+            ),
             MetadataLeftContent::GitBranch(git_branch),
         ),
         VerticalTabsPrimaryInfo::Branch => {
@@ -4512,6 +4518,7 @@ fn render_terminal_row_content(
                 ),
                 render_terminal_primary_line_for_view(
                     terminal_view,
+                    &working_directory,
                     appearance,
                     sub_text_color,
                     app,
@@ -5266,13 +5273,12 @@ fn render_summary_branch_line(
 
 fn render_terminal_primary_line_for_view(
     terminal_view: &TerminalView,
+    working_directory: &str,
     appearance: &Appearance,
     text_color: WarpThemeFill,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let title_text = terminal_view.terminal_title_from_shell();
-    let working_directory = resolved_terminal_working_directory(terminal_view, app)
-        .unwrap_or_else(|| title_text.clone());
     let agent_text = terminal_agent_text(terminal_view, app);
     let (conversation_display_title, cli_agent_title) =
         preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
@@ -5283,7 +5289,7 @@ fn render_terminal_primary_line_for_view(
             conversation_display_title,
             cli_agent_title,
             title_text.as_str(),
-            working_directory.as_str(),
+            working_directory,
             terminal_title_fallback_font(&agent_text),
             terminal_view.last_completed_command_text(),
         ),
@@ -6807,13 +6813,15 @@ fn detail_pane_props<'a>(
 
 fn render_terminal_detail_section(
     props: &PaneProps<'_>,
-    terminal_view: &TerminalView,
+    terminal_pane: &TerminalPane,
     appearance: &Appearance,
     app: &AppContext,
 ) -> Box<dyn Element> {
+    let terminal_view = terminal_pane.terminal_view(app);
+    let terminal_view = terminal_view.as_ref(app);
     let theme = appearance.theme();
     let text_colors = detail_sidecar_text_colors(theme);
-    let working_directory = resolved_terminal_working_directory(terminal_view, app);
+    let working_directory = resolved_terminal_working_directory(terminal_pane, app);
     let git_branch = terminal_view.current_git_branch(app);
     let cli_agent_session = CLIAgentSessionsModel::as_ref(app).session(terminal_view.id());
     let agent_text = terminal_agent_text(terminal_view, app);
@@ -7057,12 +7065,9 @@ fn render_detail_section(
     app: &AppContext,
 ) -> Box<dyn Element> {
     match &props.typed {
-        TypedPane::Terminal(terminal_pane) => render_terminal_detail_section(
-            props,
-            terminal_pane.terminal_view(app).as_ref(app),
-            appearance,
-            app,
-        ),
+        TypedPane::Terminal(terminal_pane) => {
+            render_terminal_detail_section(props, terminal_pane, appearance, app)
+        }
         TypedPane::Code(_) => render_code_detail_section(props, appearance, app),
         TypedPane::Notebook { .. }
         | TypedPane::Workflow { .. }
@@ -7276,7 +7281,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
             let terminal_view = terminal_pane.terminal_view(app).as_ref(app);
             let terminal_title = terminal_view.terminal_title_from_shell();
             let git_branch = terminal_view.current_git_branch(app);
-            let working_directory = resolved_terminal_working_directory(terminal_view, app);
+            let working_directory = resolved_terminal_working_directory(terminal_pane, app);
             let working_directory_text = working_directory
                 .clone()
                 .unwrap_or_else(|| terminal_title.clone());
@@ -7289,6 +7294,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
                 || match primary_info {
                     VerticalTabsPrimaryInfo::Command => render_terminal_primary_line_for_view(
                         terminal_view,
+                        &working_directory_text,
                         appearance,
                         main_text_color,
                         app,

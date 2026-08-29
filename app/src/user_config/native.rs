@@ -230,33 +230,169 @@ impl super::WarpConfig {
     }
 
     /// This method takes a file name candidate (appends .yaml if missing) and a LaunchConfig as
-    /// arguments. It saves the file and returns the filename used if successful.
+    /// arguments. It saves the file and returns where it was written, failing if a launch
+    /// configuration of that name is already there.
     #[cfg(feature = "local_fs")]
     pub fn save_new_launch_config(
         file_name: String,
         launch_config: LaunchConfig,
-    ) -> Result<String> {
-        let file_name = if is_config_file(&file_name) {
-            file_name.trim().into()
-        } else {
-            format!("{file_name}.yaml")
-        };
-
-        if !has_name(file_name.trim()) {
-            return Err(anyhow!("File name is empty"));
-        };
-
-        let path = crate::user_config::launch_configs_dir().join(&file_name);
-        if path.exists() {
-            return Err(anyhow!("File already exists"));
-        };
-
-        let file = crate::util::file::create_file(path)?;
-        let mut writer = io::BufWriter::new(file);
-        writer.write_all(LAUNCH_CONFIG_COMMENT.as_bytes())?;
-        serde_yaml::to_writer(writer, &launch_config)?;
-        Ok(file_name)
+    ) -> std::result::Result<SavedLaunchConfig, SaveLaunchConfigError> {
+        write_launch_config_file(
+            &crate::user_config::launch_configs_dir(),
+            file_name,
+            launch_config,
+            Overwrite::No,
+        )
     }
+
+    /// Saves a launch configuration over the file of that name, replacing what is there.  Any
+    /// other configurations that file holds are preserved.  A missing file is created, so that
+    /// renaming between a failed save and the overwrite still does the obvious thing.
+    #[cfg(feature = "local_fs")]
+    pub fn overwrite_launch_config(
+        file_name: String,
+        launch_config: LaunchConfig,
+    ) -> std::result::Result<SavedLaunchConfig, SaveLaunchConfigError> {
+        write_launch_config_file(
+            &crate::user_config::launch_configs_dir(),
+            file_name,
+            launch_config,
+            Overwrite::Yes,
+        )
+    }
+}
+
+/// Where a launch configuration ended up on disk.
+#[cfg(feature = "local_fs")]
+#[derive(Debug, PartialEq, Eq)]
+pub struct SavedLaunchConfig {
+    /// The file name actually used, which is the candidate with `.yaml` appended if it was
+    /// missing a recognized suffix.
+    pub file_name: String,
+    /// Which document within that file holds the configuration.
+    pub document_index: usize,
+}
+
+/// Why writing a launch configuration file failed.  Callers distinguish the name clash from the
+/// rest so they can offer to replace the existing configuration.
+#[cfg(feature = "local_fs")]
+#[derive(Debug, thiserror::Error)]
+pub enum SaveLaunchConfigError {
+    #[error("Launch configuration file name is empty")]
+    EmptyFileName,
+    #[error("Launch configuration file {0} already exists")]
+    FileAlreadyExists(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// Whether an existing file of the same name may be written over.
+#[cfg(feature = "local_fs")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overwrite {
+    Yes,
+    No,
+}
+
+#[cfg(feature = "local_fs")]
+fn write_launch_config_file(
+    launch_configs_dir: &Path,
+    file_name: String,
+    launch_config: LaunchConfig,
+    overwrite: Overwrite,
+) -> std::result::Result<SavedLaunchConfig, SaveLaunchConfigError> {
+    let file_name: String = if is_config_file(&file_name) {
+        file_name.trim().into()
+    } else {
+        format!("{file_name}.yaml")
+    };
+
+    if !has_name(file_name.trim()) {
+        return Err(SaveLaunchConfigError::EmptyFileName);
+    };
+
+    let path = launch_configs_dir.join(&file_name);
+    let exists = path.exists();
+    if exists && overwrite == Overwrite::No {
+        return Err(SaveLaunchConfigError::FileAlreadyExists(file_name));
+    }
+
+    let (configs, document_index) = if exists {
+        merge_into_existing_launch_configs(&path, launch_config)
+    } else {
+        (vec![launch_config], 0)
+    };
+
+    write_launch_configs(&path, &configs)?;
+    Ok(SavedLaunchConfig {
+        file_name,
+        document_index,
+    })
+}
+
+/// Places `launch_config` among the documents already in `path`, returning the documents to write
+/// and the index the configuration landed at.
+///
+/// A file Warp wrote holds a single document, which is replaced outright.  A hand-authored file
+/// can hold several, so only the document of the same name is replaced and any others are kept; if
+/// none matches, the configuration is added rather than displacing what is there.  A file we can't
+/// parse holds nothing worth preserving, so it is replaced too.
+#[cfg(feature = "local_fs")]
+fn merge_into_existing_launch_configs(
+    path: &Path,
+    launch_config: LaunchConfig,
+) -> (Vec<LaunchConfig>, usize) {
+    let Ok(file) = fs::File::open(path) else {
+        return (vec![launch_config], 0);
+    };
+    let Ok(mut configs) = serde_yaml::Deserializer::from_reader(io::BufReader::new(file))
+        .map(LaunchConfig::deserialize)
+        .collect::<std::result::Result<Vec<_>, _>>()
+    else {
+        return (vec![launch_config], 0);
+    };
+
+    if configs.len() < 2 {
+        return (vec![launch_config], 0);
+    }
+
+    match configs
+        .iter()
+        .position(|config| config.name == launch_config.name)
+    {
+        Some(index) => {
+            configs[index] = launch_config;
+            (configs, index)
+        }
+        None => {
+            configs.push(launch_config);
+            let index = configs.len() - 1;
+            (configs, index)
+        }
+    }
+}
+
+/// Writes `configs` to `path` through a temporary file, so an interrupted write can't leave a
+/// half-written launch configuration behind.
+#[cfg(feature = "local_fs")]
+fn write_launch_configs(path: &Path, configs: &[LaunchConfig]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("Launch configuration path has no parent"))?;
+    fs::create_dir_all(parent)?;
+
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        let mut writer = io::BufWriter::new(temp.as_file_mut());
+        writer.write_all(LAUNCH_CONFIG_COMMENT.as_bytes())?;
+        for config in configs {
+            serde_yaml::to_writer(&mut writer, config)?;
+        }
+        writer.flush()?;
+    }
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 #[cfg(feature = "local_fs")]
@@ -290,20 +426,7 @@ fn overwrite_launch_config_window_in_dir(
         .ok_or_else(|| anyhow!("Launch configuration window no longer exists"))?;
     *target = window;
 
-    let parent = source_path
-        .parent()
-        .ok_or_else(|| anyhow!("Launch configuration path has no parent"))?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    {
-        let mut writer = io::BufWriter::new(temp.as_file_mut());
-        writer.write_all(LAUNCH_CONFIG_COMMENT.as_bytes())?;
-        for config in &configs {
-            serde_yaml::to_writer(&mut writer, config)?;
-        }
-        writer.flush()?;
-    }
-    temp.as_file().sync_all()?;
-    temp.persist(&source_path).map_err(|error| error.error)?;
+    write_launch_configs(&source_path, &configs)?;
 
     let mut updated = configs
         .into_iter()

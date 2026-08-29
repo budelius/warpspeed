@@ -24,6 +24,14 @@ export PROTOC=/path/to/protoc          # required by workspace build scripts
 cargo run -p warp --bin warpspeed
 ```
 
+On Windows, install WarpSpeed for routine use instead of launching it from Cargo's build directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\script\windows\install-warpspeed.ps1
+```
+
+The installer stages the `warpspeed` and `warp-oss` release binaries under `target/warpspeed-merge`, installs versioned copies under `%LOCALAPPDATA%\Programs\WarpSpeed`, and updates the Start Menu shortcuts and `~/.local/bin/warpspeed.cmd`. This keeps active executables out of `target/`, so they cannot block later builds. **Restart window in new process** switches an open window to the current installed version. Pass `-SKIP_BUILD` to install an already staged build.
+
 On Linux, install build dependencies first with `./script/linux/install_build_deps`.
 
 ## Branches

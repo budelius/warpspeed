@@ -102,6 +102,7 @@ mod voltron;
 mod warp_managed_paths_watcher;
 #[cfg(target_family = "wasm")]
 mod wasm_nux_dialog;
+mod window_process_handoff;
 mod window_settings;
 mod word_block_editor;
 mod workspaces;
@@ -331,6 +332,7 @@ use crate::workflows::aliases::WorkflowAliases;
 use crate::workflows::local_workflows::LocalWorkflows;
 use crate::workspace::{
     ActiveSession, OneTimeModalModel, PaneViewLocator, ToastStack, Workspace, WorkspaceAction,
+    WorkspaceRegistry,
 };
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
@@ -979,6 +981,12 @@ pub type TuiMountFn = Box<dyn FnOnce(&mut warpui::AppContext)>;
 /// Runs the app (or CLI / daemon). TUI entry points run after `initialize_app`
 /// in place of the GUI/CLI `launch()` path.
 fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
+    #[cfg(not(target_family = "wasm"))]
+    let incoming_window_handoff =
+        window_process_handoff::IncomingWindowHandoff::from_environment()?;
+    #[cfg(target_family = "wasm")]
+    let incoming_window_handoff = None;
+
     let mut timer = IntervalTimer::new();
 
     // ── Early initialization (pre-AppBuilder) ──────────────────────
@@ -1089,7 +1097,9 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
         feature = "release_bundle",
         any(target_os = "linux", target_os = "freebsd")
     ))]
-    if let LaunchMode::App { .. } = launch_mode {
+    if let LaunchMode::App { .. } = launch_mode
+        && incoming_window_handoff.is_none()
+    {
         match app_services::linux::pass_startup_args_to_existing_instance(
             launch_mode.args().as_ref(),
         ) {
@@ -1112,7 +1122,9 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     }
 
     #[cfg(all(feature = "release_bundle", windows))]
-    if let LaunchMode::App { .. } = launch_mode {
+    if let LaunchMode::App { .. } = launch_mode
+        && incoming_window_handoff.is_none()
+    {
         match app_services::windows::pass_startup_args_to_existing_instance(
             launch_mode.args().as_ref(),
         ) {
@@ -1359,7 +1371,7 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
             LaunchMode::Tui { .. } => {
                 unreachable!("the `tui` launch mode requires the `tui` feature")
             }
-            other => launch(ctx, app_state, other),
+            other => launch(ctx, app_state, other, incoming_window_handoff),
         }
     })
 }
@@ -3087,7 +3099,12 @@ fn is_cloud_agent_web_home_launch_url(url: &Url) -> bool {
 }
 
 #[::tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
-fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode: LaunchMode) {
+fn launch(
+    ctx: &mut warpui::AppContext,
+    app_state: Option<AppState>,
+    launch_mode: LaunchMode,
+    incoming_window_handoff: Option<window_process_handoff::IncomingWindowHandoff>,
+) {
     IntervalTimer::handle(ctx).update(ctx, |timer, _ctx| {
         timer.mark_interval_end("APP_LAUNCHED");
     });
@@ -3112,10 +3129,53 @@ fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode
                 .urls
                 .iter()
                 .any(is_cloud_agent_web_home_launch_url);
-            let app_state = if should_skip_restore { None } else { app_state };
+            let force_restore = incoming_window_handoff.is_some();
+            if let Some(handoff) = incoming_window_handoff.as_ref() {
+                let conversation_ids = handoff.window().conversation_ids_to_restore();
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
+                    history.detach_conversations_for_restore(&conversation_ids)
+                });
+                RestoredAgentConversations::handle(ctx).update(ctx, |conversations, _| {
+                    conversations.release_conversations(&conversation_ids)
+                });
+            }
+            let app_state = match incoming_window_handoff.as_ref() {
+                Some(handoff) => {
+                    let (block_lists, running_mcp_servers) = app_state
+                        .map(|state| (state.block_lists, state.running_mcp_servers))
+                        .unwrap_or_default();
+                    Some(AppState {
+                        windows: vec![handoff.window().clone()],
+                        active_window_index: Some(0),
+                        block_lists,
+                        running_mcp_servers,
+                    })
+                }
+                None if should_skip_restore => None,
+                None => app_state,
+            };
             // Attempt to restore windows from the persisted application state.
-            let arg = OpenFromRestoredArg { app_state };
+            let arg = OpenFromRestoredArg {
+                app_state,
+                force_restore,
+                defer_shell_start: force_restore,
+            };
             ctx.dispatch_global_action("root_view:open_from_restored", &arg);
+
+            if let Some(handoff) = incoming_window_handoff {
+                let workspace = ctx
+                    .window_ids()
+                    .find_map(|window_id| WorkspaceRegistry::as_ref(ctx).get(window_id, ctx));
+                match workspace {
+                    Some(workspace) => workspace.update(ctx, |workspace, ctx| {
+                        workspace.accept_window_process_handoff(handoff, ctx);
+                    }),
+                    None => {
+                        report_error!("Replacement process did not restore the handed-off window");
+                        ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                    }
+                }
+            }
 
             // Process any URLs that were provided on the command line (which may be
             // file:// URLs or ones using our custom URL scheme).

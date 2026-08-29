@@ -414,7 +414,7 @@ function warp_precmd --on-event fish_prompt --on-event fish_posterror
 
       set -l git_branch ""
       set -l git_head ""
-      if command -q git
+      if test "$WARP_PROMPT_GIT_METADATA_ENABLED" = "1"; and command -q git
           set git_branch (warp_git symbolic-ref --short HEAD 2> /dev/null)
           if test -z "$git_branch"
               # Fallback to the git commit hash if we aren't on a named branch.

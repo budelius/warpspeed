@@ -1,17 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::Context;
 use async_channel::Sender;
+use git2::{BranchType, DiffOptions, ErrorCode, Repository as GitRepository};
 use repo_metadata::repository::{RepositorySubscriber, SubscriberId};
 use repo_metadata::{Repository, RepositoryUpdate, RepositoryWatchMode};
 use warpui::r#async::SpawnedFutureHandle;
 use warpui::{Entity, ModelContext, ModelHandle};
 
 use super::{GitRepoStatusEvent, GitStatusMetadata};
-use crate::code_review::diff_state::diff_metadata_against_head;
+use crate::code_review::diff_state::DiffStats;
 use crate::context_chips::display_chip::GitBranchTrackingStatus;
 use crate::throttle::throttle;
-use crate::util::git::{detect_current_branch_display, detect_main_branch};
 
 /// Per-repository model that owns the filesystem watcher and exposes git status
 /// metadata. Consumers hold a `ModelHandle<GitRepoStatusModel>` and subscribe
@@ -24,7 +25,8 @@ pub struct LocalGitRepoStatusModel {
     repository: ModelHandle<Repository>,
     subscriber_id: Option<SubscriberId>,
     metadata: Option<GitStatusMetadata>,
-    computing_metadata_abort_handle: Option<SpawnedFutureHandle>,
+    computing_metadata_handle: Option<SpawnedFutureHandle>,
+    metadata_refresh_pending: bool,
 }
 
 impl Entity for LocalGitRepoStatusModel {
@@ -44,7 +46,8 @@ impl LocalGitRepoStatusModel {
             repository: repository_model.clone(),
             subscriber_id: None,
             metadata: None,
-            computing_metadata_abort_handle: None,
+            computing_metadata_handle: None,
+            metadata_refresh_pending: false,
         };
 
         // Kick off initial metadata computation.
@@ -113,18 +116,22 @@ impl LocalGitRepoStatusModel {
         &self.repo_path
     }
 
-    /// Manually trigger a metadata refresh.  Called by the terminal view after
-    /// events that may have changed git state (block completed, agent file
-    /// edits, etc.).
+    /// Request a metadata refresh, coalescing requests while one is already running.
     pub fn refresh_metadata(&mut self, ctx: &mut ModelContext<Self>) {
-        if let Some(handle) = self.computing_metadata_abort_handle.take() {
-            handle.abort();
+        if self.computing_metadata_handle.is_some() {
+            self.metadata_refresh_pending = true;
+            return;
         }
+
         let repo_path_buf = self.repo_path.clone();
-        self.computing_metadata_abort_handle = Some(ctx.spawn(
+        self.computing_metadata_handle = Some(ctx.spawn(
             async move { Self::load_metadata(repo_path_buf).await },
             |me, result, ctx| {
+                me.computing_metadata_handle.take();
                 me.handle_metadata_result(result, ctx);
+                if std::mem::take(&mut me.metadata_refresh_pending) {
+                    me.refresh_metadata(ctx);
+                }
             },
         ));
     }
@@ -169,92 +176,115 @@ impl LocalGitRepoStatusModel {
         changed_count > 0
     }
 
-    fn parse_branch_tracking_counts(output: &str) -> Option<(u32, u32, u32)> {
-        let mut parts = output.split_whitespace();
-        let ahead = parts.next()?.parse().ok()?;
-        let behind = parts.next()?.parse().ok()?;
-        let equivalent = parts.next().map(str::parse).transpose().ok()?.unwrap_or(0);
-        Some((ahead, behind, equivalent))
+    fn current_branch_name(repository: &GitRepository) -> anyhow::Result<String> {
+        match repository.head() {
+            Ok(head) if head.is_branch() => head
+                .shorthand()
+                .map(str::to_owned)
+                .context("Git HEAD branch name is not valid UTF-8"),
+            Ok(head) => head
+                .target()
+                .map(|oid| oid.to_string().chars().take(7).collect())
+                .context("Detached Git HEAD has no target"),
+            Err(error) if error.code() == ErrorCode::UnbornBranch => repository
+                .find_reference("HEAD")?
+                .symbolic_target()
+                .and_then(|target| target.strip_prefix("refs/heads/"))
+                .map(str::to_owned)
+                .context("Unborn Git HEAD has no branch name"),
+            Err(error) => Err(error.into()),
+        }
     }
 
-    async fn branch_tracking_status(
-        repo_path: &Path,
-        current_branch_name: &str,
-    ) -> GitBranchTrackingStatus {
-        let upstream = warp_util::git::run_git_command(
-            repo_path,
-            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        )
-        .await
-        .ok()
-        .and_then(|output| {
-            output
-                .lines()
-                .next()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-        });
-
-        let Some(upstream) = upstream else {
-            return GitBranchTrackingStatus::new(current_branch_name.to_string(), None, 0, 0);
-        };
-
-        let counts = warp_util::git::run_git_command(
-            repo_path,
-            &[
-                "rev-list",
-                "--left-right",
-                "--cherry-mark",
-                "--count",
-                "HEAD...@{u}",
-            ],
-        )
-        .await
-        .ok()
-        .and_then(|output| Self::parse_branch_tracking_counts(&output));
-
-        let Some((ahead, behind, equivalent)) = counts else {
-            return GitBranchTrackingStatus::without_counts(
-                current_branch_name.to_string(),
-                Some(upstream),
-            );
-        };
-
-        if ahead == 0 && behind == 0 && equivalent > 0 {
-            return GitBranchTrackingStatus::rebased(current_branch_name.to_string(), upstream);
+    fn main_branch_name(repository: &GitRepository, current_branch_name: &str) -> String {
+        if let Ok(origin_head) = repository.find_reference("refs/remotes/origin/HEAD")
+            && let Some(branch) = origin_head
+                .symbolic_target()
+                .and_then(|target| target.strip_prefix("refs/remotes/origin/"))
+        {
+            return branch.to_owned();
         }
 
-        GitBranchTrackingStatus::new(
-            current_branch_name.to_string(),
-            Some(upstream),
-            ahead,
-            behind,
-        )
+        ["main", "master", "trunk", "develop"]
+            .into_iter()
+            .find(|candidate| repository.find_branch(candidate, BranchType::Local).is_ok())
+            .unwrap_or(current_branch_name)
+            .to_owned()
     }
 
-    /// Compute metadata for a repo — branch names and diff stats against HEAD.
-    ///
-    /// This reuses logic extracted from `DiffStateModel::load_metadata_for_repo`
-    /// but only computes the HEAD (uncommitted) stats since that's all the git
-    /// chip needs.
-    async fn load_metadata(repo_path: PathBuf) -> anyhow::Result<GitStatusMetadata> {
-        // Detect main branch.
-        let main_branch_name = detect_main_branch(&repo_path).await?;
-        // Detect current branch (using the display variant so detached HEAD
-        // shows the short SHA instead of the literal "HEAD").
-        let current_branch_name = detect_current_branch_display(&repo_path).await?;
-        // Diff stats against HEAD.
-        let stats_against_head = diff_metadata_against_head(&repo_path).await?;
-        let branch_tracking_status =
-            Self::branch_tracking_status(&repo_path, &current_branch_name).await;
-
-        Ok(GitStatusMetadata {
-            current_branch_name,
-            main_branch_name,
-            stats_against_head: stats_against_head.aggregate_stats,
-            branch_tracking_status,
+    fn diff_stats(repository: &GitRepository) -> anyhow::Result<DiffStats> {
+        let head_tree = match repository.head().and_then(|head| head.peel_to_tree()) {
+            Ok(tree) => Some(tree),
+            Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut options = DiffOptions::new();
+        options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        let diff =
+            repository.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut options))?;
+        let stats = diff.stats()?;
+        Ok(DiffStats {
+            files_changed: stats.files_changed(),
+            total_additions: stats.insertions(),
+            total_deletions: stats.deletions(),
         })
+    }
+
+    fn branch_tracking_status(
+        repository: &GitRepository,
+        current_branch_name: &str,
+    ) -> GitBranchTrackingStatus {
+        let Ok(branch) = repository.find_branch(current_branch_name, BranchType::Local) else {
+            return GitBranchTrackingStatus::new(current_branch_name.to_owned(), None, 0, 0);
+        };
+        let Ok(upstream) = branch.upstream() else {
+            return GitBranchTrackingStatus::new(current_branch_name.to_owned(), None, 0, 0);
+        };
+        let upstream_name = upstream.name().ok().flatten().map(str::to_owned);
+        let counts = branch
+            .get()
+            .target()
+            .zip(upstream.get().target())
+            .and_then(|(local, remote)| repository.graph_ahead_behind(local, remote).ok());
+
+        match counts {
+            Some((ahead, behind)) => GitBranchTrackingStatus::new(
+                current_branch_name.to_owned(),
+                upstream_name,
+                ahead as u32,
+                behind as u32,
+            ),
+            None => GitBranchTrackingStatus::without_counts(
+                current_branch_name.to_owned(),
+                upstream_name,
+            ),
+        }
+    }
+
+    async fn load_metadata(repo_path: PathBuf) -> anyhow::Result<GitStatusMetadata> {
+        blocking::unblock(move || {
+            let repository = GitRepository::open(&repo_path).with_context(|| {
+                format!("Unable to open Git repository {}", repo_path.display())
+            })?;
+            let current_branch_name = Self::current_branch_name(&repository)?;
+            let main_branch_name = Self::main_branch_name(&repository, &current_branch_name);
+            let stats_against_head = Self::diff_stats(&repository)?;
+            let branch_tracking_status =
+                Self::branch_tracking_status(&repository, &current_branch_name);
+
+            Ok(GitStatusMetadata {
+                current_branch_name,
+                main_branch_name,
+                stats_against_head,
+                branch_tracking_status,
+            })
+        })
+        .await
     }
 }
 
@@ -269,7 +299,8 @@ impl LocalGitRepoStatusModel {
             repository,
             subscriber_id: None,
             metadata,
-            computing_metadata_abort_handle: None,
+            computing_metadata_handle: None,
+            metadata_refresh_pending: false,
         }
     }
 
@@ -292,7 +323,7 @@ impl Drop for LocalGitRepoStatusModel {
         // Note: we cannot call `repository.update()` here because `Drop` does
         // not have access to `ModelContext`.  The `Repository` model will clean
         // up the subscriber when it notices the channel has been dropped.
-        if let Some(handle) = self.computing_metadata_abort_handle.take() {
+        if let Some(handle) = self.computing_metadata_handle.take() {
             handle.abort();
         }
     }

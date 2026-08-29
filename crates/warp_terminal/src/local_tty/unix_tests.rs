@@ -44,6 +44,26 @@ fn host_bash_command_sets_history_size_sentinels() {
 }
 
 #[test]
+fn host_shell_disables_shell_git_metadata() {
+    let command = build_host_shell_command(
+        shell_starter(ShellType::Bash, "/bin/bash"),
+        None,
+        HashMap::new(),
+        None,
+        false,
+        false,
+        false,
+        false,
+        true,
+    );
+
+    assert_eq!(
+        env_value(&command, "WARP_PROMPT_GIT_METADATA_ENABLED"),
+        Some(Some("0".to_owned()))
+    );
+}
+
+#[test]
 fn host_non_bash_command_does_not_set_history_size_sentinels() {
     let command = build_host_shell_command(
         shell_starter(ShellType::Zsh, "/bin/zsh"),
@@ -61,6 +81,27 @@ fn host_non_bash_command_does_not_set_history_size_sentinels() {
     assert_eq!(env_value(&command, "HISTSIZE"), None);
     assert_eq!(env_value(&command, "WARP_INITIAL_HISTFILESIZE"), None);
     assert_eq!(env_value(&command, "WARP_INITIAL_HISTSIZE"), None);
+}
+
+#[test]
+fn docker_sandbox_disables_per_prompt_git_metadata() {
+    let docker_starter =
+        DockerSandboxShellStarter::new(shell_starter(ShellType::Bash, "sbx"), None);
+    let command = build_docker_sandbox_command(
+        &docker_starter,
+        None,
+        HashMap::new(),
+        false,
+        false,
+        false,
+        false,
+        true,
+    );
+
+    assert_eq!(
+        env_value(&command, "WARP_PROMPT_GIT_METADATA_ENABLED"),
+        Some(Some("0".to_owned()))
+    );
 }
 
 #[test]

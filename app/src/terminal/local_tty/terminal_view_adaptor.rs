@@ -2020,6 +2020,10 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.is_shell_deferred()
     }
 
+    fn deferred_shell_startup_directory(&self) -> Option<PathBuf> {
+        self.parked_shell_startup_directory()
+    }
+
     fn persistent_session_id(&self) -> Option<warp_core::SessionId> {
         self.persistent_session_id
     }
@@ -2038,6 +2042,10 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
                 crate::terminal::local_tty::spawner::PtySpawner::handle(ctx)
                     .read(ctx, |spawner, _| spawner.persistent_server_client());
         }
+    }
+
+    fn shutdown_for_process_handoff(&mut self) {
+        TerminalManager::shutdown_for_process_handoff(self);
     }
 
     fn restart_session(

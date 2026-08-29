@@ -328,6 +328,10 @@ where
         self.0.is_shell_deferred()
     }
 
+    fn deferred_shell_startup_directory(&self) -> Option<PathBuf> {
+        self.0.parked_shell_startup_directory()
+    }
+
     fn persistent_session_id(&self) -> Option<SessionId> {
         self.0.persistent_session_id
     }
@@ -345,6 +349,10 @@ where
             self.0.persistent_server_client =
                 PtySpawner::handle(ctx).read(ctx, |spawner, _| spawner.persistent_server_client());
         }
+    }
+
+    fn shutdown_for_process_handoff(&mut self) {
+        self.0.shutdown_for_process_handoff();
     }
 
     fn restart_session(
@@ -838,6 +846,12 @@ impl<S> TerminalManager<S> {
         self.deferred_shell.is_some()
     }
 
+    pub(super) fn parked_shell_startup_directory(&self) -> Option<PathBuf> {
+        self.deferred_shell
+            .as_ref()
+            .and_then(|shell| shell.startup_directory.clone())
+    }
+
     /// Returns the terminal model owned by this manager.
     pub(crate) fn model(&self) -> Arc<FairMutex<TerminalModel>> {
         self.model.clone()
@@ -858,6 +872,20 @@ impl<S> TerminalManager<S> {
     pub(super) fn shutdown_event_loop(&mut self) {
         self.stop_event_loop();
         self.inactive_pty_reads_rx.close();
+    }
+
+    pub(super) fn shutdown_for_process_handoff(&mut self) {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        if let Some(pending) = self.pending_shell_start.take() {
+            pending.abort();
+        }
+        self.deferred_shell = None;
+        self.shutdown_event_loop();
+        self.persistent_session_id = None;
+        #[cfg(unix)]
+        {
+            self.persistent_server_client = None;
+        }
     }
 
     /// Sends a shutdown message to the PTY event loop and waits for it to

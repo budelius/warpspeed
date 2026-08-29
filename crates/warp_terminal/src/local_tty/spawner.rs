@@ -168,6 +168,22 @@ impl PtySpawner {
         }
     }
 
+    /// Marks selected supervised sessions for transfer without relinquishing this process's
+    /// terminal-server client, since other windows may continue creating shells here.
+    #[cfg(unix)]
+    pub fn prepare_sessions_for_handoff(
+        &self,
+        persistent_session_ids: Vec<SessionId>,
+    ) -> Result<()> {
+        let Some(server) = self.server.as_ref() else {
+            return Ok(());
+        };
+        if server.client().is_persistent() {
+            server.prepare_for_app_termination(persistent_session_ids)?;
+        }
+        Ok(())
+    }
+
     /// Does any work necessary to clean up state in advance of the app
     /// terminating.
     pub fn prepare_for_app_termination(

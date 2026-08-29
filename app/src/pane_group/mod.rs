@@ -7215,6 +7215,41 @@ impl PaneGroup {
             .and_then(|contents| contents.as_any().downcast_ref::<TerminalPane>())
     }
 
+    pub fn terminal_manager_for_pane_id(
+        &self,
+        pane_id: impl Into<PaneId>,
+        app: &AppContext,
+    ) -> Option<ModelHandle<Box<dyn TerminalManager>>> {
+        self.terminal_session_by_id(pane_id)
+            .map(|session| session.terminal_manager(app))
+    }
+
+    pub fn terminal_session_uuid(&self, pane_id: impl Into<PaneId>) -> Option<Vec<u8>> {
+        self.terminal_session_by_id(pane_id)
+            .map(TerminalPane::session_uuid)
+    }
+
+    pub fn shutdown_terminal_sessions_for_process_handoff(&self, app: &mut AppContext) {
+        let managers = self
+            .terminal_pane_ids()
+            .filter_map(|pane_id| self.terminal_manager_for_pane_id(pane_id, app))
+            .collect::<Vec<_>>();
+        for manager in managers {
+            manager.update(app, |manager, _| {
+                manager.shutdown_for_process_handoff();
+            });
+        }
+    }
+
+    pub fn terminal_working_directory(
+        &self,
+        pane_id: impl Into<PaneId>,
+        app: &AppContext,
+    ) -> Option<String> {
+        self.terminal_session_by_id(pane_id)
+            .and_then(|session| session.working_directory(app))
+    }
+
     /// Given a pane ID, retrieve its backing terminal view, if the pane is a terminal pane.
     pub fn terminal_view_from_pane_id(
         &self,

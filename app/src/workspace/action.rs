@@ -275,11 +275,19 @@ pub enum WorkspaceAction {
     /// if the pane has a long-running foreground command (a running CLI
     /// agent counts too, since it is itself a foreground process).
     RestartShell,
+    RestartShellForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Restores this window in a newly launched application process, then closes the original.
+    RestartWindowInNewProcess,
     /// Opens (or closes, if already open) the shell picker, which lists the
     /// currently available shells so the user can restart the focused
     /// pane's session with a different shell. Selecting an entry there
     /// dispatches `ChangeShell`.
     ToggleChangeShellMenu,
+    ToggleChangeShellMenuForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Restarts the focused pane's session using `shell`, in place.
     /// Dispatched when an entry is selected from the picker opened by
     /// `ToggleChangeShellMenu`. Prompts for confirmation the same way
@@ -1082,7 +1090,10 @@ impl WorkspaceAction {
             // the persisted tab/pane layout, and the picker toggle is a plain
             // menu open/close -- none of these need a save.
             | RestartShell
+            | RestartShellForTerminalView { .. }
+            | RestartWindowInNewProcess
             | ToggleChangeShellMenu
+            | ToggleChangeShellMenuForTerminalView { .. }
             | ChangeShell { .. }
             | ToggleTabBarOverflowMenu
             | CheckForUpdate

@@ -11,6 +11,8 @@ use std::path::PathBuf;
 pub(crate) use imp::load_tab_configs;
 #[cfg(feature = "local_fs")]
 pub use imp::load_workflows;
+#[cfg(feature = "local_fs")]
+pub use imp::{SaveLaunchConfigError, SavedLaunchConfig};
 pub use imp::{load_launch_configs, load_theme_configs};
 use lazy_static::lazy_static;
 use warp_core::ui::theme::WarpTheme;

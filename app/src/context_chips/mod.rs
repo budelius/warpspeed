@@ -131,12 +131,22 @@ const TIME_REFRESH_CONFIG: RefreshConfig = RefreshConfig::Periodically {
     interval: Duration::from_secs(1),
 };
 
-/// Refresh settings for Git context chips.
-const GIT_REFRESH_CONFIG: RefreshConfig =
-    // TODO: Should we watch .git/HEAD instead? Needs to be relative to the current Git repo.
-    RefreshConfig::Periodically {
-        interval: Duration::from_secs(30),
-    };
+/// Shell fallback refresh settings for Git context chips.
+const GIT_REFRESH_CONFIG: RefreshConfig = RefreshConfig::OnDemandOnly;
+
+fn git_shell_runtime_policy() -> ChipRuntimePolicy {
+    ChipRuntimePolicy::new(
+        ["git"],
+        false,
+        None,
+        [
+            ChipFingerprintInput::SessionId,
+            ChipFingerprintInput::WorkingDirectory,
+            ChipFingerprintInput::InvalidatingCommandCount,
+        ],
+    )
+    .with_invalidate_on_commands(["git"])
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChipResult {
@@ -304,26 +314,27 @@ impl ContextChipKind {
                 log::warn!("Tried to use custom chip {title}");
                 None
             }
-            Self::ShellGitBranch => Some(ContextChip::shell_builtin(
+            Self::ShellGitBranch => Some(ContextChip::shell_builtin_with_runtime_policy(
                 "Git Branch",
                 builtins::shell_git_branch(),
                 Some(builtins::shell_other_git_branches()),
                 GIT_REFRESH_CONFIG,
+                git_shell_runtime_policy(),
             )),
-            Self::GitBranchStatus => Some(ContextChip::shell_builtin(
+            Self::GitBranchStatus => Some(ContextChip::shell_builtin_with_runtime_policy(
                 "Git Branch Status",
                 builtins::shell_git_branch_status(),
-                // Same branch list as ShellGitBranch, so clicking the chip
-                // opens the same branch-switcher menu.
                 Some(builtins::shell_other_git_branches()),
                 GIT_REFRESH_CONFIG,
+                git_shell_runtime_policy(),
             )),
             Self::GitDiffStats => Some(
-                ContextChip::shell_builtin(
+                ContextChip::shell_builtin_with_runtime_policy(
                     "Git Diff Stats",
                     builtins::shell_git_line_changes(),
                     None,
                     GIT_REFRESH_CONFIG,
+                    git_shell_runtime_policy(),
                 )
                 .with_allow_empty_value(),
             ),
@@ -374,10 +385,7 @@ impl ContextChipKind {
         !matches!(self, Self::AgentPlanAndTodoList)
     }
 
-    /// Returns a generator to be used for the first fetch of
-    /// a periodic generator. Is mostly used to use the PreCmd value
-    /// of git-branch for ShellGitBranch, while using a shell command
-    /// for the periodic updates.
+    /// Returns a generator for the initial value before an external source becomes available.
     pub fn initial_value_generator(&self) -> Option<PromptGenerator> {
         match self {
             Self::ShellGitBranch => Some(PromptGenerator::Contextual {

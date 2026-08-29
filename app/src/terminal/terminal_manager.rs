@@ -47,10 +47,18 @@ pub trait TerminalManager: Any {
         false
     }
 
+    /// Returns the startup directory retained by a parked shell.
+    fn deferred_shell_startup_directory(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Returns the stable identifier of the supervised PTY session, if any.
     fn persistent_session_id(&self) -> Option<SessionId> {
         None
     }
+
+    /// Stops this manager's local session before its pane moves to another process.
+    fn shutdown_for_process_handoff(&mut self) {}
 
     /// Supplies a supervised PTY session to reattach when this manager starts.
     fn restore_persistent_session(

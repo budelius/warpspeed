@@ -222,6 +222,37 @@ impl TerminalPane {
             .then_some(fields)
     }
 
+    fn deferred_shell_startup_directory(&self, app: &AppContext) -> Option<String> {
+        self.terminal_manager(app)
+            .read(app, |manager, _| manager.deferred_shell_startup_directory())
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    pub(crate) fn working_directory(&self, app: &AppContext) -> Option<String> {
+        let terminal_view = self.terminal_view(app);
+        let terminal_view = terminal_view.as_ref(app);
+        terminal_view
+            .pwd()
+            .or_else(|| terminal_view.display_working_directory(app))
+            .or_else(|| self.deferred_shell_startup_directory(app))
+            .or_else(|| {
+                self.restored_shell_snapshot_fields(app)
+                    .and_then(|fields| fields.cwd.clone())
+            })
+    }
+
+    pub(crate) fn display_working_directory(&self, app: &AppContext) -> Option<String> {
+        let terminal_view = self.terminal_view(app);
+        terminal_view
+            .as_ref(app)
+            .display_working_directory(app)
+            .or_else(|| self.deferred_shell_startup_directory(app))
+            .or_else(|| {
+                self.restored_shell_snapshot_fields(app)
+                    .and_then(|fields| fields.cwd.clone())
+            })
+    }
+
     /// The [`PaneView<TerminalView>`] for this pane.
     #[cfg(any(test, feature = "integration_tests"))]
     pub(in crate::pane_group) fn pane_view(&self) -> ViewHandle<TerminalPaneView> {

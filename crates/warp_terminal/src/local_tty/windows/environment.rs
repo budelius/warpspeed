@@ -21,6 +21,7 @@ use crate::local_tty::shell::{ShellStarter, extra_path_entries, ssh_socket_dir};
 
 const HONOR_PS1_NAME: &str = "WARP_HONOR_PS1";
 const PROMPT_NODE_VERSION_ENABLED_NAME: &str = "WARP_PROMPT_NODE_VERSION_ENABLED";
+const PROMPT_GIT_METADATA_ENABLED_NAME: &str = "WARP_PROMPT_GIT_METADATA_ENABLED";
 const INITIAL_WORKING_DIR_NAME: &str = "WARP_INITIAL_WORKING_DIR";
 const USE_SSH_WRAPPER_NAME: &str = "WARP_USE_SSH_WRAPPER";
 const SSH_REUSE_CONTROL_MASTER_NAME: &str = "WARP_SSH_REUSE_CONTROL_MASTER";
@@ -74,6 +75,14 @@ pub(super) fn get_shell_environment_variables(options: &PtyOptions) -> Vec<u16> 
             value: (options.node_version_chip_enabled as usize)
                 .to_string()
                 .into(),
+        },
+    );
+
+    env.insert(
+        map_key(PROMPT_GIT_METADATA_ENABLED_NAME.into()),
+        EnvEntry {
+            preferred_key: PROMPT_GIT_METADATA_ENABLED_NAME.into(),
+            value: "0".into(),
         },
     );
 
@@ -227,6 +236,7 @@ fn wsl_env_allowlist(include_initial_working_dir: bool) -> OsString {
         format!("{TERMINAL_SESSION_UUID_ENV}/u"),
         format!("{FOCUS_URL_ENV}/u"),
         format!("{PROMPT_NODE_VERSION_ENABLED_NAME}/u"),
+        format!("{PROMPT_GIT_METADATA_ENABLED_NAME}/u"),
     ];
 
     if FeatureFlag::HOANotifications.is_enabled() {

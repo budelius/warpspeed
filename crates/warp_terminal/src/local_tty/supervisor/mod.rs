@@ -6,5 +6,6 @@
 
 pub mod framing;
 pub mod message;
+pub mod ring;
 
 pub use message::{AttachedSession, Message, PROTOCOL_VERSION, SessionSummary};

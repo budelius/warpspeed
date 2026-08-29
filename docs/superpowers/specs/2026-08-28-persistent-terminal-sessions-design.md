@@ -102,6 +102,25 @@ the app feeds one to its ordinary grid. The protocol never learns what a cell is
 This needs one new piece of code — a **grid-to-ANSI renderer** — and it buys the round-trip
 property test described under Testing.
 
+## What building the snapshot taught us
+
+Plan 1 shipped (`c2e31e0f`..`c46c9b1e`) and corrected two things this spec got wrong.
+
+**The headless emulator was not "just reuse `GridHandler`".** `GridHandler` panics on
+`ansi::Mode::SwapScreen` with `unreachable!("Handled in model layer")` — in the app, the
+primary/alternate swap belongs to `TerminalModel`, which owns both screens and is in the `app`
+crate. So `HeadlessScreen` has to own two grids and implement `ansi::Handler` itself: 62 methods,
+60 of them mechanical forwarding generated from the trait definition. That is materially more than
+this spec assumed when it judged the emulator cheap. It is done and it works, but the same
+assumption should not be extended to the rest of the design without checking.
+
+**Screen state that is not text is invisible to text-level assertions.** Three defects passed
+text-comparison tests and were only caught by asserting on state directly: attributes silently
+dropped, the scroll region dropped entirely, and — after restoring it — content displaced, because
+DECSTBM homes the cursor. Rows are now positioned absolutely rather than walked with newlines.
+Any later test that compares one derived output against another should be assumed vacuous until
+shown otherwise.
+
 ## Components
 
 All paths under `crates/warp_terminal/src/local_tty/` unless noted.

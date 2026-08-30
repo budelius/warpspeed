@@ -15,13 +15,14 @@ use super::util::{
 };
 use super::{
     LAUNCH_CONFIG_COMMENT, WarpConfigUpdateEvent, custom_model_routers_dir, launch_configs_dir,
-    tab_configs_dir, themes_dir, workflows_dir,
+    session_configs_dir, tab_configs_dir, themes_dir, workflows_dir,
 };
 use crate::ai::custom_model_routers::{CustomModelRouter, ModelConfigError};
 use crate::features::FeatureFlag;
 use crate::launch_configs::launch_config::{
     LaunchConfig, LaunchConfigSource, LaunchConfigWindowSource, WindowTemplate,
 };
+use crate::session_configs::load_session_configs;
 use crate::tab_configs::{TabConfig, TabConfigError};
 use crate::themes::theme::WarpThemeConfig;
 use crate::warp_managed_paths_watcher::{
@@ -55,6 +56,23 @@ impl super::WarpConfig {
                     // Don't emit TabConfigErrors on startup — the error toast
                     // should only appear when the user saves a config file,
                     // not on app restart.
+                },
+            );
+            let _ = ctx.spawn(
+                async move { load_session_configs(&session_configs_dir(), &tab_configs_dir()) },
+                |me, (session_configs, errors), ctx| {
+                    for error in errors {
+                        warp_core::safe_warn!(
+                            safe: ("Failed to load a session config"),
+                            full: (
+                                "Failed to load session config {}: {}",
+                                error.file_path.display(),
+                                error.message
+                            )
+                        );
+                    }
+                    me.session_configs = session_configs;
+                    ctx.emit(WarpConfigUpdateEvent::SessionConfigs);
                 },
             );
         }
@@ -141,6 +159,31 @@ impl super::WarpConfig {
                     if !errors.is_empty() {
                         ctx.emit(WarpConfigUpdateEvent::TabConfigErrors(errors));
                     }
+                },
+            );
+        }
+
+        if FeatureFlag::TabConfigs.is_enabled()
+            && (update_touches_dir(update, &tab_configs_dir())
+                || update_touches_dir(update, &session_configs_dir()))
+        {
+            let session_config_dir = session_configs_dir();
+            let tab_config_dir = tab_configs_dir();
+            let _ = ctx.spawn(
+                async move { load_session_configs(&session_config_dir, &tab_config_dir) },
+                |me, (configs, errors), ctx| {
+                    for error in errors {
+                        warp_core::safe_warn!(
+                            safe: ("Failed to load a session config"),
+                            full: (
+                                "Failed to load session config {}: {}",
+                                error.file_path.display(),
+                                error.message
+                            )
+                        );
+                    }
+                    me.session_configs = configs;
+                    ctx.emit(WarpConfigUpdateEvent::SessionConfigs);
                 },
             );
         }

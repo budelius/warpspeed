@@ -26,6 +26,40 @@ pub struct LaunchConfigWindowSource {
     pub config_name: String,
 }
 
+impl LaunchConfigWindowSource {
+    pub fn is_session_config(&self) -> bool {
+        self.path
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+    }
+
+    pub fn session_id(&self) -> Option<String> {
+        if !self.is_session_config() {
+            return None;
+        }
+        let file_stem = self.path.file_stem()?.to_str()?;
+        let session_id = file_stem
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_owned();
+        (!session_id.is_empty()).then_some(session_id)
+    }
+
+    pub fn session_generation(&self) -> Option<u64> {
+        self.is_session_config()
+            .then_some(self.document_index as u64)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub name: String,

@@ -30,7 +30,9 @@ On Windows, install WarpSpeed for routine use instead of launching it from Cargo
 powershell -ExecutionPolicy Bypass -File .\script\windows\install-warpspeed.ps1
 ```
 
-The installer stages the `warpspeed` and `warp-oss` release binaries under `target/warpspeed-merge`, installs versioned copies under `%LOCALAPPDATA%\Programs\WarpSpeed`, and updates the Start Menu shortcuts and `~/.local/bin/warpspeed.cmd`. This keeps active executables out of `target/`, so they cannot block later builds. **Restart window in new process** switches an open window to the current installed version. Pass `-SKIP_BUILD` to install an already staged build.
+The installer stages only the `warpspeed` release binary under `target/warpspeed-merge`, installs a versioned copy under `%LOCALAPPDATA%\Programs\WarpSpeed`, and updates the Start Menu shortcuts and `~/.local/bin/warpspeed.cmd`. This keeps active executables out of `target/`, so they cannot block later builds. **Restart window in new process** switches an open window to the current installed version. Pass `-SKIP_BUILD` to install an already staged build.
+
+File-backed session configs compose reusable tab configs into one persistent, lazily restored window. On Windows, definitions live under `%APPDATA%\warp\WarpSpeed\data\session_configurations`; full runtime snapshots live under `%LOCALAPPDATA%\warp\WarpSpeed\data\session_config_sessions`. Open one directly with a URL argument such as `warplocal://launch/JustVIBE.toml`. YAML launch configurations remain static templates and no longer restore an evolving runtime snapshot.
 
 On Linux, install build dependencies first with `./script/linux/install_build_deps`.
 

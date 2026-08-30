@@ -39,6 +39,8 @@ use crate::settings_view::{
     OpenTeamsSettingsModalArgs, SettingsSection, settings_widget_deeplink_target,
 };
 use crate::tab_configs::TabConfig;
+#[cfg(feature = "local_fs")]
+use crate::user_config::session_configs_dir;
 use crate::user_config::{load_launch_configs, load_tab_configs, tab_configs_dir};
 use crate::util::openable_file_type::{
     is_file_openable_in_warp, is_markdown_file, is_runnable_shell_script,
@@ -210,7 +212,25 @@ impl UriHost {
             }
             UriHost::Launch => {
                 if let Some(desired_config_path) = get_launch_config_path(url.path()) {
-                    let configs = load_launch_configs(&crate::user_config::launch_configs_dir());
+                    let configs = if Path::new(&desired_config_path)
+                        .extension()
+                        .is_some_and(|extension| extension == "toml")
+                    {
+                        #[cfg(feature = "local_fs")]
+                        {
+                            crate::session_configs::load_session_configs(
+                                &session_configs_dir(),
+                                &tab_configs_dir(),
+                            )
+                            .0
+                        }
+                        #[cfg(not(feature = "local_fs"))]
+                        {
+                            Vec::new()
+                        }
+                    } else {
+                        load_launch_configs(&crate::user_config::launch_configs_dir())
+                    };
                     if let Some(config) =
                         find_matching_config(desired_config_path.as_str(), &configs)
                     {
@@ -780,16 +800,26 @@ fn find_matching_config<'a>(
     find_matching_config_name(no_extension, configs)
 }
 
-/// Case-insensitive matching on the config's name
-/// (field in the YAML file).
+/// Case-insensitive matching on the config's display name or source file name.
 fn find_matching_config_name<'a>(
     target_name: &str,
     configs: &'a [LaunchConfig],
 ) -> Option<&'a LaunchConfig> {
-    let target_name_lower = target_name.to_lowercase();
-    configs
-        .iter()
-        .find(|&config| config.name.to_lowercase() == target_name_lower)
+    configs.iter().find(|config| {
+        config.name.eq_ignore_ascii_case(target_name)
+            || config.source.as_ref().is_some_and(|source| {
+                source
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(target_name))
+                    || source
+                        .path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case(target_name))
+            })
+    })
 }
 
 /// Handles `warp://tab_config/<name>` deeplinks.

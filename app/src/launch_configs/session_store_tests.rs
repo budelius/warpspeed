@@ -69,8 +69,8 @@ fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
 fn window_session_round_trip_preserves_shell_and_agent_state() {
     let dir = tempfile::tempdir().expect("session directory should be created");
     let source = LaunchConfigWindowSource {
-        path: PathBuf::from("/home/warp/.warp/launch_configurations/devops.yaml"),
-        document_index: 0,
+        path: PathBuf::from("/home/warp/.warp/session_configurations/devops.toml"),
+        document_index: 2,
         window_index: 0,
         config_name: "DEVOPS".to_string(),
     };
@@ -89,6 +89,7 @@ fn window_session_round_trip_preserves_shell_and_agent_state() {
         .expect("window session should load")
         .expect("window session should exist");
 
+    assert!(dir.path().join("devops/2/window-0.json").is_file());
     assert_eq!(restored.window, expected);
     assert_eq!(restored.block_lists, Arc::new(block_lists));
 }

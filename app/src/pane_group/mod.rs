@@ -1426,14 +1426,28 @@ impl PaneGroup {
                     None
                 };
 
+                let startup_directory = Some(cwd).filter(|path| {
+                    chosen_shell.as_ref().is_some_and(AvailableShell::is_wsl) || path.exists()
+                });
+                #[cfg(feature = "local_tty")]
+                let parked_shell_launch_data = chosen_shell
+                    .as_ref()
+                    .and_then(AvailableShell::get_valid_shell_path_and_type);
+                #[cfg(not(feature = "local_tty"))]
+                let parked_shell_launch_data = None;
+                let parked_shell_snapshot_fields = RestoredShellSnapshotFields {
+                    cwd: startup_directory
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    shell_launch_data: parked_shell_launch_data,
+                };
+
                 let (view, terminal_manager) = match pane_mode {
                     PaneMode::Cloud => {
                         Self::create_ambient_agent_terminal(resources, view_size, ctx)
                     }
                     PaneMode::Terminal | PaneMode::Agent => PaneGroup::create_session(
-                        // Use cwd from the template iff such path exists, otherwise None
-                        // TODO(CORE-3187): On Windows, support WSL directory restoration.
-                        Some(cwd).filter(|p| p.exists()),
+                        startup_directory,
                         HashMap::new(),
                         uuid.as_bytes(),
                         IsSharedSessionCreator::No,
@@ -1481,13 +1495,16 @@ impl PaneGroup {
                     }
                 }
 
-                let pane_data = TerminalPane::new(
+                let mut pane_data = TerminalPane::new(
                     uuid.as_bytes().to_vec(),
                     terminal_manager,
                     view,
                     model_event_sender,
                     ctx,
                 );
+                if !matches!(pane_mode, PaneMode::Cloud) {
+                    pane_data.set_restored_shell_snapshot_fields(parked_shell_snapshot_fields);
+                }
 
                 let terminal_pane_id = pane_data.terminal_pane_id();
                 let pane_id = terminal_pane_id.into();

@@ -59,6 +59,7 @@ pub enum WarpConfigUpdateEvent {
     #[cfg_attr(not(feature = "local_fs"), expect(dead_code))]
     LocalUserWorkflows,
     LaunchConfigs,
+    SessionConfigs,
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     TabConfigs,
     /// Emitted when one or more tab config files failed to parse.
@@ -91,6 +92,7 @@ pub enum WarpConfigUpdateEvent {
 #[derive(Default)]
 pub struct WarpConfig {
     launch_configs: Vec<LaunchConfig>,
+    session_configs: Vec<LaunchConfig>,
     tab_configs: Vec<TabConfig>,
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     tab_config_errors: Vec<TabConfigError>,
@@ -117,8 +119,8 @@ impl WarpConfig {
         }
     }
 
-    pub fn launch_configs(&self) -> &Vec<LaunchConfig> {
-        &self.launch_configs
+    pub fn launch_and_session_configs(&self) -> impl Iterator<Item = &LaunchConfig> {
+        self.launch_configs.iter().chain(&self.session_configs)
     }
 
     pub fn tab_configs(&self) -> &Vec<TabConfig> {
@@ -223,6 +225,11 @@ pub fn launch_configs_dir() -> PathBuf {
 /// Returns the path to the directory containing the user's tab configs.
 pub fn tab_configs_dir() -> PathBuf {
     base_dir().join("tab_configs")
+}
+
+/// Returns the path to the directory containing file-backed session configs.
+pub fn session_configs_dir() -> PathBuf {
+    base_dir().join("session_configurations")
 }
 
 /// Returns the path to the directory containing the user's custom model router

@@ -33,7 +33,7 @@ pub(crate) struct RestoredWindowSession {
 }
 
 pub(crate) fn sessions_dir() -> PathBuf {
-    warp_core::paths::state_dir().join("launch_config_sessions")
+    warp_core::paths::state_dir().join("session_config_sessions")
 }
 
 fn session_file_name(source: &LaunchConfigWindowSource) -> String {
@@ -45,7 +45,23 @@ fn session_file_name(source: &LaunchConfigWindowSource) -> String {
 }
 
 fn session_path(dir: &Path, source: &LaunchConfigWindowSource) -> PathBuf {
-    dir.join(session_file_name(source))
+    match (source.session_id(), source.session_generation()) {
+        (Some(session_id), Some(generation)) => dir
+            .join(session_id)
+            .join(generation.to_string())
+            .join(format!("window-{}.json", source.window_index)),
+        _ => dir.join(session_file_name(source)),
+    }
+}
+
+fn sources_match(stored: &LaunchConfigWindowSource, expected: &LaunchConfigWindowSource) -> bool {
+    if stored.is_session_config() && expected.is_session_config() {
+        stored.session_id() == expected.session_id()
+            && stored.session_generation() == expected.session_generation()
+            && stored.window_index == expected.window_index
+    } else {
+        stored == expected
+    }
 }
 
 #[cfg(feature = "local_fs")]
@@ -58,13 +74,16 @@ fn save_to_dir(
 ) -> Result<()> {
     use std::io::{BufWriter, Write};
 
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("Failed to create launch config session directory {dir:?}"))?;
-
     let mut window = window.clone();
     window.launch_config_source = Some(source.clone());
     let pane_uuids = terminal_pane_uuids(&window);
     let path = session_path(dir, source);
+    let parent = path
+        .parent()
+        .context("Session config snapshot path has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!("Failed to create session config snapshot directory {parent:?}")
+    })?;
     let stored_blocks = if preserve_existing_blocks {
         std::fs::File::open(&path)
             .ok()
@@ -94,8 +113,8 @@ fn save_to_dir(
         block_lists: stored_blocks,
     };
 
-    let mut temp = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("Failed to create temporary session file in {dir:?}"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("Failed to create temporary session file in {parent:?}"))?;
     {
         let mut writer = BufWriter::new(temp.as_file_mut());
         serde_json::to_writer(&mut writer, &stored)?;
@@ -117,10 +136,6 @@ fn save_to_dir(
     _preserve_existing_blocks: bool,
 ) -> Result<()> {
     Ok(())
-}
-
-pub(crate) fn save(source: &LaunchConfigWindowSource, window: &WindowSnapshot) -> Result<()> {
-    save_to_dir(&sessions_dir(), source, window, &HashMap::new(), true)
 }
 
 pub(crate) fn save_windows(
@@ -157,8 +172,8 @@ fn load_from_dir(
             stored.version
         );
     }
-    if stored.source != *source {
-        bail!("Launch config session source does not match {path:?}");
+    if !sources_match(&stored.source, source) {
+        bail!("Session config snapshot source does not match {path:?}");
     }
     Ok(Some(RestoredWindowSession {
         window: stored.window,

@@ -11,6 +11,7 @@ mod auth;
 mod autoupdate;
 mod banner;
 mod billing;
+mod build_info;
 mod changelog_model;
 mod chip_configurator;
 mod cloud_object;
@@ -26,7 +27,6 @@ mod context_chips;
 mod crash_recovery;
 #[cfg(feature = "crash_reporting")]
 mod crash_reporting;
-mod build_info;
 mod debug_dump;
 mod default_terminal;
 mod download_method;
@@ -73,6 +73,8 @@ mod reward_view;
 mod safe_triangle;
 mod search_bar;
 mod server;
+#[cfg(feature = "local_fs")]
+mod session_configs;
 mod session_management;
 mod shell_indicator;
 mod suggestions;
@@ -1899,7 +1901,10 @@ pub(crate) fn initialize_app(
     #[cfg(not(target_family = "wasm"))]
     remote_server::wire_auth_token_rotation(ctx);
 
-    log::info!("Starting warp with channel state {}", ChannelState::debug_str());
+    log::info!(
+        "Starting warp with channel state {}",
+        ChannelState::debug_str()
+    );
     // The full build identity and the directories in use, so an instance that
     // is already running can still be identified from its log. `app_version`
     // alone was `<unknown>` for every build that is not a tagged release.

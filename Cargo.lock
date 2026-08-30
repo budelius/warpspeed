@@ -15222,6 +15222,7 @@ dependencies = [
  "firebase",
  "float-cmp",
  "freedesktop-desktop-entry",
+ "fs4",
  "futures",
  "futures-lite 1.13.0",
  "futures-timer",

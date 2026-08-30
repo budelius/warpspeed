@@ -1,7 +1,9 @@
 use self::parse_url_paths::{WarpWebLink, get_item_data_from_warp_link};
 use super::*;
 use crate::ChannelState;
-use crate::launch_configs::launch_config::make_mock_single_window_launch_config;
+use crate::launch_configs::launch_config::{
+    LaunchConfigSource, make_mock_single_window_launch_config,
+};
 use crate::linear::{LinearAction, LinearIssueWork};
 
 #[test]
@@ -34,6 +36,26 @@ fn test_find_matching_config() {
 
     let missing_config = "missing";
     assert_eq!(find_matching_config(missing_config, &configs), None);
+}
+
+#[test]
+fn test_find_matching_config_source_file() {
+    let mut config = make_mock_single_window_launch_config();
+    config.name = "Dummy-24 / Window 2".to_owned();
+    config.source = Some(LaunchConfigSource {
+        path: PathBuf::from("/session_configurations/DUMMY-24-window-02.toml"),
+        document_index: 1,
+    });
+    let configs = vec![config];
+
+    assert_eq!(
+        find_matching_config("dummy-24-window-02.toml", &configs),
+        Some(&configs[0])
+    );
+    assert_eq!(
+        find_matching_config("DUMMY-24-WINDOW-02", &configs),
+        Some(&configs[0])
+    );
 }
 
 #[test]

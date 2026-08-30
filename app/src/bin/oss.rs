@@ -21,11 +21,12 @@ fn main() -> Result<()> {
             mcp_static_config: None,
         },
     );
-    // The OSS build is what people run when they build this repo themselves, so it gets the same
-    // in-development features the Warp team runs with rather than only what has already shipped.
-    state = state
-        .with_additional_features(warp_core::features::DOGFOOD_FLAGS)
-        .with_additional_features(warp_core::features::PREVIEW_FLAGS);
+    // Launch configurations are only half-usable without this: it is what saves and restores a
+    // window's session alongside the YAML.  Enabled on its own rather than by taking all of
+    // DOGFOOD_FLAGS, which would turn on ~50 unrelated in-development features at the same time.
+    state = state.with_additional_features(&[
+        warp_core::features::FeatureFlag::PersistentLaunchConfigSessions,
+    ]);
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
     }

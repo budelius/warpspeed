@@ -940,8 +940,8 @@ fn make_new_help_menu() -> Menu {
 fn make_launch_config_menu_items(ctx: &mut AppContext) -> Vec<MenuItem> {
     let mut launch_config_menu_items = vec![];
 
-    let launch_configs = WarpConfig::handle(ctx).as_ref(ctx).launch_configs();
-    for config in launch_configs {
+    let warp_config = WarpConfig::handle(ctx);
+    for config in warp_config.as_ref(ctx).launch_and_session_configs() {
         launch_config_menu_items.push(MenuItem::Custom(CustomMenuItem::new(
             &config.name,
             enclose!((config) move |ctx| {

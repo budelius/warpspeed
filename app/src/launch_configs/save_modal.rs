@@ -25,7 +25,6 @@ use crate::appearance::Appearance;
 use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
 };
-use crate::features::FeatureFlag;
 use crate::launch_configs::launch_config::{
     LaunchConfig, LaunchConfigSource, LaunchConfigWindowSource, WindowTemplate,
 };
@@ -240,14 +239,8 @@ impl LaunchConfigSaveModal {
 
         let result = if let Some(source) = self.launch_config_source.as_ref() {
             let window_template = WindowTemplate::from(window_snapshot.clone());
-            WarpConfig::overwrite_launch_config_window(source, window_template).and_then(
-                |launch_config| {
-                    if FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
-                        crate::launch_configs::session_store::save(source, window_snapshot)?;
-                    }
-                    Ok((source.path.clone(), launch_config))
-                },
-            )
+            WarpConfig::overwrite_launch_config_window(source, window_template)
+                .map(|launch_config| (source.path.clone(), launch_config))
         } else {
             let file_name_candidate = self.editor.as_ref(ctx).buffer_text(ctx);
             let launch_config_name = file_name_to_human_readable_name(&file_name_candidate);
@@ -259,24 +252,14 @@ impl LaunchConfigSaveModal {
             } else {
                 WarpConfig::save_new_launch_config(file_name_candidate, launch_config.clone())
             };
-            saved.map_err(anyhow::Error::from).and_then(|saved| {
+            saved.map_err(anyhow::Error::from).map(|saved| {
                 let path = launch_configs_dir().join(saved.file_name);
                 let source = LaunchConfigSource {
                     path: path.clone(),
                     document_index: saved.document_index,
                 };
                 launch_config.source = Some(source);
-                if FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
-                    // The source was just assigned above, so this is not
-                    // expected to be empty -- but a panic here would take the
-                    // whole app down for a routine save, so report it as a
-                    // failed save instead.
-                    let window_source = launch_config.window_source(0).ok_or_else(|| {
-                        anyhow::anyhow!("Newly saved launch configuration has no window source")
-                    })?;
-                    crate::launch_configs::session_store::save(&window_source, window_snapshot)?;
-                }
-                Ok((path, launch_config))
+                (path, launch_config)
             })
         };
 

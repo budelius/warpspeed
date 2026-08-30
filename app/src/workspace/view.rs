@@ -12162,7 +12162,10 @@ impl Workspace {
         // Rewriting the YAML this window came from is not part of session persistence, so it
         // isn't gated on `PersistentLaunchConfigSessions`; the one step that is — writing the
         // session alongside it — checks the flag itself in the modal.
-        let launch_config_source = self.launch_config_source.clone();
+        let launch_config_source = self
+            .launch_config_source
+            .clone()
+            .filter(|source| !source.is_session_config());
         self.launch_config_save_modal.view.update(ctx, |view, ctx| {
             view.set_window_snapshot(window_snapshot, launch_config_source);
             view.reset_editor(ctx);
@@ -28753,7 +28756,10 @@ impl View for Workspace {
         if !self.window_process_restart_in_progress
             && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
             && *GeneralSettings::as_ref(ctx).restore_session
-            && self.launch_config_source.is_some()
+            && self
+                .launch_config_source
+                .as_ref()
+                .is_some_and(LaunchConfigWindowSource::is_session_config)
             && let Some(model_event_sender) = self.model_event_sender.as_ref()
         {
             let window = self.snapshot(ctx.window_id(), false, ctx);

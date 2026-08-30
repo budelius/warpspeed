@@ -562,10 +562,46 @@ fn active_workspace(ctx: &mut AppContext) -> Option<ViewHandle<Workspace>> {
 }
 
 fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
+    let session_source = arg
+        .launch_config
+        .window_source(0)
+        .filter(launch_config::LaunchConfigWindowSource::is_session_config);
+    if let Some(source) = session_source.as_ref()
+        && let Some((window_id, _)) = WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .find(|(_, workspace)| workspace.as_ref(ctx).launch_config_source() == Some(source))
+    {
+        ctx.windows().show_window_and_focus_app(window_id);
+        return;
+    }
+
+    #[cfg(feature = "local_fs")]
+    if let Some(source) = session_source.as_ref() {
+        match crate::session_configs::claim_session(source) {
+            Ok(true) => {}
+            Ok(false) => {
+                safe_warn!(
+                    safe: ("Session config is already open in another process"),
+                    full: (
+                        "Session config {:?} is already open in another process",
+                        source.session_id()
+                    )
+                );
+                return;
+            }
+            Err(error) => {
+                report_error!(error.context("Failed to claim session config ownership"));
+                return;
+            }
+        }
+    }
+
     let active_window_workspace = active_workspace(ctx);
     if arg.launch_config.windows.is_empty() {
         open_new(&(), ctx);
     } else if arg.open_in_active_window
+        && session_source.is_none()
         && arg.launch_config.windows.len() == 1
         && active_window_workspace.is_some()
     {
@@ -630,7 +666,9 @@ fn launch_config_workspace_source(
     });
     if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
         && !source_is_open
-        && let Some(source) = launch_config_source.as_ref()
+        && let Some(source) = launch_config_source
+            .as_ref()
+            .filter(|source| source.is_session_config())
     {
         match crate::launch_configs::session_store::load(source) {
             Ok(Some(session)) => {

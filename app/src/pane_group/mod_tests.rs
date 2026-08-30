@@ -4079,6 +4079,42 @@ fn test_deferred_template_pane_exposes_its_working_directory() {
 /// guard (see `test_deferred_pane_with_commands_parks_its_shell` for the
 /// full activation flow).
 #[test]
+fn test_deferred_template_pane_snapshots_its_parked_working_directory() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir().expect("the test process has a current directory");
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: cwd.clone(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let snapshot = pane_group.read(&app, |group, ctx| group.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(LeafSnapshot {
+            contents: LeafContents::Terminal(terminal),
+            ..
+        }) = snapshot
+        else {
+            panic!("expected a terminal pane snapshot");
+        };
+
+        assert_eq!(terminal.cwd, Some(cwd.to_string_lossy().into_owned()));
+    });
+}
+
+#[test]
 fn test_template_pane_with_commands_honors_deferred() {
     // LazyShellStartup does not gate this layer: `shell_start` is injected
     // directly by the caller (this is the mechanism Task 4 wires a real flag

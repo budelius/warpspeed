@@ -47,6 +47,7 @@ impl CustomEndpointSettingsModel {
                 WarpConfigUpdateEvent::Themes
                 | WarpConfigUpdateEvent::LocalUserWorkflows
                 | WarpConfigUpdateEvent::LaunchConfigs
+                | WarpConfigUpdateEvent::SessionConfigs
                 | WarpConfigUpdateEvent::TabConfigs
                 | WarpConfigUpdateEvent::TabConfigErrors(_)
                 | WarpConfigUpdateEvent::ModelConfigs

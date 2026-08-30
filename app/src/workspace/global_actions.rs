@@ -168,7 +168,12 @@ fn save_app(_: &(), ctx: &mut AppContext) {
         let windows = app_state
             .windows
             .iter()
-            .filter(|window| window.launch_config_source.is_some())
+            .filter(|window| {
+                window
+                    .launch_config_source
+                    .as_ref()
+                    .is_some_and(|source| source.is_session_config())
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !windows.is_empty()

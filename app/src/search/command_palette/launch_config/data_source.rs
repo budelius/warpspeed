@@ -54,7 +54,10 @@ impl DataSource {
         event: &WarpConfigUpdateEvent,
         ctx: &mut ModelContext<Self>,
     ) {
-        if matches!(event, WarpConfigUpdateEvent::LaunchConfigs) {
+        if matches!(
+            event,
+            WarpConfigUpdateEvent::LaunchConfigs | WarpConfigUpdateEvent::SessionConfigs
+        ) {
             self.searcher.refresh_search_index(ctx);
         }
     }
@@ -113,8 +116,7 @@ impl LaunchConfigSearcher for FuzzyLaunchConfigSearcher {
 
     fn refresh_search_index(&mut self, app: &AppContext) {
         self.configs = WarpConfig::as_ref(app)
-            .launch_configs()
-            .iter()
+            .launch_and_session_configs()
             .map(|config| (config.name.to_lowercase(), config.clone()))
             .collect();
     }
@@ -188,8 +190,7 @@ mod full_text_searcher {
 
         fn refresh_search_index(&mut self, app: &AppContext) {
             self.configs = WarpConfig::as_ref(app)
-                .launch_configs()
-                .iter()
+                .launch_and_session_configs()
                 .map(|config| (config.name.to_lowercase(), config.clone()))
                 .collect();
             if self.rebuild_search_index().is_err() {

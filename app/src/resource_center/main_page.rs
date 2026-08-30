@@ -124,9 +124,9 @@ impl ResourceCenterMainView {
                     let is_expanded = match data.section_name {
                         // Always show What's New section
                         FeatureSection::WhatsNew => true,
-                        FeatureSection::GettingStarted => match ChannelState::app_version() {
+                        FeatureSection::GettingStarted => match crate::build_info::changelog_version() {
                             Some(version) => {
-                                match Settings::has_changelog_been_shown(version, ctx) {
+                                match Settings::has_changelog_been_shown(&version, ctx) {
                                     true => !is_tips_completed && !is_onboarded,
                                     false => false,
                                 }
@@ -135,9 +135,9 @@ impl ResourceCenterMainView {
                         },
                         // Expand Maximize Warp section once user has completed welcome tips,
                         // and keep open after users have completed/skipped all tips
-                        FeatureSection::MaximizeWarp => match ChannelState::app_version() {
+                        FeatureSection::MaximizeWarp => match crate::build_info::changelog_version() {
                             Some(version) => {
-                                match Settings::has_changelog_been_shown(version, ctx) {
+                                match Settings::has_changelog_been_shown(&version, ctx) {
                                     true => is_tips_completed || is_onboarded,
                                     false => false,
                                 }
@@ -240,8 +240,11 @@ impl ResourceCenterMainView {
         changelog_model_handle: ModelHandle<ChangelogModel>,
         ctx: &mut ViewContext<ResourceCenterMainView>,
     ) -> ViewHandle<ChangelogSectionView> {
-        let showing_new_changelog = match ChannelState::app_version() {
-            Some(version) => !Settings::has_changelog_been_shown(version, ctx),
+        // Keyed on the build identity, not the release tag: an untagged build
+        // has no tag, which used to leave this permanently `false` and the
+        // what's-new section never highlighted after an install.
+        let showing_new_changelog = match crate::build_info::changelog_version() {
+            Some(version) => !Settings::has_changelog_been_shown(&version, ctx),
             None => false,
         };
 

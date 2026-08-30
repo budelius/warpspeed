@@ -51,6 +51,15 @@ impl ChangelogModel {
                 // There is already a request pending, so no-op while we wait for the response
             }
             ChangelogState::None => {
+                // A build staged by the Windows installer carries its own notes:
+                // the commits between the version it replaced and this one. The
+                // changelog server only knows about tagged releases, so for
+                // these builds it would answer nothing.
+                if let Some(changelog) = crate::build_info::local_release_notes() {
+                    self.handle_changelog_check((request_type, Ok(Some(changelog))), ctx);
+                    return;
+                }
+
                 self.changelog = ChangelogState::Pending;
                 let server_api = self.server_api.clone();
                 let _ = ctx.spawn(

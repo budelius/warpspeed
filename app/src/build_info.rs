@@ -14,6 +14,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use channel_versions::{Changelog, MarkdownSection};
 use warp_core::channel::ChannelState;
 
 /// The revision this binary was built from, stamped by `build.rs`.
@@ -126,7 +127,11 @@ pub(crate) fn report() -> String {
         "  release tag:   {}",
         ChannelState::app_version().unwrap_or("none (not a tagged release build)")
     );
-    let _ = writeln!(report, "  revision:      {}", unknown_if_empty(BUILD_REVISION));
+    let _ = writeln!(
+        report,
+        "  revision:      {}",
+        unknown_if_empty(BUILD_REVISION)
+    );
     let _ = writeln!(
         report,
         "  built at:      {}",
@@ -174,6 +179,70 @@ pub(crate) fn report() -> String {
     let _ = writeln!(report, "  state:          {}", display_path(&paths.state));
 
     report
+}
+
+/// The file `script/windows/install-warpspeed.ps1` writes beside the executable,
+/// holding the commits between the previously installed version and this one.
+const RELEASE_NOTES_FILE: &str = "release-notes.md";
+
+/// The version to key "has this changelog been shown" on.
+///
+/// [`ChannelState::app_version`] is `GIT_RELEASE_TAG`, which only tagged release
+/// builds have, so for a locally installed build it is `None` and the Resource
+/// Center's what's-new handling switches itself off entirely. The installed
+/// version is a better key anyway: it changes on every deploy, which is exactly
+/// when there is something new to show.
+pub(crate) fn changelog_version() -> Option<String> {
+    if let Some(tag) = ChannelState::app_version() {
+        return Some(tag.to_owned());
+    }
+    let executable = std::env::current_exe().ok()?;
+    if let Some(version) = installed_version(&executable) {
+        return Some(version);
+    }
+    let revision = BUILD_REVISION.trim();
+    (!revision.is_empty() && revision != "unknown").then(|| revision.to_owned())
+}
+
+/// The release notes this build was installed with, if it has any.
+///
+/// Read from beside the executable rather than fetched: these builds are not
+/// releases the changelog server knows about, and the interesting question
+/// after a local deploy is what changed since the build being replaced.
+pub(crate) fn local_release_notes() -> Option<Changelog> {
+    let executable = std::env::current_exe().ok()?;
+    let path = executable.parent()?.join(RELEASE_NOTES_FILE);
+    let markdown = std::fs::read_to_string(&path).ok()?;
+    if markdown.trim().is_empty() {
+        return None;
+    }
+
+    // The notes were written when the version was staged, so the file's own
+    // modification time is the release date.
+    let date = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| {
+            let seconds = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs() as i64;
+            chrono::DateTime::from_timestamp(seconds, 0)
+        })
+        .map(|timestamp| timestamp.fixed_offset())
+        .unwrap_or_else(|| chrono::Local::now().fixed_offset());
+
+    Some(Changelog {
+        date,
+        sections: Vec::new(),
+        markdown_sections: vec![MarkdownSection {
+            title: String::from("What's new"),
+            markdown,
+        }],
+        image_url: None,
+        oz_updates: Vec::new(),
+        tui_updates: Vec::new(),
+    })
 }
 
 /// Prints the report; backs `warp --build-info`.

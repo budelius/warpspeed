@@ -7,13 +7,11 @@ fn listener() -> ChannelEventListener {
     ChannelEventListener::new_for_test()
 }
 
-fn summary(session_id: SessionId) -> SessionSummary {
-    SessionSummary {
-        session_id,
+fn metadata() -> SessionMetadata {
+    SessionMetadata {
         shell: "bash".to_owned(),
         working_directory: "/home/user".to_owned(),
         title: "build".to_owned(),
-        detached_for_seconds: 0,
     }
 }
 
@@ -23,7 +21,7 @@ fn table_with_detached_session(session_id: SessionId, before: &[u8], at: u64) ->
     screen.feed(before);
 
     let mut table = SessionTable::new();
-    table.detach(session_id, screen.snapshot(), summary(session_id), at, listener());
+    table.detach(session_id, screen.snapshot(), metadata(), at, listener());
     table
 }
 
@@ -135,7 +133,7 @@ fn list_reports_how_long_a_session_has_been_detached() {
 
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].detached_for_seconds, 60);
-    assert_eq!(listed[0].shell, "bash");
+    assert_eq!(listed[0].metadata.shell, "bash");
 }
 
 /// The drawer must not reshuffle between refreshes, so the order is pinned.
@@ -145,7 +143,7 @@ fn list_is_ordered_stably_by_session() {
     for id in [3u64, 1, 2] {
         let session_id = SessionId::from(id);
         let screen = HeadlessScreen::new(20, 4, listener());
-        table.detach(session_id, screen.snapshot(), summary(session_id), 0, listener());
+        table.detach(session_id, screen.snapshot(), metadata(), 0, listener());
     }
 
     let ids: Vec<u64> = table
@@ -165,7 +163,7 @@ fn reaping_drops_only_sessions_past_the_age_limit() {
 
     let mut table = table_with_detached_session(old, b"old", 0);
     let screen = HeadlessScreen::new(20, 4, listener());
-    table.detach(recent, screen.snapshot(), summary(recent), 500, listener());
+    table.detach(recent, screen.snapshot(), metadata(), 500, listener());
 
     let reaped = table.reap_older_than(600, 300);
 

@@ -1,6 +1,7 @@
 use warp_core::SessionId;
 
 use super::*;
+use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::screen::ScreenSnapshot;
 
 /// A pipe name unique to one test, so tests can run in parallel without
@@ -18,6 +19,14 @@ fn snapshot() -> ScreenSnapshot {
         columns: 80,
         rows: 24,
         repaint: b"\x1b[H\x1b[2Jrestored".to_vec(),
+    }
+}
+
+fn metadata() -> SessionMetadata {
+    SessionMetadata {
+        shell: "bash".to_owned(),
+        working_directory: "/home/user".to_owned(),
+        title: "build".to_owned(),
     }
 }
 
@@ -61,6 +70,7 @@ fn a_snapshot_survives_a_real_pipe() {
         .send(&Message::Detach {
             session_id: SessionId::from(11u64),
             snapshot: snapshot(),
+            metadata: metadata(),
         })
         .expect("client send should succeed");
 
@@ -69,6 +79,7 @@ fn a_snapshot_survives_a_real_pipe() {
     let Some(Message::Detach {
         snapshot: received_snapshot,
         session_id,
+        ..
     }) = received
     else {
         panic!("expected a Detach message, got {received:?}");

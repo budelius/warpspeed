@@ -22,6 +22,7 @@ pub enum Message {
     Detach {
         session_id: SessionId,
         snapshot: ScreenSnapshot,
+        metadata: SessionMetadata,
     },
 
     /// The result of a [`Message::Detach`].
@@ -75,12 +76,10 @@ pub struct AttachedSession {
     pub endpoint: Option<Endpoint>,
 }
 
-/// A session as shown in the detached-sessions drawer.
+/// What a client knows about a session that the supervisor cannot work out for
+/// itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSummary {
-    /// Identifies the session for a later attach.
-    pub session_id: SessionId,
-
+pub struct SessionMetadata {
     /// The shell the session is running.
     pub shell: String,
 
@@ -89,7 +88,18 @@ pub struct SessionSummary {
 
     /// The session's title, for telling two shells apart at a glance.
     pub title: String,
+}
 
-    /// How long the session has been detached.
+/// A session as shown in the detached-sessions drawer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// Identifies the session for a later attach.
+    pub session_id: SessionId,
+
+    /// What the client told us about it when it detached.
+    pub metadata: SessionMetadata,
+
+    /// How long the session has been detached. Computed by the supervisor, not
+    /// supplied by the client.
     pub detached_for_seconds: u64,
 }

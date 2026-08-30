@@ -1,6 +1,7 @@
 use warp_core::SessionId;
 
 use super::*;
+use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::screen::ScreenSnapshot;
 
 fn snapshot() -> ScreenSnapshot {
@@ -11,10 +12,19 @@ fn snapshot() -> ScreenSnapshot {
     }
 }
 
+fn metadata() -> SessionMetadata {
+    SessionMetadata {
+        shell: "bash".to_owned(),
+        working_directory: "/home/user".to_owned(),
+        title: "build".to_owned(),
+    }
+}
+
 fn detach() -> Message {
     Message::Detach {
         session_id: SessionId::from(7u64),
         snapshot: snapshot(),
+        metadata: metadata(),
     }
 }
 

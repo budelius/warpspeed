@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use warp_core::SessionId;
 
-use super::message::{AttachedSession, Message, SessionSummary};
+use super::message::{AttachedSession, Message, SessionMetadata, SessionSummary};
 use super::ring::OutputRing;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty::screen::{HeadlessScreen, ScreenSnapshot};
@@ -49,7 +49,7 @@ pub struct SupervisedSession {
     snapshot_sequence: u64,
 
     /// Describes the session in the drawer.
-    summary: SessionSummary,
+    metadata: SessionMetadata,
 
     /// When the session was detached, in Unix seconds. Supplied by the caller
     /// rather than read from a clock, so tests stay deterministic.
@@ -98,7 +98,7 @@ impl SessionTable {
         &mut self,
         session_id: SessionId,
         snapshot: ScreenSnapshot,
-        summary: SessionSummary,
+        metadata: SessionMetadata,
         detached_at_unix_seconds: u64,
         event_listener: ChannelEventListener,
     ) {
@@ -111,7 +111,7 @@ impl SessionTable {
                 ring: OutputRing::new(DEFAULT_RING_CAPACITY_BYTES),
                 snapshot,
                 snapshot_sequence: 0,
-                summary,
+                metadata,
                 detached_at_unix_seconds,
                 attached: false,
             },
@@ -167,11 +167,12 @@ impl SessionTable {
     pub fn list(&self, now_unix_seconds: u64) -> Vec<SessionSummary> {
         let mut summaries: Vec<SessionSummary> = self
             .sessions
-            .values()
-            .map(|session| SessionSummary {
+            .iter()
+            .map(|(session_id, session)| SessionSummary {
+                session_id: *session_id,
+                metadata: session.metadata.clone(),
                 detached_for_seconds: now_unix_seconds
                     .saturating_sub(session.detached_at_unix_seconds),
-                ..session.summary.clone()
             })
             .collect();
 

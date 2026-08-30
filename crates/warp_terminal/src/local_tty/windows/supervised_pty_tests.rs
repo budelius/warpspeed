@@ -96,14 +96,25 @@ fn a_supervised_pty_reports_a_live_shell_as_running() {
 /// supervisor polling its sessions would wedge on the first idle one.
 #[test]
 fn reading_an_idle_pty_times_out_instead_of_blocking() {
-    let mut pty = spawn_supervised_pty("cmd.exe /c ping -n 20 127.0.0.1", 80, 24, None)
+    // Output is redirected away, so the shell is genuinely silent while it
+    // runs. An earlier version of this test used a bare `ping`, which prints a
+    // line per second -- it read four bytes where it expected none, and only
+    // failed once the whole suite ran and the timing shifted.
+    let mut pty = spawn_supervised_pty("cmd.exe /c ping -n 20 127.0.0.1 >nul", 80, 24, None)
         .expect("spawning a supervised pty should succeed");
 
-    // Drain the pseudoconsole's startup traffic first.
+    // Drain the pseudoconsole's startup traffic. Two consecutive empty reads,
+    // not one, because that traffic arrives in bursts with gaps between them.
     let mut buffer = [0u8; 4096];
-    for _ in 0..20 {
+    let mut consecutive_empty = 0;
+    for _ in 0..40 {
         if pty.read(&mut buffer, 100).expect("read should succeed") == 0 {
-            break;
+            consecutive_empty += 1;
+            if consecutive_empty == 2 {
+                break;
+            }
+        } else {
+            consecutive_empty = 0;
         }
     }
 

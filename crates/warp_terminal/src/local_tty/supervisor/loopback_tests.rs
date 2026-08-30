@@ -1,6 +1,7 @@
 use warp_core::SessionId;
 
 use super::*;
+use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::screen::ScreenSnapshot;
 
 fn snapshot() -> ScreenSnapshot {
@@ -8,6 +9,14 @@ fn snapshot() -> ScreenSnapshot {
         columns: 80,
         rows: 24,
         repaint: b"\x1b[H\x1b[2Jrestored".to_vec(),
+    }
+}
+
+fn metadata() -> SessionMetadata {
+    SessionMetadata {
+        shell: "bash".to_owned(),
+        working_directory: "/home/user".to_owned(),
+        title: "build".to_owned(),
     }
 }
 
@@ -54,6 +63,7 @@ fn a_screen_snapshot_survives_a_loopback_round_trip() {
         .send(&Message::Detach {
             session_id: SessionId::from(3u64),
             snapshot: snapshot(),
+            metadata: metadata(),
         })
         .expect("send should succeed");
 
@@ -65,6 +75,7 @@ fn a_screen_snapshot_survives_a_loopback_round_trip() {
     let Message::Detach {
         snapshot: received_snapshot,
         session_id,
+        ..
     } = received
     else {
         panic!("expected a Detach message, got {received:?}");
@@ -100,6 +111,7 @@ fn a_message_split_across_arrivals_is_not_lost() {
         &Message::Detach {
             session_id: SessionId::from(9u64),
             snapshot: snapshot(),
+            metadata: metadata(),
         },
     )
     .expect("write should succeed");

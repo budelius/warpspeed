@@ -1,5 +1,6 @@
 mod child;
 mod conpty_api;
+mod daemon_spawn;
 mod environment;
 mod handle_lending;
 mod pipe_security;

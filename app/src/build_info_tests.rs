@@ -79,3 +79,28 @@ fn empty_build_stamps_read_as_unknown_rather_than_blank() {
     assert_eq!(unknown_if_empty("   "), "unknown");
     assert_eq!(unknown_if_empty("bfcd80cd7822"), "bfcd80cd7822");
 }
+
+#[test]
+fn built_at_reads_the_executables_modification_time() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+
+    let built_at = built_at(Some(file.path()));
+
+    assert!(
+        built_at.ends_with(" UTC"),
+        "expected a formatted timestamp, got {built_at:?}"
+    );
+    assert!(
+        !built_at.contains("unknown"),
+        "a file that exists must yield a time, got {built_at:?}"
+    );
+}
+
+#[test]
+fn built_at_is_unknown_when_there_is_no_executable_to_stat() {
+    assert_eq!(built_at(None), "unknown");
+    assert_eq!(
+        built_at(Some(Path::new("this-path-does-not-exist-anywhere"))),
+        "unknown"
+    );
+}

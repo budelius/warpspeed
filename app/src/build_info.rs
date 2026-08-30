@@ -19,6 +19,9 @@ use warp_core::channel::ChannelState;
 /// The revision this binary was built from, stamped by `build.rs`.
 const BUILD_REVISION: &str = env!("WARP_BUILD_REVISION");
 /// When this binary was built, if the build passed `WARP_BUILD_TIMESTAMP`.
+///
+/// Usually empty. `built_at` prefers the executable's modification time, which
+/// is the same fact without the cost -- see [`built_at`].
 const BUILD_TIMESTAMP: &str = env!("WARP_BUILD_TIMESTAMP");
 
 /// The directory name the Windows installer gives a version, as produced by
@@ -74,6 +77,41 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// When this binary was built.
+///
+/// Taken from the executable's modification time rather than stamped in at
+/// compile time. A timestamp baked into the binary has to come from an env var,
+/// and `build.rs` declares `rerun-if-env-changed` on it, so a packaging script
+/// passing a fresh timestamp would force a full rebuild and relink of the app
+/// crate on every single build -- minutes, to record something the filesystem
+/// already knows. The link time is the build time, and `Copy-Item` preserves it
+/// when the installer stages a version, so this stays right for installed
+/// copies too.
+///
+/// `WARP_BUILD_TIMESTAMP` still wins when a build explicitly sets it, for
+/// packaging that wants to pin the value.
+fn built_at(executable: Option<&Path>) -> String {
+    let stamped = BUILD_TIMESTAMP.trim();
+    if !stamped.is_empty() {
+        return stamped.to_owned();
+    }
+
+    let Some(modified) = executable
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+    else {
+        return String::from("unknown");
+    };
+
+    let seconds = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default();
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| String::from("unknown"))
+}
+
 /// A multi-line report identifying this build and where it runs.
 ///
 /// Rendered as `key: value` lines rather than anything prettier because it is
@@ -92,7 +130,7 @@ pub(crate) fn report() -> String {
     let _ = writeln!(
         report,
         "  built at:      {}",
-        unknown_if_empty(BUILD_TIMESTAMP)
+        built_at(paths.executable.as_deref())
     );
     let _ = writeln!(
         report,

@@ -239,10 +239,14 @@ fn emit_build_identity() {
         .unwrap_or_else(git_revision);
     println!("cargo:rustc-env=WARP_BUILD_REVISION={revision}");
 
-    // Not defaulted to "now": a timestamp that changes on every build would
-    // make this env var differ between otherwise identical builds. Callers who
-    // want one pass it in, and the installer does.
-    let timestamp = env::var("WARP_BUILD_TIMESTAMP").unwrap_or_else(|_| String::from("unknown"));
+    // Left empty when unset, rather than defaulted to "now" or to a placeholder.
+    // A timestamp that changes on every build would make this env var differ
+    // between otherwise identical builds, and `rerun-if-env-changed` above would
+    // then rebuild the crate every time. Empty means "not stamped", and the app
+    // falls back to the executable's modification time, which is the same fact
+    // and costs nothing. A placeholder string here would look stamped and
+    // suppress that fallback.
+    let timestamp = env::var("WARP_BUILD_TIMESTAMP").unwrap_or_default();
     println!("cargo:rustc-env=WARP_BUILD_TIMESTAMP={timestamp}");
 }
 

@@ -703,6 +703,20 @@ impl BackingView for TerminalView {
             );
         }
 
+        if model.shell_launch_state().available_shell().is_some() {
+            if !items.is_empty() {
+                items.push(MenuItem::Separator);
+            }
+            items.extend([
+                MenuItemFields::new("Restart shell")
+                    .with_on_select_action(TerminalAction::RestartShell)
+                    .into_item(),
+                MenuItemFields::new("Change shell")
+                    .with_on_select_action(TerminalAction::ChangeShell)
+                    .into_item(),
+            ]);
+        }
+
         // Split-pane related items.
         if self.split_pane_state(ctx).is_in_split_pane() {
             if !items.is_empty() {

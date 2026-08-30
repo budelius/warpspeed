@@ -85,18 +85,15 @@ use crate::settings::PrivacySettings;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
-use crate::terminal::ShellLaunchData;
-use crate::terminal::available_shells::AvailableShells;
-use crate::terminal::TerminalSurface;
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
+use crate::terminal::available_shells::AvailableShells;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
 use crate::terminal::local_tty::TerminalManager;
 use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::local_tty::terminal_manager::native_startup_directory;
-use crate::terminal::model::terminal_model::ConversationTranscriptViewerStatus;
-use crate::terminal::model::terminal_model::ExitReason;
+use crate::terminal::model::terminal_model::{ConversationTranscriptViewerStatus, ExitReason};
 use crate::terminal::resizable_data::ResizableData;
 use crate::terminal::shared_session::{
     IsSharedSessionCreator, SharedSessionActionSource, SharedSessionScrollbackType,
@@ -105,6 +102,7 @@ use crate::terminal::shared_session::{
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
 use crate::terminal::view::Event as TerminalViewEvent;
+use crate::terminal::{ShellLaunchData, TerminalSurface};
 use crate::test_util::assert_eventually_within;
 use crate::test_util::pane_snapshots::{single_terminal_leaf_snapshot, terminal_leaf_snapshot};
 use crate::test_util::settings::initialize_settings_for_tests;
@@ -4039,6 +4037,42 @@ fn test_deferred_template_pane_parks_shell_until_started() {
     });
 }
 
+#[test]
+fn test_deferred_template_pane_exposes_its_working_directory() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir().expect("the test process has a current directory");
+        let displayed_cwd = cwd.to_string_lossy().into_owned();
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Template {
+                    template: PaneTemplateType::PaneTemplate {
+                        is_focused: Some(true),
+                        cwd: cwd.clone(),
+                        commands: vec![],
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let working_directory = pane_group.read(&app, |group, ctx| {
+            let pane_id = group
+                .terminal_pane_ids()
+                .next()
+                .expect("the template has one terminal pane");
+            group.terminal_working_directory(pane_id, ctx)
+        });
+
+        assert_eq!(working_directory, Some(displayed_cwd));
+    });
+}
+
 /// A pane carrying startup commands now honors `Deferred` like any other
 /// pane; the commands stay queued and run once the pane is activated. This
 /// pins the behaviour Task 1 introduced in place of the old force-eager
@@ -4529,6 +4563,39 @@ fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
             Some(shell_launch_data),
             "a parked pane must re-save the shell it was restored with"
         );
+    });
+}
+
+#[test]
+fn test_parked_restored_pane_exposes_its_working_directory() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(terminal_leaf_snapshot(Some(cwd.clone()), None)),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let displayed_cwd = pane_group.read(&app, |group, ctx| {
+            let pane_id = group
+                .terminal_pane_ids()
+                .next()
+                .expect("the restored layout has one terminal pane");
+            group.terminal_working_directory(pane_id, ctx)
+        });
+
+        assert_eq!(displayed_cwd, Some(cwd));
     });
 }
 

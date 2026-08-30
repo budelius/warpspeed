@@ -584,7 +584,8 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
                 # in an if statement; it thinks we are trying to do -gt incorrectly.
                 # Since this is a good warning and we do not want to turn off this lint rule,
                 # we do a little indirection here
-                $hasGitCommand = Get-Command -CommandType Application git 2>$null
+                $gitMetadataEnabled = "$env:WARP_PROMPT_GIT_METADATA_ENABLED" -eq '1'
+                $hasGitCommand = if ($gitMetadataEnabled) { Get-Command -CommandType Application git 2>$null } else { $null }
                 if ($hasGitCommand) {
                     # This is deliberately not using || b/c || only works in Powershell >=7
                     $gitBranchTmp = Warp-Git symbolic-ref --short HEAD 2>$null

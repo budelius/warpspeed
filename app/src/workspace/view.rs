@@ -404,6 +404,8 @@ use crate::terminal::keys_settings::KeysSettings;
 use crate::terminal::ligature_settings::should_use_ligature_rendering;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::docker_sandbox::resolve_sbx_path_from_user_shell;
+#[cfg(all(feature = "local_tty", unix))]
+use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::model::blockgrid::BlockGrid;
 #[cfg(feature = "local_fs")]
 use crate::terminal::model::session::Session;
@@ -488,6 +490,8 @@ use crate::view_components::{
 };
 #[cfg(target_family = "wasm")]
 use crate::wasm_nux_dialog::WasmNUXDialog;
+#[cfg(not(target_family = "wasm"))]
+use crate::window_process_handoff::{AgentResumeCommand, IncomingWindowHandoff};
 use crate::window_settings::{WindowSettings, WindowSettingsChangedEvent, ZoomLevel};
 use crate::workflows::manager::{WorkflowManager, WorkflowOpenSource};
 use crate::workflows::workflow::Workflow;
@@ -1140,6 +1144,7 @@ pub struct Workspace {
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
+    window_process_restart_in_progress: bool,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
@@ -3573,6 +3578,7 @@ impl Workspace {
             restart_shell_confirmation_modal,
             change_shell_menu_modal,
             pending_shell_restart: None,
+            window_process_restart_in_progress: false,
             close_session_confirmation_dialog,
             rewind_confirmation_dialog,
             delete_conversation_confirmation_dialog,
@@ -4086,6 +4092,7 @@ impl Workspace {
             NewWorkspaceSource::Restored {
                 window_snapshot,
                 block_lists,
+                defer_shell_start,
             } => {
                 self.launch_config_source = window_snapshot.launch_config_source.clone();
                 // Clamp up front, once, and reuse this single binding for
@@ -4147,9 +4154,13 @@ impl Workspace {
                         self.add_tab_with_pane_layout_with_activation(
                             PanesLayout::Snapshot {
                                 snapshot: Box::new(saved_tab.root.clone()),
-                                shell_start: ShellStartPolicy::for_launch_config_tab(
-                                    tab_index == active_tab_index,
-                                ),
+                                shell_start: if defer_shell_start {
+                                    ShellStartPolicy::Deferred
+                                } else {
+                                    ShellStartPolicy::for_launch_config_tab(
+                                        tab_index == active_tab_index,
+                                    )
+                                },
                             },
                             block_lists.clone(),
                             custom_title,
@@ -4203,7 +4214,15 @@ impl Workspace {
                     self.left_panel_open = restored_left_panel_open;
                 }
 
-                self.activate_tab_internal(active_tab_index, ctx);
+                self.activate_tab_internal_with_activation(
+                    active_tab_index,
+                    if defer_shell_start {
+                        TabActivation::Bookkeeping
+                    } else {
+                        TabActivation::Visible
+                    },
+                    ctx,
+                );
                 self.check_and_trigger_onboarding(ctx);
             }
             NewWorkspaceSource::FromTemplate {
@@ -12140,10 +12159,10 @@ impl Workspace {
             .is_launch_config_save_modal_open = true;
 
         let window_snapshot = self.snapshot(ctx.window_id(), false, ctx);
-        let launch_config_source = FeatureFlag::PersistentLaunchConfigSessions
-            .is_enabled()
-            .then(|| self.launch_config_source.clone())
-            .flatten();
+        // Rewriting the YAML this window came from is not part of session persistence, so it
+        // isn't gated on `PersistentLaunchConfigSessions`; the one step that is — writing the
+        // session alongside it — checks the flag itself in the modal.
+        let launch_config_source = self.launch_config_source.clone();
         self.launch_config_save_modal.view.update(ctx, |view, ctx| {
             view.set_window_snapshot(window_snapshot, launch_config_source);
             view.reset_editor(ctx);
@@ -12950,6 +12969,201 @@ impl Workspace {
         })
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    fn restart_window_in_new_process(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.window_process_restart_in_progress {
+            return;
+        }
+
+        let window_id = ctx.window_id();
+        if UnsavedStateSummary::for_window(window_id, ctx).has_unsaved_code_changes() {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "Save or discard code changes before restarting this window.".to_owned(),
+                    ),
+                    ctx,
+                );
+            });
+            return;
+        }
+
+        let mut snapshot = self.snapshot(
+            window_id,
+            crate::root_view::quake_mode_window_id() == Some(window_id),
+            ctx,
+        );
+        snapshot.quake_mode = false;
+        if snapshot.tabs.is_empty() {
+            self.show_window_process_restart_error(ctx);
+            return;
+        }
+
+        let resume_commands = self.process_handoff_agent_resume_commands(ctx);
+        #[cfg(all(feature = "local_tty", unix))]
+        let persistent_session_ids = snapshot.persistent_session_ids();
+        let outgoing = match crate::window_process_handoff::launch(snapshot, resume_commands) {
+            Ok(outgoing) => outgoing,
+            Err(error) => {
+                report_error!(error.context("Failed to start window process handoff"));
+                self.show_window_process_restart_error(ctx);
+                return;
+            }
+        };
+
+        self.window_process_restart_in_progress = true;
+        ctx.spawn(
+            outgoing.wait_until_ready(),
+            move |workspace, (outgoing, ready), ctx| {
+                if !ready {
+                    outgoing.abort();
+                    workspace.window_process_restart_in_progress = false;
+                    workspace.show_window_process_restart_error(ctx);
+                    return;
+                }
+
+                #[cfg(all(feature = "local_tty", unix))]
+                if let Err(error) = PtySpawner::handle(ctx).read(ctx, |spawner, _| {
+                    spawner.prepare_sessions_for_handoff(persistent_session_ids)
+                }) {
+                    outgoing.abort();
+                    workspace.window_process_restart_in_progress = false;
+                    report_error!(error.context(
+                        "Failed to preserve terminal sessions for window process handoff"
+                    ));
+                    workspace.show_window_process_restart_error(ctx);
+                    return;
+                }
+
+                let pane_groups = workspace.tab_views().cloned().collect::<Vec<_>>();
+                for pane_group in pane_groups {
+                    pane_group.update(ctx, |pane_group, ctx| {
+                        pane_group.shutdown_terminal_sessions_for_process_handoff(ctx);
+                    });
+                }
+
+                if let Err(error) = outgoing.release() {
+                    outgoing.abort();
+                    workspace.window_process_restart_in_progress = false;
+                    report_error!(error.context("Failed to release window process handoff"));
+                    workspace.show_window_process_restart_error(ctx);
+                    return;
+                }
+
+                if ctx.window_ids().count() == 1 {
+                    workspace.launch_config_source = None;
+                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                } else {
+                    ctx.windows()
+                        .close_window(ctx.window_id(), TerminationMode::ContentTransferred);
+                }
+            },
+        );
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn restart_window_in_new_process(&mut self, _ctx: &mut ViewContext<Self>) {}
+
+    #[cfg(not(target_family = "wasm"))]
+    fn process_handoff_agent_resume_commands(&self, ctx: &AppContext) -> Vec<AgentResumeCommand> {
+        let mut commands = Vec::new();
+        for pane_group in self.tab_views() {
+            let candidates = pane_group.read(ctx, |pane_group, ctx| {
+                pane_group
+                    .terminal_pane_ids()
+                    .filter_map(|pane_id| {
+                        let manager = pane_group.terminal_manager_for_pane_id(pane_id, ctx)?;
+                        if !manager.as_ref(ctx).supports_session_restart()
+                            || manager.as_ref(ctx).persistent_session_id().is_some()
+                        {
+                            return None;
+                        }
+                        Some((
+                            pane_group.terminal_session_uuid(pane_id)?,
+                            pane_group.terminal_view_from_pane_id(pane_id, ctx)?.id(),
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            commands.extend(
+                candidates
+                    .into_iter()
+                    .filter_map(|(pane_uuid, terminal_view_id)| {
+                        Self::resolve_agent_resume_command(terminal_view_id, ctx)
+                            .map(|command| AgentResumeCommand { pane_uuid, command })
+                    }),
+            );
+        }
+        commands
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn queue_process_handoff_agent_resume_commands(
+        &self,
+        commands: &[AgentResumeCommand],
+        ctx: &mut ViewContext<Self>,
+    ) {
+        for resume in commands {
+            let terminal_view = self.tab_views().find_map(|pane_group| {
+                pane_group.read(ctx, |pane_group, ctx| {
+                    let pane_id =
+                        pane_group.find_terminal_pane_by_session_uuid(&resume.pane_uuid)?;
+                    pane_group.terminal_view_from_pane_id(pane_id, ctx)
+                })
+            });
+            if let Some(terminal_view) = terminal_view {
+                terminal_view.update(ctx, |terminal_view, ctx| {
+                    terminal_view.set_pending_command_queue(vec![resume.command.clone()], ctx);
+                });
+            } else {
+                log::warn!("Could not restore a CLI agent into its handed-off terminal pane");
+            }
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn accept_window_process_handoff(
+        &mut self,
+        handoff: IncomingWindowHandoff,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.queue_process_handoff_agent_resume_commands(handoff.agent_resume_commands(), ctx);
+        if let Err(error) = handoff.mark_ready() {
+            report_error!(error.context("Failed to accept window process handoff"));
+            ctx.terminate_app(TerminationMode::ForceTerminate, None);
+            return;
+        }
+
+        ctx.spawn(handoff.wait_for_release(), |workspace, released, ctx| {
+            if !released {
+                log::error!("The original process did not release the handed-off window");
+                ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                return;
+            }
+
+            let pane_groups = workspace.tab_views().cloned().collect::<Vec<_>>();
+            for pane_group in pane_groups {
+                pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.start_deferred_shells(ctx);
+                });
+            }
+            workspace.focus_active_tab(ctx);
+            ctx.notify();
+        });
+    }
+
+    fn show_window_process_restart_error(&self, ctx: &mut ViewContext<Self>) {
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            toast_stack.add_ephemeral_toast(
+                DismissibleToast::error(
+                    "Couldn't restart this window in a new process. The original window is still open."
+                        .to_owned(),
+                ),
+                ctx,
+            );
+        });
+    }
+
     /// Restarts the focused pane's session, switching to `target` if given
     /// (or keeping the same shell if `None`). Prompts for confirmation first
     /// if the pane has a long-running foreground command -- a running CLI
@@ -13088,7 +13302,7 @@ impl Workspace {
     #[cfg(not(target_family = "wasm"))]
     fn resolve_agent_resume_command(
         terminal_view_id: EntityId,
-        ctx: &mut ViewContext<Self>,
+        ctx: &AppContext,
     ) -> Option<String> {
         let session = CLIAgentSessionsModel::as_ref(ctx).session(terminal_view_id)?;
         if session.agent != crate::terminal::CLIAgent::Claude {
@@ -13137,7 +13351,7 @@ impl Workspace {
     #[cfg(target_family = "wasm")]
     fn resolve_agent_resume_command(
         _terminal_view_id: EntityId,
-        _ctx: &mut ViewContext<Self>,
+        _ctx: &AppContext,
     ) -> Option<String> {
         None
     }
@@ -24684,7 +24898,18 @@ impl TypedActionView for Workspace {
                 self.add_tab_with_shell(shell.clone(), *source, ctx)
             }
             RestartShell => self.start_shell_restart(None, ctx),
+            RestartShellForTerminalView { terminal_view_id } => {
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
+                    self.start_shell_restart(None, ctx);
+                }
+            }
+            RestartWindowInNewProcess => self.restart_window_in_new_process(ctx),
             ToggleChangeShellMenu => self.toggle_change_shell_menu(ctx),
+            ToggleChangeShellMenuForTerminalView { terminal_view_id } => {
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
+                    self.toggle_change_shell_menu(ctx);
+                }
+            }
             ChangeShell { shell } => self.start_shell_restart(Some(shell.clone()), ctx),
             AddGetStartedTab => self.add_get_started_tab(ctx),
             AddAmbientAgentTab => self.add_ambient_agent_tab(ctx),
@@ -28520,7 +28745,14 @@ impl View for Workspace {
 
     /// Update this workspace when it has been closed, but may still be restored.
     fn on_window_closed(&mut self, ctx: &mut ViewContext<Self>) {
-        if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+        // `restore_session` is the setting through which a user says their
+        // terminal contents must not be written to disk, so it gates this even
+        // when the launch-config session feature is on. Without the check the
+        // snapshot below is persisted with `include_blocks: true` -- scrollback
+        // and all -- for anyone who turned session restore off.
+        if !self.window_process_restart_in_progress
+            && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+            && *GeneralSettings::as_ref(ctx).restore_session
             && self.launch_config_source.is_some()
             && let Some(model_event_sender) = self.model_event_sender.as_ref()
         {

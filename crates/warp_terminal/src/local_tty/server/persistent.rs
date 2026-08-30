@@ -80,10 +80,50 @@ pub(super) fn socket_path() -> PathBuf {
     ))
 }
 
+/// A client process, identified by more than its PID.
+///
+/// PIDs are recycled. A session whose client died was detected as detached by
+/// checking whether the PID was still alive, so once the kernel handed that
+/// number to an unrelated process the session looked permanently attached:
+/// `attach_session` refused every reattach and the shell could never be
+/// reached again. Pairing the PID with the process's start time makes a
+/// recycled PID distinguishable from the process that actually attached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClientProcess {
+    pid: u32,
+    /// The kernel's start time for `pid`, read when the client attached.
+    ///
+    /// `None` on platforms where we cannot read it, where this degrades to the
+    /// previous PID-only behaviour rather than refusing to work.
+    start_time: Option<u64>,
+}
+
+impl ClientProcess {
+    fn new(pid: u32) -> Self {
+        Self {
+            pid,
+            start_time: process_start_time(pid),
+        }
+    }
+
+    /// Whether this exact process is still running -- not merely something
+    /// holding its PID.
+    fn is_running(&self) -> bool {
+        if !process_is_running(self.pid) {
+            return false;
+        }
+        match (self.start_time, process_start_time(self.pid)) {
+            (Some(attached), Some(current)) => attached == current,
+            // Unknown on one side or the other: fall back to liveness alone.
+            _ => true,
+        }
+    }
+}
+
 struct SupervisedSession {
     child: Child,
     leader: File,
-    attached_client_pid: Option<u32>,
+    attached_client: Option<ClientProcess>,
     preserve_for_client_pid: Option<u32>,
     detached_output: NamedTempFile,
     spooled_output_bytes: u64,
@@ -96,10 +136,10 @@ impl SupervisedSession {
 
     fn update_attachment(&mut self) {
         if self
-            .attached_client_pid
-            .is_some_and(|pid| !process_is_running(pid))
+            .attached_client
+            .is_some_and(|client| !client.is_running())
         {
-            self.attached_client_pid = None;
+            self.attached_client = None;
         }
     }
 
@@ -142,7 +182,7 @@ impl SupervisedSession {
     }
 
     fn drain_detached_output(&mut self) -> Result<()> {
-        if self.attached_client_pid.is_some() {
+        if self.attached_client.is_some() {
             return Ok(());
         }
 
@@ -219,7 +259,7 @@ impl Supervisor {
                         SupervisedSession {
                             child: spawned.child,
                             leader,
-                            attached_client_pid: Some(client_pid),
+                            attached_client: Some(ClientProcess::new(client_pid)),
                             preserve_for_client_pid: None,
                             detached_output,
                             spooled_output_bytes: 0,
@@ -240,7 +280,7 @@ impl Supervisor {
                             Some(result.leader_fd),
                         ) {
                             if let Some(session) = self.sessions.get_mut(&session_id) {
-                                session.attached_client_pid = None;
+                                session.attached_client = None;
                             }
                             return Err(error);
                         }
@@ -301,8 +341,8 @@ impl Supervisor {
                 for session_id in persistent_session_ids {
                     if let Some(session) = self.sessions.get_mut(&session_id)
                         && session
-                            .attached_client_pid
-                            .is_none_or(|attached_pid| attached_pid == client_pid)
+                            .attached_client
+                            .is_none_or(|attached| attached.pid == client_pid)
                     {
                         session.preserve_for_client_pid = Some(client_pid);
                     }
@@ -336,7 +376,7 @@ impl Supervisor {
             self.sessions.get(&session_id)?.preserve_for_client_pid == Some(client_pid);
         if preserving {
             if let Some(session) = self.sessions.get_mut(&session_id) {
-                session.attached_client_pid = None;
+                session.attached_client = None;
                 // Consume the mark. It exists so a client can shut itself down
                 // without taking its sessions with it, and that is a one-shot
                 // request: leaving it set means every later kill for this
@@ -370,7 +410,7 @@ impl Supervisor {
                 bail!("Terminal session is no longer running");
             }
             session.update_attachment();
-            if session.attached_client_pid.is_some() {
+            if session.attached_client.is_some() {
                 bail!("Terminal session is already attached");
             }
             session.drain_detached_output()?;
@@ -384,7 +424,7 @@ impl Supervisor {
             session.spooled_output_bytes = 0;
             replay.as_file_mut().seek(std::io::SeekFrom::Start(0))?;
 
-            session.attached_client_pid = Some(client_pid);
+            session.attached_client = Some(ClientProcess::new(client_pid));
             session.preserve_for_client_pid = None;
             let result = PtySpawnResult {
                 pid: session.child.id(),
@@ -411,7 +451,7 @@ impl Supervisor {
                 if send_result.is_err()
                     && let Some(session) = self.sessions.get_mut(&session_id)
                 {
-                    session.attached_client_pid = None;
+                    session.attached_client = None;
                 }
                 send_result?;
             }
@@ -568,6 +608,26 @@ fn set_nonblocking(fd: RawFd) -> Result<()> {
     flags.insert(nix::fcntl::OFlag::O_NONBLOCK);
     nix::fcntl::fcntl(fd, nix::fcntl::F_SETFL(flags))?;
     Ok(())
+}
+
+/// The kernel's start time for a process, used to tell a recycled PID from the
+/// process that actually attached.
+///
+/// Linux only for now: field 22 of `/proc/<pid>/stat`, in clock ticks since
+/// boot. Elsewhere this returns `None` and callers fall back to a bare liveness
+/// check, which is what every platform did before.
+#[cfg(target_os = "linux")]
+fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The second field is the executable name in parentheses and may itself
+    // contain spaces and parentheses, so fields are counted from the last ')'.
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_start_time(_pid: u32) -> Option<u64> {
+    None
 }
 
 fn process_is_running(pid: u32) -> bool {

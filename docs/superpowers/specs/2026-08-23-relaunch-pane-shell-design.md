@@ -10,10 +10,12 @@
 
 Two user-facing commands, one implementation path:
 
-- **Restart shell** — relaunch the same shell. No menu; immediate.
+- **Restart shell** — relaunch the same shell immediately.
 - **Change shell…** — open the shell picker and relaunch with the chosen shell.
 
-Out of scope, tracked separately: process-per-window, and opening a launch configuration in a new process. Those share no design surface with this.
+Both are available from the command palette, the pane-header overflow menu, and terminal tab/pane context menus.
+
+A follow-up command, **Restart window in new process**, snapshots the selected window and restores it in a newly launched process. It deliberately uses a separate handoff path rather than composing pane-level shell restarts.
 
 ## Decisions
 
@@ -22,7 +24,15 @@ Out of scope, tracked separately: process-per-window, and opening a launch confi
 | Something is running in the pane | Warn and confirm, then kill. Prompt **only** when something is actually running. |
 | Where the new shell starts | The pane's current directory, translated across shell types. |
 | Agent behaviour | Auto-relaunch a **Claude Code** agent onto a fork of its conversation. Claude only — `resolve_agent_resume_command` returns `None` for every other `CLIAgent`, Codex included. |
-| Surface | Two separate commands, as above. |
+| Surface | Two separate commands in the command palette and terminal context menus. |
+
+### Window process restart
+
+`Restart window in new process` writes a versioned `WindowSnapshot` handoff under the application's state directory and launches a replacement executable. Installed WarpSpeed processes resolve that executable through `%LOCALAPPDATA%\Programs\WarpSpeed\current.txt`; development builds fall back to their current executable when no installed replacement exists. The command has no default keybinding and is available from the command palette and terminal tab context menus.
+
+The handoff is two-phase. The replacement restores only the handed-off window with every shell deferred, restores built-in agent conversations, queues resumable Claude CLI-agent commands, and writes a ready marker. Only then does the original process preserve supervised Unix PTYs, synchronously stop the old pane event loops, and write the release marker. The replacement starts its deferred shells after observing release, allowing supervised PTYs to reattach without racing their old owners. On platforms without supervised PTY transfer, shells restart from their captured shell and working-directory metadata; resumable Claude sessions continue from a forked transcript.
+
+The original window remains open if the replacement cannot launch or acknowledge readiness. After release, the original closes with `TerminationMode::ContentTransferred`; if it was the process's final window, the original process terminates. Handoff files use unique names, owner-scoped state storage, bounded waits, and are removed after completion or failure.
 
 ## Architecture
 

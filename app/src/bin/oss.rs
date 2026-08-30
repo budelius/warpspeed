@@ -21,6 +21,11 @@ fn main() -> Result<()> {
             mcp_static_config: None,
         },
     );
+    // The OSS build is what people run when they build this repo themselves, so it gets the same
+    // in-development features the Warp team runs with rather than only what has already shipped.
+    state = state
+        .with_additional_features(warp_core::features::DOGFOOD_FLAGS)
+        .with_additional_features(warp_core::features::PREVIEW_FLAGS);
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
     }

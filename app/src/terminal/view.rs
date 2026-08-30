@@ -11147,15 +11147,6 @@ impl TerminalView {
 
     /// Recomputes the chip values for the Warp prompt (i.e. _not_ PS1).
     fn refresh_warp_prompt(&mut self, ctx: &mut ViewContext<Self>) {
-        // Ask the per-repo sub-model to re-fetch metadata so the chip values
-        // reflect the latest git state (branch, diff stats, etc.).
-        #[cfg(feature = "local_fs")]
-        if let Some(handle) = &self.git_repo_status {
-            handle.update(ctx, |model, ctx| {
-                model.refresh_metadata(ctx);
-            });
-        }
-
         self.input.update(ctx, |input, ctx| {
             input.update_prompt_display_chips(ctx);
         });
@@ -27037,6 +27028,8 @@ impl TypedActionView for TerminalView {
             | AltSelect(_)
             | AltMouseAction(_)
             | ToggleMaximizePane
+            | RestartShell
+            | ChangeShell
             | PromptContextMenu { .. }
             | OpenInputContextMenu { .. }
             | InputContextMenuItem(_)
@@ -27349,6 +27342,16 @@ impl TypedActionView for TerminalView {
                 ctx.emit(Event::Pane(PaneEvent::SplitUp(chosen_shell.to_owned())))
             }
             ToggleMaximizePane => ctx.emit(Event::Pane(PaneEvent::ToggleMaximized)),
+            RestartShell => {
+                ctx.dispatch_typed_action(&WorkspaceAction::RestartShellForTerminalView {
+                    terminal_view_id: self.view_id,
+                });
+            }
+            ChangeShell => {
+                ctx.dispatch_typed_action(&WorkspaceAction::ToggleChangeShellMenuForTerminalView {
+                    terminal_view_id: self.view_id,
+                });
+            }
             PromptContextMenu {
                 position_offset_from_prompt,
             } => self.show_prompt_context_menu(*position_offset_from_prompt, ctx),

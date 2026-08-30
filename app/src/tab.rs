@@ -42,7 +42,7 @@ use crate::shell_indicator::ShellIndicatorType;
 use crate::terminal::shared_session::SharedSessionStatus;
 use crate::terminal::shared_session::manager::Manager;
 use crate::terminal::shared_session::render_util::shared_session_indicator_color;
-use crate::terminal::view::TerminalViewState;
+use crate::terminal::view::{TerminalView, TerminalViewState};
 use crate::themes::theme::{AnsiColorIdentifier, Fill as ThemeFill, VerticalGradient};
 use crate::ui_components::buttons::icon_button;
 use crate::ui_components::color_dot::{TAB_COLOR_OPTIONS, render_color_dot};
@@ -457,6 +457,8 @@ impl TabData {
             self.pin_menu_items(index),
             self.tab_group_menu_items(index, tab_groups, is_only_member_of_group),
             self.session_sharing_menu_items(index, ctx),
+            self.shell_menu_items(pane_name_target, ctx),
+            self.window_process_menu_items(),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
             self.close_tab_menu_items(index, tabs_len, ctx),
@@ -580,6 +582,67 @@ impl TabData {
         })
     }
 
+    fn terminal_context_target(
+        &self,
+        pane_name_target: Option<PaneNameMenuTarget>,
+        ctx: &AppContext,
+    ) -> Option<(PaneId, ViewHandle<TerminalView>)> {
+        let pane_group = self.pane_group.as_ref(ctx);
+        let pane_id = pane_name_target
+            .filter(|target| self.pane_group.id() == target.locator.pane_group_id)
+            .and_then(|target| {
+                pane_group
+                    .pane_by_id(target.locator.pane_id)
+                    .map(|_| target.locator.pane_id)
+            })
+            .unwrap_or_else(|| pane_group.focused_pane_id(ctx));
+        let terminal_view = pane_group.terminal_view_from_pane_id(pane_id, ctx)?;
+        Some((pane_id, terminal_view))
+    }
+
+    fn shell_menu_items(
+        &self,
+        pane_name_target: Option<PaneNameMenuTarget>,
+        ctx: &AppContext,
+    ) -> Vec<MenuItem<WorkspaceAction>> {
+        let Some((pane_id, terminal_view)) = self.terminal_context_target(pane_name_target, ctx)
+        else {
+            return vec![];
+        };
+        let pane_group = self.pane_group.as_ref(ctx);
+        let can_restart = pane_group
+            .terminal_manager_for_pane_id(pane_id, ctx)
+            .is_some_and(|manager| manager.as_ref(ctx).supports_session_restart());
+        if !can_restart {
+            return vec![];
+        }
+
+        let terminal_view_id = terminal_view.id();
+        vec![
+            MenuItemFields::new("Restart shell")
+                .with_on_select_action(WorkspaceAction::RestartShellForTerminalView {
+                    terminal_view_id,
+                })
+                .into_item(),
+            MenuItemFields::new("Change shell")
+                .with_on_select_action(WorkspaceAction::ToggleChangeShellMenuForTerminalView {
+                    terminal_view_id,
+                })
+                .into_item(),
+        ]
+    }
+
+    fn window_process_menu_items(&self) -> Vec<MenuItem<WorkspaceAction>> {
+        if cfg!(target_family = "wasm") {
+            return Vec::new();
+        }
+        vec![
+            MenuItemFields::new("Restart window in new process")
+                .with_on_select_action(WorkspaceAction::RestartWindowInNewProcess)
+                .into_item(),
+        ]
+    }
+
     fn copy_metadata_menu_items(
         &self,
         pane_name_target: Option<PaneNameMenuTarget>,
@@ -596,7 +659,7 @@ impl TabData {
         let vertical_tabs_display_granularity = *TabSettings::as_ref(ctx)
             .vertical_tabs_display_granularity
             .value();
-        let (title_label, title, terminal_view) = if matches!(
+        let (title_label, title) = if matches!(
             vertical_tabs_display_granularity,
             VerticalTabsDisplayGranularity::Panes
         ) {
@@ -611,19 +674,13 @@ impl TabData {
             (
                 "Copy pane title",
                 Self::copyable_pane_title(pane_group, pane_id, ctx),
-                pane_group.terminal_view_from_pane_id(pane_id, ctx),
             )
         } else {
-            let terminal_view = pane_name_target
-                .filter(|target| self.pane_group.id() == target.locator.pane_group_id)
-                .and_then(|target| {
-                    pane_group.terminal_view_from_pane_id(target.locator.pane_id, ctx)
-                })
-                .or_else(|| pane_group.focused_session_view(ctx));
-            ("Copy tab title", tab_title, terminal_view)
+            ("Copy tab title", tab_title)
         };
 
-        if let Some(terminal_view) = terminal_view {
+        if let Some((pane_id, terminal_view)) = self.terminal_context_target(pane_name_target, ctx)
+        {
             let terminal_view = terminal_view.as_ref(ctx);
             Self::push_copy_metadata_menu_item(
                 &mut menu_items,
@@ -634,11 +691,7 @@ impl TabData {
             Self::push_copy_metadata_menu_item(
                 &mut menu_items,
                 "Copy working directory",
-                Self::copyable_metadata_value(
-                    terminal_view
-                        .pwd()
-                        .or_else(|| terminal_view.display_working_directory(ctx)),
-                ),
+                Self::copyable_metadata_value(pane_group.terminal_working_directory(pane_id, ctx)),
             );
             Self::push_copy_metadata_menu_item(
                 &mut menu_items,

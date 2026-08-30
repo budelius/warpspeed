@@ -24,7 +24,9 @@ use crate::code_review::diff_state::DiffStats;
 use crate::code_review::git_repo_model::{GitRepoStatusModel, GitStatusMetadata};
 #[cfg(feature = "local_fs")]
 use crate::code_review::github_repo_model::GitHubRepoModel;
-use crate::context_chips::context_chip::{Environment, PromptGenerator};
+use crate::context_chips::context_chip::{
+    ChipFingerprintInput, Environment, PromptGenerator, RefreshConfig,
+};
 #[cfg(feature = "local_fs")]
 use crate::context_chips::display_chip::GitBranchTrackingStatus;
 use crate::context_chips::prompt::Prompt;
@@ -60,6 +62,41 @@ fn git_status_metadata(branch: &str) -> GitStatusMetadata {
         stats_against_head: DiffStats::default(),
         branch_tracking_status: GitBranchTrackingStatus::new(branch.to_string(), None, 0, 0),
     }
+}
+
+#[test]
+fn git_shell_fallbacks_refresh_only_on_demand() {
+    let branch_chip = ContextChipKind::ShellGitBranch.to_chip().unwrap();
+    assert!(matches!(
+        branch_chip.refresh_config(),
+        RefreshConfig::OnDemandOnly
+    ));
+    assert_eq!(
+        branch_chip.runtime_policy().fingerprint_inputs(),
+        &[
+            ChipFingerprintInput::SessionId,
+            ChipFingerprintInput::WorkingDirectory,
+            ChipFingerprintInput::InvalidatingCommandCount,
+        ]
+    );
+    assert_eq!(
+        branch_chip.runtime_policy().invalidate_on_commands(),
+        &["git"]
+    );
+    assert!(matches!(
+        ContextChipKind::GitBranchStatus
+            .to_chip()
+            .unwrap()
+            .refresh_config(),
+        RefreshConfig::OnDemandOnly
+    ));
+    assert!(matches!(
+        ContextChipKind::GitDiffStats
+            .to_chip()
+            .unwrap()
+            .refresh_config(),
+        RefreshConfig::OnDemandOnly
+    ));
 }
 
 #[test]
@@ -463,8 +500,7 @@ fn test_disabling_chips() {
             })
             .await;
 
-        // By default, context chips are enabled, so the git branch command should run. It may run
-        // twice due to how periodically-refreshing chips are implemented.
+        // By default, context chips are enabled, so the git branch dropdown command should run.
         assert!(!executor.commands.lock().is_empty());
 
         // If PS1 is enabled, the command should not run.

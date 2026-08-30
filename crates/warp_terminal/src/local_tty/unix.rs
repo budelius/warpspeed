@@ -408,6 +408,8 @@ fn build_host_shell_command(
         "WARP_PROMPT_NODE_VERSION_ENABLED",
         if node_version_chip_enabled { "1" } else { "0" },
     );
+    // Host repositories are tracked by Warp's native repository watcher.
+    builder.env("WARP_PROMPT_GIT_METADATA_ENABLED", "0");
 
     // Pass through any additional entries to add to PATH.
     let path_append = extra_path_entries()
@@ -962,6 +964,7 @@ fn build_docker_sandbox_command(
         "WARP_PROMPT_NODE_VERSION_ENABLED",
         if node_version_chip_enabled { "1" } else { "0" },
     );
+    builder.env("WARP_PROMPT_GIT_METADATA_ENABLED", "0");
     let path_append = extra_path_entries()
         .map(|p| p.to_string_lossy().into_owned())
         .join(":");

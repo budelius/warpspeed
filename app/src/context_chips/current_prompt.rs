@@ -979,10 +979,8 @@ impl CurrentPrompt {
         allow_fingerprint_skip: bool,
         ctx: &mut ModelContext<Self>,
     ) {
-        // For periodically-updated chips, we have to check if context chips were disabled while
-        // waiting on the timer. This protects against race conditions between aborting the
-        // previous refresh handle and starting the next one.
-        if !self.active(ctx) {
+        // A timer may fire after the chip was disabled or switched to an external update source.
+        if !self.active(ctx) || self.is_updated_externally(chip_kind) {
             return;
         }
 
@@ -1503,6 +1501,18 @@ impl CurrentPrompt {
             && let Some(old_strong) = old_weak.upgrade(ctx)
         {
             ctx.unsubscribe_from_model(&old_strong);
+        }
+
+        if handle.is_some() {
+            for chip_kind in [
+                ContextChipKind::ShellGitBranch,
+                ContextChipKind::GitBranchStatus,
+                ContextChipKind::GitDiffStats,
+            ] {
+                if let Some(state) = self.states.get_mut(&chip_kind) {
+                    state.clear_abort_handlers();
+                }
+            }
         }
 
         // Repo detached, clear git chips that require repository metadata.

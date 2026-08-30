@@ -639,7 +639,7 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
           # default PATH. Instead, we rely on the active PATH, as if the user doesn't have git
           # available to their session, it is unlikely they will be looking for git branch
           # information from the prompt.
-          if command -v git >/dev/null 2>&1; then
+          if [[ "$WARP_PROMPT_GIT_METADATA_ENABLED" == "1" ]] && command -v git >/dev/null 2>&1; then
             git_branch=$(warp_git symbolic-ref --short HEAD 2> /dev/null)
             # The git branch the user is on, or the git commit hash if they're not on a branch.
             git_head="${git_branch:-$(warp_git rev-parse --short HEAD 2> /dev/null)}"

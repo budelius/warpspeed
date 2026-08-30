@@ -683,6 +683,14 @@ pub enum Command {
     /// Print debugging information and exit.
     #[clap(long_flag = "dump-debug-info")]
     DumpDebugInfo,
+
+    /// Print which build this is, where it runs from, and the directories it
+    /// uses, then exit.
+    ///
+    /// `--version` reports the release tag, which only tagged builds have. This
+    /// identifies any build, including one run out of a build directory.
+    #[clap(long_flag = "build-info")]
+    BuildInfo,
     /// Print the JSON schema for the current Warp channel's settings and exit.
     #[cfg(not(target_family = "wasm"))]
     DumpSettingsSchema {
@@ -701,7 +709,7 @@ impl Command {
     pub fn prints_to_stdout(&self) -> bool {
         match self {
             Command::Worker(_) => false,
-            Command::CommandLine(_) | Command::DumpDebugInfo => true,
+            Command::CommandLine(_) | Command::DumpDebugInfo | Command::BuildInfo => true,
             Command::Completions { .. } => true,
             #[cfg(not(target_family = "wasm"))]
             Command::DumpSettingsSchema { output_path } => output_path.is_none(),

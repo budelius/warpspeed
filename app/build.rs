@@ -27,6 +27,8 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FAMILY");
 
+    emit_build_identity();
+
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
     let target_family = env::var("CARGO_CFG_TARGET_FAMILY")?;
 
@@ -212,6 +214,73 @@ fn generate_channel_config_if_needed(target_family: &str, target_os: &str) {
         fs::write(&config_path, &output.stdout).unwrap_or_else(|err| {
             panic!("Failed to write config to {}: {err}", config_path.display())
         });
+    }
+}
+
+/// Records which source tree this binary was built from, for `--build-info`.
+///
+/// `GIT_RELEASE_TAG` only exists for tagged release builds, so for everything
+/// else -- a developer's `cargo build`, a CI job, the Windows installer -- the
+/// binary otherwise carries no identity at all, and the only way to tell two
+/// builds apart is the mtime of the file. That is what this fixes.
+///
+/// Both values can be supplied through the environment
+/// (`WARP_BUILD_REVISION`, `WARP_BUILD_TIMESTAMP`) so a packaging script can
+/// stamp exactly what it intends; otherwise the revision is read from git.
+/// Every failure degrades to "unknown" rather than failing the build: a build
+/// from a source tarball with no `.git` must still compile.
+fn emit_build_identity() {
+    println!("cargo:rerun-if-env-changed=WARP_BUILD_REVISION");
+    println!("cargo:rerun-if-env-changed=WARP_BUILD_TIMESTAMP");
+
+    let revision = env::var("WARP_BUILD_REVISION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(git_revision);
+    println!("cargo:rustc-env=WARP_BUILD_REVISION={revision}");
+
+    // Left empty when unset, rather than defaulted to "now" or to a placeholder.
+    // A timestamp that changes on every build would make this env var differ
+    // between otherwise identical builds, and `rerun-if-env-changed` above would
+    // then rebuild the crate every time. Empty means "not stamped", and the app
+    // falls back to the executable's modification time, which is the same fact
+    // and costs nothing. A placeholder string here would look stamped and
+    // suppress that fallback.
+    let timestamp = env::var("WARP_BUILD_TIMESTAMP").unwrap_or_default();
+    println!("cargo:rustc-env=WARP_BUILD_TIMESTAMP={timestamp}");
+}
+
+/// The short revision of `HEAD`, suffixed `-dirty` when the tree has changes.
+///
+/// Deliberately does not `rerun-if-changed` on anything in `.git`: watching
+/// `.git/index` would rebuild the whole app crate after every `git add`, which
+/// costs far more than an occasionally stale revision string. A release build
+/// starts clean, and anyone who needs it exact can pass `WARP_BUILD_REVISION`.
+fn git_revision() -> String {
+    let revision = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|revision| revision.trim().to_owned())
+        .filter(|revision| !revision.is_empty());
+
+    let Some(revision) = revision else {
+        return String::from("unknown");
+    };
+
+    let is_dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| !output.stdout.is_empty());
+
+    if is_dirty {
+        format!("{revision}-dirty")
+    } else {
+        revision
     }
 }
 

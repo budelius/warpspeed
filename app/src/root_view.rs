@@ -242,6 +242,8 @@ pub enum QuakeModePinPosition {
 
 pub struct OpenFromRestoredArg {
     pub app_state: Option<AppState>,
+    pub force_restore: bool,
+    pub defer_shell_start: bool,
 }
 
 pub struct OpenLaunchConfigArg {
@@ -644,8 +646,13 @@ fn launch_config_workspace_source(
                     });
                 #[cfg(feature = "local_fs")]
                 let block_lists = if session.block_lists.is_empty() {
-                    crate::persistence::load_restored_blocks_for_launch_config().unwrap_or_else(
-                        |error| {
+                    // Only the panes of the window being restored -- this runs
+                    // on the UI thread, and reading every block in the database
+                    // stalls it in proportion to the user's whole history.
+                    let pane_uuids =
+                        crate::launch_configs::session_store::terminal_pane_uuids(&window_snapshot);
+                    crate::persistence::load_restored_blocks_for_launch_config(&pane_uuids)
+                        .unwrap_or_else(|error| {
                             safe_warn!(
                                 safe: ("Failed to load terminal history for launch config session"),
                                 full: (
@@ -653,8 +660,7 @@ fn launch_config_workspace_source(
                                 )
                             );
                             Default::default()
-                        },
-                    )
+                        })
                 } else {
                     session.block_lists
                 };
@@ -663,6 +669,7 @@ fn launch_config_workspace_source(
                 return NewWorkspaceSource::Restored {
                     window_snapshot,
                     block_lists,
+                    defer_shell_start: false,
                 };
             }
             Ok(None) => {}
@@ -830,7 +837,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
         };
 
         // Check whether user has enabled session restoration.
-        if *GeneralSettings::as_ref(ctx).restore_session {
+        if arg.force_restore || *GeneralSettings::as_ref(ctx).restore_session {
             let mut active_index = None;
             let mut normal_window_count = 0;
             for (idx, window) in app_state.windows.iter().enumerate() {
@@ -870,6 +877,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                                 NewWorkspaceSource::Restored {
                                     window_snapshot: window.clone(),
                                     block_lists: app_state.block_lists.clone(),
+                                    defer_shell_start: arg.defer_shell_start,
                                 },
                                 ctx,
                             );
@@ -910,6 +918,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                                     NewWorkspaceSource::Restored {
                                         window_snapshot: window.clone(),
                                         block_lists: app_state.block_lists.clone(),
+                                        defer_shell_start: arg.defer_shell_start,
                                     },
                                     ctx,
                                 );
@@ -962,6 +971,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                             NewWorkspaceSource::Restored {
                                 window_snapshot: window.clone(),
                                 block_lists: app_state.block_lists.clone(),
+                                defer_shell_start: arg.defer_shell_start,
                             },
                             ctx,
                         );
@@ -1655,6 +1665,7 @@ pub enum NewWorkspaceSource {
     Restored {
         window_snapshot: WindowSnapshot,
         block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+        defer_shell_start: bool,
     },
     Session {
         options: Box<NewTerminalOptions>,

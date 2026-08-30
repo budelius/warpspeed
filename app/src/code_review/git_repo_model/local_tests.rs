@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use repo_metadata::{RepositoryUpdate, TargetFile};
 
@@ -31,19 +31,44 @@ fn should_refresh_metadata_ignores_ignored_file_updates() {
     ));
 }
 
-#[cfg(feature = "local_fs")]
 #[test]
-fn parse_branch_tracking_counts_accepts_git_rev_list_output() {
-    assert_eq!(
-        LocalGitRepoStatusModel::parse_branch_tracking_counts("2\t3\n"),
-        Some((2, 3, 0))
-    );
-    assert_eq!(
-        LocalGitRepoStatusModel::parse_branch_tracking_counts("10 0 4"),
-        Some((10, 0, 4))
-    );
-    assert_eq!(
-        LocalGitRepoStatusModel::parse_branch_tracking_counts("error"),
-        None
-    );
+fn native_git_metadata_supports_unborn_branch() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let repository = GitRepository::init(temp_dir.path()).unwrap();
+    std::fs::write(temp_dir.path().join("untracked.txt"), "new\n").unwrap();
+
+    let current_branch = LocalGitRepoStatusModel::current_branch_name(&repository).unwrap();
+    let stats = LocalGitRepoStatusModel::diff_stats(&repository).unwrap();
+
+    assert!(!current_branch.is_empty());
+    assert_eq!(stats.files_changed, 1);
+    assert_eq!(stats.total_additions, 1);
+    assert_eq!(stats.total_deletions, 0);
+}
+
+#[test]
+fn native_git_metadata_reads_branch_and_worktree_diff() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let repository = GitRepository::init(temp_dir.path()).unwrap();
+    std::fs::write(temp_dir.path().join("tracked.txt"), "one\n").unwrap();
+    let mut index = repository.index().unwrap();
+    index.add_path(Path::new("tracked.txt")).unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repository.find_tree(tree_id).unwrap();
+    let signature = git2::Signature::now("Warp", "warp@example.com").unwrap();
+    repository
+        .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+        .unwrap();
+    std::fs::write(temp_dir.path().join("tracked.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(temp_dir.path().join("untracked.txt"), "new\n").unwrap();
+
+    let current_branch = LocalGitRepoStatusModel::current_branch_name(&repository).unwrap();
+    let main_branch = LocalGitRepoStatusModel::main_branch_name(&repository, &current_branch);
+    let stats = LocalGitRepoStatusModel::diff_stats(&repository).unwrap();
+
+    assert!(!current_branch.is_empty());
+    assert_eq!(main_branch, current_branch);
+    assert_eq!(stats.files_changed, 2);
+    assert_eq!(stats.total_additions, 2);
+    assert_eq!(stats.total_deletions, 0);
 }

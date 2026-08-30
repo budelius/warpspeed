@@ -973,10 +973,9 @@ pub fn init(app: &mut AppContext) {
     .with_group(bindings::BindingGroup::Settings.as_str())
     .with_context_predicate(id!("Workspace"))]);
 
-    // Restart/change shell — command-palette-only by design: every unclaimed
-    // chord risks colliding with a user's own binding, so neither ships with
-    // a default keybinding. Both prompt for confirmation first if the pane
-    // has a long-running foreground command.
+    // Restart/change shell have no default keybindings because every unclaimed chord risks
+    // colliding with a user's own binding. Both prompt for confirmation first if the pane has a
+    // long-running foreground command.
     //
     // `Workspace_PaneCanRestartShell` keeps both off panes whose terminal
     // manager has no local session to replace. The palette builds its command
@@ -1000,6 +999,15 @@ pub fn init(app: &mut AppContext) {
         .with_group(bindings::BindingGroup::Terminal.as_str())
         .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanRestartShell")),
     ]);
+
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:restart_window_in_new_process",
+        "Restart window in new process",
+        WorkspaceAction::RestartWindowInNewProcess,
+    )
+    .with_group(bindings::BindingGroup::Close.as_str())
+    .with_context_predicate(id!("Workspace"))
+    .with_enabled(|| !cfg!(target_family = "wasm"))]);
 
     app.register_editable_bindings([EditableBinding::new(
         "workspace:cycle_active_tab_color",

@@ -50,10 +50,11 @@ use crate::gpu_state::GPUState;
 use crate::launch_configs::launch_config::{
     LaunchConfigWindowSource, PaneMode, PaneTemplateType, TabTemplate, WindowTemplate,
 };
+use crate::modal::ModalAction;
 use crate::network::NetworkStatus;
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::notebooks::notebook::NotebookView;
-use crate::pane_group::{Direction, PaneGroupAction, PaneId};
+use crate::pane_group::{BackingView, Direction, PaneGroupAction, PaneId};
 use crate::pricing::PricingInfoModel;
 #[cfg(not(target_family = "wasm"))]
 use crate::remote_server::codebase_index_model::RemoteCodebaseIndexModel;
@@ -79,7 +80,6 @@ use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::shared_session::{
     SharedSessionScrollbackType, SharedSessionSource, SharedSessionStatus,
 };
-use crate::modal::ModalAction;
 use crate::test_util::assert_eventually_within;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseSettings;
@@ -341,6 +341,7 @@ fn restored_workspace(
             NewWorkspaceSource::Restored {
                 window_snapshot,
                 block_lists: Arc::new(HashMap::new()),
+                defer_shell_start: false,
             },
             ctx,
         )
@@ -5301,6 +5302,45 @@ fn test_session_restore_defers_all_but_active_tab() {
     });
 }
 
+#[test]
+fn process_handoff_restore_keeps_every_shell_parked_until_release() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        let snapshot = window_snapshot_with_tabs(3, 1);
+        let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            Workspace::new(
+                global_resource_handles,
+                None,
+                NewWorkspaceSource::Restored {
+                    window_snapshot: snapshot,
+                    block_lists: Arc::new(HashMap::new()),
+                    defer_shell_start: true,
+                },
+                ctx,
+            )
+        });
+
+        let deferred = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        tab.pane_group
+                            .read(ctx, |group, ctx| group.terminal_manager(0, ctx))
+                            .expect("each restored tab has one terminal pane")
+                            .read(ctx, |manager, _| manager.has_deferred_shell())
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+
+        assert_eq!(deferred, vec![true, true, true]);
+    });
+}
+
 /// An out-of-range `active_tab_index` on the restored snapshot must not
 /// leave the visible tab's shell parked forever: `activate_tab_internal`
 /// silently no-ops on an out-of-range index rather than clamping, so the
@@ -5335,6 +5375,106 @@ fn test_session_restore_out_of_range_active_index_starts_last_tab() {
             "an out-of-range active_tab_index clamps to the last tab for both \
              the eager set and activation, so exactly that tab's shell starts"
         );
+    });
+}
+
+#[test]
+fn restart_window_in_new_process_is_available_to_the_command_palette() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:restart_window_in_new_process")
+                .expect("the restart-window binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::RestartWindowInNewProcess)
+            ));
+            assert!(
+                ctx.key_bindings_for_view(workspace.as_ref(ctx).window_id, workspace.id())
+                    .into_iter()
+                    .any(|binding| matches!(
+                        binding
+                            .action
+                            .as_ref()
+                            .as_any()
+                            .downcast_ref::<WorkspaceAction>(),
+                        Some(WorkspaceAction::RestartWindowInNewProcess)
+                    ))
+            );
+        });
+    });
+}
+
+#[test]
+fn restart_and_change_shell_appear_in_pane_context_menus() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        let (tab_items, pane_header_items, terminal_view_id) =
+            workspace.update(&mut app, |workspace, ctx| {
+                let tab_index = workspace.active_tab_index;
+                let tab = &workspace.tabs[tab_index];
+                let tab_items = tab.menu_items(
+                    tab_index,
+                    workspace.tabs.len(),
+                    &workspace.tab_groups,
+                    workspace.tab_is_only_member_of_its_group(tab_index),
+                    workspace.can_move_tab(tab_index, TabMovement::Left),
+                    workspace.can_move_tab(tab_index, TabMovement::Right),
+                    ctx,
+                );
+                let terminal_view = workspace
+                    .focused_terminal_view(ctx)
+                    .expect("mock workspace has a focused terminal pane");
+                let pane_header_items = terminal_view
+                    .as_ref(ctx)
+                    .pane_header_overflow_menu_items(ctx);
+                (tab_items, pane_header_items, terminal_view.id())
+            });
+
+        for label in ["Restart shell", "Change shell"] {
+            assert!(
+                tab_items
+                    .iter()
+                    .any(|item| { item.fields().is_some_and(|fields| fields.label() == label) }),
+                "the tab context menu must include {label:?}"
+            );
+            assert!(
+                pane_header_items
+                    .iter()
+                    .any(|item| { item.fields().is_some_and(|fields| fields.label() == label) }),
+                "the pane header context menu must include {label:?}"
+            );
+        }
+
+        assert!(tab_items.iter().any(|item| {
+            item.fields()
+                .is_some_and(|fields| fields.label() == "Restart window in new process")
+        }));
+        assert!(tab_items.iter().any(|item| matches!(
+            item.fields().and_then(|fields| fields.on_select_action()),
+            Some(WorkspaceAction::RestartWindowInNewProcess)
+        )));
+        assert!(tab_items.iter().any(|item| matches!(
+            item.fields().and_then(|fields| fields.on_select_action()),
+            Some(WorkspaceAction::RestartShellForTerminalView {
+                terminal_view_id: target,
+            }) if *target == terminal_view_id
+        )));
+        assert!(tab_items.iter().any(|item| matches!(
+            item.fields().and_then(|fields| fields.on_select_action()),
+            Some(WorkspaceAction::ToggleChangeShellMenuForTerminalView {
+                terminal_view_id: target,
+            }) if *target == terminal_view_id
+        )));
     });
 }
 
@@ -5491,9 +5631,10 @@ fn restart_shell_resumes_tracked_claude_session_via_forked_transcript() {
         // Write a Claude session transcript ending on a complete turn, in the layout
         // `fork_transcript_at_last_complete_turn` reads from, so the fork has something to
         // find and trim.
-        let session_dir = tmp.path().join("projects").join(
-            crate::ai::agent_sdk::driver::harness::claude_transcript::encode_cwd(cwd),
-        );
+        let session_dir = tmp
+            .path()
+            .join("projects")
+            .join(crate::ai::agent_sdk::driver::harness::claude_transcript::encode_cwd(cwd));
         std::fs::create_dir_all(&session_dir).unwrap();
         let entries = [
             serde_json::json!({ "type": "user", "message": { "role": "user" } }),
@@ -5533,7 +5674,8 @@ fn restart_shell_resumes_tracked_claude_session_via_forked_transcript() {
                                 session_id: Some(original_session_id.to_string()),
                                 ..Default::default()
                             },
-                        input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+                        input_state:
+                            crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
                         should_auto_toggle_input: false,
                         listener: None,
                         plugin_version: None,
@@ -5610,9 +5752,10 @@ fn restart_shell_clears_the_tracked_agent_session_so_a_second_restart_cannot_ref
         let cwd = std::path::Path::new("/mock/project/for/clearing/test");
         let original_session_id = uuid::Uuid::new_v4();
 
-        let session_dir = tmp.path().join("projects").join(
-            crate::ai::agent_sdk::driver::harness::claude_transcript::encode_cwd(cwd),
-        );
+        let session_dir = tmp
+            .path()
+            .join("projects")
+            .join(crate::ai::agent_sdk::driver::harness::claude_transcript::encode_cwd(cwd));
         std::fs::create_dir_all(&session_dir).unwrap();
         let entries = [
             serde_json::json!({ "type": "user", "message": { "role": "user" } }),
@@ -5652,7 +5795,8 @@ fn restart_shell_clears_the_tracked_agent_session_so_a_second_restart_cannot_ref
                                 session_id: Some(original_session_id.to_string()),
                                 ..Default::default()
                             },
-                        input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+                        input_state:
+                            crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
                         should_auto_toggle_input: false,
                         listener: None,
                         plugin_version: None,
@@ -5796,7 +5940,11 @@ fn focused_pane_shell(
             .focused_terminal_manager(ctx)
             .expect("mock workspace has a focused terminal pane")
             .read(ctx, |manager, _| {
-                manager.model().lock().shell_launch_state().available_shell()
+                manager
+                    .model()
+                    .lock()
+                    .shell_launch_state()
+                    .available_shell()
             })
     })
 }
@@ -5980,9 +6128,8 @@ fn restart_shell_confirmation_confirm_restarts_with_the_pending_target_and_cwd()
         // the raw host path would fail for the right reasons in the wrong test.
         // That also means this assertion exercises `native_startup_directory`'s
         // non-identity arms wherever the machine has such a shell.
-        let expected = crate::terminal::local_tty::terminal_manager::native_startup_directory(
-            &cwd, &target,
-        );
+        let expected =
+            crate::terminal::local_tty::terminal_manager::native_startup_directory(&cwd, &target);
         assert!(
             expected.is_some(),
             "precondition: the target shell must be able to accept the test process's own \
@@ -6307,8 +6454,9 @@ fn toggle_change_shell_menu_opens_then_closes_the_picker() {
             workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);
         });
         assert!(
-            app.read(|ctx| workspace
-                .read(ctx, |workspace, _| workspace.change_shell_menu_modal.is_open())),
+            app.read(|ctx| workspace.read(ctx, |workspace, _| workspace
+                .change_shell_menu_modal
+                .is_open())),
             "the first `ToggleChangeShellMenu` must open the picker"
         );
 
@@ -6316,8 +6464,9 @@ fn toggle_change_shell_menu_opens_then_closes_the_picker() {
             workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);
         });
         assert!(
-            !app.read(|ctx| workspace
-                .read(ctx, |workspace, _| workspace.change_shell_menu_modal.is_open())),
+            !app.read(|ctx| workspace.read(ctx, |workspace, _| workspace
+                .change_shell_menu_modal
+                .is_open())),
             "the second `ToggleChangeShellMenu` must close the picker, not leave it open"
         );
     });
@@ -6345,8 +6494,9 @@ fn selecting_a_shell_closes_the_change_shell_picker() {
                 .read(ctx, |modal, _| modal.body().clone())
         });
         assert!(
-            app.read(|ctx| workspace
-                .read(ctx, |workspace, _| workspace.change_shell_menu_modal.is_open())),
+            app.read(|ctx| workspace.read(ctx, |workspace, _| workspace
+                .change_shell_menu_modal
+                .is_open())),
             "precondition: the picker must be open before a selection can close it"
         );
 

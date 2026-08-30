@@ -201,6 +201,8 @@ pub enum TerminalAction {
     ClearSelectionsWhenShellMode,
     Close,
     ToggleMaximizePane,
+    RestartShell,
+    ChangeShell,
     SplitRight(Option<AvailableShell>),
     SplitLeft(Option<AvailableShell>),
     SplitDown(Option<AvailableShell>),
@@ -564,6 +566,8 @@ impl fmt::Debug for TerminalAction {
             SplitDown(_) => f.write_str("SplitDown"),
             SplitUp(_) => f.write_str("SplitUp"),
             ToggleMaximizePane => f.write_str("ToggleMaximizeActivePane"),
+            RestartShell => f.write_str("RestartShell"),
+            ChangeShell => f.write_str("ChangeShell"),
             PromptContextMenu {
                 position_offset_from_prompt,
             } => write!(

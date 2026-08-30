@@ -21,6 +21,13 @@ pub struct Command {
     pub(super) inner: std::process::Command,
     #[cfg(windows)]
     kill_on_parent_process_close: bool,
+    /// The creation flags last given to `inner`.
+    ///
+    /// `std::process::Command` does not expose them, and [`Self::spawn`] has to
+    /// know whether `CREATE_BREAKAWAY_FROM_JOB` is set in order to retry
+    /// without it.
+    #[cfg(windows)]
+    creation_flags: u32,
     stdin_is_default: bool,
     stdout_is_default: bool,
     stderr_is_default: bool,
@@ -74,20 +81,25 @@ impl Command {
         #[cfg_attr(not(windows), expect(unused_mut))]
         let mut inner = std::process::Command::new(program);
 
+        // We need to set the `CREATE_BREAKAWAY_FROM_JOB` flag to avoid assigning
+        // the process to the same Job Object as the Warp process, otherwise the
+        // process will be killed when the Warp process is killed. A job that
+        // forbids breakaway makes this fail; see `spawn_inner` for the fallback.
+        #[cfg(windows)]
+        let flags = windows::Win32::System::Threading::CREATE_NO_WINDOW.0
+            | windows::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB.0;
+
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            // We need to set the `CREATE_BREAKAWAY_FROM_JOB` flag to avoid assigning
-            // the process to the same Job Object as the Warp process, otherwise the
-            // process will be killed when the Warp process is killed.
-            let flags = windows::Win32::System::Threading::CREATE_NO_WINDOW.0
-                | windows::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB.0;
             inner.creation_flags(flags);
         }
         Self {
             inner,
             #[cfg(windows)]
             kill_on_parent_process_close: false,
+            #[cfg(windows)]
+            creation_flags: flags,
             stdin_is_default: true,
             stdout_is_default: true,
             stderr_is_default: true,
@@ -104,6 +116,7 @@ impl Command {
     pub fn creation_flags(&mut self, flags: u32) -> &mut Self {
         use std::os::windows::process::CommandExt;
         let flags = windows::Win32::System::Threading::CREATE_NO_WINDOW.0 | flags;
+        self.creation_flags = flags;
         self.inner.creation_flags(flags);
         self
     }
@@ -496,6 +509,48 @@ impl Command {
     ///     .spawn()
     ///     .expect("ls command failed to start");
     /// ```
+    /// Spawns, retrying without `CREATE_BREAKAWAY_FROM_JOB` if the job object
+    /// forbids leaving it.
+    ///
+    /// [`Self::new`] always requests breakaway so that a spawned process is not
+    /// killed when Warp's job object closes. That flag fails outright with
+    /// `ERROR_ACCESS_DENIED` unless the job was created with
+    /// `JOB_OBJECT_LIMIT_BREAKAWAY_OK` -- common under a terminal, a test
+    /// runner, or a CI agent, and not something Warp can change from inside.
+    ///
+    /// Failing the spawn there is the worse outcome: the process cannot start
+    /// at all, rather than starting inside the job. So breakaway is treated as
+    /// a preference, and a denial falls back to spawning without it.
+    #[cfg(windows)]
+    fn spawn_inner(&mut self) -> io::Result<Child> {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+
+        match self.inner.spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_ACCESS_DENIED)
+                    && self.creation_flags & CREATE_BREAKAWAY_FROM_JOB != 0 =>
+            {
+                let without_breakaway = self.creation_flags & !CREATE_BREAKAWAY_FROM_JOB;
+                self.inner.creation_flags(without_breakaway);
+                let result = self.inner.spawn();
+
+                // Restore the requested flags either way, so one denial does
+                // not silently change the behaviour of later spawns.
+                self.inner.creation_flags(self.creation_flags);
+                result
+            }
+            result => result,
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn spawn_inner(&mut self) -> io::Result<Child> {
+        self.inner.spawn()
+    }
+
     pub fn spawn(&mut self) -> io::Result<Child> {
         if self.stdin_is_default {
             self.inner.stdin(Stdio::null());
@@ -507,7 +562,7 @@ impl Command {
             self.inner.stderr(Stdio::null());
         }
 
-        let child = self.inner.spawn();
+        let child = self.spawn_inner();
 
         #[cfg(windows)]
         if self.kill_on_parent_process_close

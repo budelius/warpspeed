@@ -7,6 +7,7 @@ mod pipe_security;
 mod pipe_transport;
 mod pipes;
 mod proc_thread_attribute_list;
+mod supervised_pty;
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;

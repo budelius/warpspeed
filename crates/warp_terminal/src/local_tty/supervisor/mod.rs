@@ -8,6 +8,7 @@ pub mod framing;
 pub mod loopback;
 pub mod message;
 pub mod ring;
+pub mod serve;
 pub mod session_table;
 pub mod transport;
 

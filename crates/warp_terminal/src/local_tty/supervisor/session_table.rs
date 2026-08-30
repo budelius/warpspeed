@@ -181,6 +181,13 @@ impl SessionTable {
         summaries
     }
 
+    /// Every held session's id, in a stable order.
+    pub fn session_ids(&self) -> Vec<SessionId> {
+        let mut ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        ids.sort_by_key(|id| id.as_u64());
+        ids
+    }
+
     /// Stops holding a session.
     pub fn remove(&mut self, session_id: SessionId) -> bool {
         self.sessions.remove(&session_id).is_some()

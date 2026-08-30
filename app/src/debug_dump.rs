@@ -5,11 +5,10 @@
 //! information.
 #[cfg(not(windows))]
 use command::blocking::Command;
-use warp_core::channel::ChannelState;
 use warpui::windowing;
 
 pub(crate) fn run() -> anyhow::Result<()> {
-    println!("Warp version: {:?}", ChannelState::app_version());
+    print!("{}", crate::build_info::report());
 
     #[cfg(not(windows))]
     {

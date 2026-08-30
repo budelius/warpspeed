@@ -26,6 +26,7 @@ mod context_chips;
 mod crash_recovery;
 #[cfg(feature = "crash_reporting")]
 mod crash_reporting;
+mod build_info;
 mod debug_dump;
 mod default_terminal;
 mod download_method;
@@ -817,6 +818,9 @@ pub fn run() -> Result<()> {
             }
             warp_cli::Command::DumpDebugInfo => {
                 return debug_dump::run();
+            }
+            warp_cli::Command::BuildInfo => {
+                return build_info::run();
             }
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::DumpSettingsSchema { output_path } => {
@@ -1895,11 +1899,11 @@ pub(crate) fn initialize_app(
     #[cfg(not(target_family = "wasm"))]
     remote_server::wire_auth_token_rotation(ctx);
 
-    log::info!(
-        "Starting warp with channel state {} and version {:?}",
-        ChannelState::debug_str(),
-        ChannelState::app_version()
-    );
+    log::info!("Starting warp with channel state {}", ChannelState::debug_str());
+    // The full build identity and the directories in use, so an instance that
+    // is already running can still be identified from its log. `app_version`
+    // alone was `<unknown>` for every build that is not a tagged release.
+    build_info::log();
 
     // Teach our app that sometimes option means meta.
     ctx.set_event_munger(move |event, ctx| {

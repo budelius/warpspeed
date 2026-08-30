@@ -23,6 +23,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Merged upstream through `e2a08021`. The `warpspeed` target still builds against
   it unchanged.
 
+### Fixed
+
+- Arrow keys no longer stop reaching a foreground program when a block is still
+  selected from an earlier click. `terminal_up`/`terminal_down` consulted the
+  block selection before the running command, so a stale selection silently
+  swallowed up/down and left interactive selectors -- a CLI agent's question
+  prompt, `fzf`, `git add -p` -- impossible to navigate.
+- A pane no longer goes blind when an in-band generator's terminating marker is
+  lost. Capturing diverts every printable byte away from the grid, so the capture
+  is now bounded and abandoned if no marker arrives, and its cursor arithmetic
+  counts characters rather than bytes -- counting bytes could underflow or split
+  a multi-byte character and panic the PTY reader thread.
+- A generator whose bytes never reached the line editor no longer leaks the
+  in-flight in-band count. The leak kept the input box visible, which stopped the
+  terminal taking keyboard focus for the rest of the session.
+
 ### Notes
 
 - History extends to Warp's root commit. The repository began as a shallow clone,

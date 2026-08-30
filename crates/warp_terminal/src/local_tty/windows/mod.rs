@@ -3,6 +3,7 @@ mod conpty_api;
 mod environment;
 mod handle_lending;
 mod pipe_security;
+mod pipe_transport;
 mod pipes;
 mod proc_thread_attribute_list;
 

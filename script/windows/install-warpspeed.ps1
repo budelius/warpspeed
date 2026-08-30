@@ -27,7 +27,7 @@ if (-not $SKIP_BUILD) {
 
         Push-Location $WORKSPACE_ROOT
         try {
-            cargo build -p warp --release --bin warp-oss --bin warpspeed
+            cargo build -p warp --release --bin warpspeed
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to build warpspeed (exit code $LASTEXITCODE)"
             }
@@ -42,7 +42,6 @@ if (-not $SKIP_BUILD) {
 }
 
 $runtime_files = @(
-    'warp-oss.exe',
     'warpspeed.exe',
     'conpty.dll',
     'dxcompiler.dll',
@@ -123,6 +122,58 @@ $previous_version = if (Test-Path -LiteralPath $current_path) {
 } else {
     $null
 }
+# Release notes for this version: the commits between the build being replaced
+# and this one. WarpSpeed reads this file from beside its executable and shows
+# it in the Resource Center's what's-new section, because the changelog server
+# only knows about tagged releases and has nothing to say about a local build.
+#
+# The version directory name is <yyyyMMdd>-<HHmmssfff>-<revision>[-dirty], so the
+# revision is the third dash-separated component.
+$release_notes_path = Join-Path $version_dir 'release-notes.md'
+$previous_revision = if ($previous_version) {
+    $parts = $previous_version.Split('-')
+    if ($parts.Count -ge 3) { $parts[2] } else { $null }
+} else {
+    $null
+}
+
+$release_notes = if (-not $previous_revision) {
+    "First install of WarpSpeed from this repository, at ``$revision``."
+} else {
+    Push-Location $WORKSPACE_ROOT
+    try {
+        # Verify the revision is still in the repository before asking for a
+        # range against it: a rebase or a reset can leave the previous install
+        # pointing at a commit that no longer exists, and `git log` would fail.
+        git cat-file -e "$previous_revision^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            "Replaces ``$previous_revision``, which is no longer in the repository, so the list of changes cannot be determined."
+        } else {
+            $log = git log --pretty=format:'- %s (%h)' "$previous_revision..HEAD"
+            if ($LASTEXITCODE -ne 0) {
+                "Could not determine the changes since ``$previous_revision``."
+            } elseif (-not $log) {
+                "No new commits since ``$previous_revision``. This build differs only by uncommitted changes."
+            } else {
+                ($log -join "`n")
+            }
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+$dirty_note = if ($dirty) {
+    "`n`nBuilt from a tree with uncommitted changes, so it also contains work that is not in any commit above."
+} else {
+    ''
+}
+[IO.File]::WriteAllText(
+    $release_notes_path,
+    "## $version`n`n$release_notes$dirty_note`n",
+    [Text.Encoding]::UTF8
+)
+
 $current_temp_path = Join-Path $INSTALL_ROOT 'current.txt.new'
 [IO.File]::WriteAllText($current_temp_path, $version, [Text.Encoding]::ASCII)
 Move-Item -Force -LiteralPath $current_temp_path -Destination $current_path
@@ -175,6 +226,16 @@ Get-ChildItem -LiteralPath $versions_dir -Directory | ForEach-Object {
         }
     }
 }
+
+Get-ChildItem -LiteralPath $versions_dir -Filter 'warp-oss.exe' -File -Recurse |
+    ForEach-Object {
+        $obsolete_executable = $_
+        try {
+            Remove-Item -LiteralPath $obsolete_executable.FullName -Force
+        } catch {
+            Write-Warning "Could not remove obsolete Warp OSS executable $($obsolete_executable.FullName): $_"
+        }
+    }
 
 Write-Host "Installed WarpSpeed $version"
 Write-Host "Executable: $(Join-Path $version_dir 'warpspeed.exe')"

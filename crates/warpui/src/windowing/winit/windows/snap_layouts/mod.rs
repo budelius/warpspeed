@@ -7,4 +7,4 @@
 
 mod logic;
 
-pub use logic::*;
+pub use logic::{ButtonRect, hit_test, leave_position, pack_coords, synthetic_message, SyntheticMouseMessage};

@@ -1,13 +1,11 @@
 //! The decisions the Snap Layouts window subclass makes, expressed without any Win32 calls so
 //! they can be tested.
 
+use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::WindowsAndMessaging::{
     HTCLIENT, HTMAXBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN,
     WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
 };
-
-/// Mouse key state constant: left button pressed. Matches Windows API MK_LBUTTON = 0x0001.
-pub const MK_LBUTTON: (u32,) = (0x0001,);
 
 /// The bounds of the app-drawn maximize button, in physical pixels relative to the top-left of the
 /// window's client area.

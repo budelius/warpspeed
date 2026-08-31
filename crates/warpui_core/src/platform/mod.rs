@@ -454,6 +454,13 @@ pub trait Window: 'static + WindowContext + std::any::Any {
     fn uses_native_window_decorations(&self) -> bool;
     fn set_titlebar_height(&self, height: f64);
 
+    /// Reports where the app-drawn maximize button was painted, in logical pixels relative to the
+    /// window's client area, or `None` when no maximize button is on screen.
+    ///
+    /// Windows answers its non-client hit test from this, which is what opens the Snap Layouts
+    /// flyout over the button. Every other platform ignores it.
+    fn set_maximize_button_bounds(&self, bounds: Option<RectF>);
+
     /// Whether any hardware supports window transparency
     fn supports_transparency(&self) -> bool;
     fn graphics_backend(&self) -> GraphicsBackend;

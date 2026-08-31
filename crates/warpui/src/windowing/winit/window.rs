@@ -724,6 +724,11 @@ pub(super) struct Window {
     /// invisible title bar insofar as it triggers window dragging when clicked-and-dragged, or
     /// maximize/restore when double-clicked.
     titlebar_height: Cell<f32>,
+    /// Shared with the Snap Layouts window subclass on Windows 11. `None` when the subclass is not
+    /// installed: on Windows 10, on a window created with native decorations, and on every other
+    /// platform.
+    #[cfg(windows)]
+    snap_layouts: RefCell<Option<std::sync::Arc<super::windows::SnapLayoutsState>>>,
     capture_callback: RefCell<Option<FrameCaptureCallback>>,
 }
 
@@ -734,6 +739,8 @@ impl Window {
             inner: Default::default(),
             scene: Default::default(),
             titlebar_height: Cell::new(DEFAULT_TITLEBAR_HEIGHT),
+            #[cfg(windows)]
+            snap_layouts: RefCell::new(None),
             capture_callback: RefCell::new(None),
         }
     }
@@ -1666,6 +1673,32 @@ impl crate::platform::Window for Window {
 
     fn set_titlebar_height(&self, height: f64) {
         self.titlebar_height.set(height as f32);
+    }
+
+    fn set_maximize_button_bounds(&self, bounds: Option<RectF>) {
+        #[cfg(windows)]
+        {
+            use crate::platform::WindowContext;
+
+            let state = self.snap_layouts.borrow().as_ref().cloned();
+            let Some(state) = state else {
+                return;
+            };
+
+            // The subclass compares against physical client coordinates, so convert here rather
+            // than in the window procedure. A scale-factor change corrects itself on the next
+            // paint, which is when this is called.
+            let scale_factor = self.backing_scale_factor();
+            state.set_button_rect(bounds.map(|bounds| super::windows::ButtonRect {
+                left: (bounds.min_x() * scale_factor).round() as i32,
+                top: (bounds.min_y() * scale_factor).round() as i32,
+                right: (bounds.max_x() * scale_factor).round() as i32,
+                bottom: (bounds.max_y() * scale_factor).round() as i32,
+            }));
+        }
+
+        #[cfg(not(windows))]
+        let _ = bounds;
     }
 }
 

@@ -65,34 +65,39 @@ no message path changes.
 
 ### 2. The button's rectangle reaches the platform layer
 
-`Hoverable` already computes its laid-out `bounds()` and uses them for hit testing
-(`crates/warpui_core/src/elements/gui/hoverable.rs:623`), but it does not keep them. It will record them into
-`MouseState` during paint.
-
-The app already owns the handle for that button: `TrafficLightMouseStates::maximize_window_button`
-(`app/src/util/traffic_lights.rs:109`). `app/src/workspace/view.rs` reads the recorded rectangle and pushes it
-down through a new platform-window method:
+A new platform-window method carries the rectangle down:
 
 ```rust
 fn set_maximize_button_bounds(&self, bounds: Option<RectF>);
 ```
 
-The method matches `set_titlebar_height` in shape and in call site — `update_titlebar_height`
-(`app/src/workspace/view.rs:15240-15249`) — and is a no-op on macOS, Linux, WASM, headless, and the test
+It matches `set_titlebar_height` in shape and is a no-op on macOS, Linux, WASM, headless, and the test
 delegate.
 
-Taking the rectangle from layout rather than recomputing it analytically keeps the two rendering paths in
-`renderer.rs`, the Segoe Fluent glyph path and the SVG fallback, from drifting away from the hit test.
+The rectangle must come from paint, not from a view method. `update_titlebar_height`
+(`app/src/workspace/view.rs:15240-15249`) is called only at workspace construction and on settings changes,
+whereas the button is right-aligned and therefore moves on every window resize — and a resize re-lays-out the
+existing element tree without re-running `Workspace::render`. Anything pushed from a render-time call site
+would go stale the moment the window is resized.
 
-The winit window stores the rectangle in logical coordinates and converts to physical pixels using its scale
-factor when a hit test arrives, so per-monitor DPI changes and the app's zoom level both stay correct.
+A small Windows-only wrapper element, `MaximizeButtonRegion`, therefore publishes the rectangle itself. It
+wraps the maximize button in `traffic_lights/windows/renderer.rs`, and on each paint reports the bounds it
+was just laid out at to the platform window for its window id. Reporting the laid-out rectangle rather than
+recomputing it analytically also keeps the two rendering paths in `renderer.rs`, the Segoe Fluent glyph path
+and the SVG fallback, from drifting away from the hit test.
+
+The winit window converts to physical pixels with its current scale factor as the rectangle arrives, so the
+hit test itself needs no coordinate conversion, and a DPI change corrects itself on the next paint.
 
 The rectangle is `None`, and the flyout consequently absent, whenever the button is not a maximize target:
 
+- the window is fullscreen, where the button dispatches `root_view:toggle_fullscreen`. The wrapper element
+  reports `None` in that state;
+- the traffic lights are not rendered at all, where `maybe_render_traffic_lights`
+  (`app/src/workspace/view.rs:22303`) returns early. It reports `None` on that path;
 - the window is decorated, which happens when `enable_decorations_if_needed`
-  (`crates/warpui/src/windowing/winit/window.rs:667`) works around the GPU rendering-offset bug;
-- the window is fullscreen, where the button dispatches `root_view:toggle_fullscreen`;
-- the tab bar, and with it the button, is hidden.
+  (`crates/warpui/src/windowing/winit/window.rs:667`) works around the GPU rendering-offset bug. The subclass
+  is never installed on such a window.
 
 ### 3. Non-client messages become ordinary mouse messages
 
@@ -141,8 +146,7 @@ directly:
 - the non-client to client message mapping, covering each row of the table above and the messages that pass
   through untouched.
 
-Both are unit tested under `#[cfg(windows)]` in the new module. A test in
-`crates/warpui_core/src/elements/gui/hoverable_tests.rs` covers the recorded bounds.
+Both are unit tested under `#[cfg(windows)]` in the new module.
 
 Manual verification on Windows 11:
 

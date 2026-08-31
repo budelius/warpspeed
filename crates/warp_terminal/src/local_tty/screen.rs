@@ -13,12 +13,10 @@
 
 use crate::SizeInfo;
 use crate::event_listener::ChannelEventListener;
-use crate::model::Point;
-use crate::model::ansi;
 use crate::model::grid::grid_handler::{GridHandler, PerformResetGridChecks};
-use crate::model::grid::render_ansi;
-use crate::model::grid::{Dimensions, RespectDisplayedOutput};
+use crate::model::grid::{Dimensions, RespectDisplayedOutput, render_ansi};
 use crate::model::secrets::{ObfuscateSecrets, RespectObfuscatedSecrets};
+use crate::model::{Point, ansi};
 
 /// A screen in a form that can be sent over the supervisor protocol.
 ///

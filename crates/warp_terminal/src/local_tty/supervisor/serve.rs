@@ -73,8 +73,13 @@ impl<H: SessionHost> Supervisor<H> {
         now_unix_seconds: u64,
         event_listener: ChannelEventListener,
     ) {
-        self.table
-            .detach(session_id, snapshot, metadata, now_unix_seconds, event_listener);
+        self.table.detach(
+            session_id,
+            snapshot,
+            metadata,
+            now_unix_seconds,
+            event_listener,
+        );
     }
 
     /// Answers one client message.

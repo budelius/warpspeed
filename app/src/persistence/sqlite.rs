@@ -92,8 +92,8 @@ use crate::drive::OpenWarpDriveObjectSettings;
 use crate::notebooks::NotebookId;
 use crate::persistence::block_list::{
     get_all_restored_blocks, get_restored_blocks_for_panes,
-    process_ai_queries_for_nld_history_match,
-    process_ai_queries_for_uparrow_prompt, read_recent_ai_queries,
+    process_ai_queries_for_nld_history_match, process_ai_queries_for_uparrow_prompt,
+    read_recent_ai_queries,
 };
 use crate::persistence::model::{
     CODE_REVIEW_PANE_KIND, GET_STARTED_PANE_KIND, NewPersistedObjectAction, NewTeamSettings,
@@ -1326,10 +1326,8 @@ fn save_pane_state(
                     .as_ref()
                     .and_then(|config| serde_json::to_string(config).ok()),
                 llm_model_override: terminal_snapshot.llm_model_override.clone(),
-                active_profile_id: terminal_snapshot
-                    .active_profile_id
-                    .as_ref()
-                    .and_then(|sync_id| match serde_json::to_string(sync_id) {
+                active_profile_id: terminal_snapshot.active_profile_id.as_ref().and_then(
+                    |sync_id| match serde_json::to_string(sync_id) {
                         Ok(serialized) => Some(serialized),
                         Err(error) => {
                             log::warn!(
@@ -1337,7 +1335,8 @@ fn save_pane_state(
                             );
                             None
                         }
-                    }),
+                    },
+                ),
                 conversation_ids,
                 active_conversation_id: terminal_snapshot
                     .active_conversation_id

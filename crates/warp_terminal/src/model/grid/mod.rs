@@ -1,8 +1,8 @@
 mod displayed_output;
 pub mod grid_handler;
-pub mod render_ansi;
 mod grid_storage;
 mod indexing;
+pub mod render_ansi;
 mod selection_cursor;
 mod storage;
 

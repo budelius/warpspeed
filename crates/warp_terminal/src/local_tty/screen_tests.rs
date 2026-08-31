@@ -1,6 +1,5 @@
-use crate::event_listener::ChannelEventListener;
-
 use super::*;
+use crate::event_listener::ChannelEventListener;
 
 fn screen(columns: u16, rows: u16) -> HeadlessScreen {
     HeadlessScreen::new(columns, rows, ChannelEventListener::new_for_test())
@@ -91,10 +90,8 @@ fn text_attributes_survive_the_detach_boundary() {
     let mut continuous = screen(40, 3);
     continuous.feed(styled);
 
-    let reattached = HeadlessScreen::from_snapshot(
-        &continuous.snapshot(),
-        ChannelEventListener::new_for_test(),
-    );
+    let reattached =
+        HeadlessScreen::from_snapshot(&continuous.snapshot(), ChannelEventListener::new_for_test());
 
     assert_eq!(
         cell_appearance(&continuous),
@@ -125,10 +122,8 @@ fn alternate_screen_mode_survives_the_detach_boundary() {
         "test setup failed to enter the alternate screen"
     );
 
-    let reattached = HeadlessScreen::from_snapshot(
-        &continuous.snapshot(),
-        ChannelEventListener::new_for_test(),
-    );
+    let reattached =
+        HeadlessScreen::from_snapshot(&continuous.snapshot(), ChannelEventListener::new_for_test());
 
     assert!(
         reattached.is_alternate_screen_active(),
@@ -152,10 +147,8 @@ fn scroll_region_is_restored_by_a_snapshot() {
     continuous.feed(b"\x1b[2;4r");
     let expected = continuous.grid_for_test().scroll_region().clone();
 
-    let reattached = HeadlessScreen::from_snapshot(
-        &continuous.snapshot(),
-        ChannelEventListener::new_for_test(),
-    );
+    let reattached =
+        HeadlessScreen::from_snapshot(&continuous.snapshot(), ChannelEventListener::new_for_test());
 
     assert_eq!(
         expected,

@@ -90,7 +90,9 @@ fn attaching_a_session_twice_fails() {
     let session_id = SessionId::from(1u64);
     let mut table = table_with_detached_session(session_id, b"content", 0);
 
-    table.attach(session_id).expect("first attach should succeed");
+    table
+        .attach(session_id)
+        .expect("first attach should succeed");
     let second = table.attach(session_id);
 
     assert!(second.is_err(), "a second attach must be refused");
@@ -210,7 +212,12 @@ fn ping_is_answered_with_the_protocol_version() {
 fn a_response_message_is_not_treated_as_a_request() {
     let mut table = SessionTable::new();
 
-    let response = table.handle_request(&Message::Pong { protocol_version: 2 }, 0);
+    let response = table.handle_request(
+        &Message::Pong {
+            protocol_version: 2,
+        },
+        0,
+    );
 
     assert!(response.is_none(), "a response must not produce a reply");
 }

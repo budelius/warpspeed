@@ -80,14 +80,14 @@ pub mod view;
 pub mod warpify;
 mod waterfall_gap_element;
 mod writeable_pty;
-#[cfg(feature = "tui")]
-pub use writeable_pty::{PtyIntent, PtyIntentEvent, TerminalSurface};
 /// Test-only re-export. `TerminalSurface` is the seam a restart drives the view
 /// through -- `on_session_restart_started`, `on_pty_spawn_failed` -- so tests
 /// living outside this module need the trait in scope to call those methods on
 /// a `TerminalView`. Skipped when `tui` already re-exports it publicly.
 #[cfg(all(test, not(feature = "tui")))]
 pub(crate) use writeable_pty::TerminalSurface;
+#[cfg(feature = "tui")]
+pub use writeable_pty::{PtyIntent, PtyIntentEvent, TerminalSurface};
 #[cfg(windows)]
 pub mod wsl;
 

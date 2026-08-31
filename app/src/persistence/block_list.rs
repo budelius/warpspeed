@@ -241,7 +241,6 @@ fn restored_blocks_for_sessions(
     conn: &mut SqliteConnection,
     terminal_sessions: Vec<model::TerminalSession>,
 ) -> Result<PersistedBlocks, diesel::result::Error> {
-
     let block_lists = Block::belonging_to(&terminal_sessions)
         .select(Block::as_select())
         .order_by(schema::blocks::columns::id.asc())

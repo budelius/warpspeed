@@ -25,7 +25,7 @@ impl AntivirusInfo {
     /// unit test has no business doing -- but the terminal's shell-death path
     /// reads this singleton for telemetry, so a test that lets a shell die
     /// needs it registered or the effect panics.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(test)]
     pub fn new_for_test() -> Self {
         Self(None)
     }

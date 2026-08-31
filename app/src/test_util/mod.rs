@@ -45,14 +45,14 @@ pub(crate) use assert_eventually;
 /// given message on timeout.
 macro_rules! assert_eventually_within {
     ($timeout:expr_2021 => $cond:expr_2021, $($arg:tt)+) => {{
-        let deadline = std::time::Instant::now() + $timeout;
+        let deadline = instant::Instant::now() + $timeout;
         let mut pass = false;
         loop {
             if $cond {
                 pass = true;
                 break;
             }
-            if std::time::Instant::now() >= deadline {
+            if instant::Instant::now() >= deadline {
                 break;
             }
             warpui::r#async::Timer::after(std::time::Duration::from_millis(5)).await;

@@ -1,8 +1,8 @@
 use warp_core::SessionId;
 
 use super::*;
-use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::screen::ScreenSnapshot;
+use crate::local_tty::supervisor::message::SessionMetadata;
 
 fn snapshot() -> ScreenSnapshot {
     ScreenSnapshot {

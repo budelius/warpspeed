@@ -26,8 +26,8 @@ use windows::Win32::System::Console::{COORD, HPCON};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResetEvent, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, TerminateProcess, WaitForSingleObject,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResetEvent, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -99,12 +99,12 @@ impl SupervisedPty {
         };
         unsafe { ResetEvent(self.read_event) }.context("Failed to reset the pty read event")?;
 
-        let pending = match unsafe { ReadFile(self.pipe, Some(buffer), None, Some(&mut overlapped)) }
-        {
-            Ok(()) => false,
-            Err(error) if error.code() == ERROR_IO_PENDING.to_hresult() => true,
-            Err(error) => return Err(error).context("Failed to read from the supervised pty"),
-        };
+        let pending =
+            match unsafe { ReadFile(self.pipe, Some(buffer), None, Some(&mut overlapped)) } {
+                Ok(()) => false,
+                Err(error) if error.code() == ERROR_IO_PENDING.to_hresult() => true,
+                Err(error) => return Err(error).context("Failed to read from the supervised pty"),
+            };
 
         if pending {
             match unsafe { WaitForSingleObject(self.read_event, timeout_ms) } {
@@ -238,14 +238,17 @@ pub fn spawn_supervised_pty(
     startup_info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
 
-    let mut attributes =
-        unsafe { ProcThreadAttributeList::new() }.context("Failed to allocate the attribute list")?;
+    let mut attributes = unsafe { ProcThreadAttributeList::new() }
+        .context("Failed to allocate the attribute list")?;
     attributes
         .set_pty_connection(pty)
         .context("Failed to attach the child to the pseudoconsole")?;
     startup_info.lpAttributeList = attributes.as_mut_ptr();
 
-    let mut command: Vec<u16> = command_line.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut command: Vec<u16> = command_line
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let directory = working_directory
         .filter(|path| path.is_dir())
         .map(|path| HSTRING::from(path.as_os_str()));
@@ -268,7 +271,7 @@ pub fn spawn_supervised_pty(
     if result
         .as_ref()
         .err()
-        .is_some_and(|error| error.code().0 as i32 & 0xFFFF == ACCESS_DENIED)
+        .is_some_and(|error| error.code().0 & 0xFFFF == ACCESS_DENIED)
     {
         escaped_job_object = false;
         result = create_process(
@@ -324,7 +327,9 @@ fn create_process(
             false,
             flags,
             None,
-            directory.map(|dir| PCWSTR(dir.as_ptr())).unwrap_or(PCWSTR::null()),
+            directory
+                .map(|dir| PCWSTR(dir.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
             &startup_info.StartupInfo,
             process_information,
         )

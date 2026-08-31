@@ -9,11 +9,11 @@ pub mod mio_channel;
 pub mod recorder;
 pub mod screen;
 pub mod screen_handler;
-pub mod supervisor;
 #[cfg(unix)]
 pub mod server;
 pub mod shell;
 pub mod spawner;
+pub mod supervisor;
 #[cfg(unix)]
 pub mod terminal_attributes;
 #[cfg(unix)]

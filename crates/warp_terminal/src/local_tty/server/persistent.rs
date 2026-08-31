@@ -37,8 +37,7 @@ const MAX_SPOOLED_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
 /// How much of the spool survives compaction. A replay wants the most recent
 /// output, so compaction keeps the tail.
 const RETAINED_SPOOL_BYTES: u64 = 4 * 1024 * 1024;
-const SPOOL_TRUNCATION_NOTICE: &[u8] =
-    b"
+const SPOOL_TRUNCATION_NOTICE: &[u8] = b"
 
 [warp] Earlier output from this detached session was discarded.
 

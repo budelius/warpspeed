@@ -271,7 +271,7 @@ fn fork_transcript_trims_to_last_complete_turn() {
     // Table-driven over the entry sequences Step 1 established: complete turn, trailing
     // partial turn, and only-ever-partial. Each case gets its own tmp dir / session id so
     // the fork write for one case cannot leak into another's assertions.
-    let cases: Vec<(&str, Vec<serde_json::Value>, Option<Vec<serde_json::Value>>)> = vec![
+    let cases = vec![
         (
             "ends on a complete turn: nothing is trimmed",
             vec![user_entry(), assistant_entry(Some("end_turn"))],
@@ -340,8 +340,8 @@ fn fork_transcript_trims_to_last_complete_turn() {
 
         match expected {
             Some(expected_entries) => {
-                let continuation = result
-                    .unwrap_or_else(|| panic!("expected Some(..) for case: {description}"));
+                let continuation =
+                    result.unwrap_or_else(|| panic!("expected Some(..) for case: {description}"));
                 let new_uuid = resume_uuid(&continuation.command);
                 assert_ne!(new_uuid, old_uuid, "case: {description}");
 
@@ -354,7 +354,9 @@ fn fork_transcript_trims_to_last_complete_turn() {
                 let index: serde_json::Value = serde_json::from_slice(
                     &fs::read(tmp.path().join("sessions-index.json")).unwrap(),
                 )
-                .unwrap_or_else(|_| panic!("missing/invalid sessions-index.json for case: {description}"));
+                .unwrap_or_else(|_| {
+                    panic!("missing/invalid sessions-index.json for case: {description}")
+                });
                 assert_eq!(
                     index[new_uuid.to_string()]["sessionId"],
                     new_uuid.to_string(),

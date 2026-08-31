@@ -108,7 +108,10 @@ fn attaching_lends_the_session_endpoint_to_the_asking_client() {
         &listener(),
     );
 
-    let Some(Message::AttachResponse { result: Ok(attached) }) = response else {
+    let Some(Message::AttachResponse {
+        result: Ok(attached),
+    }) = response
+    else {
         panic!("expected a successful attach, got {response:?}");
     };
 
@@ -145,7 +148,10 @@ fn attaching_over_a_transport_that_cannot_lend_omits_the_endpoint() {
         &listener(),
     );
 
-    let Some(Message::AttachResponse { result: Ok(attached) }) = response else {
+    let Some(Message::AttachResponse {
+        result: Ok(attached),
+    }) = response
+    else {
         panic!("expected a successful attach, got {response:?}");
     };
 
@@ -252,7 +258,10 @@ fn pumped_output_reaches_a_client_that_reattaches() {
         &listener(),
     );
 
-    let Some(Message::AttachResponse { result: Ok(attached) }) = response else {
+    let Some(Message::AttachResponse {
+        result: Ok(attached),
+    }) = response
+    else {
         panic!("expected a successful attach, got {response:?}");
     };
 

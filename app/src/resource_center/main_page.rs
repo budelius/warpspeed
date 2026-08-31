@@ -124,26 +124,30 @@ impl ResourceCenterMainView {
                     let is_expanded = match data.section_name {
                         // Always show What's New section
                         FeatureSection::WhatsNew => true,
-                        FeatureSection::GettingStarted => match crate::build_info::changelog_version() {
-                            Some(version) => {
-                                match Settings::has_changelog_been_shown(&version, ctx) {
-                                    true => !is_tips_completed && !is_onboarded,
-                                    false => false,
+                        FeatureSection::GettingStarted => {
+                            match crate::build_info::changelog_version() {
+                                Some(version) => {
+                                    match Settings::has_changelog_been_shown(&version, ctx) {
+                                        true => !is_tips_completed && !is_onboarded,
+                                        false => false,
+                                    }
                                 }
+                                None => !is_tips_completed && !is_onboarded,
                             }
-                            None => !is_tips_completed && !is_onboarded,
-                        },
+                        }
                         // Expand Maximize Warp section once user has completed welcome tips,
                         // and keep open after users have completed/skipped all tips
-                        FeatureSection::MaximizeWarp => match crate::build_info::changelog_version() {
-                            Some(version) => {
-                                match Settings::has_changelog_been_shown(&version, ctx) {
-                                    true => is_tips_completed || is_onboarded,
-                                    false => false,
+                        FeatureSection::MaximizeWarp => {
+                            match crate::build_info::changelog_version() {
+                                Some(version) => {
+                                    match Settings::has_changelog_been_shown(&version, ctx) {
+                                        true => is_tips_completed || is_onboarded,
+                                        false => false,
+                                    }
                                 }
+                                None => is_tips_completed || is_onboarded,
                             }
-                            None => is_tips_completed || is_onboarded,
-                        },
+                        }
                         _ => false,
                     };
 

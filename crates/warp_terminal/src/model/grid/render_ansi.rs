@@ -217,9 +217,10 @@ pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
                 continue;
             }
 
-            for _ in 0..std::mem::take(&mut pending_blanks) {
-                out.push(b' ');
-            }
+            out.extend(std::iter::repeat_n(
+                b' ',
+                std::mem::take(&mut pending_blanks),
+            ));
 
             if style != active_style {
                 out.extend_from_slice(style.sgr().as_bytes());

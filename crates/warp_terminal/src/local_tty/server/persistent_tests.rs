@@ -175,7 +175,11 @@ fn socket_directory_is_created_private() {
     prepare_socket_directory(&directory).unwrap();
 
     let mode = std::fs::symlink_metadata(&directory).unwrap().mode();
-    assert_eq!(mode & 0o077, 0, "the socket directory must not be readable or writable by others");
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "the socket directory must not be readable or writable by others"
+    );
 }
 
 #[test]
@@ -190,7 +194,10 @@ fn binding_refuses_a_path_that_is_not_a_socket() {
         error.to_string().contains("is not a socket"),
         "expected a refusal, got: {error:#}"
     );
-    assert!(path.exists(), "a path we do not recognise must not be unlinked");
+    assert!(
+        path.exists(),
+        "a path we do not recognise must not be unlinked"
+    );
 }
 
 #[test]
@@ -251,12 +258,7 @@ fn spooled_output_is_capped_and_keeps_the_most_recent_bytes() {
     }
     session.spool_output(b"TAIL-MARKER").unwrap();
 
-    let length = session
-        .detached_output
-        .as_file()
-        .metadata()
-        .unwrap()
-        .len();
+    let length = session.detached_output.as_file().metadata().unwrap().len();
     assert!(
         length <= MAX_SPOOLED_OUTPUT_BYTES,
         "spool grew to {length} bytes, past the {MAX_SPOOLED_OUTPUT_BYTES} cap"

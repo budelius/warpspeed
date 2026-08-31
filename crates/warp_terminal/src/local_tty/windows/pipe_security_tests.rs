@@ -34,9 +34,8 @@ fn a_current_user_only_descriptor_can_be_built() {
         !attributes.lpSecurityDescriptor.is_null(),
         "the descriptor must not be null, or the pipe would fall back to system defaults"
     );
-    assert_eq!(
-        attributes.bInheritHandle.as_bool(),
-        false,
+    assert!(
+        !attributes.bInheritHandle.as_bool(),
         "the listening handle must not be inherited by children"
     );
 }

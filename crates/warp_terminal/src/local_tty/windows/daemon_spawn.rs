@@ -31,7 +31,7 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::Child;
 
 use anyhow::{Context, Result};
 
@@ -90,13 +90,12 @@ where
                 escaped_job_object: false,
             })
         }
-        Err(error) => {
-            Err(error).context("Failed to start the terminal session supervisor")
-        }
+        Err(error) => Err(error).context("Failed to start the terminal session supervisor"),
     }
 }
 
 /// Spawns with the given creation flags and no inherited standard streams.
+#[allow(clippy::disallowed_types)]
 fn spawn_with_flags<S>(program: &Path, args: &[S], flags: u32) -> std::io::Result<Child>
 where
     S: AsRef<OsStr>,
@@ -104,7 +103,7 @@ where
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
 
-    Command::new(program)
+    std::process::Command::new(program)
         .args(args)
         // A detached process has no console to inherit these from, and leaving
         // them attached to Warp's would keep its pipes alive after it exits.

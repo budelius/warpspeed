@@ -12,6 +12,4 @@ pub mod serve;
 pub mod session_table;
 pub mod transport;
 
-pub use message::{
-    AttachedSession, Message, PROTOCOL_VERSION, SessionMetadata, SessionSummary,
-};
+pub use message::{AttachedSession, Message, PROTOCOL_VERSION, SessionMetadata, SessionSummary};

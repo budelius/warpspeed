@@ -1,7 +1,6 @@
+use super::*;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty::screen::HeadlessScreen;
-
-use super::*;
 
 /// The repaint must put the terminal into a known state before drawing.
 /// Without that, a snapshot fed into a screen still carrying state from earlier

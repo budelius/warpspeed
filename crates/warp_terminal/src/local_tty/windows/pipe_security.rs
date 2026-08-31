@@ -12,7 +12,7 @@
 use std::ffi::c_void;
 
 use anyhow::{Context, Result};
-use windows::Win32::Foundation::{HANDLE, LocalFree, HLOCAL};
+use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -104,8 +104,8 @@ fn current_user_sid_string() -> Result<String> {
     unsafe { ConvertSidToStringSidW(token_user.User.Sid, &mut sid_string) }
         .context("Failed to convert this process's user SID to a string")?;
 
-    let owned = unsafe { sid_string.to_string() }
-        .context("The user SID string was not valid UTF-16")?;
+    let owned =
+        unsafe { sid_string.to_string() }.context("The user SID string was not valid UTF-16")?;
     unsafe { LocalFree(Some(HLOCAL(sid_string.0 as *mut c_void))) };
 
     Ok(owned)

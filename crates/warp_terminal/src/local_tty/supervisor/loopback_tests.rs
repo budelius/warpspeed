@@ -1,8 +1,8 @@
 use warp_core::SessionId;
 
 use super::*;
-use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::screen::ScreenSnapshot;
+use crate::local_tty::supervisor::message::SessionMetadata;
 
 fn snapshot() -> ScreenSnapshot {
     ScreenSnapshot {
@@ -92,7 +92,10 @@ fn receiving_with_nothing_sent_yields_nothing() {
     let (_client, mut supervisor) = LoopbackTransport::pair();
 
     assert!(
-        supervisor.receive().expect("receive should succeed").is_none(),
+        supervisor
+            .receive()
+            .expect("receive should succeed")
+            .is_none(),
         "an empty channel must not produce a message"
     );
 }
@@ -120,7 +123,10 @@ fn a_message_split_across_arrivals_is_not_lost() {
 
     client.outgoing.lock().extend(head.iter().copied());
     assert!(
-        supervisor.receive().expect("receive should succeed").is_none(),
+        supervisor
+            .receive()
+            .expect("receive should succeed")
+            .is_none(),
         "half a message must not decode"
     );
 

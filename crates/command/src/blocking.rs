@@ -616,7 +616,7 @@ impl Command {
             self.inner.stderr(Stdio::piped());
         }
 
-        self.inner.output()
+        self.spawn_inner()?.wait_with_output()
     }
 
     /// Executes a command as a child process, waiting for it to finish and
@@ -650,7 +650,7 @@ impl Command {
             self.inner.stderr(Stdio::null());
         }
 
-        self.inner.status()
+        self.spawn_inner()?.wait()
     }
 
     /// Returns the path to the program that was given to [`std::process::Command::new`].

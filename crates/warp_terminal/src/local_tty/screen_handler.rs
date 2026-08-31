@@ -16,11 +16,10 @@ use std::io;
 use warpui_core::color::ColorU;
 
 use super::screen::HeadlessScreen;
-use crate::model::ansi;
 use crate::model::ansi::*;
 use crate::model::index::VisibleRow;
 use crate::model::selection::ScrollDelta;
-use crate::model::{KeyboardModes, KeyboardModesApplyBehavior};
+use crate::model::{KeyboardModes, KeyboardModesApplyBehavior, ansi};
 
 impl ansi::Handler for HeadlessScreen {
     /// Intercepts the alternate-screen switch; everything else goes to the
@@ -171,8 +170,13 @@ impl ansi::Handler for HeadlessScreen {
     fn terminal_attribute(&mut self, a0: Attr) {
         self.active_grid_mut().terminal_attribute(a0)
     }
-    fn set_keyboard_enhancement_flags(&mut self, a0: KeyboardModes, a1: KeyboardModesApplyBehavior) {
-        self.active_grid_mut().set_keyboard_enhancement_flags(a0, a1)
+    fn set_keyboard_enhancement_flags(
+        &mut self,
+        a0: KeyboardModes,
+        a1: KeyboardModesApplyBehavior,
+    ) {
+        self.active_grid_mut()
+            .set_keyboard_enhancement_flags(a0, a1)
     }
     fn push_keyboard_enhancement_flags(&mut self, a0: KeyboardModes) {
         self.active_grid_mut().push_keyboard_enhancement_flags(a0)
@@ -202,7 +206,8 @@ impl ansi::Handler for HeadlessScreen {
         self.active_grid_mut().set_color(a0, a1)
     }
     fn dynamic_color_sequence<W: io::Write>(&mut self, a0: &mut W, a1: u8, a2: usize, a3: &str) {
-        self.active_grid_mut().dynamic_color_sequence(a0, a1, a2, a3)
+        self.active_grid_mut()
+            .dynamic_color_sequence(a0, a1, a2, a3)
     }
     fn reset_color(&mut self, a0: usize) {
         self.active_grid_mut().reset_color(a0)

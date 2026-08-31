@@ -1,8 +1,8 @@
 use warp_core::SessionId;
 
 use super::*;
-use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::screen::ScreenSnapshot;
+use crate::local_tty::supervisor::message::SessionMetadata;
 
 /// A pipe name unique to one test, so tests can run in parallel without
 /// colliding in the shared Windows pipe namespace.
@@ -94,7 +94,9 @@ fn a_snapshot_survives_a_real_pipe() {
 fn a_reply_travels_back_over_the_same_pipe() {
     let (mut client, mut supervisor) = connected_pair("reply");
 
-    client.send(&Message::Ping).expect("client send should succeed");
+    client
+        .send(&Message::Ping)
+        .expect("client send should succeed");
     assert_eq!(
         supervisor.receive().expect("receive should succeed"),
         Some(Message::Ping)
@@ -122,7 +124,10 @@ fn receiving_from_a_silent_peer_yields_nothing() {
     let (_client, mut supervisor) = connected_pair("silent");
 
     assert!(
-        supervisor.receive().expect("receive should succeed").is_none(),
+        supervisor
+            .receive()
+            .expect("receive should succeed")
+            .is_none(),
         "a peer that sent nothing must not produce a message"
     );
 }

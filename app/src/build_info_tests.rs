@@ -29,9 +29,16 @@ fn an_installed_executable_reports_its_version_directory() {
 fn a_build_directory_executable_has_no_installed_version() {
     // The case that made this module necessary: several of these were running
     // at once with no way to tell them apart.
-    let executable: PathBuf = ["T:\\", "projects", "warp", "target", "release", "warpspeed.exe"]
-        .iter()
-        .collect();
+    let executable: PathBuf = [
+        "T:\\",
+        "projects",
+        "warp",
+        "target",
+        "release",
+        "warpspeed.exe",
+    ]
+    .iter()
+    .collect();
 
     assert_eq!(installed_version(&executable), None);
 }
@@ -41,7 +48,12 @@ fn a_versions_directory_one_level_up_does_not_count() {
     // `versions/<version>/warpspeed.exe` is the layout; anything deeper is not
     // something the installer produced, so claiming a version would be a lie.
     let executable: PathBuf = [
-        "C:\\", "install", "versions", "20260829-1", "nested", "warpspeed.exe",
+        "C:\\",
+        "install",
+        "versions",
+        "20260829-1",
+        "nested",
+        "warpspeed.exe",
     ]
     .iter()
     .collect();

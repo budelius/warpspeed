@@ -8,9 +8,54 @@ Param (
 
 $ErrorActionPreference = 'Stop'
 
+# When this run began. Used below to leave alone anything a concurrent run
+# staged after this point.
+$RUN_STARTED_AT = Get-Date
+
+# How long to wait for another install to finish before giving up. A release
+# build takes around twenty minutes, so this has to be generous enough to queue
+# behind one rather than fail underneath it.
+$LOCK_TIMEOUT_MINUTES = 60
+
 $WORKSPACE_ROOT = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $STAGING_TARGET_DIR = Join-Path $WORKSPACE_ROOT 'target\warpspeed-merge'
 $STAGING_RELEASE_DIR = Join-Path $STAGING_TARGET_DIR 'release'
+
+# Only one install at a time.
+#
+# Two runs a second apart will destroy each other: the first to finish prunes
+# every version directory it does not recognise, and a directory the second run
+# is still copying into is exactly that. The second run then fails partway
+# through -- or worse, succeeds into a directory that has been deleted out from
+# under it and leaves a half-populated install as `current`.
+#
+# The lock is an exclusive handle on a file rather than a mutex so that it is
+# visible on disk while held, and Windows releases it when the process exits,
+# including when it is killed. Held for the whole run, build included: cargo
+# serializes concurrent builds on its own lock anyway, so a second run would
+# queue there regardless, and this way the wait is explained rather than
+# mysterious.
+New-Item -ItemType Directory -Force -Path $INSTALL_ROOT | Out-Null
+$lock_path = Join-Path $INSTALL_ROOT 'install.lock'
+$lock_deadline = $RUN_STARTED_AT.AddMinutes($LOCK_TIMEOUT_MINUTES)
+$lock_stream = $null
+$announced_wait = $false
+while (-not $lock_stream) {
+    try {
+        $lock_stream = [IO.File]::Open($lock_path, 'OpenOrCreate', 'ReadWrite', 'None')
+    } catch [IO.IOException] {
+        if ((Get-Date) -gt $lock_deadline) {
+            throw "Timed out after $LOCK_TIMEOUT_MINUTES minutes waiting for another WarpSpeed install to finish. If no install is running, delete $lock_path and retry."
+        }
+        if (-not $announced_wait) {
+            Write-Host 'Another WarpSpeed install is running; waiting for it to finish...'
+            $announced_wait = $true
+        }
+        Start-Sleep -Seconds 5
+    }
+}
+# $lock_stream stays in scope for the rest of the script; the handle is released
+# when this process exits, however it exits.
 
 if (-not $SKIP_BUILD) {
     $previous_target_dir = $env:CARGO_TARGET_DIR
@@ -218,7 +263,17 @@ Get-ChildItem -LiteralPath $versions_dir -Directory | ForEach-Object {
     $is_running = $running_executables | Where-Object {
         $_.StartsWith($candidate_prefix, [StringComparison]::OrdinalIgnoreCase)
     }
-    if ($protected_versions -notcontains $candidate.Name -and -not $is_running) {
+    # Anything that appeared after this run started belongs to someone else --
+    # an install running an older copy of this script, without the lock above.
+    # Deleting it is what broke the run that staged it. Second line of defence:
+    # with the lock held, this should never be true.
+    $staged_after_this_run = $candidate.CreationTime -ge $RUN_STARTED_AT
+    if ($staged_after_this_run) {
+        Write-Warning "Leaving WarpSpeed version $($candidate.Name) alone: it was staged after this install started, so another install is using it."
+    }
+    if ($protected_versions -notcontains $candidate.Name -and
+        -not $is_running -and
+        -not $staged_after_this_run) {
         try {
             Remove-Item -LiteralPath $candidate.FullName -Recurse -Force
         } catch {

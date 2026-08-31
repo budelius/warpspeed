@@ -37,3 +37,179 @@ impl SnapLayoutsState {
         self.button.lock().ok().and_then(|button| *button)
     }
 }
+
+use std::sync::Arc;
+use std::sync::LazyLock;
+
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
+};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, PostMessageW, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+};
+use winit::window::Window as WinitWindow;
+
+use super::window_attribute::to_hwnd;
+
+/// Distinguishes our subclass from any other on the same window.
+const SUBCLASS_ID: usize = 0x5741_5250;
+
+/// The first Windows 11 build. Snap Layouts does not exist before it.
+const WINDOWS_11_BUILD: u32 = 22000;
+
+static WINDOWS_VERSION: LazyLock<windows_version::OsVersion> =
+    LazyLock::new(windows_version::OsVersion::current);
+
+/// Installs the Snap Layouts subclass on `window`, returning the state to publish the maximize
+/// button's bounds through.
+///
+/// Returns `None`, leaving the window untouched, on anything before Windows 11 and on a window that
+/// has the native frame, which draws its own caption buttons.
+pub fn install(window: &WinitWindow) -> Option<Arc<SnapLayoutsState>> {
+    if WINDOWS_VERSION.build < WINDOWS_11_BUILD {
+        log::info!("Snap Layouts is not supported before Windows 11");
+        return None;
+    }
+
+    if window.is_decorated() {
+        return None;
+    }
+
+    let hwnd = to_hwnd(window)
+        .inspect_err(|err| {
+            log::warn!("Couldn't install the Snap Layouts subclass: {err:?}");
+        })
+        .ok()?;
+
+    let state = Arc::new(SnapLayoutsState::new());
+    // The subclass owns a reference for as long as the window lives; `WM_NCDESTROY` reclaims it.
+    let reference_data = Arc::into_raw(Arc::clone(&state)) as usize;
+
+    let installed =
+        unsafe { SetWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID, reference_data) };
+    if !installed.as_bool() {
+        // SAFETY: the pointer came from `Arc::into_raw` immediately above and the subclass never
+        // took ownership of it, so this is the only reclaim.
+        drop(unsafe { Arc::from_raw(reference_data as *const SnapLayoutsState) });
+        log::warn!("Couldn't install the Snap Layouts subclass");
+        return None;
+    }
+
+    Some(state)
+}
+
+/// Sits in front of winit's window procedure, answering the maximize button's hit test and
+/// replaying the non-client mouse messages that answer produces.
+unsafe extern "system" fn subclass_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    // SAFETY: `install` leaked an `Arc` into `reference_data`, and `WM_NCDESTROY` below reclaims it
+    // only after the last message has been handled.
+    let state = unsafe { &*(reference_data as *const SnapLayoutsState) };
+
+    match message {
+        WM_NCHITTEST => {
+            let default_answer = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+            let button = state.button_rect();
+            if button.is_none() {
+                return default_answer;
+            }
+
+            let (screen_x, screen_y) = unpack_coords(lparam);
+            let Some((client_x, client_y)) = screen_to_client(hwnd, screen_x, screen_y) else {
+                return default_answer;
+            };
+
+            LRESULT(hit_test(default_answer.0 as u32, client_x, client_y, button) as isize)
+        }
+        WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP => {
+            let Some(synthetic) = synthetic_message(message, wparam.0 as u32) else {
+                return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+            };
+
+            let position = if message == WM_NCMOUSELEAVE {
+                // WM_NCMOUSELEAVE carries no position of its own.
+                cursor_client_position(hwnd)
+                    .map(|cursor| leave_position(cursor, state.button_rect()))
+            } else {
+                let (screen_x, screen_y) = unpack_coords(lparam);
+                screen_to_client(hwnd, screen_x, screen_y)
+            };
+
+            let Some((x, y)) = position else {
+                return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+            };
+
+            if message == WM_NCMOUSEMOVE {
+                track_mouse_leave(hwnd);
+            }
+
+            unsafe {
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    synthetic.message,
+                    WPARAM(synthetic.wparam),
+                    LPARAM(pack_coords(x, y)),
+                );
+            }
+
+            // Swallow the original. Left alone, `DefWindowProc` would open the system menu on a
+            // press over a caption button.
+            LRESULT(0)
+        }
+        WM_NCDESTROY => unsafe {
+            let _ = RemoveWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID);
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            // SAFETY: reclaims the reference `install` leaked. No further message reaches this
+            // procedure once the subclass has been removed.
+            drop(Arc::from_raw(reference_data as *const SnapLayoutsState));
+            result
+        },
+        _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// Splits a mouse message's `LPARAM` into its signed 16-bit coordinates.
+fn unpack_coords(lparam: LPARAM) -> (i32, i32) {
+    let packed = lparam.0 as u32;
+    (
+        (packed & 0xFFFF) as u16 as i16 as i32,
+        (packed >> 16) as u16 as i16 as i32,
+    )
+}
+
+fn screen_to_client(hwnd: HWND, x: i32, y: i32) -> Option<(i32, i32)> {
+    let mut point = POINT { x, y };
+    let converted = unsafe { ScreenToClient(hwnd, &mut point) };
+    converted.as_bool().then_some((point.x, point.y))
+}
+
+fn cursor_client_position(hwnd: HWND) -> Option<(i32, i32)> {
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point) }.ok()?;
+    screen_to_client(hwnd, point.x, point.y)
+}
+
+/// Asks for a `WM_NCMOUSELEAVE` when the pointer leaves the non-client area, which is the only
+/// notice we get that the hover over the maximize button has ended.
+fn track_mouse_leave(hwnd: HWND) {
+    let mut event = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE | TME_NONCLIENT,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+
+    if let Err(err) = unsafe { TrackMouseEvent(&mut event) } {
+        log::warn!("Couldn't track the pointer leaving the maximize button: {err:?}");
+    }
+}

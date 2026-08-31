@@ -766,6 +766,11 @@ impl Window {
 
         let window = Arc::new(window);
 
+        #[cfg(windows)]
+        {
+            *self.snap_layouts.borrow_mut() = super::windows::install(&window);
+        }
+
         // Use the window's size as the initial surface size, ensuring that the
         // surface has a minimum size of 1 along each dimension.
         let initial_surface_size = window.inner_size().to_vec2f().max(Vector2F::splat(1.));

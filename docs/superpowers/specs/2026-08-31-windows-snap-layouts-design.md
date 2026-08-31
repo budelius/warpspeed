@@ -95,9 +95,10 @@ The rectangle is `None`, and the flyout consequently absent, whenever the button
   reports `None` in that state;
 - the traffic lights are not rendered at all, where `maybe_render_traffic_lights`
   (`app/src/workspace/view.rs:22303`) returns early. It reports `None` on that path;
-- the window is decorated, which happens when `enable_decorations_if_needed`
-  (`crates/warpui/src/windowing/winit/window.rs:667`) works around the GPU rendering-offset bug. The subclass
-  is never installed on such a window.
+- the window is decorated. The subclass is not installed on a window created with native decorations, and
+  when `enable_decorations_if_needed` (`crates/warpui/src/windowing/winit/window.rs:667`) turns them on later
+  to work around the GPU rendering-offset bug, `traffic_light_data` returns `None` and no rectangle is ever
+  published.
 
 ### 3. Non-client messages become ordinary mouse messages
 

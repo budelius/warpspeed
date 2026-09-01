@@ -14,6 +14,7 @@ use super::message::{Message, SessionMetadata};
 use super::session_table::SessionTable;
 use super::transport::Endpoint;
 use crate::event_listener::ChannelEventListener;
+use crate::local_tty::PtyOptions;
 use crate::local_tty::screen::ScreenSnapshot;
 
 /// How long a session survives with nobody attached.
@@ -24,17 +25,37 @@ pub const DEFAULT_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 /// Implemented over pseudoconsoles on Windows and over descriptors on Unix; a
 /// fake implementation is what makes the logic above it testable.
 pub trait SessionHost {
+    /// Starts a terminal owned by this host and lends its endpoint to `client_pid`.
+    fn spawn(
+        &mut self,
+        session_id: SessionId,
+        options: PtyOptions,
+        client_pid: u32,
+    ) -> Result<Endpoint>;
+
+    /// Marks the app's borrowed endpoint as released.
+    fn detach(&mut self, session_id: SessionId) -> Result<()>;
+
+    /// Returns sessions whose attached client process disappeared without detaching.
+    fn take_orphaned_sessions(&mut self) -> Vec<SessionId>;
+
     /// Collects output a session has produced, returning what was read.
     fn read_output(&mut self, session_id: SessionId, buffer: &mut [u8]) -> Result<usize>;
 
     /// Whether the session's process is still alive.
     fn is_running(&mut self, session_id: SessionId) -> bool;
 
+    /// Changes the session's terminal size.
+    fn resize(&mut self, session_id: SessionId, columns: u16, rows: u16) -> Result<()>;
+
     /// Ends the session's process.
     fn kill(&mut self, session_id: SessionId) -> Result<()>;
 
     /// Lends the session's I/O endpoint to `client_pid`.
     fn lend_endpoint(&mut self, session_id: SessionId, client_pid: u32) -> Result<Endpoint>;
+
+    /// Whether the host still owns any terminal processes.
+    fn has_sessions(&self) -> bool;
 }
 
 /// Holds sessions and answers clients about them.
@@ -59,9 +80,14 @@ impl<H: SessionHost> Supervisor<H> {
         }
     }
 
-    /// How many sessions are held.
+    /// How many detached sessions are held.
     pub fn session_count(&self) -> usize {
         self.table.len()
+    }
+
+    /// Whether the host still owns any terminal process, attached or detached.
+    pub fn has_host_sessions(&self) -> bool {
+        self.host.has_sessions()
     }
 
     /// Takes over a session a client is releasing.
@@ -82,6 +108,31 @@ impl<H: SessionHost> Supervisor<H> {
         );
     }
 
+    /// Takes over sessions whose client process exited without sending `Detach`.
+    pub fn recover_orphaned_sessions(
+        &mut self,
+        now_unix_seconds: u64,
+        event_listener: &ChannelEventListener,
+    ) {
+        for session_id in self.host.take_orphaned_sessions() {
+            self.table.detach(
+                session_id,
+                ScreenSnapshot {
+                    columns: 80,
+                    rows: 24,
+                    repaint: Vec::new(),
+                },
+                SessionMetadata {
+                    shell: String::new(),
+                    working_directory: String::new(),
+                    title: String::new(),
+                },
+                now_unix_seconds,
+                event_listener.clone(),
+            );
+        }
+    }
+
     /// Answers one client message.
     ///
     /// `client_pid` is who to lend an endpoint to; it is ignored for messages
@@ -94,19 +145,37 @@ impl<H: SessionHost> Supervisor<H> {
         event_listener: &ChannelEventListener,
     ) -> Option<Message> {
         match message {
+            Message::Spawn {
+                session_id,
+                options,
+            } => {
+                let result = bincode::deserialize::<PtyOptions>(options)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|options| self.host.spawn(*session_id, options, client_pid))
+                    .map_err(|error| error.to_string());
+                Some(Message::SpawnResponse { result })
+            }
+
             Message::Detach {
                 session_id,
                 snapshot,
                 metadata,
             } => {
-                self.table.detach(
-                    *session_id,
-                    snapshot.clone(),
-                    metadata.clone(),
-                    now_unix_seconds,
-                    event_listener.clone(),
-                );
-                Some(Message::DetachResponse { error: None })
+                let error = self
+                    .host
+                    .detach(*session_id)
+                    .err()
+                    .map(|error| error.to_string());
+                if error.is_none() {
+                    self.table.detach(
+                        *session_id,
+                        snapshot.clone(),
+                        metadata.clone(),
+                        now_unix_seconds,
+                        event_listener.clone(),
+                    );
+                }
+                Some(Message::DetachResponse { error })
             }
 
             Message::Attach { session_id, .. } => {
@@ -124,6 +193,7 @@ impl<H: SessionHost> Supervisor<H> {
                             // Without an endpoint the client has nothing to read
                             // from, so this is a failed attach rather than a
                             // degraded one.
+                            self.table.mark_detached(*session_id);
                             result = Err(format!("Failed to lend the session's endpoint: {error}"));
                         }
                     }
@@ -132,7 +202,46 @@ impl<H: SessionHost> Supervisor<H> {
                 Some(Message::AttachResponse { result })
             }
 
-            _ => self.table.handle_request(message, now_unix_seconds),
+            Message::Resize {
+                session_id,
+                columns,
+                rows,
+            } => Some(Message::ResizeResponse {
+                error: self
+                    .host
+                    .resize(*session_id, *columns, *rows)
+                    .err()
+                    .map(|error| error.to_string()),
+            }),
+
+            Message::Kill { session_id } => {
+                self.table.remove(*session_id);
+                Some(Message::KillResponse {
+                    error: self
+                        .host
+                        .kill(*session_id)
+                        .err()
+                        .map(|error| error.to_string()),
+                })
+            }
+
+            Message::ChildStatus { session_id } => Some(Message::ChildStatusResponse {
+                running: self.host.is_running(*session_id),
+            }),
+
+            Message::SpawnResponse { .. }
+            | Message::DetachResponse { .. }
+            | Message::AttachResponse { .. }
+            | Message::ResizeResponse { .. }
+            | Message::KillResponse { .. }
+            | Message::ChildStatusResponse { .. }
+            | Message::ListSessionsResponse { .. }
+            | Message::Pong { .. }
+            | Message::ResponseReceived => None,
+
+            Message::ListSessions | Message::Ping => {
+                self.table.handle_request(message, now_unix_seconds)
+            }
         }
     }
 
@@ -144,7 +253,7 @@ impl<H: SessionHost> Supervisor<H> {
         let mut buffer = [0u8; 64 * 1024];
         let mut ended = Vec::new();
 
-        for session_id in self.table.session_ids() {
+        for session_id in self.table.detached_session_ids() {
             match self.host.read_output(session_id, &mut buffer) {
                 Ok(0) => {}
                 Ok(read) => self.table.push_output(session_id, &buffer[..read]),

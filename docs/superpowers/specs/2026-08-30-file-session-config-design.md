@@ -4,6 +4,13 @@
 **Date:** 2026-08-30
 **Scope:** one persistent Warp window assembled from reusable tab configs, with lazy restore and agent/session continuity.
 
+## Implementation status
+
+Named TOML sessions, reusable tab configs, runtime window snapshots, lazy pane restoration, shell
+metadata, and single-process ownership are implemented. Windows session panes now use the terminal
+supervisor and preserve their process tree across orderly closure. CLI-agent snapshots carry typed
+resume metadata; Claude Code resumes automatically when the original PTY cannot be reattached.
+
 ## Problem
 
 Launch configs currently have two conflicting meanings:

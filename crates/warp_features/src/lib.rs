@@ -919,6 +919,9 @@ pub enum FeatureFlag {
     /// Saves and restores launch configurations as window-scoped sessions.
     PersistentLaunchConfigSessions,
 
+    /// Keeps local terminal processes alive in a per-user supervisor and reattaches them later.
+    PersistentTerminalSessions,
+
     /// Shows a warning in the agent view when the active conversation's
     /// provider-side prompt cache has expired.
     PromptCacheExpiryWarning,
@@ -1052,6 +1055,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::WarpControlCli,
     FeatureFlag::TerminalLifecycleRecovery,
     FeatureFlag::PersistentLaunchConfigSessions,
+    FeatureFlag::PersistentTerminalSessions,
     FeatureFlag::PromptCacheExpiryWarning,
     FeatureFlag::JupyterNotebookRendering,
     FeatureFlag::MultiLevelOrchestration,

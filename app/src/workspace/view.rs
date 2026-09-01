@@ -404,7 +404,7 @@ use crate::terminal::keys_settings::KeysSettings;
 use crate::terminal::ligature_settings::should_use_ligature_rendering;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::docker_sandbox::resolve_sbx_path_from_user_shell;
-#[cfg(all(feature = "local_tty", unix))]
+#[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::model::blockgrid::BlockGrid;
 #[cfg(feature = "local_fs")]
@@ -13003,7 +13003,7 @@ impl Workspace {
         }
 
         let resume_commands = self.process_handoff_agent_resume_commands(ctx);
-        #[cfg(all(feature = "local_tty", unix))]
+        #[cfg(feature = "local_tty")]
         let persistent_session_ids = snapshot.persistent_session_ids();
         let outgoing = match crate::window_process_handoff::launch(snapshot, resume_commands) {
             Ok(outgoing) => outgoing,
@@ -13025,7 +13025,7 @@ impl Workspace {
                     return;
                 }
 
-                #[cfg(all(feature = "local_tty", unix))]
+                #[cfg(feature = "local_tty")]
                 if let Err(error) = PtySpawner::handle(ctx).read(ctx, |spawner, _| {
                     spawner.prepare_sessions_for_handoff(persistent_session_ids)
                 }) {
@@ -28771,6 +28771,8 @@ impl View for Workspace {
             && let Some(model_event_sender) = self.model_event_sender.as_ref()
         {
             let window = self.snapshot(ctx.window_id(), false, ctx);
+            #[cfg(feature = "local_tty")]
+            let persistent_session_ids = window.persistent_session_ids();
             if let Err(error) =
                 model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
                     windows: vec![window],
@@ -28780,6 +28782,14 @@ impl View for Workspace {
                 report_error!(
                     anyhow::Error::new(error)
                         .context("Failed to save launch config session before window close")
+                );
+            }
+            #[cfg(feature = "local_tty")]
+            if let Err(error) = PtySpawner::handle(ctx).read(ctx, |spawner, _| {
+                spawner.prepare_sessions_for_handoff(persistent_session_ids)
+            }) {
+                report_error!(
+                    error.context("Failed to detach terminal sessions before window close")
                 );
             }
         }

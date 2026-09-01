@@ -8,11 +8,15 @@ pub mod pipe_transport;
 mod pipes;
 mod proc_thread_attribute_list;
 pub mod supervised_pty;
+pub(crate) mod supervisor_client;
+pub mod supervisor_daemon;
+mod supervisor_host;
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::FromRawHandle as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use child::ChildExitWatcher;
@@ -21,6 +25,7 @@ use conpty_api::ConptyApiError;
 use environment::get_shell_environment_variables;
 pub use environment::get_user_and_system_env_variable;
 use thiserror::Error;
+use warp_core::SessionId;
 use warp_errors::{report_error, report_if_error};
 use warpui_core::{AppContext, SingletonEntity};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
@@ -65,10 +70,49 @@ unsafe impl Send for ShareableHandle {}
 unsafe impl Sync for ShareableHandle {}
 
 pub(super) struct PtySpawnResult {
-    pub pty_handle: HPCON,
+    pub pid: u32,
     pub pipe: mio::windows::NamedPipe,
-    pub conpty_api: ConptyApi,
-    child_exit_watcher: ChildExitWatcher,
+    pty_handle: Option<HPCON>,
+    conpty_api: Option<ConptyApi>,
+    child_exit_watcher: Option<ChildExitWatcher>,
+    supervisor: Option<(
+        Arc<supervisor_client::WindowsTerminalSupervisorClient>,
+        SessionId,
+    )>,
+    replay: Option<Vec<u8>>,
+}
+
+impl PtySpawnResult {
+    pub(super) fn from_supervisor(
+        endpoint: crate::local_tty::supervisor::transport::Endpoint,
+        client: Arc<supervisor_client::WindowsTerminalSupervisorClient>,
+        session_id: SessionId,
+    ) -> anyhow::Result<Self> {
+        Self::from_attached(endpoint, client, session_id, Vec::new())
+    }
+
+    pub(super) fn from_attached(
+        endpoint: crate::local_tty::supervisor::transport::Endpoint,
+        client: Arc<supervisor_client::WindowsTerminalSupervisorClient>,
+        session_id: SessionId,
+        replay: Vec<u8>,
+    ) -> anyhow::Result<Self> {
+        if endpoint.raw == 0 {
+            anyhow::bail!("Windows terminal supervisor returned an invalid PTY handle");
+        }
+        let pipe = unsafe {
+            mio::windows::NamedPipe::from_raw_handle(endpoint.raw as usize as *mut std::ffi::c_void)
+        };
+        Ok(Self {
+            pid: endpoint.pid,
+            pipe,
+            pty_handle: None,
+            conpty_api: None,
+            child_exit_watcher: None,
+            supervisor: Some((client, session_id)),
+            replay: (!replay.is_empty()).then_some(replay),
+        })
+    }
 }
 
 pub struct PseudoConsoleChild {
@@ -269,10 +313,13 @@ pub(super) fn spawn(
         process_info: process_information,
     };
     let result = PtySpawnResult {
-        pty_handle,
+        pid: process_information.dwProcessId,
         pipe,
-        conpty_api,
-        child_exit_watcher,
+        pty_handle: Some(pty_handle),
+        conpty_api: Some(conpty_api),
+        child_exit_watcher: Some(child_exit_watcher),
+        supervisor: None,
+        replay: None,
     };
     Ok(PtySpawnInfo { result, child })
 }
@@ -377,55 +424,72 @@ fn append_quoted(arg: &OsStr, cmdline: &mut Vec<u16>) {
 }
 
 pub struct Pty {
-    child_exit_watcher: ChildExitWatcher,
+    child_exit_watcher: Option<ChildExitWatcher>,
     handle: Box<dyn PtyHandle>,
-    /// An arbitrary type on Windows used to interact with the psuedoconsole.
-    pty_handle: HPCON,
+    pty_handle: Option<HPCON>,
     pipe: mio::windows::NamedPipe,
     token: mio::Token,
-    conpty_api: ConptyApi,
+    conpty_api: Option<ConptyApi>,
+    supervisor: Option<(
+        Arc<supervisor_client::WindowsTerminalSupervisorClient>,
+        SessionId,
+    )>,
+    replay: Option<Vec<u8>>,
     pty_closed: bool,
 }
 
 impl Pty {
     pub fn new(
         options: PtyOptions,
+        persistent_session_id: SessionId,
         hooks: &dyn super::spawner::PtySpawnHooks,
         event_loop_tx: mio_channel::Sender<writeable_pty::Message>,
         ctx: &mut AppContext,
     ) -> anyhow::Result<Self> {
         let size = options.size;
-        PtySpawner::handle(ctx)
-            .update(ctx, |pty_spawner, ctx| {
-                pty_spawner.spawn_pty(options, hooks, event_loop_tx, ctx)
-            })
-            .map(
-                |(
-                    PtySpawnResult {
-                        pty_handle,
-                        pipe,
-                        conpty_api,
-                        child_exit_watcher,
-                    },
-                    handle,
-                )| {
-                    let mut pty = Self {
-                        child_exit_watcher,
-                        handle,
-                        pty_handle,
-                        pipe,
-                        token: PTY_TOKEN,
-                        conpty_api,
-                        pty_closed: false,
-                    };
-                    pty.on_resize(&size);
-                    pty
-                },
-            )
+        let (result, handle) = PtySpawner::handle(ctx).update(ctx, |pty_spawner, ctx| {
+            pty_spawner.spawn_pty(options, persistent_session_id, hooks, event_loop_tx, ctx)
+        })?;
+        let mut pty = Self::from_spawn_result(result, handle);
+        pty.on_resize(&size);
+        Ok(pty)
+    }
+
+    pub fn attach(
+        session_id: SessionId,
+        size: &SizeInfo,
+        ctx: &mut AppContext,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some((result, handle)) =
+            PtySpawner::handle(ctx).update(ctx, |spawner, _| spawner.attach_pty(session_id))?
+        else {
+            return Ok(None);
+        };
+        let mut pty = Self::from_spawn_result(result, handle);
+        pty.on_resize(size);
+        Ok(Some(pty))
+    }
+
+    fn from_spawn_result(result: PtySpawnResult, handle: Box<dyn PtyHandle>) -> Self {
+        Self {
+            child_exit_watcher: result.child_exit_watcher,
+            handle,
+            pty_handle: result.pty_handle,
+            pipe: result.pipe,
+            token: PTY_TOKEN,
+            conpty_api: result.conpty_api,
+            supervisor: result.supervisor,
+            replay: result.replay,
+            pty_closed: false,
+        }
     }
 
     pub fn get_pid(&self) -> u32 {
         self.handle.pid()
+    }
+
+    pub fn persistent_session_id(&self) -> Option<SessionId> {
+        self.handle.persistent_session_id()
     }
 
     /// Closes the pseudoconsole and disconnects from the console host.
@@ -441,8 +505,13 @@ impl Pty {
         }
         self.pty_closed = true;
 
+        let (Some(conpty_api), Some(pty_handle)) = (&self.conpty_api, self.pty_handle) else {
+            // The supervisor owns the pseudoconsole. Dropping this process's duplicated pipe
+            // handle detaches the client without ending the console session.
+            return;
+        };
         unsafe {
-            self.conpty_api.close(self.pty_handle);
+            conpty_api.close(pty_handle);
         }
 
         // Drain all data in the pipe.
@@ -465,26 +534,29 @@ impl EventedReadWrite for Pty {
     fn register(&mut self, poll: &mio::Poll, interest: mio::Interest) -> std::io::Result<()> {
         poll.registry()
             .register(&mut self.pipe, self.token, interest)?;
-        poll.registry().register(
-            &mut self.child_exit_watcher,
-            SIGNALS_TOKEN,
-            mio::Interest::READABLE,
-        )
+        if let Some(watcher) = self.child_exit_watcher.as_mut() {
+            poll.registry()
+                .register(watcher, SIGNALS_TOKEN, mio::Interest::READABLE)?;
+        }
+        Ok(())
     }
 
     fn reregister(&mut self, poll: &mio::Poll, interest: mio::Interest) -> std::io::Result<()> {
         poll.registry()
             .reregister(&mut self.pipe, self.token, interest)?;
-        poll.registry().reregister(
-            &mut self.child_exit_watcher,
-            SIGNALS_TOKEN,
-            mio::Interest::READABLE,
-        )
+        if let Some(watcher) = self.child_exit_watcher.as_mut() {
+            poll.registry()
+                .reregister(watcher, SIGNALS_TOKEN, mio::Interest::READABLE)?;
+        }
+        Ok(())
     }
 
     fn deregister(&mut self, poll: &mio::Poll) -> std::io::Result<()> {
         poll.registry().deregister(&mut self.pipe)?;
-        poll.registry().deregister(&mut self.child_exit_watcher)
+        if let Some(watcher) = self.child_exit_watcher.as_mut() {
+            poll.registry().deregister(watcher)?;
+        }
+        Ok(())
     }
 
     fn reader(&mut self) -> &mut Self::Reader {
@@ -509,16 +581,30 @@ impl EventedPty for Pty {
         SIGNALS_TOKEN
     }
 
+    fn take_replay_reader(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.replay
+            .take()
+            .map(|bytes| Box::new(std::io::Cursor::new(bytes)) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn requires_exit_polling(&self) -> bool {
+        self.handle.requires_exit_polling()
+    }
+
     fn next_child_event(&mut self) -> Option<super::ChildEvent> {
         None
     }
 
     fn on_resize(&mut self, size: &crate::SizeInfo) {
-        report_if_error!(unsafe {
-            self.conpty_api
-                .resize(self.pty_handle, size.to_coord())
-                .context("Failed to resize pseudoconsole")
-        });
+        if let Some((client, session_id)) = self.supervisor.as_ref() {
+            report_if_error!(client.resize(*session_id, size.columns as u16, size.rows as u16,));
+        } else if let (Some(conpty_api), Some(pty_handle)) = (&self.conpty_api, self.pty_handle) {
+            report_if_error!(unsafe {
+                conpty_api
+                    .resize(pty_handle, size.to_coord())
+                    .context("Failed to resize pseudoconsole")
+            });
+        }
     }
 
     fn kill(mut self) -> anyhow::Result<()> {

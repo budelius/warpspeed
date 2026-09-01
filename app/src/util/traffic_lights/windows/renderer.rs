@@ -12,8 +12,7 @@ use warpui::fonts::FamilyId;
 use warpui::platform::FullscreenState;
 use warpui::{AppContext, Element, SingletonEntity, WindowId};
 
-use crate::util::traffic_lights::windows::MaximizeButtonRegion;
-use crate::util::traffic_lights::windows::RendererState;
+use crate::util::traffic_lights::windows::{MaximizeButtonRegion, RendererState};
 use crate::util::traffic_lights::windows_only::WINDOWS_BRIGHT_RED;
 use crate::util::traffic_lights::{TrafficLightData, TrafficLightMouseStates};
 use crate::workspace::TOTAL_TAB_BAR_HEIGHT;

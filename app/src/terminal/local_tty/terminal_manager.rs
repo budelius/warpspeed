@@ -162,6 +162,7 @@ pub struct TerminalManager<S> {
 
     /// Stable identifier used to reattach a PTY supervised outside the app process.
     pub(super) persistent_session_id: Option<SessionId>,
+    cli_agent_resume_command: Option<String>,
     #[cfg(unix)]
     pub(super) persistent_server_client:
         Option<Arc<crate::terminal::local_tty::server::TerminalServerClient>>,
@@ -349,6 +350,10 @@ where
             self.0.persistent_server_client =
                 PtySpawner::handle(ctx).read(ctx, |spawner, _| spawner.persistent_server_client());
         }
+    }
+
+    fn restore_cli_agent_resume_command(&mut self, command: String) {
+        self.0.cli_agent_resume_command = Some(command);
     }
 
     fn shutdown_for_process_handoff(&mut self) {
@@ -690,6 +695,7 @@ impl<S> TerminalManager<S> {
             session_sharer: Rc::new(RefCell::new(None)),
             deferred_shell: None,
             persistent_session_id: None,
+            cli_agent_resume_command: None,
             #[cfg(unix)]
             persistent_server_client: None,
             session_generation: 0,
@@ -1274,7 +1280,6 @@ fn on_shell_determined<S: TerminalSurface>(
     };
     // Reattach before enqueueing bootstrap input. Sending a fresh init script
     // to a shell that is already running would execute it as user input.
-    #[cfg(unix)]
     let attached_pty = manager.persistent_session_id.and_then(|session_id| {
         let size = manager.model().lock().block_list().size().to_owned();
         match Pty::attach(session_id, &size, ctx) {
@@ -1285,8 +1290,6 @@ fn on_shell_determined<S: TerminalSurface>(
             }
         }
     });
-    #[cfg(not(unix))]
-    let attached_pty: Option<Pty> = None;
 
     // Enqueue the init shell script (for shells that need it), then create
     // the PTY and start its corresponding event loop.
@@ -1299,6 +1302,7 @@ fn on_shell_determined<S: TerminalSurface>(
     let model = manager.model();
     #[cfg(windows)]
     let event_loop_tx = manager.event_loop_tx.lock().clone();
+    let reattached = attached_pty.is_some();
     let pty = match attached_pty {
         Some(pty) => pty,
         None => match manager
@@ -1310,7 +1314,6 @@ fn on_shell_determined<S: TerminalSurface>(
                     shell_starter,
                     env_vars,
                     model.clone(),
-                    #[cfg(unix)]
                     generated_session_id,
                     #[cfg(windows)]
                     event_loop_tx,
@@ -1329,20 +1332,16 @@ fn on_shell_determined<S: TerminalSurface>(
         },
     };
 
-    #[cfg(unix)]
+    if reattached {
+        manager.cli_agent_resume_command = None;
+    } else if let Some(command) = manager.cli_agent_resume_command.take() {
+        manager.view.update(ctx, |view, ctx| {
+            view.set_pending_restore_command(command, ctx);
+        });
+    }
+
     let active_session_id = pty.persistent_session_id().unwrap_or(generated_session_id);
-    #[cfg(not(unix))]
-    let active_session_id = generated_session_id;
-    manager.persistent_session_id = {
-        #[cfg(unix)]
-        {
-            pty.persistent_session_id()
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
-    };
+    manager.persistent_session_id = pty.persistent_session_id();
     manager
         .model()
         .lock()
@@ -1439,7 +1438,7 @@ impl<S> TerminalManager<S> {
         shell_starter: ShellStarter,
         env_vars: HashMap<OsString, OsString>,
         model: Arc<FairMutex<TerminalModel>>,
-        #[cfg(unix)] persistent_session_id: SessionId,
+        persistent_session_id: SessionId,
         #[cfg(windows)] event_loop_tx: mio_channel::Sender<Message>,
         ctx: &mut AppContext,
     ) -> anyhow::Result<Pty> {
@@ -1505,7 +1504,6 @@ impl<S> TerminalManager<S> {
         };
         Pty::new(
             options,
-            #[cfg(unix)]
             persistent_session_id,
             &hooks,
             #[cfg(windows)]

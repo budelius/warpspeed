@@ -68,6 +68,9 @@ pub trait TerminalManager: Any {
     ) {
     }
 
+    /// Supplies a command to run only when a restored PTY cannot be reattached.
+    fn restore_cli_agent_resume_command(&mut self, _command: String) {}
+
     /// Replaces this manager's shell session in place, keeping the pane, its
     /// blocklist, and its agent conversation.
     ///

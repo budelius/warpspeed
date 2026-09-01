@@ -21,6 +21,7 @@ use crate::settings_view::SettingsSection;
 use crate::settings_view::environments_page::EnvironmentsPage;
 use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
+use crate::terminal::cli_agent::CLIAgent;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::workspace::WorkspaceRegistry;
 use crate::workspace::tab_group::TabGroupId;
@@ -69,7 +70,7 @@ pub struct WindowSnapshot {
 }
 
 impl WindowSnapshot {
-    #[cfg(all(feature = "local_tty", unix))]
+    #[cfg(feature = "local_tty")]
     pub(crate) fn persistent_session_ids(&self) -> Vec<SessionId> {
         fn collect(node: &PaneNodeSnapshot, ids: &mut Vec<SessionId>) {
             match node {
@@ -259,12 +260,46 @@ pub struct AmbientAgentPaneSnapshot {
     pub task_id: Option<AmbientAgentTaskId>,
 }
 
+/// Enough information to resume a CLI agent when its original PTY cannot be reattached.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CliAgentResumeDescriptor {
+    pub agent: CLIAgent,
+    pub session_id: String,
+    pub cwd: PathBuf,
+}
+
+impl CliAgentResumeDescriptor {
+    pub(crate) fn resume_command(&self) -> Option<String> {
+        match self.agent {
+            CLIAgent::Claude => Some(format!("claude --resume {}", self.session_id)),
+            CLIAgent::Gemini
+            | CLIAgent::Codex
+            | CLIAgent::Amp
+            | CLIAgent::Droid
+            | CLIAgent::OpenCode
+            | CLIAgent::Copilot
+            | CLIAgent::Pi
+            | CLIAgent::OhMyPi
+            | CLIAgent::Auggie
+            | CLIAgent::CursorCli
+            | CLIAgent::Goose
+            | CLIAgent::Hermes
+            | CLIAgent::Vibe
+            | CLIAgent::Antigravity
+            | CLIAgent::WarpTui
+            | CLIAgent::Unknown => None,
+        }
+    }
+}
+
 /// Snapshot of the contents of a terminal pane.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalPaneSnapshot {
     pub uuid: Vec<u8>,
     #[serde(default)]
     pub persistent_session_id: Option<SessionId>,
+    #[serde(default)]
+    pub cli_agent_resume_descriptor: Option<CliAgentResumeDescriptor>,
     pub cwd: Option<String>,
     pub shell_launch_data: Option<ShellLaunchData>,
     pub is_active: bool,

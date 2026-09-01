@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn claude_resume_descriptor_generates_resume_command() {
+    let descriptor = CliAgentResumeDescriptor {
+        agent: CLIAgent::Claude,
+        session_id: "cf44b8d2-9381-4016-8bfb-7aafc57062fd".to_owned(),
+        cwd: PathBuf::from(r"T:\projects\dev-ops\system"),
+    };
+
+    assert_eq!(
+        descriptor.resume_command().as_deref(),
+        Some("claude --resume cf44b8d2-9381-4016-8bfb-7aafc57062fd")
+    );
+}
+
+#[test]
+fn unsupported_cli_agent_resume_descriptor_does_not_generate_command() {
+    let descriptor = CliAgentResumeDescriptor {
+        agent: CLIAgent::Gemini,
+        session_id: "session".to_owned(),
+        cwd: PathBuf::from(r"T:\projects\dev-ops\system"),
+    };
+
+    assert_eq!(descriptor.resume_command(), None);
+}
+
+#[test]
 fn test_has_horizontal_split() {
     let single_leaf = PaneNodeSnapshot::Leaf(LeafSnapshot {
         is_focused: false,

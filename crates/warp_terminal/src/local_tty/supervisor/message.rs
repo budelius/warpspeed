@@ -16,6 +16,17 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// A message in either direction between a client and the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
+    /// Starts a supervisor-owned terminal and lends its endpoint to the requesting client.
+    Spawn {
+        session_id: SessionId,
+        /// A bincode-encoded `PtyOptions`. Kept opaque here so the protocol remains comparable in
+        /// tests even though shell starters contain platform path types without `PartialEq`.
+        options: Vec<u8>,
+    },
+
+    /// The result of a [`Message::Spawn`].
+    SpawnResponse { result: Result<Endpoint, String> },
+
     /// The client is releasing a session. The screen travels with it, because
     /// the supervisor is blind while a client is attached and has no other way
     /// to know what the session was displaying.
@@ -40,6 +51,28 @@ pub enum Message {
         result: Result<AttachedSession, String>,
     },
 
+    /// Changes the size of a supervisor-owned terminal.
+    Resize {
+        session_id: SessionId,
+        columns: u16,
+        rows: u16,
+    },
+
+    /// The result of a [`Message::Resize`].
+    ResizeResponse { error: Option<String> },
+
+    /// Ends a supervisor-owned terminal.
+    Kill { session_id: SessionId },
+
+    /// The result of a [`Message::Kill`].
+    KillResponse { error: Option<String> },
+
+    /// Checks whether a supervisor-owned terminal is still alive.
+    ChildStatus { session_id: SessionId },
+
+    /// The result of a [`Message::ChildStatus`].
+    ChildStatusResponse { running: bool },
+
     /// Asks for every session the supervisor is holding.
     ListSessions,
 
@@ -51,6 +84,9 @@ pub enum Message {
 
     /// The reply to [`Message::Ping`].
     Pong { protocol_version: u32 },
+
+    /// Confirms that a response was read before the server closes its named-pipe instance.
+    ResponseReceived,
 }
 
 /// What a client receives when it takes a session back.

@@ -26583,6 +26583,11 @@ impl TerminalSurface for TerminalView {
         }
     }
 
+    #[cfg(feature = "local_tty")]
+    fn set_pending_restore_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
+        self.set_pending_command_queue(vec![command], ctx);
+    }
+
     fn on_active_shell_launch_data_updated(
         &mut self,
         shell_launch_data: Option<ShellLaunchData>,

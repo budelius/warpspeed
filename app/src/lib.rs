@@ -270,7 +270,7 @@ use crate::ai::skills::SkillManager;
 use crate::ai::tui_api_keys::TuiApiKeyRefresher;
 use crate::antivirus::AntivirusInfo;
 use crate::app_state::AppState;
-#[cfg(all(feature = "local_tty", unix))]
+#[cfg(feature = "local_tty")]
 use crate::app_state::get_app_state;
 use crate::autoupdate::{AutoupdateState, RelaunchModel};
 use crate::changelog_model::ChangelogModel;
@@ -754,6 +754,10 @@ pub fn run() -> Result<()> {
 
     // Ensure feature flags are initialized before parsing command-line arguments.
     features::init_feature_flags();
+    #[cfg(all(feature = "local_tty", windows))]
+    if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
+        return warp_terminal::local_tty::windows::supervisor_daemon::run();
+    }
     if let Some(args) = warp_cli::local_control::ControlArgs::from_control_mode_env() {
         #[cfg(windows)]
         warp_util::windows::attach_to_parent_console();
@@ -2732,20 +2736,21 @@ pub(crate) fn app_callbacks(
             // when we bring up the new process.  Additionally, this must occur
             // after terminating the persistence writer, so we don't keep track
             // of the fact that the shell sessions terminated.
-            #[cfg(all(feature = "local_tty", unix))]
+            #[cfg(feature = "local_tty")]
             let persistent_session_ids = get_app_state(ctx)
                 .windows
                 .into_iter()
-                .filter(|window| window.launch_config_source.is_some())
+                .filter(|window| {
+                    window.launch_config_source.as_ref().is_some_and(
+                        launch_configs::launch_config::LaunchConfigWindowSource::is_session_config,
+                    )
+                })
                 .flat_map(|window| window.persistent_session_ids())
                 .collect();
 
             #[cfg(feature = "local_tty")]
             terminal::local_tty::spawner::PtySpawner::handle(ctx).update(ctx, |pty_spawner, _| {
-                pty_spawner.prepare_for_app_termination(
-                    #[cfg(unix)]
-                    persistent_session_ids,
-                );
+                pty_spawner.prepare_for_app_termination(persistent_session_ids);
             });
 
             #[cfg(all(feature = "local_tty", windows))]

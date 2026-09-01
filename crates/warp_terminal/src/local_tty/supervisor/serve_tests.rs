@@ -19,6 +19,9 @@ struct FakeHost {
     /// Sessions that refuse to lend an endpoint.
     unlendable: Vec<u64>,
 
+    /// Sessions whose client process disappeared without detaching.
+    orphaned: Vec<u64>,
+
     /// Sessions this host was asked to kill.
     killed: Vec<u64>,
 
@@ -27,6 +30,26 @@ struct FakeHost {
 }
 
 impl SessionHost for FakeHost {
+    fn spawn(
+        &mut self,
+        session_id: SessionId,
+        _options: PtyOptions,
+        client_pid: u32,
+    ) -> Result<Endpoint> {
+        self.lend_endpoint(session_id, client_pid)
+    }
+
+    fn detach(&mut self, _session_id: SessionId) -> Result<()> {
+        Ok(())
+    }
+
+    fn take_orphaned_sessions(&mut self) -> Vec<SessionId> {
+        std::mem::take(&mut self.orphaned)
+            .into_iter()
+            .map(SessionId::from)
+            .collect()
+    }
+
     fn read_output(&mut self, session_id: SessionId, buffer: &mut [u8]) -> Result<usize> {
         if self.unreadable.contains(&session_id.as_u64()) {
             anyhow::bail!("this session cannot be read");
@@ -44,6 +67,10 @@ impl SessionHost for FakeHost {
         !self.ended.contains(&session_id.as_u64())
     }
 
+    fn resize(&mut self, _session_id: SessionId, _columns: u16, _rows: u16) -> Result<()> {
+        Ok(())
+    }
+
     fn kill(&mut self, session_id: SessionId) -> Result<()> {
         self.killed.push(session_id.as_u64());
         Ok(())
@@ -58,6 +85,10 @@ impl SessionHost for FakeHost {
             pid: 4242,
             raw: 0x1234,
         })
+    }
+
+    fn has_sessions(&self) -> bool {
+        true
     }
 }
 
@@ -90,6 +121,33 @@ fn supervisor_with_session(id: u64, at: u64) -> Supervisor<FakeHost> {
         listener(),
     );
     supervisor
+}
+
+#[test]
+fn orphaned_client_process_becomes_reattachable() {
+    let mut supervisor = Supervisor::new(
+        FakeHost {
+            orphaned: vec![42],
+            ..Default::default()
+        },
+        true,
+    );
+
+    supervisor.recover_orphaned_sessions(100, &listener());
+    let response = supervisor.handle_message(
+        &Message::Attach {
+            session_id: SessionId::from(42),
+            after_sequence: None,
+        },
+        7,
+        101,
+        &listener(),
+    );
+
+    assert!(matches!(
+        response,
+        Some(Message::AttachResponse { result: Ok(_) })
+    ));
 }
 
 /// The reason the supervisor exists: a client that comes back gets the session

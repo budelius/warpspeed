@@ -2331,6 +2331,7 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                                 }
                             })
                             .map(Into::into),
+                        cli_agent_resume_descriptor: None,
                         cwd: terminal_pane.cwd,
                         is_active: terminal_pane.is_active,
                         is_read_only: false,

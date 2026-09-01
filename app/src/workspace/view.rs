@@ -22302,6 +22302,14 @@ impl Workspace {
     // Render traffic lights, if appropriate for the current platform.
     fn maybe_render_traffic_lights(&self, stack: &mut Stack, app: &AppContext) {
         let Some(traffic_light_data) = traffic_light_data(app, self.window_id) else {
+            // No traffic lights means no maximize button, so Windows must stop claiming that
+            // region. This covers the native-frame case, where `traffic_light_data` returns `None`.
+            #[cfg(windows)]
+            crate::util::traffic_lights::windows::report_maximize_button_bounds(
+                self.window_id,
+                None,
+                app,
+            );
             return;
         };
 

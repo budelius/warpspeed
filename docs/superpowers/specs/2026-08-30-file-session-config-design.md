@@ -41,17 +41,20 @@ A launch config should remain a repeatable template. A persistent working sessio
 
 ## User-authored format
 
-Session configs live under the active application's data directory:
+Session configs live under the authored-config data directory:
 
 ```text
 session_configurations/*.toml
 ```
 
-For default WarpSpeed on Windows this is:
+Every `WarpSpeed*` instance uses the default WarpSpeed authored-config root. On Windows this is:
 
 ```text
 %APPDATA%\warp\WarpSpeed\data\session_configurations
 ```
+
+This includes elevated `WarpSpeedAdmin` and isolated `WARPSPEED_PROFILE` instances. Other Warp
+channels retain their own authored-config directories.
 
 Example `JustVIBE.toml`:
 
@@ -229,7 +232,9 @@ Only one process may own a session ID and generation at a time.
 - If another process owns it, focus that process through local control when available; otherwise show an explicit **Session is open in another WarpSpeed process** error.
 - Never open an untracked duplicate and never let two processes race to overwrite the snapshot.
 
-The versioned WarpSpeed installation and profile isolation remain independent. Profiles have separate session-config directories and state roots unless sharing is explicitly configured later.
+Versioned installations and profile runtime isolation remain independent. Every `WarpSpeed*`
+profile reads the same authored launch, session, and tab configs, while each profile retains its
+own state root, database, ownership leases, and session snapshots.
 
 ## Windows process continuity
 

@@ -27,6 +27,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- All `WarpSpeed` profiles, including elevated and `WARPSPEED_PROFILE` instances, now share one
+  authored set of launch, session, and tab configurations while retaining isolated runtime state.
 - Merged upstream through `e2a08021`. The `warpspeed` target still builds against
   it unchanged.
 

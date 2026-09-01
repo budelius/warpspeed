@@ -45,6 +45,17 @@ pub(crate) fn ensure_warp_watch_roots_exist() {
         );
     }
 
+    let authored_config_dir = crate::user_config::authored_config_base_dir();
+    if authored_config_dir != data_dir
+        && authored_config_dir != config_local_dir
+        && let Err(err) = fs::create_dir_all(&authored_config_dir)
+    {
+        log::warn!(
+            "Failed to create authored config directory {}: {err}",
+            authored_config_dir.display()
+        );
+    }
+
     // The TUI surface stores its settings in a separate config directory
     // (see `warp_core::paths::tui_config_local_dir`). Create it up front — only
     // for that surface — so the watcher can register it at startup and pick up
@@ -284,6 +295,20 @@ impl WarpManagedPathsWatcher {
                     WatchFilter::accept_all(),
                     RecursiveMode::Recursive,
                     "Warp config directory",
+                );
+            }
+            let authored_config_dir = crate::user_config::authored_config_base_dir();
+            if !authored_config_dir.starts_with(&data_dir)
+                && (!should_register_config_local_dir
+                    || !authored_config_dir.starts_with(&config_local_dir))
+            {
+                Self::register_path(
+                    ctx,
+                    &watcher,
+                    authored_config_dir,
+                    WatchFilter::accept_all(),
+                    RecursiveMode::Recursive,
+                    "Warp authored config directory",
                 );
             }
             // Watch the TUI settings directory for that surface. On macOS it's

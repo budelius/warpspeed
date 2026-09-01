@@ -7,6 +7,31 @@ use crate::launch_configs::launch_config::PaneTemplateType;
 use crate::tab_configs::render_tab_config;
 use crate::tab_configs::tab_config::{TabConfigPaneType, generated_worktree_repo_dir};
 
+#[test]
+fn warpspeed_profiles_share_authored_config_base_dir() {
+    let expected =
+        warp_core::paths::data_dir_for_app_id(warp_core::AppId::new("dev", "warp", "WarpSpeed"));
+
+    for application_name in ["WarpSpeed", "WarpSpeedAdmin", "WarpSpeed-a"] {
+        assert_eq!(
+            authored_config_base_dir_for_app_id(warp_core::AppId::new(
+                "dev",
+                "warp",
+                application_name.to_owned(),
+            )),
+            expected
+        );
+    }
+}
+
+#[test]
+fn other_applications_keep_their_own_authored_config_base_dir() {
+    assert_eq!(
+        authored_config_base_dir_for_app_id(warp_core::AppId::new("dev", "warp", "WarpOss")),
+        base_dir()
+    );
+}
+
 #[cfg(feature = "local_fs")]
 #[test]
 fn test_default_tab_configs_dir_uses_underscores() {

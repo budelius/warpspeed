@@ -138,6 +138,10 @@ pub struct TrafficLightData {
     scales_with_zoom: bool,
     /// The window these buttons belong to. Windows reports the maximize button's bounds to its
     /// platform window so it can open the Snap Layouts flyout over it.
+    ///
+    /// Read only by the Windows renderer (`windows/renderer.rs`), so every other target sees this
+    /// field as unread.
+    #[cfg_attr(not(windows), allow(dead_code))]
     window_id: WindowId,
 }
 

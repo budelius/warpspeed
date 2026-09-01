@@ -5,7 +5,21 @@
 //! subclass in this module supplies that answer, and replays the non-client mouse messages that
 //! follow as ordinary client-area ones so the app-drawn button keeps behaving normally.
 
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex, Once};
+
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
+};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, HTMAXBUTTON, PostMessageW, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+};
+use winit::window::Window as WinitWindow;
+
+use super::window_attribute::to_hwnd;
 
 mod logic;
 
@@ -38,23 +52,6 @@ impl SnapLayoutsState {
     }
 }
 
-use std::sync::Arc;
-use std::sync::LazyLock;
-
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Gdi::ScreenToClient;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
-};
-use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, PostMessageW, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
-};
-use winit::window::Window as WinitWindow;
-
-use super::window_attribute::to_hwnd;
-
 /// Distinguishes our subclass from any other on the same window.
 const SUBCLASS_ID: usize = 0x5741_5250;
 
@@ -71,7 +68,9 @@ static WINDOWS_VERSION: LazyLock<windows_version::OsVersion> =
 /// has the native frame, which draws its own caption buttons.
 pub fn install(window: &WinitWindow) -> Option<Arc<SnapLayoutsState>> {
     if WINDOWS_VERSION.build < WINDOWS_11_BUILD {
-        log::info!("Snap Layouts is not supported before Windows 11");
+        // Every window open on Windows 10 takes this path, so this is not worth surfacing above
+        // debug level.
+        log::debug!("Snap Layouts is not supported before Windows 11");
         return None;
     }
 
@@ -129,7 +128,15 @@ unsafe extern "system" fn subclass_proc(
                 return default_answer;
             };
 
-            LRESULT(hit_test(default_answer.0 as u32, client_x, client_y, button) as isize)
+            // `hit_test` only ever overrides an `HTCLIENT` answer with `HTMAXBUTTON`; every other
+            // answer, including negative ones like `HTTRANSPARENT`, must come back bit-identical to
+            // what `DefSubclassProc` returned, so we return `default_answer` itself rather than
+            // rebuild an `LRESULT` from the `u32` hit test result.
+            if hit_test(default_answer.0 as u32, client_x, client_y, button) == HTMAXBUTTON {
+                LRESULT(HTMAXBUTTON as isize)
+            } else {
+                default_answer
+            }
         }
         WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP => {
             let Some(synthetic) = synthetic_message(message, wparam.0 as u32) else {
@@ -178,15 +185,6 @@ unsafe extern "system" fn subclass_proc(
     }
 }
 
-/// Splits a mouse message's `LPARAM` into its signed 16-bit coordinates.
-fn unpack_coords(lparam: LPARAM) -> (i32, i32) {
-    let packed = lparam.0 as u32;
-    (
-        (packed & 0xFFFF) as u16 as i16 as i32,
-        (packed >> 16) as u16 as i16 as i32,
-    )
-}
-
 fn screen_to_client(hwnd: HWND, x: i32, y: i32) -> Option<(i32, i32)> {
     let mut point = POINT { x, y };
     let converted = unsafe { ScreenToClient(hwnd, &mut point) };
@@ -201,7 +199,12 @@ fn cursor_client_position(hwnd: HWND) -> Option<(i32, i32)> {
 
 /// Asks for a `WM_NCMOUSELEAVE` when the pointer leaves the non-client area, which is the only
 /// notice we get that the hover over the maximize button has ended.
+///
+/// Called on every `WM_NCMOUSEMOVE`, so a failure is only logged once per process rather than on
+/// every mouse move.
 fn track_mouse_leave(hwnd: HWND) {
+    static WARNED: Once = Once::new();
+
     let mut event = TRACKMOUSEEVENT {
         cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
         dwFlags: TME_LEAVE | TME_NONCLIENT,
@@ -210,6 +213,8 @@ fn track_mouse_leave(hwnd: HWND) {
     };
 
     if let Err(err) = unsafe { TrackMouseEvent(&mut event) } {
-        log::warn!("Couldn't track the pointer leaving the maximize button: {err:?}");
+        WARNED.call_once(|| {
+            log::warn!("Couldn't track the pointer leaving the maximize button: {err:?}");
+        });
     }
 }

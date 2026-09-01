@@ -1,6 +1,7 @@
 //! The decisions the Snap Layouts window subclass makes, expressed without any Win32 calls so
 //! they can be tested.
 
+use windows::Win32::Foundation::LPARAM;
 use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::WindowsAndMessaging::{
     HTCLIENT, HTMAXBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN,
@@ -99,6 +100,16 @@ pub fn leave_position(cursor: (i32, i32), button: Option<ButtonRect>) -> (i32, i
 pub fn pack_coords(x: i32, y: i32) -> isize {
     let packed = ((y as u32) << 16) | ((x as u32) & 0xFFFF);
     packed as i32 as isize
+}
+
+/// Splits a mouse message's `LPARAM` into its signed 16-bit coordinates. The inverse of
+/// `pack_coords`.
+pub fn unpack_coords(lparam: LPARAM) -> (i32, i32) {
+    let packed = lparam.0 as u32;
+    (
+        (packed & 0xFFFF) as u16 as i16 as i32,
+        (packed >> 16) as u16 as i16 as i32,
+    )
 }
 
 #[cfg(test)]
@@ -215,5 +226,13 @@ mod tests {
         assert_eq!(pack_coords(930, 20), (20 << 16) | 930);
         // Negative coordinates occur while the mouse is captured outside the window.
         assert_eq!(pack_coords(-1, -1), 0xFFFF_FFFFu32 as i32 as isize);
+    }
+
+    #[test]
+    fn coordinates_round_trip_through_pack_and_unpack() {
+        assert_eq!(unpack_coords(LPARAM(pack_coords(930, 20))), (930, 20));
+        // Negative coordinates occur while the mouse is captured outside the window; this pins the
+        // sign-extension in `unpack_coords`.
+        assert_eq!(unpack_coords(LPARAM(pack_coords(-5, -10))), (-5, -10));
     }
 }

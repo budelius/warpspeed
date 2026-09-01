@@ -5,6 +5,8 @@
 //! moves on every window resize, and a resize re-lays-out the existing element tree without
 //! re-running the workspace's `render`.
 
+use std::any::Any;
+
 use warpui::elements::Point;
 use warpui::event::DispatchedEvent;
 use warpui::geometry::rect::RectF;
@@ -80,6 +82,11 @@ impl Element for MaximizeButtonRegion {
 
     fn origin(&self) -> Option<Point> {
         self.origin
+    }
+
+    /// Forwarded so that wrapping the button changes nothing about how its parent lays it out.
+    fn parent_data(&self) -> Option<&dyn Any> {
+        self.child.parent_data()
     }
 }
 

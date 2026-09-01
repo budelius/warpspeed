@@ -8,8 +8,6 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(windows)]
-use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result};
 use itertools::Itertools;
@@ -1509,12 +1507,9 @@ fn create_window(
                 Dwm::DWMWCP_ROUND,
             );
 
-            static WINDOWS_VERSION: LazyLock<windows_version::OsVersion> =
-                LazyLock::new(windows_version::OsVersion::current);
-
             if let Err(err) = rounded_corner_result {
                 match err {
-                    WindowAttributeErr::Win32Error(_) if WINDOWS_VERSION.build < 22000 => {
+                    WindowAttributeErr::Win32Error(_) if !super::windows::is_windows_11() => {
                         log::info!("Rounded window corners not supported on Windows 10");
                     }
                     _ => {
@@ -1694,12 +1689,9 @@ impl crate::platform::Window for Window {
             // than in the window procedure. A scale-factor change corrects itself on the next
             // paint, which is when this is called.
             let scale_factor = self.backing_scale_factor();
-            state.set_button_rect(bounds.map(|bounds| super::windows::ButtonRect {
-                left: (bounds.min_x() * scale_factor).round() as i32,
-                top: (bounds.min_y() * scale_factor).round() as i32,
-                right: (bounds.max_x() * scale_factor).round() as i32,
-                bottom: (bounds.max_y() * scale_factor).round() as i32,
-            }));
+            state.set_button_rect(
+                bounds.map(|bounds| super::windows::to_physical(bounds, scale_factor)),
+            );
         }
 
         #[cfg(not(windows))]

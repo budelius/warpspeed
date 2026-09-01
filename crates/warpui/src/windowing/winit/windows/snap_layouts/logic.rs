@@ -1,11 +1,12 @@
 //! The decisions the Snap Layouts window subclass makes, expressed without any Win32 calls so
 //! they can be tested.
 
+use pathfinder_geometry::rect::RectF;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::WindowsAndMessaging::{
-    HTCLIENT, HTMAXBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    HTCLIENT, HTMAXBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDBLCLK,
+    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
 };
 
 /// The bounds of the app-drawn maximize button, in physical pixels relative to the top-left of the
@@ -23,6 +24,20 @@ impl ButtonRect {
     /// matches how Win32 treats rectangles.
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
+
+/// Converts the maximize button's logical bounds, as the app painted them, into the physical client
+/// coordinates the hit test compares against.
+///
+/// The window's current scale factor is applied here, as the bounds arrive, so the window procedure
+/// itself needs no coordinate conversion. A scale-factor change corrects itself on the next paint.
+pub fn to_physical(bounds: RectF, scale_factor: f32) -> ButtonRect {
+    ButtonRect {
+        left: (bounds.min_x() * scale_factor).round() as i32,
+        top: (bounds.min_y() * scale_factor).round() as i32,
+        right: (bounds.max_x() * scale_factor).round() as i32,
+        bottom: (bounds.max_y() * scale_factor).round() as i32,
     }
 }
 
@@ -66,10 +81,17 @@ pub fn synthetic_message(message: u32, hit: u32) -> Option<SyntheticMouseMessage
             message: WM_MOUSEMOVE,
             wparam: 0,
         }),
-        WM_NCLBUTTONDOWN if hit == HTMAXBUTTON => Some(SyntheticMouseMessage {
-            message: WM_LBUTTONDOWN,
-            wparam: MK_LBUTTON.0 as usize,
-        }),
+        // A double-click is replayed as another press, which is exactly what the app saw before
+        // Windows started routing these through the non-client area: a fast double-click used to be
+        // two plain `WM_LBUTTONDOWN`s and two clean toggles. Left untranslated it would reach
+        // `DefWindowProc`, which enters its own caption-button tracking loop and maximizes the
+        // window behind the app-drawn button's back.
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if hit == HTMAXBUTTON => {
+            Some(SyntheticMouseMessage {
+                message: WM_LBUTTONDOWN,
+                wparam: MK_LBUTTON.0 as usize,
+            })
+        }
         WM_NCLBUTTONUP if hit == HTMAXBUTTON => Some(SyntheticMouseMessage {
             message: WM_LBUTTONUP,
             wparam: 0,
@@ -114,9 +136,11 @@ pub fn unpack_coords(lparam: LPARAM) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
+    use pathfinder_geometry::vector::Vector2F;
     use windows::Win32::UI::WindowsAndMessaging::{
         HTCAPTION, HTCLIENT, HTMAXBUTTON, HTTOP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-        WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
+        WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+        WM_NCRBUTTONDOWN,
     };
 
     use super::*;
@@ -161,6 +185,17 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_claims_the_inclusive_left_and_top_edges() {
+        // The left and top edges belong to the button; the right and bottom ones do not. Pinning
+        // both halves keeps the rectangle's edge convention from drifting.
+        assert_eq!(hit_test(HTCLIENT, 908, 20, Some(button())), HTMAXBUTTON);
+        assert_eq!(hit_test(HTCLIENT, 930, 0, Some(button())), HTMAXBUTTON);
+        assert_eq!(hit_test(HTCLIENT, 908, 0, Some(button())), HTMAXBUTTON);
+        assert_eq!(hit_test(HTCLIENT, 954, 20, Some(button())), HTCLIENT);
+        assert_eq!(hit_test(HTCLIENT, 930, 35, Some(button())), HTCLIENT);
+    }
+
+    #[test]
     fn hit_test_ignores_everything_when_no_button_is_on_screen() {
         assert_eq!(hit_test(HTCLIENT, 930, 20, None), HTCLIENT);
     }
@@ -188,6 +223,20 @@ mod tests {
                 wparam: 0,
             })
         );
+    }
+
+    #[test]
+    fn a_double_click_is_replayed_as_another_press() {
+        // Without this the message reaches `DefWindowProc`, which runs its own caption-button
+        // tracking loop and maximizes the window while the app-drawn button shows no feedback.
+        assert_eq!(
+            synthetic_message(WM_NCLBUTTONDBLCLK, HTMAXBUTTON),
+            Some(SyntheticMouseMessage {
+                message: WM_LBUTTONDOWN,
+                wparam: MK_LBUTTON.0 as usize,
+            })
+        );
+        assert_eq!(synthetic_message(WM_NCLBUTTONDBLCLK, HTCAPTION), None);
     }
 
     #[test]
@@ -226,6 +275,69 @@ mod tests {
         assert_eq!(pack_coords(930, 20), (20 << 16) | 930);
         // Negative coordinates occur while the mouse is captured outside the window.
         assert_eq!(pack_coords(-1, -1), 0xFFFF_FFFFu32 as i32 as isize);
+    }
+
+    /// The same button as [`button`], in logical pixels: 46 wide, 35 tall, right-aligned in a
+    /// 1000-pixel-wide window.
+    fn logical_button() -> RectF {
+        RectF::new(Vector2F::new(908., 0.), Vector2F::new(46., 35.))
+    }
+
+    #[test]
+    fn logical_bounds_scale_to_physical_client_coordinates() {
+        assert_eq!(
+            to_physical(logical_button(), 1.0),
+            ButtonRect {
+                left: 908,
+                top: 0,
+                right: 954,
+                bottom: 35,
+            }
+        );
+        // 125%: the right and bottom edges land on a half pixel and round away from zero.
+        assert_eq!(
+            to_physical(logical_button(), 1.25),
+            ButtonRect {
+                left: 1135,
+                top: 0,
+                right: 1193,
+                bottom: 44,
+            }
+        );
+        assert_eq!(
+            to_physical(logical_button(), 1.5),
+            ButtonRect {
+                left: 1362,
+                top: 0,
+                right: 1431,
+                bottom: 53,
+            }
+        );
+        assert_eq!(
+            to_physical(logical_button(), 2.0),
+            ButtonRect {
+                left: 1816,
+                top: 0,
+                right: 1908,
+                bottom: 70,
+            }
+        );
+    }
+
+    #[test]
+    fn scaling_preserves_the_button_away_from_the_window_origin() {
+        // A button that is not flush against the top of the window, so a scale factor applied to
+        // the origin rather than to both edges would be visible.
+        let bounds = RectF::new(Vector2F::new(100., 8.), Vector2F::new(46., 35.));
+        assert_eq!(
+            to_physical(bounds, 2.0),
+            ButtonRect {
+                left: 200,
+                top: 16,
+                right: 292,
+                bottom: 86,
+            }
+        );
     }
 
     #[test]

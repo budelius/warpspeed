@@ -5,7 +5,7 @@
 //! subclass in this module supplies that answer, and replays the non-client mouse messages that
 //! follow as ordinary client-area ones so the app-drawn button keeps behaving normally.
 
-use std::sync::{Arc, LazyLock, Mutex, Once};
+use std::sync::{Arc, Mutex, Once};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
@@ -14,11 +14,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, HTMAXBUTTON, PostMessageW, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    GetCursorPos, HTMAXBUTTON, PostMessageW, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCHITTEST,
+    WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
 };
 use winit::window::Window as WinitWindow;
 
+use super::is_windows_11;
 use super::window_attribute::to_hwnd;
 
 mod logic;
@@ -32,6 +33,11 @@ pub use logic::*;
 #[derive(Debug, Default)]
 pub struct SnapLayoutsState {
     button: Mutex<Option<ButtonRect>>,
+    /// Whether the window procedure believes the pointer is currently over the maximize button.
+    ///
+    /// Only ever touched from the message thread; the `Mutex` is here to match the field above and
+    /// to keep the state shareable, not because there is contention to resolve.
+    hovered: Mutex<bool>,
 }
 
 impl SnapLayoutsState {
@@ -50,16 +56,25 @@ impl SnapLayoutsState {
     pub fn button_rect(&self) -> Option<ButtonRect> {
         self.button.lock().ok().and_then(|button| *button)
     }
+
+    /// Records that the pointer is over the maximize button.
+    fn note_hovered(&self) {
+        if let Ok(mut hovered) = self.hovered.lock() {
+            *hovered = true;
+        }
+    }
+
+    /// Clears the recorded hover, reporting whether one was in effect.
+    fn take_hovered(&self) -> bool {
+        match self.hovered.lock() {
+            Ok(mut hovered) => std::mem::replace(&mut hovered, false),
+            Err(_) => false,
+        }
+    }
 }
 
 /// Distinguishes our subclass from any other on the same window.
 const SUBCLASS_ID: usize = 0x5741_5250;
-
-/// The first Windows 11 build. Snap Layouts does not exist before it.
-const WINDOWS_11_BUILD: u32 = 22000;
-
-static WINDOWS_VERSION: LazyLock<windows_version::OsVersion> =
-    LazyLock::new(windows_version::OsVersion::current);
 
 /// Installs the Snap Layouts subclass on `window`, returning the state to publish the maximize
 /// button's bounds through.
@@ -67,7 +82,7 @@ static WINDOWS_VERSION: LazyLock<windows_version::OsVersion> =
 /// Returns `None`, leaving the window untouched, on anything before Windows 11 and on a window that
 /// has the native frame, which draws its own caption buttons.
 pub fn install(window: &WinitWindow) -> Option<Arc<SnapLayoutsState>> {
-    if WINDOWS_VERSION.build < WINDOWS_11_BUILD {
+    if !is_windows_11() {
         // Every window open on Windows 10 takes this path, so this is not worth surfacing above
         // debug level.
         log::debug!("Snap Layouts is not supported before Windows 11");
@@ -138,8 +153,24 @@ unsafe extern "system" fn subclass_proc(
                 default_answer
             }
         }
-        WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP => {
+        WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP
+        | WM_NCLBUTTONDBLCLK => {
             let Some(synthetic) = synthetic_message(message, wparam.0 as u32) else {
+                // Non-client activity that has nothing to do with the button. If we still believe
+                // the button is hovered, this move is the pointer leaving it, and it is the only
+                // notice we are going to get: winit answers our synthetic `WM_MOUSEMOVE` by arming
+                // its own client-only `TrackMouseEvent`, which replaces the `TME_NONCLIENT` request
+                // below, so `WM_NCMOUSELEAVE` may never arrive. End the hover here, and let the
+                // message itself go on to `DefSubclassProc` so the resize borders and the rest of
+                // the non-client area keep working exactly as before.
+                if message == WM_NCMOUSEMOVE && state.take_hovered() {
+                    let (screen_x, screen_y) = unpack_coords(lparam);
+                    if let Some(cursor) = screen_to_client(hwnd, screen_x, screen_y) {
+                        let (x, y) = leave_position(cursor, state.button_rect());
+                        post_synthetic(hwnd, WM_MOUSEMOVE, 0, x, y);
+                    }
+                }
+
                 return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
             };
 
@@ -156,21 +187,23 @@ unsafe extern "system" fn subclass_proc(
                 return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
             };
 
-            if message == WM_NCMOUSEMOVE {
-                track_mouse_leave(hwnd);
+            match message {
+                WM_NCMOUSEMOVE => {
+                    track_mouse_leave(hwnd);
+                    state.note_hovered();
+                }
+                // Belt and braces: when the request above does survive, this is the tidier way for
+                // the hover to end.
+                WM_NCMOUSELEAVE => {
+                    state.take_hovered();
+                }
+                _ => {}
             }
 
-            unsafe {
-                let _ = PostMessageW(
-                    Some(hwnd),
-                    synthetic.message,
-                    WPARAM(synthetic.wparam),
-                    LPARAM(pack_coords(x, y)),
-                );
-            }
+            post_synthetic(hwnd, synthetic.message, synthetic.wparam, x, y);
 
             // Swallow the original. Left alone, `DefWindowProc` would open the system menu on a
-            // press over a caption button.
+            // press over a caption button, and run its own tracking loop on a double-click.
             LRESULT(0)
         }
         WM_NCDESTROY => unsafe {
@@ -182,6 +215,18 @@ unsafe extern "system" fn subclass_proc(
             result
         },
         _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// Posts a client-area mouse message at the given client coordinates.
+fn post_synthetic(hwnd: HWND, message: u32, wparam: usize, x: i32, y: i32) {
+    unsafe {
+        let _ = PostMessageW(
+            Some(hwnd),
+            message,
+            WPARAM(wparam),
+            LPARAM(pack_coords(x, y)),
+        );
     }
 }
 
@@ -197,8 +242,13 @@ fn cursor_client_position(hwnd: HWND) -> Option<(i32, i32)> {
     screen_to_client(hwnd, point.x, point.y)
 }
 
-/// Asks for a `WM_NCMOUSELEAVE` when the pointer leaves the non-client area, which is the only
-/// notice we get that the hover over the maximize button has ended.
+/// Asks for a `WM_NCMOUSELEAVE` when the pointer leaves the non-client area.
+///
+/// This request does not always survive: winit classifies our synthetic `WM_MOUSEMOVE` by client
+/// rectangle containment, decides the pointer has entered the client area, and arms its own
+/// client-only `TrackMouseEvent`, which replaces this one. The window procedure therefore also ends
+/// the hover from the first non-client move away from the button, and treats `WM_NCMOUSELEAVE` as
+/// the tidier of two paths rather than as the only one.
 ///
 /// Called on every `WM_NCMOUSEMOVE`, so a failure is only logged once per process rather than on
 /// every mouse move.
@@ -216,5 +266,43 @@ fn track_mouse_leave(hwnd: HWND) {
         WARNED.call_once(|| {
             log::warn!("Couldn't track the pointer leaving the maximize button: {err:?}");
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_button_rectangle_round_trips_through_the_shared_state() {
+        let state = SnapLayoutsState::new();
+        assert_eq!(
+            state.button_rect(),
+            None,
+            "no button is published initially"
+        );
+
+        let rect = ButtonRect {
+            left: 908,
+            top: 0,
+            right: 954,
+            bottom: 35,
+        };
+        state.set_button_rect(Some(rect));
+        assert_eq!(state.button_rect(), Some(rect));
+
+        // Published as `None` in fullscreen and whenever the traffic lights are not rendered.
+        state.set_button_rect(None);
+        assert_eq!(state.button_rect(), None);
+    }
+
+    #[test]
+    fn the_hover_is_recorded_and_taken_once() {
+        let state = SnapLayoutsState::new();
+        assert!(!state.take_hovered(), "no hover is in effect initially");
+
+        state.note_hovered();
+        assert!(state.take_hovered(), "the recorded hover is reported once");
+        assert!(!state.take_hovered(), "and is cleared by being taken");
     }
 }

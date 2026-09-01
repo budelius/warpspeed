@@ -10,8 +10,9 @@ use warpui::elements::{
 };
 use warpui::fonts::FamilyId;
 use warpui::platform::FullscreenState;
-use warpui::{AppContext, Element, SingletonEntity};
+use warpui::{AppContext, Element, SingletonEntity, WindowId};
 
+use crate::util::traffic_lights::windows::MaximizeButtonRegion;
 use crate::util::traffic_lights::windows::RendererState;
 use crate::util::traffic_lights::windows_only::WINDOWS_BRIGHT_RED;
 use crate::util::traffic_lights::{TrafficLightData, TrafficLightMouseStates};
@@ -111,6 +112,7 @@ fn render_tab_row_with_glyph_icons(
     mouse_states: &TrafficLightMouseStates,
     theme: &WarpTheme,
     icon_font_family: FamilyId,
+    window_id: WindowId,
 ) -> Box<dyn Element> {
     let flex = Flex::row()
         .with_main_axis_size(MainAxisSize::Min)
@@ -134,12 +136,17 @@ fn render_tab_row_with_glyph_icons(
                 } else {
                     "root_view:toggle_maximize_window"
                 };
-                icon.render(
-                    mouse_states.maximize_window_button.clone(),
-                    theme,
-                    icon_font_family,
-                    action_name,
+                MaximizeButtonRegion::new(
+                    icon.render(
+                        mouse_states.maximize_window_button.clone(),
+                        theme,
+                        icon_font_family,
+                        action_name,
+                    ),
+                    window_id,
+                    fullscreen_state != FullscreenState::Fullscreen,
                 )
+                .finish()
             },
             WindowsTrafficLightIcon::Close.render(
                 mouse_states.close_window_button.clone(),
@@ -169,6 +176,7 @@ impl TrafficLightData {
                 mouse_states,
                 theme,
                 icon_font_family,
+                self.window_id,
             ),
             None => {
                 // If we were unable to fetch the icon font family, render the tab bar using SVG
@@ -206,18 +214,26 @@ impl TrafficLightData {
                             .finish(),
                         )
                         .finish(),
-                        Self::render_button(
-                            Arc::clone(&mouse_states.maximize_window_button),
-                            Self::render_windows_maximize_button_icon(fg_color, fullscreen_state),
-                            theme.surface_3().into(),
+                        MaximizeButtonRegion::new(
+                            Self::render_button(
+                                Arc::clone(&mouse_states.maximize_window_button),
+                                Self::render_windows_maximize_button_icon(
+                                    fg_color,
+                                    fullscreen_state,
+                                ),
+                                theme.surface_3().into(),
+                            )
+                            .on_click(move |evt, _, _| {
+                                if fullscreen_state == FullscreenState::Fullscreen {
+                                    evt.dispatch_action("root_view:toggle_fullscreen", ());
+                                } else {
+                                    evt.dispatch_action("root_view:toggle_maximize_window", ());
+                                }
+                            })
+                            .finish(),
+                            self.window_id,
+                            fullscreen_state != FullscreenState::Fullscreen,
                         )
-                        .on_click(move |evt, _, _| {
-                            if fullscreen_state == FullscreenState::Fullscreen {
-                                evt.dispatch_action("root_view:toggle_fullscreen", ());
-                            } else {
-                                evt.dispatch_action("root_view:toggle_maximize_window", ());
-                            }
-                        })
                         .finish(),
                         Container::new(
                             Self::render_windows_close_button(

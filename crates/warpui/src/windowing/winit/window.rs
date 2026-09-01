@@ -8,8 +8,6 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(windows)]
-use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result};
 use itertools::Itertools;
@@ -724,6 +722,11 @@ pub(super) struct Window {
     /// invisible title bar insofar as it triggers window dragging when clicked-and-dragged, or
     /// maximize/restore when double-clicked.
     titlebar_height: Cell<f32>,
+    /// Shared with the Snap Layouts window subclass on Windows 11. `None` when the subclass is not
+    /// installed: on Windows 10, on a window created with native decorations, and on every other
+    /// platform.
+    #[cfg(windows)]
+    snap_layouts: RefCell<Option<std::sync::Arc<super::windows::SnapLayoutsState>>>,
     capture_callback: RefCell<Option<FrameCaptureCallback>>,
 }
 
@@ -734,6 +737,8 @@ impl Window {
             inner: Default::default(),
             scene: Default::default(),
             titlebar_height: Cell::new(DEFAULT_TITLEBAR_HEIGHT),
+            #[cfg(windows)]
+            snap_layouts: RefCell::new(None),
             capture_callback: RefCell::new(None),
         }
     }
@@ -775,6 +780,11 @@ impl Window {
         )?;
 
         enable_decorations_if_needed(&window, &resources.adapter.get_info());
+
+        #[cfg(windows)]
+        {
+            *self.snap_layouts.borrow_mut() = super::windows::install(&window);
+        }
 
         let renderer = Renderer::new(&resources, GlyphConfig::default());
 
@@ -1497,12 +1507,9 @@ fn create_window(
                 Dwm::DWMWCP_ROUND,
             );
 
-            static WINDOWS_VERSION: LazyLock<windows_version::OsVersion> =
-                LazyLock::new(windows_version::OsVersion::current);
-
             if let Err(err) = rounded_corner_result {
                 match err {
-                    WindowAttributeErr::Win32Error(_) if WINDOWS_VERSION.build < 22000 => {
+                    WindowAttributeErr::Win32Error(_) if !super::windows::is_windows_11() => {
                         log::info!("Rounded window corners not supported on Windows 10");
                     }
                     _ => {
@@ -1666,6 +1673,29 @@ impl crate::platform::Window for Window {
 
     fn set_titlebar_height(&self, height: f64) {
         self.titlebar_height.set(height as f32);
+    }
+
+    fn set_maximize_button_bounds(&self, bounds: Option<RectF>) {
+        #[cfg(windows)]
+        {
+            use crate::platform::WindowContext;
+
+            let state = self.snap_layouts.borrow().as_ref().cloned();
+            let Some(state) = state else {
+                return;
+            };
+
+            // The subclass compares against physical client coordinates, so convert here rather
+            // than in the window procedure. A scale-factor change corrects itself on the next
+            // paint, which is when this is called.
+            let scale_factor = self.backing_scale_factor();
+            state.set_button_rect(
+                bounds.map(|bounds| super::windows::to_physical(bounds, scale_factor)),
+            );
+        }
+
+        #[cfg(not(windows))]
+        let _ = bounds;
     }
 }
 

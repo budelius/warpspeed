@@ -209,6 +209,10 @@ impl platform::Window for Window {
 
     fn set_titlebar_height(&self, _height: f64) {}
 
+    fn set_maximize_button_bounds(&self, _bounds: Option<RectF>) {
+        // Snap Layouts is a Windows 11 feature; there is nothing to report here.
+    }
+
     fn supports_transparency(&self) -> bool {
         false
     }

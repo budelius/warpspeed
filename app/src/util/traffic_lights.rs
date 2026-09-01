@@ -74,6 +74,7 @@ pub fn traffic_light_data(ctx: &AppContext, window_id: WindowId) -> Option<Traff
             width: 64.,
             side: TrafficLightSide::Left,
             scales_with_zoom: false,
+            window_id,
         })
     } else if cfg!(any(target_os = "linux", target_os = "freebsd"))
         && !ctx.windows().is_tiling_window_manager()
@@ -82,12 +83,14 @@ pub fn traffic_light_data(ctx: &AppContext, window_id: WindowId) -> Option<Traff
             width: 116.,
             side: TrafficLightSide::Right,
             scales_with_zoom: true,
+            window_id,
         })
     } else if cfg!(target_os = "windows") {
         Some(TrafficLightData {
             width: 136.,
             side: TrafficLightSide::Right,
             scales_with_zoom: true,
+            window_id,
         })
     } else {
         None
@@ -128,11 +131,18 @@ impl TrafficLightMouseStates {
 pub struct TrafficLightData {
     width: f32,
     pub side: TrafficLightSide,
-    /// Whether the traffic lights can scale with the app's zoom level.
+    /// Whether the traffic light buttons can scale with the app's zoom level.
     ///
     /// If `false` that means the traffic light buttons are of fixed size as determined by the OS
     /// and we cannot scale them as the user configures the zoom level.
     scales_with_zoom: bool,
+    /// The window these buttons belong to. Windows reports the maximize button's bounds to its
+    /// platform window so it can open the Snap Layouts flyout over it.
+    ///
+    /// Read only by the Windows renderer (`windows/renderer.rs`), so every other target sees this
+    /// field as unread.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    window_id: WindowId,
 }
 
 impl TrafficLightData {

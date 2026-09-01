@@ -111,12 +111,50 @@ returns 0 to swallow the original:
 | Received | Posted |
 | --- | --- |
 | `WM_NCMOUSEMOVE`, wParam `HTMAXBUTTON` | `WM_MOUSEMOVE` at the client coordinate |
+| `WM_NCMOUSEMOVE`, any other wParam, while the button is hovered | `WM_MOUSEMOVE` at the client coordinate, or one pixel below the rectangle if that coordinate is still inside it |
 | `WM_NCMOUSELEAVE` | `WM_MOUSEMOVE` at the current cursor position, or one pixel below the rectangle if that position is still inside it |
 | `WM_NCLBUTTONDOWN`, wParam `HTMAXBUTTON` | `WM_LBUTTONDOWN` |
+| `WM_NCLBUTTONDBLCLK`, wParam `HTMAXBUTTON` | `WM_LBUTTONDOWN` |
 | `WM_NCLBUTTONUP`, wParam `HTMAXBUTTON` | `WM_LBUTTONUP` |
 
-On the first `WM_NCMOUSEMOVE` the subclass arms `TrackMouseEvent` with `TME_NONCLIENT | TME_LEAVE` so that
-`WM_NCMOUSELEAVE` arrives when the pointer leaves the button.
+Every row but the second is swallowed. The second is not: the pointer is over the resize border or some
+other part of the non-client area, and that area has to keep behaving exactly as it did before, so the
+message goes on to `DefSubclassProc` and only the synthetic move is added.
+
+`WM_NCLBUTTONDBLCLK` has to be translated for the same reason `WM_NCLBUTTONDOWN` does, and more urgently.
+Left to `DefWindowProc` with an `HTMAXBUTTON` hit code it enters a caption-button tracking loop — a nested
+modal message loop this app has never run — and posts `WM_SYSCOMMAND SC_MAXIMIZE` itself, while the
+app-drawn button never sees the press. Replaying it as another `WM_LBUTTONDOWN` reproduces exactly what the
+app saw before Windows started routing these through the non-client area: a fast double-click was two plain
+presses and two clean toggles.
+
+### Ending the hover
+
+On a `WM_NCMOUSEMOVE` over the button the subclass arms `TrackMouseEvent` with `TME_NONCLIENT | TME_LEAVE`,
+but that request cannot be relied on, because winit tracks the pointer on the same `HWND`. winit's `WM_MOUSEMOVE`
+handler classifies pointer position purely geometrically, by `GetClientRect` containment, and the maximize
+button is geometrically inside the client rectangle. So it reads the synthetic move as an enter and calls
+`TrackMouseEvent(TME_LEAVE)`, client-only, replacing our request — and because the pointer is in the
+non-client area as far as the hit test is concerned, Windows satisfies that client request at once with
+`WM_MOUSELEAVE`, leaving nothing armed.
+
+While the pointer keeps moving over the button our request is re-armed on each `WM_NCMOUSEMOVE`, so it
+mostly holds. It fails precisely when the pointer comes to rest — the gesture Snap Layouts exists for. The
+last arming is winit's, it is consumed immediately, and a later departure through the non-client area
+produces no `WM_NCMOUSELEAVE` at all; the hover highlight would stay lit until the pointer re-entered the
+client area.
+
+The subclass therefore does not depend on `WM_NCMOUSELEAVE`. It records in its shared state whether it
+currently believes the button is hovered — set on a `WM_NCMOUSEMOVE` with `HTMAXBUTTON`, cleared on the
+first non-client move whose hit code is anything else, and cleared by `WM_NCMOUSELEAVE` when that does
+arrive. The recorded hover is what distinguishes a departure from the button from ordinary non-client
+activity that never involved it, so no synthetic move is posted for the latter.
+
+One case escapes both clearing paths: a pointer that leaves the button straight into the client area produces
+`WM_MOUSEMOVE`, not `WM_NCMOUSEMOVE`, so the recorded hover survives. It is harmless. The button un-hovers
+from those real client moves anyway, and the stale record costs one extra synthetic move on the next
+non-client move elsewhere, which then clears it. The record gates a `PostMessageW` and nothing else — it can
+never cause a message to be swallowed.
 
 winit converts the posted messages into `WindowEvent::CursorMoved` and `WindowEvent::MouseInput`, which the
 event loop already turns into `MouseMoved`, `LeftMouseDown`, and `LeftMouseUp`
@@ -145,18 +183,27 @@ directly:
 - the hit-test decision, `(original answer, client point, Option<rect>) -> answer`, covering the override,
   the `HTTOP` pass-through, a point outside the rectangle, and a `None` rectangle;
 - the non-client to client message mapping, covering each row of the table above and the messages that pass
-  through untouched.
+  through untouched;
+- the logical-to-physical conversion of the button's bounds, `(RectF, scale factor) -> rect`, at each of the
+  common Windows scale factors. This is the one piece of arithmetic outside the decision module, and an
+  off-by-scale in it would put the flyout slightly off the button — the hardest failure to diagnose from a
+  screenshot;
+- the shared state's rectangle round trip, which is the seam between the two halves of the feature.
 
-Both are unit tested under `#[cfg(windows)]` in the new module.
+All are unit tested under `#[cfg(windows)]` in the new module.
 
 Manual verification on Windows 11:
 
 1. Hovering the maximize button opens the Snap Layouts flyout, and choosing a zone snaps the window.
 2. The button still highlights on hover and reacts to a press.
 3. Clicking it maximizes and restores.
-4. Dragging the top and top-right edges still resizes.
-5. Dragging the tab bar still moves the window; double-clicking it still maximizes.
-6. In fullscreen, and in a window forced to native decorations, no flyout appears.
+4. Double-clicking it maximizes and restores, with the same press feedback a single click gives, and
+   without the window jumping ahead of the button's own handling.
+5. Letting the pointer rest on the button and then leaving through the window's top edge ends the hover
+   highlight.
+6. Dragging the top and top-right edges still resizes.
+7. Dragging the tab bar still moves the window; double-clicking it still maximizes.
+8. In fullscreen, and in a window forced to native decorations, no flyout appears.
 
 Manual verification on Windows 10: the caption buttons behave exactly as before and no flyout appears.
 

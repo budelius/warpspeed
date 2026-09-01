@@ -17,6 +17,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   opt-in on `dev`. `fmt` compiles nothing, so it skips system packages and the
   LFS payload and finishes in about a minute. Config validated with GitLab's CI
   lint; `fmt` has completed a real run, the compile jobs have not.
+- Windows 11 Snap Layouts on the maximize button. Warp draws its own caption buttons on an
+  undecorated window, so Windows never saw the `HTMAXBUTTON` hit-test answer that offers the
+  flyout. A window subclass now supplies it and replays the non-client mouse messages that follow,
+  leaving the button's hover, press, and click behavior unchanged. Windows 10 is untouched.
 
 ### Changed
 

@@ -205,6 +205,22 @@ fn base_dir() -> PathBuf {
     warp_core::paths::data_dir()
 }
 
+fn authored_config_base_dir_for_app_id(app_id: warp_core::AppId) -> PathBuf {
+    if !app_id.application_name().starts_with("WarpSpeed") {
+        return base_dir();
+    }
+
+    warp_core::paths::data_dir_for_app_id(warp_core::AppId::new(
+        app_id.qualifier().to_owned(),
+        app_id.organization().to_owned(),
+        "WarpSpeed",
+    ))
+}
+
+pub(crate) fn authored_config_base_dir() -> PathBuf {
+    authored_config_base_dir_for_app_id(warp_core::channel::ChannelState::app_id())
+}
+
 /// Returns the path to the directory containing the user's custom themes.
 pub fn themes_dir() -> PathBuf {
     warp_core::paths::themes_dir()
@@ -219,17 +235,17 @@ pub fn workflows_dir() -> PathBuf {
 /// Returns the path to the directory containing the user's launch
 /// configurations.
 pub fn launch_configs_dir() -> PathBuf {
-    base_dir().join("launch_configurations")
+    authored_config_base_dir().join("launch_configurations")
 }
 
 /// Returns the path to the directory containing the user's tab configs.
 pub fn tab_configs_dir() -> PathBuf {
-    base_dir().join("tab_configs")
+    authored_config_base_dir().join("tab_configs")
 }
 
 /// Returns the path to the directory containing file-backed session configs.
 pub fn session_configs_dir() -> PathBuf {
-    base_dir().join("session_configurations")
+    authored_config_base_dir().join("session_configurations")
 }
 
 /// Returns the path to the directory containing the user's custom model router

@@ -128,6 +128,21 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// Returns the portable data directory for an application ID without inheriting the current data
+/// profile.
+pub fn data_dir_for_app_id(app_id: AppId) -> PathBuf {
+    cfg_if! {
+        if #[cfg(target_os = "macos")] {
+            let _ = app_id;
+            data_dir()
+        } else {
+            project_dirs_for_app_id(app_id, None)
+                .map(|dirs| dirs.data_dir().to_owned())
+                .unwrap_or_default()
+        }
+    }
+}
+
 /// Returns the GUI application ID for the current channel.
 ///
 /// Most TUI channel binaries use the same application ID as the GUI. The OSS

@@ -38,7 +38,9 @@ use crate::ai::blocklist::{apply_child_agent_model_override, prepare_local_oz_ch
 use crate::ai::conversation_utils;
 use crate::ai::llms::LLMPreferences;
 use crate::ai::orchestration::{RemoteChildLaunchConfig, prepare_remote_child_launch};
-use crate::app_state::{AmbientAgentPaneSnapshot, LeafContents, TerminalPaneSnapshot};
+use crate::app_state::{
+    AmbientAgentPaneSnapshot, CliAgentResumeDescriptor, LeafContents, TerminalPaneSnapshot,
+};
 use crate::code::buffer_location::LocalOrRemotePath;
 use crate::features::FeatureFlag;
 #[cfg(feature = "local_fs")]
@@ -549,6 +551,7 @@ impl PaneContent for TerminalPane {
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id: None,
+                cli_agent_resume_descriptor: None,
                 cwd: None,
                 is_active,
                 is_read_only: false,
@@ -580,6 +583,7 @@ impl PaneContent for TerminalPane {
                 LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: self.uuid.clone(),
                     persistent_session_id: None,
+                    cli_agent_resume_descriptor: None,
                     cwd: None,
                     is_active,
                     is_read_only: false,
@@ -629,10 +633,27 @@ impl PaneContent for TerminalPane {
             let persistent_session_id = self
                 .terminal_manager(app)
                 .read(app, |manager, _| manager.persistent_session_id());
+            let cli_agent_resume_descriptor = CLIAgentSessionsModel::as_ref(app)
+                .session(self.terminal_view(app).id())
+                .filter(|session| !session.is_remote())
+                .and_then(|session| {
+                    let session_id = session.session_context.session_id.clone()?;
+                    let cwd = session
+                        .session_context
+                        .cwd
+                        .clone()
+                        .or_else(|| cwd.clone())?;
+                    Some(CliAgentResumeDescriptor {
+                        agent: session.agent,
+                        session_id,
+                        cwd: cwd.into(),
+                    })
+                });
 
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id,
+                cli_agent_resume_descriptor,
                 cwd,
                 is_active,
                 is_read_only: view.model.lock().is_read_only(),

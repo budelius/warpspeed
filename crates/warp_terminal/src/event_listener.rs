@@ -27,6 +27,20 @@ pub struct ChannelEventListener {
 }
 
 impl ChannelEventListener {
+    /// Creates an event listener for a headless terminal that has no UI consumer.
+    pub fn new_headless() -> Self {
+        let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
+        std::mem::forget(wakeups_rx);
+        let (pty_reads_tx, _) = async_broadcast::broadcast(1);
+        Self {
+            wakeups_tx,
+            send_terminal_event: Arc::new(|_| true),
+            send_app_event: Arc::new(|_| true),
+            is_terminal_event_queue_empty: Arc::new(|| true),
+            pty_reads_tx,
+        }
+    }
+
     pub fn new<E>(
         wakeups_tx: Sender<()>,
         terminal_events_tx: Sender<E>,

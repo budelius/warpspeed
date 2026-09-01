@@ -181,11 +181,22 @@ impl SessionTable {
         summaries
     }
 
-    /// Every held session's id, in a stable order.
-    pub fn session_ids(&self) -> Vec<SessionId> {
-        let mut ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+    /// Every detached session's id, in a stable order.
+    pub fn detached_session_ids(&self) -> Vec<SessionId> {
+        let mut ids: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter_map(|(id, session)| (!session.attached).then_some(*id))
+            .collect();
         ids.sort_by_key(|id| id.as_u64());
         ids
+    }
+
+    /// Makes a failed attach retryable.
+    pub fn mark_detached(&mut self, session_id: SessionId) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.attached = false;
+        }
     }
 
     /// Stops holding a session.
@@ -230,13 +241,21 @@ impl SessionTable {
             Message::Ping => Some(Message::Pong {
                 protocol_version: super::message::PROTOCOL_VERSION,
             }),
-            // Detach carries a screen the caller must place into the table with
-            // `detach`, which needs an event listener this type does not own.
-            Message::Detach { .. }
+            // Detach and process lifecycle requests need the platform host owned by `Supervisor`.
+            Message::Spawn { .. }
+            | Message::SpawnResponse { .. }
+            | Message::Detach { .. }
             | Message::DetachResponse { .. }
             | Message::AttachResponse { .. }
+            | Message::Resize { .. }
+            | Message::ResizeResponse { .. }
+            | Message::Kill { .. }
+            | Message::KillResponse { .. }
+            | Message::ChildStatus { .. }
+            | Message::ChildStatusResponse { .. }
             | Message::ListSessionsResponse { .. }
-            | Message::Pong { .. } => None,
+            | Message::Pong { .. }
+            | Message::ResponseReceived => None,
         }
     }
 }

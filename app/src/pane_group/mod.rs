@@ -1700,6 +1700,17 @@ impl PaneGroup {
             LeafContents::Terminal(terminal_snapshot) => {
                 let uuid = PaneUuid(terminal_snapshot.uuid.clone());
                 let block_list = block_lists.get(&uuid);
+                let cli_agent_resume_command = terminal_snapshot
+                    .cli_agent_resume_descriptor
+                    .as_ref()
+                    .and_then(|descriptor| descriptor.resume_command());
+                let configure_before_start = terminal_snapshot.persistent_session_id.is_some()
+                    || cli_agent_resume_command.is_some();
+                let initial_shell_start = if configure_before_start {
+                    ShellStartPolicy::Deferred
+                } else {
+                    shell_start
+                };
 
                 let chosen_shell = terminal_snapshot
                     .shell_launch_data
@@ -1782,15 +1793,21 @@ impl PaneGroup {
                     model_event_sender.clone(),
                     chosen_shell,
                     terminal_snapshot.input_config,
-                    shell_start,
+                    initial_shell_start,
                     ctx,
                 );
 
-                if let Some(session_id) = terminal_snapshot.persistent_session_id {
-                    terminal_manager.update(ctx, |manager, ctx| {
+                terminal_manager.update(ctx, |manager, ctx| {
+                    if let Some(session_id) = terminal_snapshot.persistent_session_id {
                         manager.restore_persistent_session(session_id, ctx);
-                    });
-                }
+                    }
+                    if let Some(command) = cli_agent_resume_command {
+                        manager.restore_cli_agent_resume_command(command);
+                    }
+                    if configure_before_start && shell_start == ShellStartPolicy::Eager {
+                        manager.ensure_shell_started(ctx);
+                    }
+                });
 
                 let terminal_view_id = terminal_view.id();
 
@@ -2254,6 +2271,7 @@ impl PaneGroup {
                         LeafContents::Terminal(TerminalPaneSnapshot {
                             uuid: Uuid::new_v4().as_bytes().to_vec(),
                             persistent_session_id: None,
+                            cli_agent_resume_descriptor: None,
                             cwd: None,
                             is_active: visible_leaf_is_active_session,
                             is_read_only: false,

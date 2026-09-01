@@ -11,6 +11,7 @@
 //! I/O hot path.
 
 use anyhow::{Context, Result, bail};
+use instant::Instant;
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
@@ -20,8 +21,8 @@ use windows::Win32::Storage::FileSystem::{
     ReadFile, WriteFile,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
-    PeekNamedPipe,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
+    PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
 };
 use windows::core::PCWSTR;
 
@@ -177,6 +178,28 @@ impl PipeTransport {
             handle,
             pending: Vec::new(),
         })
+    }
+
+    /// Returns the process ID connected to the client side of an accepted pipe.
+    pub fn client_process_id(&self) -> Result<u32> {
+        let mut process_id = 0u32;
+        unsafe { GetNamedPipeClientProcessId(self.handle, &mut process_id) }
+            .context("Failed to identify the terminal supervisor client")?;
+        Ok(process_id)
+    }
+
+    /// Waits for one complete message until `timeout` expires.
+    pub fn receive_timeout(&mut self, timeout: std::time::Duration) -> Result<Message> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(message) = self.receive()? {
+                return Ok(message);
+            }
+            if Instant::now() >= deadline {
+                bail!("Timed out waiting for a terminal supervisor message");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// Moves whatever the pipe already holds into `pending`.

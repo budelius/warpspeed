@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use warp_core::SessionId;
+#[cfg(windows)]
+use warp_core::features::FeatureFlag;
 #[cfg(unix)]
 use warp_errors::report_error;
 use warpui_core::{AppContext, Entity, SingletonEntity};
@@ -11,6 +13,8 @@ use {
 
 #[cfg(target_os = "windows")]
 use super::PseudoConsoleChild;
+#[cfg(windows)]
+use super::windows::supervisor_client::WindowsTerminalSupervisorClient;
 use super::{PtyOptions, PtySpawnResult};
 use crate::local_tty::{self};
 
@@ -98,6 +102,42 @@ impl PtyHandle for DirectPtyHandle {
         self.child.kill()
     }
 }
+
+#[cfg(windows)]
+struct SupervisorOwnedPtyHandle {
+    client: std::sync::Arc<WindowsTerminalSupervisorClient>,
+    session_id: SessionId,
+    pid: u32,
+}
+
+#[cfg(windows)]
+impl PtyHandle for SupervisorOwnedPtyHandle {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn has_process_terminated(&mut self) -> Result<bool> {
+        self.client
+            .is_running(self.session_id)
+            .map(|running| !running)
+    }
+
+    fn persistent_session_id(&self) -> Option<SessionId> {
+        Some(self.session_id)
+    }
+
+    fn requires_exit_polling(&self) -> bool {
+        true
+    }
+
+    fn kill(&mut self) -> Result<()> {
+        if self.client.take_preserved(self.session_id) {
+            Ok(())
+        } else {
+            self.client.kill(self.session_id)
+        }
+    }
+}
 /// Invokes the provided callback function without crash reporting enabled.
 fn invoke_without_crash_reporting<T>(hooks: &dyn PtySpawnHooks, func: impl FnOnce() -> T) -> T {
     // Uninitialize cocoa-sentry before spawning the shell process to avoid passing any custom state
@@ -132,6 +172,8 @@ pub(super) struct PtySpawnInfo {
 pub struct PtySpawner {
     #[cfg(unix)]
     server: Option<TerminalServer>,
+    #[cfg(windows)]
+    supervisor: Option<std::sync::Arc<WindowsTerminalSupervisorClient>>,
 }
 
 impl PtySpawner {
@@ -148,7 +190,12 @@ impl PtySpawner {
                     server: Some(server),
                 })
             } else if #[cfg(target_os = "windows")] {
-                Ok(Self {})
+                let supervisor = FeatureFlag::PersistentTerminalSessions
+                    .is_enabled()
+                    .then(WindowsTerminalSupervisorClient::new)
+                    .transpose()?
+                    .map(std::sync::Arc::new);
+                Ok(Self { supervisor })
             } else {
                 unreachable!("Spawning a PTY is not supported on this platform.");
             }
@@ -161,7 +208,7 @@ impl PtySpawner {
             if #[cfg(unix)] {
                 Self{ server: None }
             } else if #[cfg(target_os = "windows")] {
-                Self {}
+                Self { supervisor: None }
             } else {
                 unreachable!("Spawning a PTY for tests is not supported on this platform.");
             }
@@ -170,26 +217,28 @@ impl PtySpawner {
 
     /// Marks selected supervised sessions for transfer without relinquishing this process's
     /// terminal-server client, since other windows may continue creating shells here.
-    #[cfg(unix)]
     pub fn prepare_sessions_for_handoff(
         &self,
         persistent_session_ids: Vec<SessionId>,
     ) -> Result<()> {
-        let Some(server) = self.server.as_ref() else {
-            return Ok(());
-        };
-        if server.client().is_persistent() {
+        #[cfg(unix)]
+        if let Some(server) = self.server.as_ref()
+            && server.client().is_persistent()
+        {
             server.prepare_for_app_termination(persistent_session_ids)?;
+        }
+        #[cfg(windows)]
+        if let Some(supervisor) = self.supervisor.as_ref() {
+            for session_id in persistent_session_ids {
+                supervisor.detach(session_id)?;
+            }
         }
         Ok(())
     }
 
     /// Does any work necessary to clean up state in advance of the app
     /// terminating.
-    pub fn prepare_for_app_termination(
-        &mut self,
-        #[cfg(unix)] persistent_session_ids: Vec<SessionId>,
-    ) {
+    pub fn prepare_for_app_termination(&mut self, persistent_session_ids: Vec<SessionId>) {
         #[cfg(unix)]
         if let Some(server) = self.server.take() {
             if server.client().is_persistent() {
@@ -202,6 +251,17 @@ impl PtySpawner {
                 log::info!("Tearing down terminal server...");
             }
             drop(server);
+        }
+
+        #[cfg(windows)]
+        if let Some(supervisor) = self.supervisor.as_ref() {
+            for session_id in persistent_session_ids {
+                if let Err(error) = supervisor.detach(session_id) {
+                    log::error!(
+                        "Failed to detach supervised terminal session {session_id:?}: {error:#}"
+                    );
+                }
+            }
         }
     }
 
@@ -221,7 +281,7 @@ impl PtySpawner {
     pub(super) fn spawn_pty(
         &self,
         options: PtyOptions,
-        #[cfg(unix)] persistent_session_id: SessionId,
+        persistent_session_id: SessionId,
         hooks: &dyn PtySpawnHooks,
         #[cfg(windows)] event_loop_tx: super::mio_channel::Sender<crate::writeable_pty::Message>,
         ctx: &mut AppContext,
@@ -258,6 +318,40 @@ impl PtySpawner {
             } else {
                 hooks.spawned(PtySpawnMode::TerminalServer, ctx);
                 return result;
+            }
+        }
+
+        #[cfg(windows)]
+        if let Some(client) = &self.supervisor {
+            let result = invoke_without_crash_reporting(hooks, || {
+                client
+                    .spawn(persistent_session_id, &options)
+                    .and_then(|endpoint| {
+                        super::windows::PtySpawnResult::from_supervisor(
+                            endpoint,
+                            client.clone(),
+                            persistent_session_id,
+                        )
+                    })
+            });
+            match result {
+                Ok(result) => {
+                    hooks.spawned(PtySpawnMode::TerminalServer, ctx);
+                    let pid = result.pid;
+                    return Ok((
+                        result,
+                        Box::new(SupervisorOwnedPtyHandle {
+                            client: client.clone(),
+                            session_id: persistent_session_id,
+                            pid,
+                        }),
+                    ));
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Failed to spawn a supervised Windows terminal; falling back to direct: {error:#}"
+                    );
+                }
             }
         }
 
@@ -313,26 +407,57 @@ impl PtySpawner {
         Ok((result, handle))
     }
 
-    #[cfg(unix)]
     pub(super) fn attach_pty(
         &self,
         session_id: SessionId,
     ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>)>> {
-        use crate::local_tty::server::ServerOwnedPtyHandle;
+        #[cfg(unix)]
+        {
+            use crate::local_tty::server::ServerOwnedPtyHandle;
 
-        let Some(server) = self.server.as_ref() else {
-            return Ok(None);
-        };
-        let client = server.client().clone();
-        let Some(result) = client.attach_session(session_id)? else {
-            return Ok(None);
-        };
-        let handle = Box::new(ServerOwnedPtyHandle {
-            pid: result.pid,
-            persistent_session_id: Some(session_id),
-            client,
-        });
-        Ok(Some((result, handle)))
+            let Some(server) = self.server.as_ref() else {
+                return Ok(None);
+            };
+            let client = server.client().clone();
+            let Some(result) = client.attach_session(session_id)? else {
+                return Ok(None);
+            };
+            let handle = Box::new(ServerOwnedPtyHandle {
+                pid: result.pid,
+                persistent_session_id: Some(session_id),
+                client,
+            });
+            Ok(Some((result, handle)))
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(client) = self.supervisor.as_ref() else {
+                return Ok(None);
+            };
+            let attached = client.attach(session_id)?;
+            let endpoint = attached
+                .endpoint
+                .context("Windows terminal supervisor did not lend a PTY endpoint")?;
+            let mut replay = if attached.output_was_dropped {
+                attached.snapshot.repaint
+            } else {
+                Vec::new()
+            };
+            replay.extend(attached.buffered_output);
+            let result = super::windows::PtySpawnResult::from_attached(
+                endpoint,
+                client.clone(),
+                session_id,
+                replay,
+            )?;
+            let handle = Box::new(SupervisorOwnedPtyHandle {
+                client: client.clone(),
+                session_id,
+                pid: endpoint.pid,
+            });
+            Ok(Some((result, handle)))
+        }
     }
 }
 

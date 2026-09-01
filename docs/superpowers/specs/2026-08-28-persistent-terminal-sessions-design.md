@@ -5,6 +5,15 @@
 **Scope:** Spec A — the local, cross-platform half. Remote transports are Spec B
 (`2026-08-28-remote-persistent-sessions-design.md`) and are out of scope here.
 
+## Implementation status
+
+The Windows backend now owns ConPTY sessions in a detached per-profile WarpSpeed process, lends
+pipe handles to the app, and reattaches persistent TOML-session panes after window closure, app
+termination, or disappearance of the attached app process. If the PTY is unavailable, a saved
+Claude Code session ID is resumed lazily after the replacement shell bootstraps. The
+detached-sessions drawer and general persistence for windows without a TOML session identity remain
+unimplemented.
+
 ## Problem
 
 Quitting Warp kills every shell it owns. A running build, a test suite, a Claude Code turn

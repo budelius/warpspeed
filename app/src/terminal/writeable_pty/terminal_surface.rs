@@ -72,6 +72,10 @@ where
     #[cfg(feature = "local_tty")]
     fn on_shell_determined(&mut self, _ctx: &mut ViewContext<Self>) {}
 
+    /// Queues a command that resumes state after a restored PTY could not be reattached.
+    #[cfg(feature = "local_tty")]
+    fn set_pending_restore_command(&mut self, _command: String, _ctx: &mut ViewContext<Self>) {}
+
     /// Called when the active shell launch data is updated (e.g. shell indicator metadata).
     fn on_active_shell_launch_data_updated(
         &mut self,

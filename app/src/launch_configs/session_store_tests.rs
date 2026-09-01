@@ -5,12 +5,13 @@ use std::sync::Arc;
 use super::{load_from_dir, save_to_dir};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::app_state::{
-    LeafContents, LeafSnapshot, PaneNodeSnapshot, PaneUuid, TabSnapshot, TerminalPaneSnapshot,
-    WindowSnapshot,
+    CliAgentResumeDescriptor, LeafContents, LeafSnapshot, PaneNodeSnapshot, PaneUuid, TabSnapshot,
+    TerminalPaneSnapshot, WindowSnapshot,
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
+use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::model::block::SerializedBlock;
 use crate::terminal::shell::ShellType;
 
@@ -25,6 +26,11 @@ fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
                 contents: LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: vec![1, 2, 3],
                     persistent_session_id: Some(warp_core::SessionId::from(u64::MAX)),
+                    cli_agent_resume_descriptor: Some(CliAgentResumeDescriptor {
+                        agent: CLIAgent::Claude,
+                        session_id: "cf44b8d2-9381-4016-8bfb-7aafc57062fd".to_owned(),
+                        cwd: PathBuf::from("/workspace/devops"),
+                    }),
                     cwd: Some("/workspace/devops".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {
                         executable_path: PathBuf::from("/bin/zsh"),

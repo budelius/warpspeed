@@ -21,6 +21,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   undecorated window, so Windows never saw the `HTMAXBUTTON` hit-test answer that offers the
   flyout. A window subclass now supplies it and replays the non-client mouse messages that follow,
   leaving the button's hover, press, and click behavior unchanged. Windows 10 is untouched.
+- Persistent TOML sessions on Windows now keep their supervisor-owned shells and foreground
+  processes alive across orderly window or app closure and reattach them on reopen. Claude Code
+  resumes automatically from its saved session ID if the original PTY is unavailable.
 
 ### Changed
 

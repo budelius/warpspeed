@@ -448,6 +448,7 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
                 contents: LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: vec![u8::from(vertical_tabs_panel_open) + 1],
                     persistent_session_id: None,
+                    cli_agent_resume_descriptor: None,
                     cwd: Some("/tmp".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {
                         executable_path: PathBuf::from("/bin/zsh"),
@@ -611,6 +612,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: vec![42],
                         persistent_session_id: None,
+                        cli_agent_resume_descriptor: None,
                         cwd: Some("/tmp".to_string()),
                         shell_launch_data: Some(ShellLaunchData::Executable {
                             executable_path: PathBuf::from("/bin/zsh"),
@@ -780,6 +782,7 @@ fn test_sqlite_round_trips_tab_groups() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![1],
                 persistent_session_id: None,
+                cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/grouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -809,6 +812,7 @@ fn test_sqlite_round_trips_tab_groups() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![2],
                 persistent_session_id: None,
+                cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/ungrouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -907,6 +911,7 @@ fn test_sqlite_round_trips_pinned_state() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![10],
                 persistent_session_id: None,
+                cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/pinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -936,6 +941,7 @@ fn test_sqlite_round_trips_pinned_state() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![11],
                 persistent_session_id: None,
+                cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/unpinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -965,6 +971,7 @@ fn test_sqlite_round_trips_pinned_state() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![12],
                 persistent_session_id: None,
+                cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/pinned-group".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),

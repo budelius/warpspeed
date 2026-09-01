@@ -32,8 +32,11 @@ use windows::Win32::System::Threading::{
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 use super::conpty_api::ConptyApi;
+use super::environment::get_shell_environment_variables;
 use super::pipes;
 use super::proc_thread_attribute_list::ProcThreadAttributeList;
+use crate::local_tty::PtyOptions;
+use crate::local_tty::shell::ShellStarter;
 
 /// `CREATE_BREAKAWAY_FROM_JOB`, so the shell is not killed when Warp's job
 /// object closes.
@@ -218,6 +221,46 @@ pub fn spawn_supervised_pty(
     rows: u16,
     working_directory: Option<&Path>,
 ) -> Result<SupervisedPty> {
+    let command = command_line
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    spawn_supervised_pty_inner(command, columns, rows, working_directory, None)
+}
+
+/// Starts a supervisor-owned terminal from the same options as the app's direct PTY path.
+pub fn spawn_supervised_pty_with_options(options: &PtyOptions) -> Result<SupervisedPty> {
+    let command = match &options.shell_starter {
+        ShellStarter::Direct(starter) | ShellStarter::MSYS2(starter) => {
+            super::shell_command(starter)?
+        }
+        ShellStarter::Wsl(starter) => super::wsl_shell_command(starter)?,
+        ShellStarter::DockerSandbox(_) => {
+            bail!("Docker sandbox shells are not supported by the Windows supervisor")
+        }
+    };
+    let command = unsafe { std::slice::from_raw_parts(command.as_ptr(), command.len()) }
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .collect();
+    let environment = get_shell_environment_variables(options);
+    spawn_supervised_pty_inner(
+        command,
+        options.size.columns as u16,
+        options.size.rows as u16,
+        options.start_dir.as_deref(),
+        Some(&environment),
+    )
+}
+
+fn spawn_supervised_pty_inner(
+    mut command: Vec<u16>,
+    columns: u16,
+    rows: u16,
+    working_directory: Option<&Path>,
+    environment: Option<&[u16]>,
+) -> Result<SupervisedPty> {
     let conpty_api = unsafe { ConptyApi::load() }?;
 
     let pipes::DuplexPipe { client, server } = pipes::create_async_anonymous_pipe()
@@ -245,10 +288,6 @@ pub fn spawn_supervised_pty(
         .context("Failed to attach the child to the pseudoconsole")?;
     startup_info.lpAttributeList = attributes.as_mut_ptr();
 
-    let mut command: Vec<u16> = command_line
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
     let directory = working_directory
         .filter(|path| path.is_dir())
         .map(|path| HSTRING::from(path.as_os_str()));
@@ -264,6 +303,7 @@ pub fn spawn_supervised_pty(
         &mut command,
         base_flags | PROCESS_CREATION_FLAGS(CREATE_BREAKAWAY_FROM_JOB),
         directory.as_ref(),
+        environment,
         &startup_info,
         &mut process_information,
     );
@@ -278,6 +318,7 @@ pub fn spawn_supervised_pty(
             &mut command,
             base_flags,
             directory.as_ref(),
+            environment,
             &startup_info,
             &mut process_information,
         );
@@ -315,6 +356,7 @@ fn create_process(
     command: &mut [u16],
     flags: PROCESS_CREATION_FLAGS,
     directory: Option<&HSTRING>,
+    environment: Option<&[u16]>,
     startup_info: &STARTUPINFOEXW,
     process_information: &mut PROCESS_INFORMATION,
 ) -> windows::core::Result<()> {
@@ -326,7 +368,7 @@ fn create_process(
             None,
             false,
             flags,
-            None,
+            environment.map(|block| block.as_ptr().cast()),
             directory
                 .map(|dir| PCWSTR(dir.as_ptr()))
                 .unwrap_or(PCWSTR::null()),

@@ -130,8 +130,8 @@ presses and two clean toggles.
 
 ### Ending the hover
 
-On every `WM_NCMOUSEMOVE` the subclass arms `TrackMouseEvent` with `TME_NONCLIENT | TME_LEAVE`, but that
-request cannot be relied on, because winit tracks the pointer on the same `HWND`. winit's `WM_MOUSEMOVE`
+On a `WM_NCMOUSEMOVE` over the button the subclass arms `TrackMouseEvent` with `TME_NONCLIENT | TME_LEAVE`,
+but that request cannot be relied on, because winit tracks the pointer on the same `HWND`. winit's `WM_MOUSEMOVE`
 handler classifies pointer position purely geometrically, by `GetClientRect` containment, and the maximize
 button is geometrically inside the client rectangle. So it reads the synthetic move as an enter and calls
 `TrackMouseEvent(TME_LEAVE)`, client-only, replacing our request — and because the pointer is in the
@@ -149,6 +149,12 @@ currently believes the button is hovered — set on a `WM_NCMOUSEMOVE` with `HTM
 first non-client move whose hit code is anything else, and cleared by `WM_NCMOUSELEAVE` when that does
 arrive. The recorded hover is what distinguishes a departure from the button from ordinary non-client
 activity that never involved it, so no synthetic move is posted for the latter.
+
+One case escapes both clearing paths: a pointer that leaves the button straight into the client area produces
+`WM_MOUSEMOVE`, not `WM_NCMOUSEMOVE`, so the recorded hover survives. It is harmless. The button un-hovers
+from those real client moves anyway, and the stale record costs one extra synthetic move on the next
+non-client move elsewhere, which then clears it. The record gates a `PostMessageW` and nothing else — it can
+never cause a message to be swallowed.
 
 winit converts the posted messages into `WindowEvent::CursorMoved` and `WindowEvent::MouseInput`, which the
 event loop already turns into `MouseMoved`, `LeftMouseDown`, and `LeftMouseUp`

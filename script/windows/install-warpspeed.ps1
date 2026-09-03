@@ -57,6 +57,53 @@ while (-not $lock_stream) {
 # $lock_stream stays in scope for the rest of the script; the handle is released
 # when this process exits, however it exits.
 
+# Every WarpSpeed process currently running, and the ones that would not say.
+#
+# This installer never terminates a running WarpSpeed: an instance is somebody's
+# live terminal sessions. It only has to avoid deleting the files one is running
+# from, which means knowing every version directory that is in use.
+#
+# `Get-Process warpspeed | ForEach-Object { $_.Path }` is not enough to know
+# that. Reading `Path` opens the process, so an instance running at a higher
+# integrity level than this script answers a non-elevated caller with an empty
+# value rather than an error -- and this fork's `AppId` varies with elevation
+# precisely so an elevated WarpSpeed can run alongside a normal one, which makes
+# that the expected case rather than an exotic one. `Win32_Process` avoids the
+# handle for most processes, so it is tried first, but it reports an empty
+# `ExecutablePath` for the same reason often enough that the caller still has to
+# handle not knowing.
+#
+# `UnidentifiedProcessIds` is therefore part of the answer, not an error: a
+# caller that cannot rule a version out must leave every version alone.
+function Get-RunningWarpSpeedInstances {
+    $executable_paths = New-Object Collections.Generic.List[string]
+    $unidentified_process_ids = New-Object Collections.Generic.List[int]
+
+    $processes = @(
+        Get-CimInstance Win32_Process -Filter "Name='warpspeed.exe' OR Name='warp-oss.exe'" -ErrorAction SilentlyContinue
+    )
+    foreach ($process in $processes) {
+        $path = $process.ExecutablePath
+        if (-not $path) {
+            $path = try {
+                (Get-Process -Id $process.ProcessId -ErrorAction Stop).Path
+            } catch {
+                $null
+            }
+        }
+        if ($path) {
+            $executable_paths.Add($path)
+        } else {
+            $unidentified_process_ids.Add([int]$process.ProcessId)
+        }
+    }
+
+    [PSCustomObject]@{
+        ExecutablePaths        = $executable_paths.ToArray()
+        UnidentifiedProcessIds = $unidentified_process_ids.ToArray()
+    }
+}
+
 if (-not $SKIP_BUILD) {
     $previous_target_dir = $env:CARGO_TARGET_DIR
     $previous_full_profile = $env:CARGO_FULL_PROFILE
@@ -252,45 +299,63 @@ call "$launcher_path" %*
 [IO.File]::WriteAllText($cli_shim_path, $cli_shim, [Text.Encoding]::ASCII)
 
 $protected_versions = @($version, $previous_version) | Where-Object { $_ }
-$running_executables = @(
-    Get-Process warpspeed -ErrorAction SilentlyContinue |
-        ForEach-Object { $_.Path } |
-        Where-Object { $_ }
-)
-Get-ChildItem -LiteralPath $versions_dir -Directory | ForEach-Object {
-    $candidate = $_
-    $candidate_prefix = $candidate.FullName.TrimEnd('\') + '\'
-    $is_running = $running_executables | Where-Object {
-        $_.StartsWith($candidate_prefix, [StringComparison]::OrdinalIgnoreCase)
-    }
-    # Anything that appeared after this run started belongs to someone else --
-    # an install running an older copy of this script, without the lock above.
-    # Deleting it is what broke the run that staged it. Second line of defence:
-    # with the lock held, this should never be true.
-    $staged_after_this_run = $candidate.CreationTime -ge $RUN_STARTED_AT
-    if ($staged_after_this_run) {
-        Write-Warning "Leaving WarpSpeed version $($candidate.Name) alone: it was staged after this install started, so another install is using it."
-    }
-    if ($protected_versions -notcontains $candidate.Name -and
-        -not $is_running -and
-        -not $staged_after_this_run) {
-        try {
-            Remove-Item -LiteralPath $candidate.FullName -Recurse -Force
-        } catch {
-            Write-Warning "Could not remove old WarpSpeed version $($candidate.Name): $_"
+$running = Get-RunningWarpSpeedInstances
+$running_executables = $running.ExecutablePaths
+
+# One unidentifiable instance makes every version suspect, and the only safe
+# amount of pruning is then none. Stale directories are cheap; the alternative
+# is deleting conpty.dll, the icon and the release notes out from under a live
+# window, which is what "the installer killed my session" looks like from the
+# outside.
+if ($running.UnidentifiedProcessIds.Count -gt 0) {
+    $unidentified = $running.UnidentifiedProcessIds -join ', '
+    Write-Warning "Skipping cleanup of old WarpSpeed versions: $($running.UnidentifiedProcessIds.Count) running instance(s) (PID $unidentified) would not report an executable path, so which versions are in use cannot be determined. Re-run this installer elevated, or with those instances closed, to clean up."
+} else {
+    Get-ChildItem -LiteralPath $versions_dir -Directory | ForEach-Object {
+        $candidate = $_
+        $candidate_prefix = $candidate.FullName.TrimEnd('\') + '\'
+        $is_running = $running_executables | Where-Object {
+            $_.StartsWith($candidate_prefix, [StringComparison]::OrdinalIgnoreCase)
+        }
+        # Anything that appeared after this run started belongs to someone else --
+        # an install running an older copy of this script, without the lock above.
+        # Deleting it is what broke the run that staged it. Second line of defence:
+        # with the lock held, this should never be true.
+        $staged_after_this_run = $candidate.CreationTime -ge $RUN_STARTED_AT
+        if ($staged_after_this_run) {
+            Write-Warning "Leaving WarpSpeed version $($candidate.Name) alone: it was staged after this install started, so another install is using it."
+        }
+        if ($protected_versions -notcontains $candidate.Name -and
+            -not $is_running -and
+            -not $staged_after_this_run) {
+            try {
+                Remove-Item -LiteralPath $candidate.FullName -Recurse -Force
+            } catch {
+                Write-Warning "Could not remove old WarpSpeed version $($candidate.Name): $_"
+            }
         }
     }
+
+    Get-ChildItem -LiteralPath $versions_dir -Filter 'warp-oss.exe' -File -Recurse |
+        ForEach-Object {
+            $obsolete_executable = $_
+            $in_use = $running_executables | Where-Object {
+                $_.Equals($obsolete_executable.FullName, [StringComparison]::OrdinalIgnoreCase)
+            }
+            if (-not $in_use) {
+                try {
+                    Remove-Item -LiteralPath $obsolete_executable.FullName -Force
+                } catch {
+                    Write-Warning "Could not remove obsolete Warp OSS executable $($obsolete_executable.FullName): $_"
+                }
+            }
+        }
 }
 
-Get-ChildItem -LiteralPath $versions_dir -Filter 'warp-oss.exe' -File -Recurse |
-    ForEach-Object {
-        $obsolete_executable = $_
-        try {
-            Remove-Item -LiteralPath $obsolete_executable.FullName -Force
-        } catch {
-            Write-Warning "Could not remove obsolete Warp OSS executable $($obsolete_executable.FullName): $_"
-        }
-    }
+$running_count = $running_executables.Count + $running.UnidentifiedProcessIds.Count
+if ($running_count -gt 0) {
+    Write-Host "$running_count WarpSpeed process(es) are still running and were left alone. Each keeps serving its sessions from the version it launched with; use 'Restart window in new process' to move a window to $version."
+}
 
 Write-Host "Installed WarpSpeed $version"
 Write-Host "Executable: $(Join-Path $version_dir 'warpspeed.exe')"

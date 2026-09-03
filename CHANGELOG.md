@@ -47,6 +47,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A generator whose bytes never reached the line editor no longer leaks the
   in-flight in-band count. The leak kept the input box visible, which stopped the
   terminal taking keyboard focus for the rest of the session.
+- The Windows installer no longer deletes a version directory a running WarpSpeed
+  is using. It read each instance's path with `Get-Process`, which an elevated
+  instance will not answer from a non-elevated installer -- and this fork's
+  `AppId` varies with elevation precisely so elevated and normal instances run
+  side by side. An unreadable instance looked like no instance, so its build was
+  pruned out from under it. Paths now come from `Win32_Process` first, and any
+  instance that still will not say leaves every version in place.
 
 ### Notes
 

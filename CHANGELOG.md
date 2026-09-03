@@ -63,6 +63,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fresh boot, which is the case it was written for. It is now a column like any other. Sessions
   restored from a TOML session config were unaffected; those snapshots are JSON and always carried
   it.
+- An installed version is no longer labelled with the tree the build finished in. The installer
+  asked git for the revision and the dirty flag after building, and a release build takes a
+  quarter of an hour -- long enough to commit, check out, or edit underneath it. Builds came out
+  marked `-dirty` for changes made while they compiled, and could name a revision they were never
+  built from. Both are read before the build now, and the release notes generated from them are
+  right again.
 - The Windows installer no longer deletes a version directory a running WarpSpeed
   is using. It read each instance's path with `Get-Process`, which an elevated
   instance will not answer from a non-elevated installer -- and this fork's

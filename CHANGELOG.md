@@ -75,5 +75,4 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - History extends to Warp's root commit. The repository began as a shallow clone,
   but GitLab rejects shallow pushes, so it was unshallowed before publishing.
-- `feature/launch-config-shell-improvements` carries lazy session restore and is
-  not yet merged. Its shell-count reduction has not been measured.
+- Lazy session restore is merged. Its shell-count reduction has not been measured.

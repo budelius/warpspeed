@@ -13,9 +13,9 @@ terminal startup and session-restore behaviour.
   are actually reachable. It also takes a distinct `AppId` that varies with
   elevation and `WARPSPEED_PROFILE`, so it runs alongside an installed Warp
   instead of sharing its settings, database, and session state.
-- **Lazy session restore** (on `feature/launch-config-shell-improvements`, not yet
-  merged). Restored tabs defer starting their shells until activated, so opening a
-  large saved session forks shells for the active tab rather than every pane.
+- **Lazy session restore.** Restored tabs defer starting their shells until activated,
+  so opening a large saved session forks shells for the active tab rather than every
+  pane. The reduction in shell count has not been measured.
 
 ## Building
 

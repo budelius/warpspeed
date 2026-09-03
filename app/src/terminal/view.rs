@@ -27347,15 +27347,31 @@ impl TypedActionView for TerminalView {
                 ctx.emit(Event::Pane(PaneEvent::SplitUp(chosen_shell.to_owned())))
             }
             ToggleMaximizePane => ctx.emit(Event::Pane(PaneEvent::ToggleMaximized)),
+            // Deferred, not dispatched inline. Both of these are reachable
+            // from the pane header's overflow menu, and
+            // `PaneView::handle_header_event` runs a selected overflow-menu
+            // action inside `self.child(ctx).update(..)` -- so the `PaneView`
+            // is out of the window's view map for the duration of this call.
+            // Handling either action walks `focus_terminal_view_locally` ->
+            // `find_pane_id_for_terminal_view` -> `TerminalPane::terminal_view`
+            // -> `self.view.as_ref(ctx)`, straight back into that same
+            // `PaneView`, and `AppContext::view` answers a view it cannot find
+            // with `panic!("circular view reference ...")` -- killing the
+            // window before the picker ever appears. Deferring puts the
+            // workspace's work after this update has finished, which is what
+            // every sibling entry in the same menu (`Close`, the splits,
+            // `ToggleMaximizePane`) achieves by emitting an event instead.
             RestartShell => {
-                ctx.dispatch_typed_action(&WorkspaceAction::RestartShellForTerminalView {
+                ctx.dispatch_typed_action_deferred(WorkspaceAction::RestartShellForTerminalView {
                     terminal_view_id: self.view_id,
                 });
             }
             ChangeShell => {
-                ctx.dispatch_typed_action(&WorkspaceAction::ToggleChangeShellMenuForTerminalView {
-                    terminal_view_id: self.view_id,
-                });
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::ToggleChangeShellMenuForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
             }
             PromptContextMenu {
                 position_offset_from_prompt,

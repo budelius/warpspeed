@@ -6472,6 +6472,150 @@ fn toggle_change_shell_menu_opens_then_closes_the_picker() {
     });
 }
 
+/// `ToggleChangeShellMenuForTerminalView` -- what the tab and vertical-tabs
+/// context menus dispatch -- opens the picker for a named pane, and the picker
+/// then has to survive a frame.
+///
+/// Every other change-shell test drives `ToggleChangeShellMenu`, the palette
+/// command, and stops at `is_open()`. Nothing covered the targeted variant, and
+/// nothing rendered the result at all, so this also runs a real frame: the
+/// workspace that adds the modal to its overlay stack, the modal, and the
+/// `Menu` it wraps -- the only `Modal<Menu<_>>` in the app, and so the one
+/// composition nothing else exercises.
+#[test]
+fn change_shell_picker_opens_and_renders_for_a_targeted_terminal_view() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        // The shipping build is a dogfood build, which has `ShellSelector` on,
+        // and that flag selects a completely different shell enumeration in
+        // `AvailableShells::load_known_shells` -- the rich one that finds WSL
+        // distros and MSYS2 installs. Leaving it off tests the picker against
+        // a four-entry list no real user has.
+        FeatureFlag::ShellSelector.set_enabled(true);
+
+        let workspace = mock_workspace(&mut app);
+        let window_id = workspace.update(&mut app, |_, ctx| ctx.window_id());
+        let terminal_view_id = workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane")
+                .id()
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::ToggleChangeShellMenuForTerminalView { terminal_view_id },
+                ctx,
+            );
+        });
+        assert!(
+            app.read(|ctx| workspace.read(ctx, |workspace, _| workspace
+                .change_shell_menu_modal
+                .is_open())),
+            "the pane context menu's entry must open the picker"
+        );
+
+        let modal = app.read(|ctx| {
+            workspace.read(ctx, |workspace, _| {
+                workspace.change_shell_menu_modal.view.clone()
+            })
+        });
+        let menu = app.read(|ctx| modal.read(ctx, |modal, _| modal.body().clone()));
+
+        app.read(|ctx| {
+            drop(workspace.read(ctx, |workspace, ctx| workspace.render(ctx)));
+            drop(modal.read(ctx, |modal, ctx| modal.render(ctx)));
+            drop(menu.read(ctx, |menu, ctx| menu.render(ctx)));
+        });
+
+        // `render` only builds an element tree; it lays nothing out, so a
+        // modal that renders can still fail the moment a frame measures it.
+        // Drive a real frame -- layout and paint at a real window size --
+        // through the presenter, the way the platform layer does. Every view
+        // on the path has to be listed: a `ChildView` lays out to zero size
+        // unless its view was rendered this frame.
+        let presenter =
+            std::rc::Rc::new(std::cell::RefCell::new(warpui::Presenter::new(window_id)));
+        let mut updated = warpui::EntityIdSet::default();
+        updated.insert(workspace.id());
+        updated.insert(modal.id());
+        updated.insert(menu.id());
+        let invalidation = warpui::WindowInvalidation {
+            updated,
+            ..Default::default()
+        };
+        app.update(move |ctx| {
+            presenter.borrow_mut().invalidate(invalidation, ctx);
+            presenter
+                .borrow_mut()
+                .build_scene(vec2f(1200., 800.), 1., None, ctx);
+        });
+    });
+}
+
+/// Opening the shell picker from the pane header's own overflow menu crashed
+/// the window before the picker appeared:
+///
+/// ```text
+/// thread 'main' panicked at 'circular view reference for view type
+/// warp::pane_group::pane::view::PaneView<warp::terminal::view::TerminalView>'
+/// ```
+///
+/// `PaneView::handle_header_event` runs the selected overflow-menu action
+/// inside `self.child(ctx).update(..)`, so the `PaneView` is out of the
+/// window's view map for the whole call. `TerminalAction::ChangeShell`
+/// dispatched its workspace action *synchronously*, and handling that walks
+/// `focus_terminal_view_locally` -> `find_pane_id_for_terminal_view` ->
+/// `TerminalPane::terminal_view` -> `self.view.as_ref(ctx)`, back into the
+/// very `PaneView` being updated -- which `AppContext::view` answers with that
+/// panic rather than a value.
+///
+/// Every sibling entry in the same menu (`Close`, the splits,
+/// `ToggleMaximizePane`) already avoids this by emitting an event instead of
+/// dispatching inline. The palette command and the tab context menu never hit
+/// it either, because neither dispatches from inside a `PaneView` update --
+/// which is why this reproduces only from the pane header.
+#[test]
+fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_view() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        FeatureFlag::ShellSelector.set_enabled(true);
+
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane")
+        });
+        let pane_view = app
+            .read(|ctx| {
+                workspace.read(ctx, |workspace, ctx| {
+                    workspace
+                        .active_tab_pane_group()
+                        .read(ctx, |group, _| group.terminal_pane_view_at_pane_index(0))
+                })
+            })
+            .expect("the focused pane is a terminal pane");
+
+        // Exactly the nesting `PaneView::handle_header_event` builds for
+        // `header::Event::SelectedOverflowMenuAction`: the child is updated
+        // while its `PaneView` is mid-update.
+        pane_view.update(&mut app, |_, ctx| {
+            terminal_view.update(ctx, |terminal_view, ctx| {
+                terminal_view.handle_action(&TerminalAction::ChangeShell, ctx);
+            });
+        });
+
+        assert!(
+            app.read(|ctx| workspace.read(ctx, |workspace, _| workspace
+                .change_shell_menu_modal
+                .is_open())),
+            "the pane header's Change shell entry must open the picker -- a deferred dispatch              that never arrives is as broken as the re-entrant one that crashed"
+        );
+    });
+}
+
 /// Choosing a shell must close the picker.
 ///
 /// Selecting an item dispatches `ChangeShell` and, independently, has the menu

@@ -76,6 +76,34 @@ impl LogState {
 
 static LOG_STATE: OnceLock<LogState> = OnceLock::new();
 
+/// A `Write` that sends every log line to the log file and to a console.
+///
+/// Used when a GUI run has a console attached: the file is what survives the
+/// process (and is the only place a panic can be read back from afterwards),
+/// while the console is what a developer running `cargo run` is watching.
+struct Tee<W: std::io::Write> {
+    logfile: W,
+    terminal: std::io::Stderr,
+}
+
+impl<W: std::io::Write> std::io::Write for Tee<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The file is the sink that has to succeed; the console is a
+        // convenience. A console that has gone away -- its window closed, its
+        // handle redirected to a pipe with no reader -- must not take the log
+        // file down with it, so its errors are dropped rather than returned.
+        let written = self.logfile.write(buf)?;
+        let _ = self.terminal.write_all(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let result = self.logfile.flush();
+        let _ = self.terminal.flush();
+        result
+    }
+}
+
 /// Formats a log record to be output to the terminal.
 fn format_for_terminal_output(
     buf: &mut env_logger::fmt::Formatter,
@@ -625,8 +653,22 @@ fn init_internal(
     let use_logfile = match log_destination {
         Some(LogDestination::File) => true,
         Some(LogDestination::Stderr) => false,
-        None => !stdout_is_a_tty && !in_ci && !integration_test,
+        // The GUI always keeps a log file, console or not. Inferring the
+        // destination from `stdout` alone loses the log of every GUI run that
+        // happens to have a console attached -- and a GUI build that is not
+        // `windows_subsystem = "windows"` (this fork's `warpspeed` binary, and
+        // any `cargo run`) gets one on every launch. That console dies with
+        // the process, so the one run whose log matters most -- the one that
+        // panicked -- is exactly the one that leaves nothing behind.
+        //
+        // CI and integration tests still opt out: they assert on captured
+        // output, and a log file is not what they are reading.
+        None => !in_ci && !integration_test && (frontend == LogFrontend::Gui || !stdout_is_a_tty),
     };
+    // A console the user is actually looking at still gets the logs. Without
+    // this, honouring the rule above would silently take console output away
+    // from `cargo run`, which is the only reason the tty heuristic existed.
+    let mirror_to_terminal = use_logfile && stdout_is_a_tty && !in_ci && !integration_test;
 
     let state = LogState::new(
         use_logfile,
@@ -655,6 +697,14 @@ fn init_internal(
                 state.max_rotation,
             )?
         };
+        let target = if mirror_to_terminal {
+            Box::new(Tee {
+                logfile: target,
+                terminal: std::io::stderr(),
+            }) as Box<dyn std::io::Write + Send + 'static>
+        } else {
+            target
+        };
         base_logger.target(env_logger::Target::Pipe(target));
         base_logger.format(format_for_file_output);
     } else {
@@ -679,11 +729,14 @@ fn init_internal(
     #[cfg(not(feature = "crash_reporting"))]
     base_logger.init();
 
-    // If we're logging to a file, initialize the `log_panics` crate, which
-    // will install a panic hook that writes out panics using `log::error`.
-    if use_logfile {
-        log_panics::init();
-    }
+    // Always install `log_panics`'s hook, which reports panics -- with a
+    // backtrace -- through `log::error`. This used to be gated on
+    // `use_logfile`, so a run that logged to a console installed no hook at
+    // all: the panic went to stderr, the console closed with the process, and
+    // the crash left no record anywhere. A panic is worth recording wherever
+    // this process's logs go, and the hook writes through `log`, so it lands
+    // in whichever destination was configured above.
+    log_panics::init();
 
     LOG_STATE.set(state).expect("Logging already initialized");
     // We can .expect here because .init would have already panicked if we initialized logging twice.

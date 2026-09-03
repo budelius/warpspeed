@@ -104,6 +104,31 @@ function Get-RunningWarpSpeedInstances {
     }
 }
 
+# What is about to be compiled, read before compiling it.
+#
+# A release build takes a quarter of an hour, and asking git afterwards describes the tree as it
+# is when the build finishes rather than the one it consumed. Any commit, checkout or stray edit
+# in between -- and a quarter of an hour is long enough for all three -- lands under a version
+# label naming a revision the binary was never built from, or marked `-dirty` for changes that
+# were not on disk when a single file was compiled. A version directory is the only record of
+# what a build contains, and one that describes the wrong tree is worse than no record at all,
+# because the release notes below are generated from it.
+#
+# The label is still a claim about the start of the build rather than a proof: cargo reads its
+# sources as it goes, so an edit made mid-build can reach the binary without reaching the label.
+# Nothing short of building from a clean checkout can close that, and the case worth ruling out
+# is the ordinary one -- committing while a build runs.
+Push-Location $WORKSPACE_ROOT
+try {
+    $revision = (git rev-parse --short=12 HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to determine the current git revision'
+    }
+    $dirty = if (git status --porcelain) { '-dirty' } else { '' }
+} finally {
+    Pop-Location
+}
+
 if (-not $SKIP_BUILD) {
     $previous_target_dir = $env:CARGO_TARGET_DIR
     $previous_full_profile = $env:CARGO_FULL_PROFILE
@@ -160,17 +185,6 @@ $runtime_architecture = switch ($native_architecture) {
 $open_console = Join-Path $STAGING_RELEASE_DIR "$runtime_architecture\OpenConsole.exe"
 if (-not (Test-Path -LiteralPath $open_console -PathType Leaf)) {
     throw "Missing staged WarpSpeed runtime file: $open_console"
-}
-
-Push-Location $WORKSPACE_ROOT
-try {
-    $revision = (git rev-parse --short=12 HEAD).Trim()
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Failed to determine the current git revision'
-    }
-    $dirty = if (git status --porcelain) { '-dirty' } else { '' }
-} finally {
-    Pop-Location
 }
 
 $timestamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfff')

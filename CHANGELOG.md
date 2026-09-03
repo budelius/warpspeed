@@ -24,11 +24,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Persistent TOML sessions on Windows now keep their supervisor-owned shells and foreground
   processes alive across orderly window or app closure and reattach them on reopen. Claude Code
   resumes automatically from its saved session ID if the original PTY is unavailable.
+- A CLI agent session registry at `agent-sessions.json` and `agent-sessions.md` in the state
+  directory, rewritten on every window-state save. Each entry names the agent, its shell, its
+  directory, its session ID and the command that reopens it, so a session can be recovered by
+  hand when the pane it was in does not come back.
 
 ### Changed
 
 - All `WarpSpeed` profiles, including elevated and `WARPSPEED_PROFILE` instances, now share one
   authored set of launch, session, and tab configurations while retaining isolated runtime state.
+- A pane's CLI agent is now recorded even when it never reported a session ID, because "the agent
+  left no way back in" is itself the answer to why a session did not return. Codex, Mistral Vibe
+  and Pi join Claude Code in resuming automatically; their syntax was verified against the shipped
+  CLIs. Gemini and OpenCode are recorded but not resumed -- `gemini --resume` takes an index rather
+  than a session ID, and `opencode session` cannot open one -- because a guessed flag starts a
+  fresh session and scrolls away the ID it was meant to recover.
 - Merged upstream through `e2a08021`. The `warpspeed` target still builds against
   it unchanged.
 
@@ -47,6 +57,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A generator whose bytes never reached the line editor no longer leaks the
   in-flight in-band count. The leak kept the input box visible, which stopped the
   terminal taking keyboard focus for the rest of the session.
+- CLI agent sessions now survive a reboot. The resume descriptor was captured into each pane's
+  snapshot and then dropped on the way to SQLite -- the write ignored it and the read hardcoded
+  `None` -- so it only ever reached a window restarted in a new process, never one restored on a
+  fresh boot, which is the case it was written for. It is now a column like any other. Sessions
+  restored from a TOML session config were unaffected; those snapshots are JSON and always carried
+  it.
 - The Windows installer no longer deletes a version directory a running WarpSpeed
   is using. It read each instance's path with `Get-Process`, which an elevated
   instance will not answer from a non-elevated installer -- and this fork's

@@ -695,7 +695,13 @@ fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> a
             delete_blocks(connection, pane_id).context("error deleting blocks")
         }
         ModelEvent::Snapshot(app_state) => {
-            save_app_state(connection, &app_state).context("error saving app state")
+            let result = save_app_state(connection, &app_state).context("error saving app state");
+            // A convenience beside the real persistence, so its failure is reported and dropped
+            // rather than allowed to fail the save that matters.
+            if let Err(error) = crate::agent_session_registry::write(&app_state) {
+                log::warn!("Failed to write the CLI agent session registry: {error:#}");
+            }
+            result
         }
         ModelEvent::UpsertWorkflows(workflows) => {
             upsert_workflows(connection, workflows).context("error saving workflows")
@@ -1344,6 +1350,18 @@ fn save_pane_state(
                 persistent_session_id: terminal_snapshot
                     .persistent_session_id
                     .map(|id| id.as_u64().to_string()),
+                cli_agent_resume_descriptor: terminal_snapshot
+                    .cli_agent_resume_descriptor
+                    .as_ref()
+                    .and_then(|descriptor| match serde_json::to_string(descriptor) {
+                        Ok(serialized) => Some(serialized),
+                        Err(error) => {
+                            log::warn!(
+                                "Dropping the CLI agent resume descriptor from a persisted terminal pane: {error}"
+                            );
+                            None
+                        }
+                    }),
             };
 
             diesel::insert_into(schema::terminal_panes::dsl::terminal_panes)
@@ -2331,7 +2349,20 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                                 }
                             })
                             .map(Into::into),
-                        cli_agent_resume_descriptor: None,
+                        cli_agent_resume_descriptor: terminal_pane
+                            .cli_agent_resume_descriptor
+                            .and_then(|serialized| match serde_json::from_str(&serialized) {
+                                Ok(descriptor) => Some(descriptor),
+                                Err(error) => {
+                                    // Losing this silently would look exactly like the pane never
+                                    // having run an agent, which is the bug this column exists to
+                                    // fix.
+                                    log::warn!(
+                                        "Ignoring an unreadable CLI agent resume descriptor for a restored terminal pane: {error}"
+                                    );
+                                    None
+                                }
+                            }),
                         cwd: terminal_pane.cwd,
                         is_active: terminal_pane.is_active,
                         is_read_only: false,

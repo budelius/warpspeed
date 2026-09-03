@@ -1,5 +1,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 
+#[cfg(feature = "local_fs")]
+mod agent_session_registry;
 mod ai;
 mod alloc;
 mod antivirus;

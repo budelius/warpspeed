@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc::SyncSender;
 
+use chrono::Utc;
 #[cfg(not(target_family = "wasm"))]
 use session_sharing_protocol::sharer::SessionSourceType;
 use url::Url;
@@ -637,16 +638,17 @@ impl PaneContent for TerminalPane {
                 .session(self.terminal_view(app).id())
                 .filter(|session| !session.is_remote())
                 .and_then(|session| {
-                    let session_id = session.session_context.session_id.clone()?;
-                    let cwd = session
+                    let session_cwd = session
                         .session_context
                         .cwd
                         .clone()
                         .or_else(|| cwd.clone())?;
                     Some(CliAgentResumeDescriptor {
                         agent: session.agent,
-                        session_id,
-                        cwd: cwd.into(),
+                        session_id: session.session_context.session_id.clone(),
+                        cwd: session_cwd.into(),
+                        title: session.session_context.display_title(),
+                        captured_unix_seconds: Some(Utc::now().timestamp()),
                     })
                 });
 

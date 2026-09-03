@@ -1,28 +1,56 @@
 use super::*;
 
-#[test]
-fn claude_resume_descriptor_generates_resume_command() {
-    let descriptor = CliAgentResumeDescriptor {
-        agent: CLIAgent::Claude,
-        session_id: "cf44b8d2-9381-4016-8bfb-7aafc57062fd".to_owned(),
+fn descriptor(agent: CLIAgent, session_id: Option<&str>) -> CliAgentResumeDescriptor {
+    CliAgentResumeDescriptor {
+        agent,
+        session_id: session_id.map(str::to_owned),
         cwd: PathBuf::from(r"T:\projects\dev-ops\system"),
-    };
+        title: None,
+        captured_unix_seconds: None,
+    }
+}
 
+/// Only syntax verified against the shipped CLI belongs here. A guessed flag runs, starts a fresh
+/// session, and scrolls away the ID it was supposed to recover.
+#[test]
+fn agents_with_verified_syntax_generate_a_resume_command() {
+    for (agent, expected) in [
+        (CLIAgent::Claude, "claude --resume session-1"),
+        (CLIAgent::Codex, "codex resume session-1"),
+        (CLIAgent::Vibe, "vibe --resume session-1"),
+        (CLIAgent::Pi, "pi --session session-1"),
+    ] {
+        assert_eq!(
+            descriptor(agent, Some("session-1"))
+                .resume_command()
+                .as_deref(),
+            Some(expected),
+            "{} must resume with the syntax its CLI documents",
+            agent.display_name()
+        );
+    }
+}
+
+/// `gemini --resume` takes "latest" or a per-project index, and `opencode session` can list and
+/// delete by ID but not open one. Both would otherwise look resumable because Warp has their
+/// session ID.
+#[test]
+fn unsupported_cli_agent_resume_descriptor_does_not_generate_command() {
     assert_eq!(
-        descriptor.resume_command().as_deref(),
-        Some("claude --resume cf44b8d2-9381-4016-8bfb-7aafc57062fd")
+        descriptor(CLIAgent::Gemini, Some("session-1")).resume_command(),
+        None
+    );
+    assert_eq!(
+        descriptor(CLIAgent::OpenCode, Some("session-1")).resume_command(),
+        None
     );
 }
 
+/// An agent detected from its command line alone never reports a session ID, and there is nothing
+/// to resume.
 #[test]
-fn unsupported_cli_agent_resume_descriptor_does_not_generate_command() {
-    let descriptor = CliAgentResumeDescriptor {
-        agent: CLIAgent::Gemini,
-        session_id: "session".to_owned(),
-        cwd: PathBuf::from(r"T:\projects\dev-ops\system"),
-    };
-
-    assert_eq!(descriptor.resume_command(), None);
+fn a_descriptor_without_a_session_id_does_not_generate_command() {
+    assert_eq!(descriptor(CLIAgent::Claude, None).resume_command(), None);
 }
 
 #[test]

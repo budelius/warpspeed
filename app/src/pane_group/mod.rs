@@ -1704,6 +1704,25 @@ impl PaneGroup {
                     .cli_agent_resume_descriptor
                     .as_ref()
                     .and_then(|descriptor| descriptor.resume_command());
+                // The log is the recovery trail of last resort: if the pane fails to restore, or
+                // the agent has no resume command, this is where the session ID can still be read
+                // back from.
+                if let Some(descriptor) = &terminal_snapshot.cli_agent_resume_descriptor {
+                    log::info!(
+                        "Restoring a pane that ran {} in {} (session {}, shell {}): {}",
+                        descriptor.agent.display_name(),
+                        descriptor.cwd.display(),
+                        descriptor.session_id.as_deref().unwrap_or("unknown"),
+                        terminal_snapshot
+                            .shell_launch_data
+                            .as_ref()
+                            .map(|shell| shell.shell_detail())
+                            .unwrap_or_else(|| "default".to_owned()),
+                        cli_agent_resume_command
+                            .as_deref()
+                            .unwrap_or("no resume command is known for this agent"),
+                    );
+                }
                 let configure_before_start = terminal_snapshot.persistent_session_id.is_some()
                     || cli_agent_resume_command.is_some();
                 let initial_shell_start = if configure_before_start {

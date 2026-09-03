@@ -17,8 +17,9 @@ use super::{
     read_sqlite_data, save_app_state, save_codebase_index_metadata, setup_database, start_writer,
 };
 use crate::app_state::{
-    AppState, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents, LeafSnapshot, PaneNodeSnapshot,
-    TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+    AppState, CliAgentResumeDescriptor, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents,
+    LeafSnapshot, PaneNodeSnapshot, TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot,
+    WindowSnapshot,
 };
 use crate::auth::UserUid;
 use crate::cloud_object::{CloudObjectPermissions, Owner};
@@ -32,6 +33,7 @@ use crate::persistence::{
 use crate::server::ids::{ClientId, ServerId};
 use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
+use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::model::block::SerializedBlock;
 use crate::terminal::model::session::SessionId;
 use crate::themes::theme::AnsiColorIdentifier;
@@ -567,6 +569,54 @@ fn test_sqlite_round_trips_launch_config_window_source() {
         panic!("expected restored terminal pane");
     };
     assert_eq!(terminal.persistent_session_id, Some(persistent_session_id));
+}
+
+/// The descriptor was captured into the snapshot and then dropped on the way to SQLite, so a
+/// window restored after a reboot -- the only restore that goes through the database -- came back
+/// with no way to reopen the agent that had been running in it.
+#[test]
+fn test_sqlite_round_trips_cli_agent_resume_descriptor() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let mut window = test_terminal_window_snapshot(false);
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &mut window.tabs[0].root
+    else {
+        panic!("expected terminal pane");
+    };
+    let descriptor = CliAgentResumeDescriptor {
+        agent: CLIAgent::Claude,
+        session_id: Some("cf44b8d2-9381-4016-8bfb-7aafc57062fd".to_owned()),
+        cwd: PathBuf::from("/workspace/devops"),
+        title: Some("finish the installer fix".to_owned()),
+        captured_unix_seconds: Some(1_767_225_600),
+    };
+    terminal.cli_agent_resume_descriptor = Some(descriptor.clone());
+    let app_state = AppState {
+        windows: vec![window],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+    let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::Full)
+        .expect("app state should load")
+        .app_state
+        .expect("app state should be present for the full scope");
+
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &restored.windows[0].tabs[0].root
+    else {
+        panic!("expected restored terminal pane");
+    };
+    assert_eq!(terminal.cli_agent_resume_descriptor, Some(descriptor));
 }
 
 #[test]

@@ -260,31 +260,58 @@ pub struct AmbientAgentPaneSnapshot {
     pub task_id: Option<AmbientAgentTaskId>,
 }
 
-/// Enough information to resume a CLI agent when its original PTY cannot be reattached.
+/// What a pane's CLI agent was, and enough to pick it back up, for a pane whose original PTY
+/// cannot be reattached -- a restored window, or a machine that has rebooted since.
+///
+/// Recorded for every pane that ran an agent, including ones that never reported a session ID,
+/// because "Claude Code ran here and left no way back in" is itself the answer to why a session
+/// did not come back.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CliAgentResumeDescriptor {
     pub agent: CLIAgent,
-    pub session_id: String,
+    /// `None` when the agent was detected from its command line alone. Warp learns a session ID
+    /// from the agent's Warp plugin, so an agent running without one is unresumable.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub cwd: PathBuf,
+    /// The session's last user prompt, or its summary -- what distinguishes one saved session
+    /// from the four others in the same directory.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// When this descriptor was captured, as a Unix timestamp in seconds.
+    #[serde(default)]
+    pub captured_unix_seconds: Option<i64>,
 }
 
 impl CliAgentResumeDescriptor {
+    /// The shell command that reopens this session, if the agent's CLI can be told to resume a
+    /// specific session by ID.
+    ///
+    /// Only agents whose syntax has actually been verified against the shipped CLI appear here.
+    /// A guessed flag is worse than none: it runs, fails or starts a fresh session, and the
+    /// session ID it was supposed to recover is the thing it just scrolled off the screen.
+    /// Everything else is recorded rather than invoked -- [`Self::session_id`] and the agent are
+    /// in the pane snapshot, the log, and the session registry, which is enough to recover by
+    /// hand.
     pub(crate) fn resume_command(&self) -> Option<String> {
+        let session_id = self.session_id.as_deref()?;
         match self.agent {
-            CLIAgent::Claude => Some(format!("claude --resume {}", self.session_id)),
+            CLIAgent::Claude => Some(format!("claude --resume {session_id}")),
+            CLIAgent::Codex => Some(format!("codex resume {session_id}")),
+            CLIAgent::Vibe => Some(format!("vibe --resume {session_id}")),
+            CLIAgent::Pi => Some(format!("pi --session {session_id}")),
+            // `gemini --resume` takes "latest" or a per-project index, never a session ID.
             CLIAgent::Gemini
-            | CLIAgent::Codex
+            // `opencode session` can list and delete by ID but cannot open one.
+            | CLIAgent::OpenCode
             | CLIAgent::Amp
             | CLIAgent::Droid
-            | CLIAgent::OpenCode
             | CLIAgent::Copilot
-            | CLIAgent::Pi
             | CLIAgent::OhMyPi
             | CLIAgent::Auggie
             | CLIAgent::CursorCli
             | CLIAgent::Goose
             | CLIAgent::Hermes
-            | CLIAgent::Vibe
             | CLIAgent::Antigravity
             | CLIAgent::WarpTui
             | CLIAgent::Unknown => None,

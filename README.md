@@ -36,6 +36,12 @@ Installing never disturbs a running WarpSpeed. Each instance keeps running from 
 
 File-backed session configs compose reusable tab configs into one persistent, lazily restored window. On Windows, definitions live under `%APPDATA%\warp\WarpSpeed\data\session_configurations`; full runtime snapshots live under `%LOCALAPPDATA%\warp\WarpSpeed\data\session_config_sessions`. Open one directly with a URL argument such as `warplocal://launch/JustVIBE.toml`. YAML launch configurations remain static templates and no longer restore an evolving runtime snapshot.
 
+## Recovering CLI agent sessions
+
+A pane that was running a CLI agent records which agent it was, in which shell and directory, and the session ID it reported. Restoring the window -- including on a fresh boot -- puts the resume command back in that pane's input, ready to run: `claude --resume <id>`, `codex resume <id>`, `vibe --resume <id>` and `pi --session <id>`. Other agents are recorded but not resumed, because their CLIs cannot be told to open a session by ID.
+
+The same information is written to `agent-sessions.md` and `agent-sessions.json` in the state directory (`%LOCALAPPDATA%\warp\WarpSpeed\data` on Windows) every time window state is saved, so a session is still recoverable by hand when its pane is not. Warp learns a session ID from the agent's own Warp plugin; an agent running without that plugin is recorded with no ID and cannot be resumed.
+
 On Linux, install build dependencies first with `./script/linux/install_build_deps`.
 
 ## Branches

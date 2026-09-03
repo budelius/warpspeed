@@ -28,8 +28,10 @@ fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
                     persistent_session_id: Some(warp_core::SessionId::from(u64::MAX)),
                     cli_agent_resume_descriptor: Some(CliAgentResumeDescriptor {
                         agent: CLIAgent::Claude,
-                        session_id: "cf44b8d2-9381-4016-8bfb-7aafc57062fd".to_owned(),
+                        session_id: Some("cf44b8d2-9381-4016-8bfb-7aafc57062fd".to_owned()),
                         cwd: PathBuf::from("/workspace/devops"),
+                        title: Some("wire up the supervisor".to_owned()),
+                        captured_unix_seconds: Some(1_767_225_600),
                     }),
                     cwd: Some("/workspace/devops".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {

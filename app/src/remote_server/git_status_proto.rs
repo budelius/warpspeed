@@ -59,6 +59,9 @@ impl TryFrom<&proto::GitStatusMetadata> for GitStatusMetadata {
             current_branch_name: metadata.current_branch_name.clone(),
             main_branch_name: metadata.main_branch_name.clone(),
             stats_against_head: DiffStats::from(stats),
+            // The dropdown's branch list is not carried over the wire; remote
+            // repos fall back to running the shell command on the host.
+            branch_dropdown_lines: Vec::new(),
             branch_tracking_status: if metadata.tracking_counts_available {
                 GitBranchTrackingStatus::new(
                     metadata.current_branch_name.clone(),

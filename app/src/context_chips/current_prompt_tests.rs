@@ -61,6 +61,7 @@ fn git_status_metadata(branch: &str) -> GitStatusMetadata {
         main_branch_name: "main".to_string(),
         stats_against_head: DiffStats::default(),
         branch_tracking_status: GitBranchTrackingStatus::new(branch.to_string(), None, 0, 0),
+        branch_dropdown_lines: Vec::new(),
     }
 }
 
@@ -975,6 +976,7 @@ fn test_git_status_change_updates_branch_status_chip_value() {
                     main_branch_name: "main".to_string(),
                     stats_against_head: DiffStats::default(),
                     branch_tracking_status: branch_tracking_status.clone(),
+                    branch_dropdown_lines: Vec::new(),
                 }),
                 ctx,
             );

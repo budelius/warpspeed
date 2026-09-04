@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use warpui::{Entity, ModelContext, ModelHandle};
 use super::{GitRepoStatusEvent, GitStatusMetadata};
 use crate::code_review::diff_state::DiffStats;
 use crate::context_chips::display_chip::GitBranchTrackingStatus;
+use crate::context_chips::git_branch_on_click::WORKTREE_LIST_SEPARATOR;
 use crate::throttle::throttle;
 
 /// Per-repository model that owns the filesystem watcher and exposes git status
@@ -266,6 +268,94 @@ impl LocalGitRepoStatusModel {
         }
     }
 
+    /// Map each local branch that is checked out in a *linked* worktree to that
+    /// worktree's path, mirroring what `git worktree list --porcelain` reports.
+    ///
+    /// Paths use forward slashes, matching git's own porcelain output on
+    /// Windows, because `parse_git_worktree_paths` compares them verbatim.
+    fn linked_worktree_branches(repository: &GitRepository) -> HashMap<String, String> {
+        let mut branch_to_path = HashMap::new();
+        let Ok(worktree_names) = repository.worktrees() else {
+            return branch_to_path;
+        };
+
+        for name in worktree_names.iter().flatten() {
+            let Ok(worktree) = repository.find_worktree(name) else {
+                continue;
+            };
+            let path = worktree.path().to_string_lossy().replace('\\', "/");
+            let Ok(worktree_repository) = GitRepository::open_from_worktree(&worktree) else {
+                continue;
+            };
+            let Ok(head) = worktree_repository.head() else {
+                continue;
+            };
+            if !head.is_branch() {
+                continue;
+            }
+            if let Some(branch_name) = head.shorthand() {
+                branch_to_path.insert(branch_name.to_owned(), path);
+            }
+        }
+
+        branch_to_path
+    }
+
+    /// Build the git branch chip's dropdown lines directly from libgit2.
+    ///
+    /// This replaces spawning `git branch` + `git worktree list` through the
+    /// session's shell, which on Windows meant a PowerShell process per
+    /// refresh. The emitted shape is deliberately identical to that command's
+    /// stdout so `filter_git_branch_on_click_values` keeps working untouched:
+    /// `* ` marks HEAD, `+ ` marks a branch checked out in a linked worktree,
+    /// branches are ordered by committer date descending, and the worktree
+    /// porcelain follows a record-separator line.
+    fn branch_dropdown_lines(repository: &GitRepository) -> anyhow::Result<Vec<String>> {
+        let linked_worktree_branches = Self::linked_worktree_branches(repository);
+
+        // (committer time, name, is_head) so we can reproduce `--sort=-committerdate`.
+        let mut branches: Vec<(i64, String, bool)> = Vec::new();
+        for entry in repository.branches(Some(BranchType::Local))? {
+            let Ok((branch, _)) = entry else {
+                continue;
+            };
+            let Ok(Some(name)) = branch.name() else {
+                continue;
+            };
+            let name = name.to_owned();
+            let committed_at = branch
+                .get()
+                .peel_to_commit()
+                .map(|commit| commit.time().seconds())
+                .unwrap_or(0);
+            branches.push((committed_at, name, branch.is_head()));
+        }
+        branches.sort_by(|left, right| right.0.cmp(&left.0));
+
+        let mut lines: Vec<String> = branches
+            .iter()
+            .map(|(_, name, is_head)| {
+                if *is_head {
+                    format!("* {name}")
+                } else if linked_worktree_branches.contains_key(name) {
+                    format!("+ {name}")
+                } else {
+                    format!("  {name}")
+                }
+            })
+            .collect();
+
+        lines.push(WORKTREE_LIST_SEPARATOR.to_owned());
+
+        for (branch_name, path) in &linked_worktree_branches {
+            lines.push(format!("worktree {path}"));
+            lines.push(format!("branch refs/heads/{branch_name}"));
+            lines.push(String::new());
+        }
+
+        Ok(lines)
+    }
+
     async fn load_metadata(repo_path: PathBuf) -> anyhow::Result<GitStatusMetadata> {
         blocking::unblock(move || {
             let repository = GitRepository::open(&repo_path).with_context(|| {
@@ -276,12 +366,18 @@ impl LocalGitRepoStatusModel {
             let stats_against_head = Self::diff_stats(&repository)?;
             let branch_tracking_status =
                 Self::branch_tracking_status(&repository, &current_branch_name);
+            let branch_dropdown_lines =
+                Self::branch_dropdown_lines(&repository).unwrap_or_else(|error| {
+                    log::warn!("GitRepoStatusModel: branch dropdown enumeration failed: {error}");
+                    Vec::new()
+                });
 
             Ok(GitStatusMetadata {
                 current_branch_name,
                 main_branch_name,
                 stats_against_head,
                 branch_tracking_status,
+                branch_dropdown_lines,
             })
         })
         .await

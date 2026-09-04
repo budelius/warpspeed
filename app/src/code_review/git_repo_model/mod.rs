@@ -21,6 +21,14 @@ pub struct GitStatusMetadata {
     pub main_branch_name: String,
     pub stats_against_head: DiffStats,
     pub branch_tracking_status: GitBranchTrackingStatus,
+    /// Raw lines backing the git branch chip's dropdown, in the same shape
+    /// that `git branch --sort=-committerdate`, a record separator, and
+    /// `git worktree list --porcelain` produced, so the existing on-click
+    /// parsing in `git_branch_on_click` is unchanged.
+    ///
+    /// Populated natively via libgit2 by the local backend. Empty for the
+    /// remote backend, which still falls back to running the shell command.
+    pub branch_dropdown_lines: Vec<String>,
 }
 
 // ── GitRepoStatusModel ──────────────────────────────────────────────────────

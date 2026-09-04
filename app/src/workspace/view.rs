@@ -13053,8 +13053,13 @@ impl Workspace {
                     return;
                 }
 
-                if ctx.window_ids().count() == 1 {
+                let open_window_count = ctx.window_ids().count();
+                log::info!(
+                    "window process handoff released: {open_window_count} window(s) open in this process"
+                );
+                if open_window_count == 1 {
                     workspace.launch_config_source = None;
+                    log::info!("Handing off the only window, terminating the old process");
                     ctx.terminate_app(TerminationMode::ForceTerminate, None);
                 } else {
                     ctx.windows()

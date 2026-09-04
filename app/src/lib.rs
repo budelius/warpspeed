@@ -2788,7 +2788,11 @@ pub(crate) fn app_callbacks(
             let quit_on_last_window_closed =
                 cfg!(any(target_os = "linux", target_os = "freebsd", windows))
                     || *general_settings.quit_on_last_window_closed;
-            if ctx.window_ids().count() == 1 && quit_on_last_window_closed {
+            let open_window_count = ctx.window_ids().count();
+            log::info!(
+                "close requested for {window_id:?}: {open_window_count} open, quit_on_last={quit_on_last_window_closed}"
+            );
+            if open_window_count == 1 && quit_on_last_window_closed {
                 log::info!("No windows left, terminating app");
                 ctx.terminate_app(TerminationMode::Cancellable, None);
                 return ApproveTerminateResult::Cancel;

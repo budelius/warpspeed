@@ -160,13 +160,22 @@ fn color_parameter(color: Color, is_foreground: bool) -> Option<String> {
 
 /// Renders `grid`'s screen as a self-contained repaint sequence.
 ///
-/// The output is safe to feed to a terminal in any state: it homes the cursor
-/// and erases before drawing, so the result does not depend on what the
-/// receiving screen already contained.
+/// The output is safe to feed to a terminal in any state: every row is
+/// positioned absolutely and erased to its end before its content is drawn, so
+/// the result does not depend on what the receiving screen already contained.
+///
+/// The erase is deliberately per-row (`CSI K`) rather than one full-screen
+/// `CSI 2J` up front. On Warp's own primary-screen grid `CSI 2J` does not blank
+/// the visible rows: `GridHandler::clear_screen` routes `ClearMode::All`
+/// through `clear_viewport`, which preserves them as block scrollback. A
+/// repaint that erased that way appended a second copy of the frame instead of
+/// replacing it, so every reattach duplicated the screen. `CSI 3J` would blank
+/// them, but it would also discard the block's real scrollback -- which the
+/// snapshot does not carry and so could not restore.
 pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
     let mut out = Vec::new();
 
-    out.extend_from_slice(b"\x1b[H\x1b[2J");
+    out.extend_from_slice(b"\x1b[H");
 
     let columns = grid.columns();
     let rows = grid.total_rows();
@@ -189,6 +198,17 @@ pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
         // above has already moved the cursor, so walking the screen with "\r\n"
         // puts content on the wrong rows.
         out.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
+
+        // Erase the row before drawing it, so a row that is now shorter does
+        // not leave the tail of the previous frame behind. The style has to be
+        // back at its default first, because `CSI K` erases using the active
+        // background and would otherwise paint the row in whatever colour the
+        // last cell of the previous row happened to set.
+        if active_style != CellStyle::default() {
+            out.extend_from_slice(b"\x1b[0m");
+            active_style = CellStyle::default();
+        }
+        out.extend_from_slice(b"\x1b[K");
 
         // Blank cells at the end of a row are already blank from the erase
         // above, so they are held back and only written if more content

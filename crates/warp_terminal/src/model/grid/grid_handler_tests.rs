@@ -2700,3 +2700,63 @@ fn test_full_grid_clear_drops_active_hyperlink() {
         }
     }
 }
+
+/// A repaint must *replace* the receiving screen, not append to it.
+///
+/// Warp's primary-screen grid does not blank visible rows on `CSI 2J`: it
+/// preserves them as block scrollback (see
+/// `test_clear_screen_all_primary_preserves_visible_rows_in_history_by_default`).
+/// A repaint that relied on that erase therefore left the old frame behind and
+/// drew a second copy below it, so every reattach duplicated the screen.
+#[test]
+fn a_repaint_replaces_the_receiving_screen_without_growing_scrollback() {
+    let mut source = GridHandler::new_for_test_with_scroll_limit(4, 20, MAX_SCROLL_LIMIT);
+    source.input_at_cursor("new frame line one");
+    source.carriage_return();
+    source.linefeed();
+    source.input_at_cursor("new frame line two");
+
+    let repaint = crate::model::grid::render_ansi::render_screen(&source);
+
+    // A pane that already holds a previous frame, as it does on reattach.
+    let mut receiver = GridHandler::new_for_test_with_scroll_limit(4, 20, MAX_SCROLL_LIMIT);
+    receiver.input_at_cursor("stale frame line one");
+    receiver.carriage_return();
+    receiver.linefeed();
+    receiver.input_at_cursor("stale frame line two");
+
+    let history_before = receiver.history_size();
+    crate::model::ansi::Processor::new().parse_bytes(&mut receiver, &repaint, &mut std::io::sink());
+
+    assert_eq!(
+        receiver.history_size(),
+        history_before,
+        "the repaint pushed the old frame into scrollback instead of erasing it, \
+         so the pane now holds two copies of the screen"
+    );
+
+    let text = visible_text_of(&receiver);
+    assert!(
+        !text.contains("stale"),
+        "the previous frame survived the repaint: {text:?}"
+    );
+    assert!(
+        text.contains("new frame line one") && text.contains("new frame line two"),
+        "the repaint did not reproduce the source screen: {text:?}"
+    );
+}
+
+fn visible_text_of(grid: &GridHandler) -> String {
+    let end = Point::new(
+        grid.total_rows().saturating_sub(1),
+        grid.columns().saturating_sub(1),
+    );
+    grid.bounds_to_string(
+        Point::new(0, 0),
+        end,
+        false,
+        crate::model::secrets::RespectObfuscatedSecrets::No,
+        false,
+        crate::model::grid::RespectDisplayedOutput::No,
+    )
+}

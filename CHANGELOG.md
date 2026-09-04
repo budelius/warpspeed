@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-04
+
+First tagged release of this fork. Everything below accumulated since the fork
+point; upstream's own release notes are not duplicated here.
+
 ### Added
 
 - `warpspeed` build target: a standalone binary with an inline channel config and
@@ -100,3 +105,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - History extends to Warp's root commit. The repository began as a shallow clone,
   but GitLab rejects shallow pushes, so it was unshallowed before publishing.
 - Lazy session restore is merged. Its shell-count reduction has not been measured.
+
+[Unreleased]: https://gitlab.com/martin-wieser/warpspeed/-/compare/v0.1.0...dev
+[0.1.0]: https://gitlab.com/martin-wieser/warpspeed/-/tags/v0.1.0

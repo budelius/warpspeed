@@ -18,7 +18,7 @@ pub struct LaunchConfigSource {
     pub document_index: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 pub struct LaunchConfigWindowSource {
     pub path: PathBuf,
     pub document_index: usize,

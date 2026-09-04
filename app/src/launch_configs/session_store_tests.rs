@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::{load_from_dir, save_to_dir};
+use super::{group_summaries, load_from_dir, save_to_dir, save_windows_to_dir};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::app_state::{
     CliAgentResumeDescriptor, LeafContents, LeafSnapshot, PaneNodeSnapshot, PaneUuid, TabSnapshot,
@@ -88,11 +88,25 @@ fn window_session_round_trip_preserves_shell_and_agent_state() {
         vec![SerializedBlock::default().into()],
     )]);
 
-    save_to_dir(dir.path(), &source, &expected, &block_lists, false)
-        .expect("window session should save");
+    save_to_dir(
+        dir.path(),
+        &source,
+        &expected,
+        &block_lists,
+        false,
+        1_767_225_600,
+    )
+    .expect("window session should save");
     expected.tabs[0].custom_title = Some("Updated agent".to_string());
-    save_to_dir(dir.path(), &source, &expected, &Default::default(), true)
-        .expect("window session should be replaced");
+    save_to_dir(
+        dir.path(),
+        &source,
+        &expected,
+        &Default::default(),
+        true,
+        1_767_225_601,
+    )
+    .expect("window session should be replaced");
     let restored = load_from_dir(dir.path(), &source)
         .expect("window session should load")
         .expect("window session should exist");
@@ -100,4 +114,163 @@ fn window_session_round_trip_preserves_shell_and_agent_state() {
     assert!(dir.path().join("devops/2/window-0.json").is_file());
     assert_eq!(restored.window, expected);
     assert_eq!(restored.block_lists, Arc::new(block_lists));
+}
+
+#[test]
+fn autosaved_session_catalog_describes_each_agent_pane() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = LaunchConfigWindowSource {
+        path: PathBuf::from("/home/warp/.warp/session_configurations/devops.toml"),
+        document_index: 2,
+        window_index: 0,
+        config_name: "DEVOPS".to_string(),
+    };
+
+    save_windows_to_dir(
+        dir.path(),
+        &[window(source)],
+        &Default::default(),
+        true,
+        1_767_225_600,
+        None,
+    )
+    .expect("window session should save");
+    let sessions = group_summaries(super::read_catalog(dir.path()).expect("catalog should load"));
+
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.name(), "DEVOPS");
+    assert_eq!(session.saved_at_unix_seconds(), 1_767_225_600);
+    assert_eq!(session.pane_count(), 1);
+    assert_eq!(session.agent_count(), 1);
+    let pane = &session.tabs().next().expect("tab should exist").panes[0];
+    assert_eq!(pane.shell.as_deref(), Some("/bin/zsh"));
+    assert_eq!(pane.cwd.as_deref(), Some("/workspace/devops"));
+    let agent = pane.agent.as_ref().expect("agent should be described");
+    assert_eq!(agent.agent, CLIAgent::Claude);
+    assert_eq!(
+        agent.resume_command.as_deref(),
+        Some("claude --resume cf44b8d2-9381-4016-8bfb-7aafc57062fd")
+    );
+    assert_eq!(agent.title.as_deref(), Some("wire up the supervisor"));
+    let searchable_text = session.searchable_text();
+    assert!(searchable_text.contains("/home/warp/.warp/session_configurations/devops.toml"));
+    assert!(searchable_text.contains("Claude Code"));
+    assert!(searchable_text.contains("wire up the supervisor"));
+}
+
+#[test]
+fn close_time_save_retains_an_openable_history_entry() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = LaunchConfigWindowSource {
+        path: PathBuf::from("/home/warp/.warp/session_configurations/devops.toml"),
+        document_index: 2,
+        window_index: 0,
+        config_name: "DEVOPS".to_string(),
+    };
+    let expected = window(source);
+
+    save_windows_to_dir(
+        dir.path(),
+        std::slice::from_ref(&expected),
+        &Default::default(),
+        false,
+        1_767_225_600,
+        Some("saved-run"),
+    )
+    .expect("window session should be retained");
+    let sessions = group_summaries(super::read_catalog(dir.path()).expect("catalog should load"));
+
+    assert_eq!(sessions.len(), 2);
+    let history = sessions
+        .iter()
+        .find(|session| !session.is_current())
+        .expect("stored session history should be cataloged");
+    assert!(history.id.starts_with("history:"));
+    assert!(history.id.ends_with(":saved-run"));
+    let restored = super::load_stored_session_from_dir(dir.path(), history)
+        .expect("stored session should load");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].window, expected);
+}
+
+#[test]
+fn reopening_a_configuration_starts_a_distinct_history_run() {
+    let source = LaunchConfigWindowSource {
+        path: PathBuf::from("/history-run-test/devops.yaml"),
+        document_index: 0,
+        window_index: 0,
+        config_name: "DEVOPS".to_string(),
+    };
+    let snapshot = window(source.clone());
+
+    super::begin_run(&source);
+    let first = super::active_history_id(std::slice::from_ref(&snapshot))
+        .expect("active run should have a history ID");
+    assert_eq!(
+        super::active_history_id(std::slice::from_ref(&snapshot)).as_deref(),
+        Some(first.as_str())
+    );
+
+    super::begin_run(&source);
+    let second = super::active_history_id(std::slice::from_ref(&snapshot))
+        .expect("reopened run should have a history ID");
+    assert_ne!(first, second);
+}
+
+#[test]
+fn closing_one_window_retains_the_complete_multi_window_session() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let first_source = LaunchConfigWindowSource {
+        path: PathBuf::from("/home/warp/.warp/launch_configurations/devops.yaml"),
+        document_index: 0,
+        window_index: 0,
+        config_name: "DEVOPS".to_string(),
+    };
+    let second_source = LaunchConfigWindowSource {
+        window_index: 1,
+        ..first_source.clone()
+    };
+    let first = window(first_source);
+    let second = window(second_source);
+
+    save_windows_to_dir(
+        dir.path(),
+        &[first.clone(), second.clone()],
+        &Default::default(),
+        true,
+        1_767_225_500,
+        None,
+    )
+    .expect("multi-window session should autosave");
+    save_windows_to_dir(
+        dir.path(),
+        std::slice::from_ref(&first),
+        &Default::default(),
+        false,
+        1_767_225_600,
+        Some("saved-run"),
+    )
+    .expect("complete session should be retained when one window closes");
+    save_windows_to_dir(
+        dir.path(),
+        std::slice::from_ref(&second),
+        &Default::default(),
+        false,
+        1_767_225_601,
+        Some("saved-run"),
+    )
+    .expect("the same history entry should update when the other window closes");
+
+    let sessions = group_summaries(super::read_catalog(dir.path()).expect("catalog should load"));
+    let history = sessions
+        .iter()
+        .find(|session| !session.is_current())
+        .expect("stored session history should be cataloged");
+    assert_eq!(history.windows().len(), 2);
+    let restored = super::load_stored_session_from_dir(dir.path(), history)
+        .expect("multi-window session should restore");
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored[0].window, first);
+    assert_eq!(restored[1].window, second);
 }

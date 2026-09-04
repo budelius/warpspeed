@@ -372,10 +372,12 @@ fn test_deduplicate_launch_config_window_sessions() {
         ModelEvent::SaveLaunchConfigWindowSessions {
             windows: first,
             include_blocks: false,
+            history_id: None,
         },
         ModelEvent::SaveLaunchConfigWindowSessions {
             windows: latest.clone(),
             include_blocks: false,
+            history_id: None,
         },
     ];
 
@@ -398,14 +400,17 @@ fn test_deduplicate_preserves_launch_config_sessions_with_blocks() {
         ModelEvent::SaveLaunchConfigWindowSessions {
             windows: vec![],
             include_blocks: false,
+            history_id: None,
         },
         ModelEvent::SaveLaunchConfigWindowSessions {
             windows: checkpoint.clone(),
             include_blocks: true,
+            history_id: Some("run".to_owned()),
         },
         ModelEvent::SaveLaunchConfigWindowSessions {
             windows: latest.clone(),
             include_blocks: false,
+            history_id: None,
         },
     ];
 
@@ -417,6 +422,7 @@ fn test_deduplicate_preserves_launch_config_sessions_with_blocks() {
         ModelEvent::SaveLaunchConfigWindowSessions {
             windows,
             include_blocks: true,
+            history_id: Some(_),
         } if windows == &checkpoint
     ));
     assert!(matches!(
@@ -424,6 +430,7 @@ fn test_deduplicate_preserves_launch_config_sessions_with_blocks() {
         ModelEvent::SaveLaunchConfigWindowSessions {
             windows,
             include_blocks: false,
+            history_id: None,
         } if windows == &latest
     ));
 }

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ai::workspace::WorkspaceMetadata;
 use csv::Writer;
@@ -24,7 +25,7 @@ use crate::auth;
 use crate::auth::AuthStateProvider;
 use crate::default_terminal::DefaultTerminal;
 use crate::features::{FeatureFlag, runtime_flags_menu_items};
-use crate::root_view::OpenLaunchConfigArg;
+use crate::root_view::{OpenLaunchConfigArg, OpenStoredSessionArg};
 use crate::server::telemetry::LaunchConfigUiLocation;
 use crate::settings::{
     AISettings, BlockVisibilitySettings, DebugSettings, DefaultSessionMode, SelectionSettings,
@@ -939,6 +940,43 @@ fn make_new_help_menu() -> Menu {
 
 fn make_launch_config_menu_items(ctx: &mut AppContext) -> Vec<MenuItem> {
     let mut launch_config_menu_items = vec![];
+
+    if FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+        for summary in crate::launch_configs::session_store::list_summaries()
+            .into_iter()
+            .take(10)
+        {
+            let saved =
+                chrono::DateTime::<chrono::Utc>::from_timestamp(summary.saved_at_unix_seconds(), 0)
+                    .map(crate::util::time_format::format_approx_duration_from_now_utc)
+                    .unwrap_or_else(|| "unknown time".to_owned());
+            let label = format!(
+                "{} — {} {saved}",
+                summary.name(),
+                if summary.is_current() {
+                    "Autosaved"
+                } else {
+                    "Stored"
+                }
+            );
+            let summary = Arc::new(summary);
+            launch_config_menu_items.push(MenuItem::Custom(CustomMenuItem::new(
+                label,
+                enclose!((summary) move |ctx| {
+                    ctx.dispatch_global_action(
+                        "root_view:open_stored_session",
+                        &OpenStoredSessionArg {
+                            summary: summary.clone(),
+                            ui_location: LaunchConfigUiLocation::AppMenu,
+                        },
+                    );
+                    ctx.dispatch_global_action("workspace:save_app", &());
+                }),
+                no_updates,
+                None,
+            )));
+        }
+    }
 
     let warp_config = WarpConfig::handle(ctx);
     for config in warp_config.as_ref(ctx).launch_and_session_configs() {

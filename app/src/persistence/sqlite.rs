@@ -628,6 +628,7 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                         ModelEvent::SaveLaunchConfigWindowSessions {
                             windows,
                             include_blocks,
+                            history_id,
                         } => {
                             if paused {
                                 log::info!("Ignoring event as SQLite Writer is on pause");
@@ -643,6 +644,8 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                                 crate::launch_configs::session_store::save_windows(
                                     &windows,
                                     &block_lists,
+                                    !include_blocks,
+                                    history_id.as_deref(),
                                 )
                             });
                             if let Err(error) = result {

@@ -168,18 +168,14 @@ fn save_app(_: &(), ctx: &mut AppContext) {
         let windows = app_state
             .windows
             .iter()
-            .filter(|window| {
-                window
-                    .launch_config_source
-                    .as_ref()
-                    .is_some_and(|source| source.is_session_config())
-            })
+            .filter(|window| window.launch_config_source.is_some())
             .cloned()
             .collect::<Vec<_>>();
         if !windows.is_empty()
             && let Err(err) = model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
                 windows,
                 include_blocks: false,
+                history_id: None,
             })
         {
             report_error!(

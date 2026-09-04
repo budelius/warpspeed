@@ -31,6 +31,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The git branch chip's dropdown is now enumerated with libgit2 instead of running
+  `git branch` and `git worktree list` through the session's shell. The refresh runs on
+  every branch change, not on click, so on Windows it spawned a PowerShell process each
+  time -- measured at ~435 ms against ~16 ms for the same work in Git Bash -- to fill a
+  dropdown that was usually never opened. The emitted shape is unchanged, so the existing
+  parsing and its tests are untouched. Remote repositories keep the shell path: the branch
+  list is not carried over the wire.
 - All `WarpSpeed` profiles, including elevated and `WARPSPEED_PROFILE` instances, now share one
   authored set of launch, session, and tab configurations while retaining isolated runtime state.
 - A pane's CLI agent is now recorded even when it never reported a session ID, because "the agent
@@ -44,6 +51,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- A session reattach no longer draws a second copy of the screen. `render_screen` opened its
+  repaint with `CSI 2J`, which on Warp's primary-screen grid preserves the visible rows as
+  block scrollback rather than blanking them, so the repaint appended a frame instead of
+  replacing one. Each row is now erased individually with `CSI K` after it is positioned,
+  which leaves the block's real scrollback intact -- `CSI 3J` would have discarded it, and
+  the snapshot does not carry it to restore.
 - Arrow keys no longer stop reaching a foreground program when a block is still
   selected from an earlier click. `terminal_up`/`terminal_down` consulted the
   block selection before the running command, so a stale selection silently
@@ -78,6 +91,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   instance that still will not say leaves every version in place.
 
 ### Notes
+
+- Both paths that can end the process when a window closes -- `on_should_close_window` and the
+  window-process handoff -- now log the open window count and the branch they took. Added while
+  investigating a report that closing one window of a multi-window process closes all of them;
+  the log shows the `count == 1` guard is not what fires, so the cause is still open.
 
 - History extends to Warp's root commit. The repository began as a shallow clone,
   but GitLab rejects shallow pushes, so it was unshallowed before publishing.

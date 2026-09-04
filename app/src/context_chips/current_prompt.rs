@@ -869,6 +869,26 @@ impl CurrentPrompt {
 
     /// Re-run the branch-list (on-click) generator for a git branch chip so
     /// its branch-switcher dropdown stays in sync with the repository.
+    /// Populate the git branch chip's dropdown from `native_lines` when the
+    /// repository backend supplied them (libgit2, local repos), falling back to
+    /// the chip's shell generator when it did not (remote repos).
+    ///
+    /// The native path matters on Windows: the shell generator spawns a
+    /// PowerShell process per refresh, and this runs on every branch change
+    /// whether or not anyone opens the dropdown.
+    fn apply_git_branch_dropdown(
+        &mut self,
+        chip_kind: ContextChipKind,
+        native_lines: &[String],
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if native_lines.is_empty() {
+            self.refresh_git_branch_dropdown(chip_kind, ctx);
+            return;
+        }
+        self.update_on_click_value(&chip_kind, Some(native_lines.to_vec()));
+    }
+
     fn refresh_git_branch_dropdown(
         &mut self,
         chip_kind: ContextChipKind,
@@ -1614,7 +1634,11 @@ impl CurrentPrompt {
         if current_branch.as_ref() != Some(&new_branch) {
             self.update_chip_value(&ContextChipKind::ShellGitBranch, Some(new_branch));
             // Refresh the branch dropdown so it stays in sync.
-            self.refresh_git_branch_dropdown(ContextChipKind::ShellGitBranch, ctx);
+            self.apply_git_branch_dropdown(
+                ContextChipKind::ShellGitBranch,
+                &metadata.branch_dropdown_lines,
+                ctx,
+            );
         }
 
         let new_branch_status = ChipValue::GitBranchStatus(metadata.branch_tracking_status.clone());
@@ -1631,7 +1655,11 @@ impl CurrentPrompt {
             );
             self.update_chip_value(&ContextChipKind::GitBranchStatus, Some(new_branch_status));
             if branch_changed {
-                self.refresh_git_branch_dropdown(ContextChipKind::GitBranchStatus, ctx);
+                self.apply_git_branch_dropdown(
+                    ContextChipKind::GitBranchStatus,
+                    &metadata.branch_dropdown_lines,
+                    ctx,
+                );
             }
         }
 

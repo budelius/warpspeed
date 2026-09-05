@@ -17,6 +17,7 @@ use terminal::view::ActiveSessionState;
 use warp_editor::editor::NavigationKey;
 #[cfg(feature = "local_fs")]
 use warp_files::FileModel;
+use warp_util::path::user_friendly_path;
 use warpui::platform::WindowStyle;
 use warpui::{AddSingletonModel, App, ViewHandle};
 use watcher::HomeDirectoryWatcher;
@@ -4078,9 +4079,17 @@ fn test_worktree_sidecar_hides_linked_worktrees_from_repo_list() {
                     .collect::<Vec<_>>()
             });
 
-            let main_repo_label = main_repo.to_string_lossy().to_string();
-            let linked_worktree_label = linked_worktree.to_string_lossy().to_string();
-
+            // Built the way the menu builds them, not from the raw path. The
+            // sidecar abbreviates a repo under the home directory to `~`, and on
+            // Windows the temp directory *is* under the home directory -- so
+            // comparing against the absolute path only ever matched where
+            // `TempDir` lands outside `$HOME`.
+            let home = dirs::home_dir().map(|path| path.display().to_string());
+            let main_repo_label =
+                user_friendly_path(&main_repo.to_string_lossy(), home.as_deref()).into_owned();
+            let linked_worktree_label =
+                user_friendly_path(&linked_worktree.to_string_lossy(), home.as_deref())
+                    .into_owned();
             assert!(labels.iter().any(|label| label == "Search repos"));
             assert!(labels.iter().any(|label| label == &main_repo_label));
             assert!(!labels.iter().any(|label| label == &linked_worktree_label));
@@ -6492,7 +6501,7 @@ fn change_shell_picker_opens_and_renders_for_a_targeted_terminal_view() {
         // `AvailableShells::load_known_shells` -- the rich one that finds WSL
         // distros and MSYS2 installs. Leaving it off tests the picker against
         // a four-entry list no real user has.
-        FeatureFlag::ShellSelector.set_enabled(true);
+        let _shell_selector = FeatureFlag::ShellSelector.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);
         let window_id = workspace.update(&mut app, |_, ctx| ctx.window_id());
@@ -6580,7 +6589,7 @@ fn change_shell_picker_opens_and_renders_for_a_targeted_terminal_view() {
 fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_view() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
-        FeatureFlag::ShellSelector.set_enabled(true);
+        let _shell_selector = FeatureFlag::ShellSelector.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);
         let terminal_view = workspace.update(&mut app, |workspace, ctx| {

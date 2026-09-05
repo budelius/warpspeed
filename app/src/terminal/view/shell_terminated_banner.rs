@@ -17,6 +17,7 @@ use crate::ui_components;
 
 const FILE_ISSUE_TEXT: &str = "File issue";
 const MORE_INFO_TEXT: &str = "More info";
+const RETRY_TEXT: &str = "Retry";
 
 /// A banner to display when the shell process terminates.
 ///
@@ -42,7 +43,7 @@ impl ShellTerminatedBanner {
 }
 
 impl Entity for ShellTerminatedBanner {
-    type Event = ();
+    type Event = Event;
 }
 
 impl View for ShellTerminatedBanner {
@@ -103,6 +104,12 @@ impl View for ShellTerminatedBanner {
 pub enum Action {
     OpenUrl(String),
     CopyPtySpawnError(String),
+    Retry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    Retry,
 }
 
 impl TypedActionView for ShellTerminatedBanner {
@@ -117,6 +124,7 @@ impl TypedActionView for ShellTerminatedBanner {
                 ctx.clipboard()
                     .write(ClipboardContent::plain_text(error_str.to_owned()));
             }
+            Action::Retry => ctx.emit(Event::Retry),
         }
     }
 }
@@ -208,7 +216,7 @@ impl TerminationType {
             TerminationType::Premature { .. } => {
                 let ui_builder = inverted_color_ui_builder(appearance);
 
-                handles.resize_with(2, MouseStateHandle::default);
+                handles.resize_with(3, MouseStateHandle::default);
                 vec![
                     ui_builder
                         .button(ButtonVariant::Text, handles[0].clone())
@@ -221,7 +229,7 @@ impl TerminationType {
                         })
                         .finish(),
                     ui_builder
-                        .button(ButtonVariant::Outlined, handles[1].clone())
+                        .button(ButtonVariant::Text, handles[1].clone())
                         .with_text_label(MORE_INFO_TEXT.to_string())
                         .build()
                         .on_click(|ctx, _, _| {
@@ -230,12 +238,20 @@ impl TerminationType {
                             ));
                         })
                         .finish(),
+                    ui_builder
+                        .button(ButtonVariant::Outlined, handles[2].clone())
+                        .with_text_label(RETRY_TEXT.to_string())
+                        .build()
+                        .on_click(|ctx, _, _| {
+                            ctx.dispatch_typed_action(Action::Retry);
+                        })
+                        .finish(),
                 ]
             }
             TerminationType::PtySpawnFailure { pty_spawn_error } => {
                 let ui_builder = inverted_color_ui_builder(appearance);
 
-                handles.resize_with(3, MouseStateHandle::default);
+                handles.resize_with(4, MouseStateHandle::default);
                 let error_str = format!("{pty_spawn_error:#}");
                 vec![
                     ui_builder
@@ -259,13 +275,21 @@ impl TerminationType {
                         })
                         .finish(),
                     ui_builder
-                        .button(ButtonVariant::Outlined, handles[2].clone())
+                        .button(ButtonVariant::Text, handles[2].clone())
                         .with_text_label(MORE_INFO_TEXT.to_string())
                         .build()
                         .on_click(|ctx, _, _| {
                             ctx.dispatch_typed_action(Action::OpenUrl(
                                 "https://docs.warp.dev/support-and-community/troubleshooting-and-support/known-issues#debugging".to_string(),
                             ));
+                        })
+                        .finish(),
+                    ui_builder
+                        .button(ButtonVariant::Outlined, handles[3].clone())
+                        .with_text_label(RETRY_TEXT.to_string())
+                        .build()
+                        .on_click(|ctx, _, _| {
+                            ctx.dispatch_typed_action(Action::Retry);
                         })
                         .finish(),
                 ]
@@ -295,3 +319,7 @@ fn inverted_color_ui_builder(appearance: &Appearance) -> UiBuilder {
         appearance.line_height_ratio(),
     )
 }
+
+#[cfg(test)]
+#[path = "shell_terminated_banner_tests.rs"]
+mod tests;

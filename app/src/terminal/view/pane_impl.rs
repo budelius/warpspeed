@@ -46,7 +46,7 @@ use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shared_session::manager::Manager;
 use crate::terminal::shared_session::participant_avatar_view::render_participants_and_role_elements;
 use crate::terminal::shared_session::render_util::shared_session_indicator_color;
-use crate::terminal::{TerminalManager, TerminalView};
+use crate::terminal::{TerminalManager, TerminalView, detached_sessions};
 use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
 use crate::ui_components::buttons::icon_button_with_color;
 use crate::ui_components::icon_with_status::render_icon_with_status;
@@ -610,6 +610,32 @@ impl TerminalView {
     }
 }
 
+impl TerminalView {
+    /// Whether this pane's shell can be handed to the session supervisor and
+    /// picked up again later.
+    ///
+    /// The manager is reached through the pane stack rather than held here,
+    /// because a `TerminalView` owns its model but not the session behind it.
+    pub(crate) fn can_detach_session(&self, ctx: &AppContext) -> bool {
+        if !detached_sessions::are_supported(ctx) {
+            return false;
+        }
+        self.pane_stack
+            .as_ref()
+            .and_then(|handle| handle.upgrade(ctx))
+            .and_then(|stack| {
+                stack
+                    .as_ref(ctx)
+                    .entries()
+                    .iter()
+                    .find(|(_, view)| view.id() == self.view_id)
+                    .map(|(manager, _)| manager.as_ref(ctx).persistent_session_id())
+            })
+            .flatten()
+            .is_some()
+    }
+}
+
 impl BackingView for TerminalView {
     type PaneHeaderOverflowMenuAction = TerminalAction;
     type CustomAction = TerminalAction;
@@ -715,6 +741,13 @@ impl BackingView for TerminalView {
                     .with_on_select_action(TerminalAction::ChangeShell)
                     .into_item(),
             ]);
+            if self.can_detach_session(ctx) {
+                items.push(
+                    MenuItemFields::new("Detach session")
+                        .with_on_select_action(TerminalAction::DetachSession)
+                        .into_item(),
+                );
+            }
         }
 
         // Split-pane related items.

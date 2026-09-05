@@ -11045,6 +11045,15 @@ impl TerminalView {
             let banner = ctx.add_typed_action_view(|ctx| {
                 shell_terminated_banner::ShellTerminatedBanner::new(termination_type, ctx)
             });
+            ctx.subscribe_to_view(&banner, |me, _, event, ctx| match event {
+                shell_terminated_banner::Event::Retry => {
+                    ctx.dispatch_typed_action_deferred(
+                        WorkspaceAction::RestartShellForTerminalView {
+                            terminal_view_id: me.view_id,
+                        },
+                    );
+                }
+            });
 
             self.insert_rich_content(
                 None,
@@ -27035,6 +27044,7 @@ impl TypedActionView for TerminalView {
             | ToggleMaximizePane
             | RestartShell
             | ChangeShell
+            | DetachSession
             | PromptContextMenu { .. }
             | OpenInputContextMenu { .. }
             | InputContextMenuItem(_)
@@ -27372,6 +27382,11 @@ impl TypedActionView for TerminalView {
                         terminal_view_id: self.view_id,
                     },
                 );
+            }
+            DetachSession => {
+                ctx.dispatch_typed_action_deferred(WorkspaceAction::DetachSessionForTerminalView {
+                    terminal_view_id: self.view_id,
+                });
             }
             PromptContextMenu {
                 position_offset_from_prompt,

@@ -173,6 +173,7 @@ impl SessionTable {
                 metadata: session.metadata.clone(),
                 detached_for_seconds: now_unix_seconds
                     .saturating_sub(session.detached_at_unix_seconds),
+                attached: session.attached,
             })
             .collect();
 

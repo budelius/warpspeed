@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use session_sharing_protocol::common::SessionId;
 use ui_components::lightbox;
+use warp_core::SessionId as TerminalSessionId;
 use warp_util::path::LineAndColumnArg;
 use warpui::accessibility::AccessibilityVerbosity;
 use warpui::geometry::rect::RectF;
@@ -277,6 +278,22 @@ pub enum WorkspaceAction {
     RestartShell,
     RestartShellForTerminalView {
         terminal_view_id: EntityId,
+    },
+    /// Hands the focused pane's shell to the session supervisor and closes the
+    /// pane. The shell and everything running under it keep going; the session
+    /// then appears in the picker opened by `ToggleAttachSessionMenu`.
+    DetachSession,
+    DetachSessionForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Opens (or closes, if already open) the picker listing the sessions the
+    /// supervisor is holding with no pane attached. Selecting an entry there
+    /// dispatches `AttachDetachedSession`.
+    ToggleAttachSessionMenu,
+    /// Opens a new tab whose terminal takes over `session_id` instead of
+    /// starting a fresh shell.
+    AttachDetachedSession {
+        session_id: TerminalSessionId,
     },
     /// Restores this window in a newly launched application process, then closes the original.
     RestartWindowInNewProcess,
@@ -1044,6 +1061,11 @@ impl WorkspaceAction {
             | OpenRepository { .. }
             | SelectTabConfig(_)
             | ToggleVerticalTabsPanel
+            // Both change the pane/tab layout: one removes a pane, the other
+            // adds a tab.
+            | DetachSession
+            | DetachSessionForTerminalView { .. }
+            | AttachDetachedSession { .. }
             | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets
             // restarted, the user can continue working
@@ -1091,6 +1113,7 @@ impl WorkspaceAction {
             // menu open/close -- none of these need a save.
             | RestartShell
             | RestartShellForTerminalView { .. }
+            | ToggleAttachSessionMenu
             | RestartWindowInNewProcess
             | ToggleChangeShellMenu
             | ToggleChangeShellMenuForTerminalView { .. }

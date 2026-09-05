@@ -60,11 +60,38 @@ fn client_reattaches_same_process_through_daemon() {
     let first = client.spawn(session_id, &powershell_options()).unwrap();
     let _ = unsafe { CloseHandle(HANDLE(first.raw as usize as *mut _)) };
 
-    client.detach(session_id).unwrap();
+    let snapshot = ScreenSnapshot {
+        columns: 100,
+        rows: 30,
+        repaint: b"\x1b[H\x1b[2Jclaude".to_vec(),
+    };
+    let metadata = SessionMetadata {
+        shell: "pwsh".to_owned(),
+        working_directory: r"C:\src".to_owned(),
+        title: "Claude Code".to_owned(),
+    };
+    client
+        .detach(session_id, snapshot.clone(), metadata.clone())
+        .unwrap();
+
+    // The listing is what the detached-session picker is built from, so the
+    // metadata a client detached with has to survive the round trip.
+    let listed = client
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.session_id == session_id)
+        .expect("a detached session must appear in the listing");
+    assert_eq!(listed.metadata, metadata);
+
     let attached = client.attach(session_id).unwrap();
     let second = attached.endpoint.expect("attach should lend an endpoint");
 
     assert_eq!(second.pid, first.pid);
+    assert_eq!(
+        attached.snapshot, snapshot,
+        "the screen handed over at detach must come back on attach"
+    );
     assert!(client.is_running(session_id).unwrap());
 
     let _ = unsafe { CloseHandle(HANDLE(second.raw as usize as *mut _)) };

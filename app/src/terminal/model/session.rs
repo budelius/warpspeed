@@ -1714,6 +1714,25 @@ pub mod testing {
     use super::command_executor::testing::TestCommandExecutor;
     use super::*;
 
+    /// A history file that does not exist, so a test session reads no history.
+    ///
+    /// `histfile: None` is not the hermetic choice it looks like:
+    /// `read_history_for_local_session` falls back to the shell's *default*
+    /// history file, which on a developer's machine is their own. Every test
+    /// that asserts on history entries then passes on a clean CI runner and
+    /// fails on a machine that has actually been used. Named rather than
+    /// created so there is nothing to clean up, and obvious in a log if the
+    /// read is ever reached.
+    fn absent_history_file() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "warp-absent-test-history-{}.txt",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// Builder methods for constructing `SessionInfo` in tests.
     impl SessionInfo {
         pub fn new_for_test() -> Self {
@@ -1728,7 +1747,7 @@ pub mod testing {
                 session_id: SessionId::from(0),
                 shell: Shell::new(shell_type, None, None, Default::default(), None),
                 launch_data: None,
-                histfile: None,
+                histfile: Some(absent_history_file()),
                 user: "local:user".to_owned(),
                 hostname: "local:host".to_owned(),
                 session_type: BootstrapSessionType::Local,

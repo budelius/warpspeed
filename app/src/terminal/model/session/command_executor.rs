@@ -358,8 +358,23 @@ pub mod testing {
     use super::*;
     use crate::terminal::shell::ShellType;
 
+    /// The programs that can run a command for `shell`, in preference order.
+    ///
+    /// PowerShell has two: `pwsh` is PowerShell 7 and is not installed
+    /// everywhere, while `powershell` is Windows PowerShell 5.1 and always is.
+    /// Trying only `pwsh` means every test that asks a session what commands
+    /// exist gets "program not found" and silently sees an empty shell, which
+    /// reads as "this machine has no `git`" rather than as a missing
+    /// interpreter.
+    fn interpreters_for(shell: &Shell) -> &'static [&'static str] {
+        match shell.shell_type() {
+            ShellType::PowerShell => &["pwsh", "powershell"],
+            _ => &["bash"],
+        }
+    }
+
     /// Implementation of `CommandExecutor` for use in tests. This implementation simply executes
-    /// the given command in a bash subprocess.
+    /// the given command in a subprocess of the session's shell.
     #[derive(Debug, Default)]
     pub struct TestCommandExecutor {}
 
@@ -373,28 +388,33 @@ pub mod testing {
             environment_variables: Option<HashMap<String, String>>,
             _execute_command_options: ExecuteCommandOptions,
         ) -> Result<CommandOutput> {
-            let mut command_process = Command::new(match shell.shell_type() {
-                ShellType::PowerShell => "pwsh",
-                _ => "bash",
-            });
+            let mut last_error = None;
+            for interpreter in interpreters_for(shell) {
+                let mut command_process = Command::new(interpreter);
 
-            // Set environment variables, including $PATH.
-            if let Some(environment_variables) = environment_variables {
-                command_process.envs(&environment_variables);
+                // Set environment variables, including $PATH.
+                if let Some(environment_variables) = &environment_variables {
+                    command_process.envs(environment_variables);
+                }
+
+                // Set the current dir, if any.
+                if let Some(current_directory_path) = current_directory_path {
+                    command_process.current_dir(current_directory_path);
+                }
+
+                match command_process.arg("-c").arg(command).output().await {
+                    Ok(output) => return Ok(output.into()),
+                    // Only an absent interpreter is worth trying the next one
+                    // for; a command that ran and failed has really failed.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(anyhow!(error)),
+                }
             }
-
-            // Set the current dir, if any.
-            if let Some(current_directory_path) = current_directory_path {
-                command_process.current_dir(current_directory_path);
-            }
-
-            command_process
-                .arg("-c")
-                .arg(command)
-                .output()
-                .await
-                .map(|output| output.into())
-                .map_err(|e| anyhow!(e))
+            Err(anyhow!(
+                last_error.expect("at least one interpreter is tried")
+            ))
         }
 
         fn as_any(&self) -> &dyn Any {

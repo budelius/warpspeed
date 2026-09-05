@@ -279,17 +279,25 @@ pub(super) fn spawn(
         })
         .map(|path| HSTRING::from(path.as_os_str()));
 
-    unsafe {
+    let base_flags =
+        PROCESS_CREATION_FLAGS(0) | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+
+    // Ask to leave Warp's job object, and start inside it if the job forbids
+    // that. `CREATE_BREAKAWAY_FROM_JOB` keeps a shell alive when the job around
+    // Warp is closed, but a job created without `JOB_OBJECT_LIMIT_BREAKAWAY_OK`
+    // answers the request with `ERROR_ACCESS_DENIED` -- and Warp cannot change
+    // that from the inside. Refusing to fall back means no shell starts at all
+    // whenever Warp runs under something that makes such a job: a test runner,
+    // a CI agent, some terminals. A shell inside the job is far better than
+    // none. The same trade is made in `supervised_pty` and `daemon_spawn`.
+    let mut spawn = |flags| unsafe {
         CreateProcessW(
             PCWSTR::null(), /* lpApplicationName */
             Some(PWSTR::from_raw(shell_command.as_ptr().cast_mut())),
             None,  /* lpProcessAttributes */
             None,  /* lpThreadAttributes */
             false, /* bInheritHandles */
-            PROCESS_CREATION_FLAGS(0)
-                | EXTENDED_STARTUPINFO_PRESENT
-                | CREATE_UNICODE_ENVIRONMENT
-                | CREATE_BREAKAWAY_FROM_JOB,
+            flags,
             Some(environment_block.as_ptr() as *const std::ffi::c_void),
             start_directory
                 .as_ref()
@@ -298,11 +306,23 @@ pub(super) fn spawn(
             &startup_info.StartupInfo as *const STARTUPINFOW,
             &mut process_information,
         )
-        .map_err(|error| {
-            let detail = shell_starter.shell_detail();
-            PtySpawnError::CreateShellProcessFailed { detail, error }
-        })?;
+    };
+
+    let mut result = spawn(base_flags | CREATE_BREAKAWAY_FROM_JOB);
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.code().0 & 0xFFFF == ACCESS_DENIED)
+    {
+        log::info!(
+            "The job object around Warp forbids breakaway; starting the shell inside it instead"
+        );
+        result = spawn(base_flags);
     }
+    result.map_err(|error| {
+        let detail = shell_starter.shell_detail();
+        PtySpawnError::CreateShellProcessFailed { detail, error }
+    })?;
 
     let _ = unsafe { conpty_api.release(pty_handle) };
 
@@ -353,6 +373,9 @@ fn wsl_shell_command(wsl_shell_starter: &WslShellStarter) -> Result<HSTRING, Enc
 ///
 /// Windows expects a single string for its command which includes all arguments, so we need to
 /// string them together and escape them appropriately.
+/// `ERROR_ACCESS_DENIED`, returned when the job forbids breakaway.
+const ACCESS_DENIED: i32 = 5;
+
 fn shell_command(shell_starter: &DirectShellStarter) -> Result<HSTRING, EncodingError> {
     let mut encoded_shell_command = Vec::<u16>::new();
 
@@ -458,10 +481,12 @@ impl Pty {
     pub fn attach(
         session_id: SessionId,
         size: &SizeInfo,
+        include_snapshot: bool,
         ctx: &mut AppContext,
     ) -> anyhow::Result<Option<Self>> {
-        let Some((result, handle)) =
-            PtySpawner::handle(ctx).update(ctx, |spawner, _| spawner.attach_pty(session_id))?
+        let Some((result, handle)) = PtySpawner::handle(ctx).update(ctx, |spawner, _| {
+            spawner.attach_pty(session_id, include_snapshot)
+        })?
         else {
             return Ok(None);
         };

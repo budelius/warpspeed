@@ -10,9 +10,32 @@
 The Windows backend now owns ConPTY sessions in a detached per-profile WarpSpeed process, lends
 pipe handles to the app, and reattaches persistent TOML-session panes after window closure, app
 termination, or disappearance of the attached app process. If the PTY is unavailable, a saved
-Claude Code session ID is resumed lazily after the replacement shell bootstraps. The
-detached-sessions drawer and general persistence for windows without a TOML session identity remain
-unimplemented.
+Claude Code session ID is resumed lazily after the replacement shell bootstraps.
+
+A session can also be detached and reattached **on demand**: "Detach session" in the pane and tab
+menus hands the pane's screen and metadata over and closes the pane; "Attach detached session"
+lists what the supervisor holds (`ListSessions`, filtered to sessions no client is on) and opens a
+chosen one in a new tab, repainting its screen. Both are command-palette entries as well. The
+snapshot handoff described below is therefore live: it was previously stubbed with a blank 80x24
+screen and empty metadata, which is what made the drawer impossible to build.
+
+Plan 3 has since landed as well: `local_tty/unix_supervisor` is the Unix and macOS backend for the
+same v2 core, with an `AF_UNIX` transport that lends the PTY leader over `SCM_RIGHTS` and a
+double-forked, `setsid`-ed daemon. Detach, attach and the listing therefore behave the same on
+both platforms, and with the flag on the v1 daemon is no longer started. **Verified on Linux, in
+a container; macOS is compiled only in the sense that its one divergent function --
+`LOCAL_PEERPID` in place of `SO_PEERCRED` -- was checked against the pinned `libc` by name, not
+by building it.**
+
+Detach-at-quit is also general now: every window is asked what it is holding, and a pane with a
+tracked CLI agent or a running foreground command is kept, rather than only the panes of a
+launch-config window.
+
+Still unimplemented: the drawer itself as a persistent surface rather than a picker, the sqlite
+session index (the supervisor's own listing is the source of truth today, so a session outlives
+its metadata only as long as the supervisor does), and the full idle classifier the data-flow
+section below describes -- the shipped one keeps a session when it is busy or hosting an agent
+and does not attempt the "no live descendants" check for a non-warpified pane.
 
 ## Problem
 
@@ -79,10 +102,10 @@ Only two things differ per platform. Everything above the `Transport` trait is s
 
 | | Unix | Windows |
 |---|---|---|
-| Transport | `AF_UNIX`, `/tmp/terminal-session-supervisor-v2.sock-<uid>-<hash>`, mode `0600` | Named pipe `warp-terminal-supervisor-v2-<sid-hash>`, DACL limited to the current user SID |
+| Transport | `AF_UNIX`, `$XDG_RUNTIME_DIR/warp-supervisor/v2-<uid>-<hash>.sock` (state dir if unset; never `/tmp`), mode `0600` in a `0700` directory. Kept short deliberately: `sockaddr_un` holds ~104 bytes and the obvious name overran it | Named pipe `warp-terminal-supervisor-v2-<sid-hash>`, DACL limited to the current user SID |
 | Endpoint lending | `SCM_RIGHTS` fd passing (exists today) | `DuplicateHandle` of the ConPTY pipe handles into the client PID |
 | Detach | Warp closes its fd; supervisor resumes reading the leader | Warp closes its duplicates; supervisor resumes reading its originals |
-| Daemonize | `setsid()` (exists today) | `DETACHED_PROCESS`, and excluded from Warp's job object so it is not killed with the tree |
+| Daemonize | `setsid()` in a `pre_exec` hook, behind a second fork so Warp has nothing left to wait on | `DETACHED_PROCESS`, and excluded from Warp's job object so it is not killed with the tree |
 
 Windows already loads a bundled `conpty.dll` exposing `ConptyReleasePseudoConsole`
 (`windows/conpty_api.rs:102`). The supervisor creates the ConPTY, so `Release` is not needed on the

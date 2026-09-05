@@ -39,6 +39,7 @@ use crate::launch_configs::launch_config::LaunchConfig;
 use crate::menu::{MenuAction, MenuItem, MenuItemFields};
 use crate::pane_group::{PaneGroup, PaneId};
 use crate::shell_indicator::ShellIndicatorType;
+use crate::terminal::detached_sessions;
 use crate::terminal::shared_session::SharedSessionStatus;
 use crate::terminal::shared_session::manager::Manager;
 use crate::terminal::shared_session::render_util::shared_session_indicator_color;
@@ -458,7 +459,7 @@ impl TabData {
             self.tab_group_menu_items(index, tab_groups, is_only_member_of_group),
             self.session_sharing_menu_items(index, ctx),
             self.shell_menu_items(pane_name_target, ctx),
-            self.window_process_menu_items(),
+            self.window_process_menu_items(ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
             self.close_tab_menu_items(index, tabs_len, ctx),
@@ -617,8 +618,14 @@ impl TabData {
             return vec![];
         }
 
+        let can_detach = detached_sessions::are_supported(ctx)
+            && pane_group
+                .terminal_manager_for_pane_id(pane_id, ctx)
+                .and_then(|manager| manager.as_ref(ctx).persistent_session_id())
+                .is_some();
+
         let terminal_view_id = terminal_view.id();
-        vec![
+        let mut items = vec![
             MenuItemFields::new("Restart shell")
                 .with_on_select_action(WorkspaceAction::RestartShellForTerminalView {
                     terminal_view_id,
@@ -629,18 +636,40 @@ impl TabData {
                     terminal_view_id,
                 })
                 .into_item(),
-        ]
+        ];
+        if can_detach {
+            items.push(
+                MenuItemFields::new("Detach session")
+                    .with_on_select_action(WorkspaceAction::DetachSessionForTerminalView {
+                        terminal_view_id,
+                    })
+                    .into_item(),
+            );
+        }
+        items
     }
 
-    fn window_process_menu_items(&self) -> Vec<MenuItem<WorkspaceAction>> {
+    fn window_process_menu_items(&self, ctx: &AppContext) -> Vec<MenuItem<WorkspaceAction>> {
         if cfg!(target_family = "wasm") {
             return Vec::new();
         }
-        vec![
+        let mut items = vec![
             MenuItemFields::new("Restart window in new process")
                 .with_on_select_action(WorkspaceAction::RestartWindowInNewProcess)
                 .into_item(),
-        ]
+        ];
+        // Offered whenever the supervisor can be asked, rather than only when
+        // it is holding something: finding that out is a round trip, and doing
+        // it on every right-click to decide whether to draw a row is not worth
+        // it. The picker says so when there is nothing to attach.
+        if detached_sessions::are_supported(ctx) {
+            items.push(
+                MenuItemFields::new("Attach detached session")
+                    .with_on_select_action(WorkspaceAction::ToggleAttachSessionMenu)
+                    .into_item(),
+            );
+        }
+        items
     }
 
     fn copy_metadata_menu_items(

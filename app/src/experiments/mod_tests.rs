@@ -149,7 +149,10 @@ fn test_create_experiment_layer_mappings() {
     let layers = vec![&*TEST_LAYER];
     create_experiment_layer_mappings(&layers);
 
-    assert_eq!(EXPERIMENT_LAYER_MAPPINGS.len(), 2);
+    // The map's total size is not this test's business: it is a process-wide
+    // static, and `experiments::init` fills it with the real layers for any
+    // other test in the binary that starts an app. What this test is about is
+    // that every experiment in a layer ends up mapped to that layer.
     assert_eq!(
         EXPERIMENT_LAYER_MAPPINGS
             .get(TestExperiment::name())

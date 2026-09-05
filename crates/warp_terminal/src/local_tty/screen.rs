@@ -35,6 +35,20 @@ pub struct ScreenSnapshot {
     pub repaint: Vec<u8>,
 }
 
+impl Default for ScreenSnapshot {
+    /// A blank screen at the classic default size.
+    ///
+    /// This is what a session gets when it is handed over without one -- an
+    /// ungraceful app death, or a caller that has no live grid to render.
+    fn default() -> Self {
+        Self {
+            columns: 80,
+            rows: 24,
+            repaint: Vec::new(),
+        }
+    }
+}
+
 /// A terminal screen driven by bytes, with no view attached.
 pub struct HeadlessScreen {
     primary: GridHandler,

@@ -162,6 +162,11 @@ pub struct TerminalManager<S> {
 
     /// Stable identifier used to reattach a PTY supervised outside the app process.
     pub(super) persistent_session_id: Option<SessionId>,
+
+    /// Whether the attach that claims [`Self::persistent_session_id`] should
+    /// repaint the session's screen. Set only when the pane is opening onto a
+    /// detached session, which leaves it with nothing else to show.
+    repaint_screen_on_attach: bool,
     cli_agent_resume_command: Option<String>,
     #[cfg(unix)]
     pub(super) persistent_server_client:
@@ -350,6 +355,15 @@ where
             self.0.persistent_server_client =
                 PtySpawner::handle(ctx).read(ctx, |spawner, _| spawner.persistent_server_client());
         }
+    }
+
+    fn attach_detached_session(
+        &mut self,
+        session_id: SessionId,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) {
+        self.restore_persistent_session(session_id, ctx);
+        self.0.repaint_screen_on_attach = true;
     }
 
     fn restore_cli_agent_resume_command(&mut self, command: String) {
@@ -695,6 +709,7 @@ impl<S> TerminalManager<S> {
             session_sharer: Rc::new(RefCell::new(None)),
             deferred_shell: None,
             persistent_session_id: None,
+            repaint_screen_on_attach: false,
             cli_agent_resume_command: None,
             #[cfg(unix)]
             persistent_server_client: None,
@@ -888,6 +903,7 @@ impl<S> TerminalManager<S> {
         self.deferred_shell = None;
         self.shutdown_event_loop();
         self.persistent_session_id = None;
+        self.repaint_screen_on_attach = false;
         #[cfg(unix)]
         {
             self.persistent_server_client = None;
@@ -1008,6 +1024,7 @@ impl<S> TerminalManager<S> {
         //    thread, so no spawned callback is dispatched during step 2.
         self.session_generation = self.session_generation.wrapping_add(1);
         self.persistent_session_id = None;
+        self.repaint_screen_on_attach = false;
         if let Some(pending) = self.pending_shell_start.take() {
             pending.abort();
         }
@@ -1280,9 +1297,12 @@ fn on_shell_determined<S: TerminalSurface>(
     };
     // Reattach before enqueueing bootstrap input. Sending a fresh init script
     // to a shell that is already running would execute it as user input.
+    // Consumed by this attach: a later restart of the same pane replaces the
+    // session rather than taking one over, and must not repaint.
+    let include_snapshot = std::mem::take(&mut manager.repaint_screen_on_attach);
     let attached_pty = manager.persistent_session_id.and_then(|session_id| {
         let size = manager.model().lock().block_list().size().to_owned();
-        match Pty::attach(session_id, &size, ctx) {
+        match Pty::attach(session_id, &size, include_snapshot, ctx) {
             Ok(pty) => pty,
             Err(error) => {
                 log::warn!("Failed to reattach terminal session: {error:#}");

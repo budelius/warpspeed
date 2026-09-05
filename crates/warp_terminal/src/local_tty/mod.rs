@@ -18,6 +18,8 @@ pub mod supervisor;
 pub mod terminal_attributes;
 #[cfg(unix)]
 mod unix;
+#[cfg(unix)]
+pub mod unix_supervisor;
 #[cfg(windows)]
 pub mod windows;
 

@@ -203,6 +203,7 @@ pub enum TerminalAction {
     ToggleMaximizePane,
     RestartShell,
     ChangeShell,
+    DetachSession,
     SplitRight(Option<AvailableShell>),
     SplitLeft(Option<AvailableShell>),
     SplitDown(Option<AvailableShell>),
@@ -568,6 +569,7 @@ impl fmt::Debug for TerminalAction {
             ToggleMaximizePane => f.write_str("ToggleMaximizeActivePane"),
             RestartShell => f.write_str("RestartShell"),
             ChangeShell => f.write_str("ChangeShell"),
+            DetachSession => f.write_str("DetachSession"),
             PromptContextMenu {
                 position_offset_from_prompt,
             } => write!(

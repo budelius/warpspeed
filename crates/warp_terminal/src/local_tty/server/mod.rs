@@ -146,7 +146,12 @@ impl TerminalServer {
         Self::new_ephemeral()
     }
 
-    fn new_ephemeral() -> Result<Self> {
+    /// A terminal server that spawns ptys but supervises none of them.
+    ///
+    /// What the v2 supervisor's callers want: it owns every session it starts,
+    /// so the persistent server below would only be a second daemon holding
+    /// nothing.
+    pub(in crate::local_tty) fn new_ephemeral() -> Result<Self> {
         log::info!("Spawning terminal server process...");
 
         // Create a pair of Unix domain sockets which we can use to send

@@ -648,12 +648,15 @@ impl Pty {
     pub fn attach(
         session_id: warp_core::SessionId,
         size: &SizeInfo,
+        include_snapshot: bool,
         ctx: &mut AppContext,
     ) -> Result<Option<Self>> {
         let signals = Signals::new([signal_hook::consts::SIGCHLD])
             .context("error preparing signal handling")?;
         let Some((result, pty_handle)) = PtySpawner::handle(ctx)
-            .update(ctx, |pty_spawner, _| pty_spawner.attach_pty(session_id))?
+            .update(ctx, |pty_spawner, _| {
+                pty_spawner.attach_pty(session_id, include_snapshot)
+            })?
         else {
             return Ok(None);
         };

@@ -138,10 +138,9 @@ fn branch_dropdown_lines_match_the_git_branch_command_shape() {
 
     // And the existing on-click parser still understands the shape, keeping the
     // checked-out branch at the front.
-    let filtered = crate::context_chips::git_branch_on_click::filter_git_branch_on_click_values(
-        Some(lines),
-    )
-    .unwrap();
+    let filtered =
+        crate::context_chips::git_branch_on_click::filter_git_branch_on_click_values(Some(lines))
+            .unwrap();
     assert_eq!(filtered, [head_branch, "middle".into(), "oldest".into()]);
 }
 
@@ -175,10 +174,9 @@ fn branch_dropdown_lines_mark_branches_checked_out_in_linked_worktrees() {
     );
 
     // The '+' branch resolves to its worktree path through the existing parser.
-    let filtered = crate::context_chips::git_branch_on_click::filter_git_branch_on_click_values(
-        Some(lines),
-    )
-    .unwrap();
+    let filtered =
+        crate::context_chips::git_branch_on_click::filter_git_branch_on_click_values(Some(lines))
+            .unwrap();
     assert!(
         filtered
             .iter()

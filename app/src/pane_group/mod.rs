@@ -24,6 +24,7 @@ use typed_path::TypedPath;
 use url::Url;
 use uuid::Uuid;
 use warp_cli::agent::Harness;
+use warp_core::SessionId as TerminalSessionId;
 use warp_core::command::ExitCode;
 use warp_core::context_flag::ContextFlag;
 use warp_errors::report_if_error;
@@ -821,6 +822,10 @@ pub struct NewTerminalOptions {
     pub is_shared_session_creator: IsSharedSessionCreator,
     /// The AI conversation to restore when the terminal is created.
     pub conversation_restoration: Option<ConversationRestorationInNewPaneType>,
+    /// An already-running supervisor session to take over instead of starting
+    /// a shell. The shell start is deferred until the pane has been told which
+    /// session to claim, so no process is forked and then thrown away.
+    pub attach_session_id: Option<TerminalSessionId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3502,6 +3507,12 @@ impl PaneGroup {
         ctx: &mut ViewContext<Self>,
     ) -> (PaneData, InitialFocus) {
         let uuid = Uuid::new_v4();
+        let attach_session_id = options.attach_session_id;
+        let shell_start = if attach_session_id.is_some() {
+            ShellStartPolicy::Deferred
+        } else {
+            ShellStartPolicy::Eager
+        };
         let (view, terminal_manager) = PaneGroup::create_session(
             options.initial_directory,
             options.env_vars,
@@ -3515,9 +3526,16 @@ impl PaneGroup {
             model_event_sender.clone(),
             options.shell,
             None,
-            ShellStartPolicy::Eager,
+            shell_start,
             ctx,
         );
+
+        if let Some(session_id) = attach_session_id {
+            terminal_manager.update(ctx, |manager, ctx| {
+                manager.attach_detached_session(session_id, ctx);
+                manager.ensure_shell_started(ctx);
+            });
+        }
 
         let pane_data = TerminalPane::new(
             uuid.as_bytes().to_vec(),

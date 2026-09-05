@@ -7,6 +7,90 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Detach and attach a terminal session by hand.** "Detach session" in a pane's
+  overflow menu and a tab's right-click menu hands that pane's shell -- and
+  everything running under it, a CLI agent included -- to the session supervisor
+  and closes the pane without killing anything. "Attach detached session" lists
+  what the supervisor is holding and opens it in a new tab. Both are also
+  command-palette entries (`workspace:detach_session`,
+  `workspace:attach_detached_session`) with no default keybinding.
+
+  The detach carries the pane's screen as an ANSI repaint, so a session that
+  comes back into a fresh tab paints what it was showing rather than starting
+  blank; a reattached *restored* pane still suppresses that repaint, because it
+  has already drawn its own scrollback from sqlite. Sessions detached at app
+  quit had been handed over with a blank placeholder screen and no metadata --
+  the screen and the shell, directory and title now travel with them, which is
+  also what makes the picker able to name them.
+
+  Gated on `PersistentTerminalSessions`. The menu entries and palette commands
+  hide themselves where no supervisor can be reached, rather than failing when
+  chosen.
+
+- **Quitting Warp no longer ends a session that still has work in it.** With
+  `PersistentTerminalSessions` on, app exit asks every window what it is holding
+  and keeps each pane that has a tracked CLI agent or a foreground command still
+  running -- with its screen -- rather than only the panes of a launch-config
+  session window. A pane sitting at a prompt is still ended, which is what
+  quitting has always done. Restoring the window on the next launch reattaches
+  what survived. A launch-config session window keeps every session as before,
+  running or not, and now hands its screens over rather than a blank placeholder.
+
+- **A Unix and macOS backend for the v2 session supervisor**, so detach, attach
+  and the listing behave there as they do on Windows. The supervisor runs as a
+  double-forked, `setsid`-ed process that outlives Warp; it speaks the same
+  protocol over an `AF_UNIX` socket, and lends a session's PTY leader descriptor
+  over `SCM_RIGHTS` where Windows duplicates a handle. Above the transport seam
+  nothing differs between the two.
+
+  This supersedes the v1 supervisor (`local_tty/server/persistent.rs`), which
+  kept sessions alive across app exit but spooled their output as raw bytes --
+  correct for line-oriented output, visibly wrong for a reattached `htop`, `vim`
+  or Claude Code TUI -- and could not enumerate what it was holding. v1 remains
+  the path when the flag is off, and its socket keeps its own name, so an old
+  daemon left running after an upgrade holds its own sessions until its TTL
+  reaps them rather than being spoken to in a protocol it does not know. With
+  the flag on, Warp no longer starts the v1 daemon at all.
+
+### Fixed
+
+- **A shell could not start at all when Warp ran inside a job object that
+  forbids breakaway.** The Windows PTY spawn asked for `CREATE_BREAKAWAY_FROM_JOB`
+  and treated the refusal as fatal, so `CreateProcessW` returned
+  `ERROR_ACCESS_DENIED` and no shell appeared -- under a test runner, a CI agent,
+  or any terminal that makes such a job. It now falls back to starting inside the
+  job, which is what `supervised_pty`, `daemon_spawn` and `command::blocking`
+  already did. A shell that dies with the job beats no shell.
+
+### Changed
+
+- Test-suite hygiene, chasing 36 failures on a developer machine down to the 14
+  that need a Windows privilege this repo cannot grant itself. Each was a test
+  reading something the machine happened to have, or something another test left
+  behind:
+  - `SessionInfo::new_for_test` left `histfile` unset, which is not the hermetic
+    choice it looks like -- the session falls back to the shell's *real* history
+    file, so history assertions passed on a clean CI runner and failed on a
+    machine that had been used. It now names a file that does not exist.
+  - 29 tests flipped feature flags with `FeatureFlag::set_enabled`, which is
+    process-global and never undone, so every later test in the binary inherited
+    them. They now use the thread-local, RAII-scoped `override_enabled` the
+    overrides module prescribes.
+  - `TestCommandExecutor` ran PowerShell as `pwsh` only. Where PowerShell 7 is
+    not installed every "what commands exist" lookup returned "program not
+    found", which reads as a machine with no `git` on it. It now falls back to
+    `powershell`.
+  - The experiments, telemetry and worktree-sidecar tests asserted on
+    process-global totals, a shared event queue, and an un-abbreviated path --
+    each true only in a particular running order, or only where the temp
+    directory sits outside `$HOME`, which on Windows it does not.
+  - The CLI-agent image-drop test waited on an off-thread read plus an exclusive
+    OS clipboard using a scheduler-tick budget, and failed false-red under load.
+    It now waits in wall clock, which is what `assert_eventually_within` exists
+    for.
+
 ## [0.1.0] - 2026-09-04
 
 First tagged release of this fork. Everything below accumulated since the fork

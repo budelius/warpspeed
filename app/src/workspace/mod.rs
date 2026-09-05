@@ -1000,6 +1000,30 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanRestartShell")),
     ]);
 
+    // Detaching hands a shell to the session supervisor so it keeps running with
+    // no window; attaching brings one back in a new tab. `Workspace_PaneCanDetachSession`
+    // keeps the detach off panes with no supervisor-owned session -- the same
+    // reason `Workspace_PaneCanRestartShell` exists. The attach has no such
+    // predicate because it does not act on the focused pane; it reports "no
+    // detached sessions" instead.
+    app.register_editable_bindings([
+        EditableBinding::new(
+            "workspace:detach_session",
+            "Detach session",
+            WorkspaceAction::DetachSession,
+        )
+        .with_group(bindings::BindingGroup::Terminal.as_str())
+        .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanDetachSession")),
+        EditableBinding::new(
+            "workspace:attach_detached_session",
+            "Attach detached session",
+            WorkspaceAction::ToggleAttachSessionMenu,
+        )
+        .with_group(bindings::BindingGroup::Terminal.as_str())
+        .with_enabled(|| FeatureFlag::PersistentTerminalSessions.is_enabled())
+        .with_context_predicate(id!("Workspace")),
+    ]);
+
     app.register_editable_bindings([EditableBinding::new(
         "workspace:restart_window_in_new_process",
         "Restart window in new process",

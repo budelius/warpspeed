@@ -6,6 +6,7 @@ use chrono::{DateTime, Local};
 use vec1::vec1;
 use warp_core::command::ExitCode;
 use warp_core::features::FeatureFlag;
+use warp_terminal::local_tty::screen::HeadlessScreen;
 use warp_terminal::model::ansi::ClearMode;
 use warpui::r#async::executor::Background;
 use warpui::text::{SelectionType, str_to_byte_vec};
@@ -2291,4 +2292,41 @@ fn cloud_mode_setup_phase_ended_does_not_emit_when_not_sharing() {
     rx.close();
     let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert!(events.is_empty());
+}
+
+/// The property the detach mechanism rests on: the screen a pane hands over
+/// reproduces itself in a receiver that never saw the bytes that built it.
+///
+/// The alternate screen is the case that matters -- a reattached `htop`, `vim`
+/// or Claude Code TUI is exactly what a raw byte spool gets wrong -- and it is
+/// also the case where a snapshot that forgot its mode prefix would silently
+/// paint onto the wrong grid.
+#[test]
+fn a_snapshot_of_the_alternate_screen_reproduces_it_elsewhere() {
+    let mut terminal = TerminalModel::mock(None, None);
+    terminal.process_bytes("\x1b[?1049h\x1b[2J\x1b[H\x1b[1;31mclaude\x1b[0m\r\n> ask");
+
+    let snapshot = terminal.screen_snapshot();
+    let receiver = HeadlessScreen::from_snapshot(&snapshot, ChannelEventListener::new_for_test());
+
+    assert!(
+        receiver.is_alternate_screen_active(),
+        "the snapshot must put the receiver on the alternate screen before painting"
+    );
+    let text = receiver.visible_text();
+    assert!(text.contains("claude"), "reproduced screen was {text:?}");
+    assert!(text.contains("> ask"), "reproduced screen was {text:?}");
+}
+
+/// A snapshot carries the screen at its declared size, so a receiver rebuilds
+/// the same geometry rather than reflowing the text into a default 80x24.
+#[test]
+fn a_snapshot_carries_the_screen_size_it_was_taken_at() {
+    let terminal = TerminalModel::mock(None, None);
+    let size = terminal.block_list().size().to_owned();
+
+    let snapshot = terminal.screen_snapshot();
+
+    assert_eq!(snapshot.columns, size.columns as u16);
+    assert_eq!(snapshot.rows, size.rows as u16);
 }

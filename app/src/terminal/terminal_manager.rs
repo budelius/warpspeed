@@ -68,6 +68,19 @@ pub trait TerminalManager: Any {
     ) {
     }
 
+    /// Supplies a detached supervisor session for this manager to take over.
+    ///
+    /// Unlike [`Self::restore_persistent_session`], the pane has no scrollback
+    /// of its own, so the session's screen is repainted on attach rather than
+    /// left to the blocks restored from sqlite.
+    fn attach_detached_session(
+        &mut self,
+        session_id: SessionId,
+        ctx: &mut ModelContext<Box<dyn TerminalManager>>,
+    ) {
+        self.restore_persistent_session(session_id, ctx);
+    }
+
     /// Supplies a command to run only when a restored PTY cannot be reattached.
     fn restore_cli_agent_resume_command(&mut self, _command: String) {}
 

@@ -138,6 +138,21 @@ fn list_reports_how_long_a_session_has_been_detached() {
     assert_eq!(listed[0].metadata.shell, "bash");
 }
 
+/// The picker offers what can actually be attached. A session another client
+/// already holds is still listed -- it is not gone -- but attaching it would
+/// put two readers on one PTY, so the listing has to say which is which.
+#[test]
+fn list_reports_whether_a_session_is_already_attached() {
+    let session_id = SessionId::from(1u64);
+    let mut table = table_with_detached_session(session_id, b"content", 0);
+
+    assert!(!table.list(0)[0].attached);
+
+    table.attach(session_id).expect("the session is detached");
+
+    assert!(table.list(0)[0].attached);
+}
+
 /// The drawer must not reshuffle between refreshes, so the order is pinned.
 #[test]
 fn list_is_ordered_stably_by_session() {

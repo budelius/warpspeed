@@ -405,7 +405,7 @@ use crate::terminal::ligature_settings::should_use_ligature_rendering;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::docker_sandbox::resolve_sbx_path_from_user_shell;
 #[cfg(feature = "local_tty")]
-use crate::terminal::local_tty::spawner::PtySpawner;
+use crate::terminal::local_tty::spawner::{PendingDetach, PtySpawner};
 use crate::terminal::model::blockgrid::BlockGrid;
 #[cfg(feature = "local_fs")]
 use crate::terminal::model::session::Session;
@@ -441,7 +441,7 @@ use crate::terminal::view::{
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::{
     self, BlockListSettings, ShellLaunchData, SizeInfo, TerminalManager, TerminalModel,
-    TerminalView,
+    TerminalView, detached_sessions,
 };
 use crate::themes::theme::{AnsiColorIdentifier, RespectSystemTheme, ThemeKind};
 use crate::themes::theme_chooser::{ThemeChooser, ThemeChooserEvent, ThemeChooserMode};
@@ -486,7 +486,7 @@ use crate::view_components::callout_bubble::{
     CalloutArrowDirection, CalloutArrowPosition, CalloutBubbleConfig, render_callout_bubble,
 };
 use crate::view_components::{
-    AgentToast, AgentToastStack, DismissibleToast, DismissibleToastStack, ToastLink,
+    AgentToast, AgentToastStack, DismissibleToast, DismissibleToastStack, ToastFlavor, ToastLink,
 };
 #[cfg(target_family = "wasm")]
 use crate::wasm_nux_dialog::WasmNUXDialog;
@@ -1141,6 +1141,10 @@ pub struct Workspace {
     /// Picker listing the currently available shells, opened by
     /// `ToggleChangeShellMenu`; selecting an entry dispatches `ChangeShell`.
     change_shell_menu_modal: ModalViewState<Modal<Menu<WorkspaceAction>>>,
+    /// Picker listing the sessions the supervisor is holding with no pane on
+    /// them, opened by `ToggleAttachSessionMenu`; selecting an entry dispatches
+    /// `AttachDetachedSession`.
+    attach_session_menu_modal: ModalViewState<Modal<Menu<WorkspaceAction>>>,
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
@@ -2302,6 +2306,31 @@ impl Workspace {
         ModalViewState::new(modal)
     }
 
+    fn build_attach_session_menu_modal(
+        ctx: &mut ViewContext<Self>,
+    ) -> ModalViewState<Modal<Menu<WorkspaceAction>>> {
+        let menu = ctx.add_typed_action_view(|_| Menu::new().with_drop_shadow());
+        ctx.subscribe_to_view(&menu, |me, _, event, ctx| {
+            if matches!(event, MenuEvent::Close { .. }) {
+                me.close_attach_session_menu(ctx);
+            }
+        });
+        let modal = ctx.add_typed_action_view(|ctx| {
+            Modal::new(Some("Attach detached session".to_string()), menu, ctx).with_modal_style(
+                UiComponentStyles {
+                    width: Some(480.),
+                    ..Default::default()
+                },
+            )
+        });
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
+            if matches!(event, ModalEvent::Close) {
+                me.close_attach_session_menu(ctx);
+            }
+        });
+        ModalViewState::new(modal)
+    }
+
     fn build_remove_tab_config_confirmation_dialog(
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<RemoveTabConfigConfirmationDialog> {
@@ -3176,6 +3205,7 @@ impl Workspace {
         let new_worktree_modal = Self::build_new_worktree_modal(ctx);
         let restart_shell_confirmation_modal = Self::build_restart_shell_confirmation_modal(ctx);
         let change_shell_menu_modal = Self::build_change_shell_menu_modal(ctx);
+        let attach_session_menu_modal = Self::build_attach_session_menu_modal(ctx);
 
         let session_config_modal = Self::build_session_config_modal(ctx);
 
@@ -3577,6 +3607,7 @@ impl Workspace {
             new_worktree_modal,
             restart_shell_confirmation_modal,
             change_shell_menu_modal,
+            attach_session_menu_modal,
             pending_shell_restart: None,
             window_process_restart_in_progress: false,
             close_session_confirmation_dialog,
@@ -13003,8 +13034,15 @@ impl Workspace {
         }
 
         let resume_commands = self.process_handoff_agent_resume_commands(ctx);
+        // No screen travels with these: the replacement process restores each
+        // pane from the snapshot it is handed, so a repaint would draw the
+        // screen a second time.
         #[cfg(feature = "local_tty")]
-        let persistent_session_ids = snapshot.persistent_session_ids();
+        let handovers: Vec<PendingDetach> = snapshot
+            .persistent_session_ids()
+            .into_iter()
+            .map(PendingDetach::without_screen)
+            .collect();
         let outgoing = match crate::window_process_handoff::launch(snapshot, resume_commands) {
             Ok(outgoing) => outgoing,
             Err(error) => {
@@ -13027,7 +13065,7 @@ impl Workspace {
 
                 #[cfg(feature = "local_tty")]
                 if let Err(error) = PtySpawner::handle(ctx).read(ctx, |spawner, _| {
-                    spawner.prepare_sessions_for_handoff(persistent_session_ids)
+                    spawner.prepare_sessions_for_handoff(handovers)
                 }) {
                     outgoing.abort();
                     workspace.window_process_restart_in_progress = false;
@@ -13500,6 +13538,257 @@ impl Workspace {
         _ctx: &mut ViewContext<Self>,
     ) -> Vec<MenuItem<WorkspaceAction>> {
         Vec::new()
+    }
+
+    /// Hands the focused pane's session to the supervisor and closes the pane.
+    fn detach_focused_session(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(view) = self.focused_terminal_view(ctx) else {
+            return;
+        };
+        self.detach_session_for_terminal_view(view.id(), ctx);
+    }
+
+    /// Locates the pane hosting `terminal_view_id` and detaches its session.
+    ///
+    /// The pane is closed only once the supervisor has confirmed it owns the
+    /// session: closing first would kill the shell if the handover failed.
+    fn detach_session_for_terminal_view(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some((pane_group_id, pane_id)) = self.tabs.iter().find_map(|tab| {
+            let pane_group_handle = &tab.pane_group;
+            pane_group_handle
+                .as_ref(ctx)
+                .find_pane_id_for_terminal_view(terminal_view_id, ctx)
+                .map(|pane_id| (pane_group_handle.id(), pane_id))
+        }) else {
+            log::debug!("Ignoring a detach for a terminal view that is not in this window");
+            return;
+        };
+
+        match self.hand_session_to_supervisor(pane_group_id, pane_id, ctx) {
+            Ok(()) => self.close_pane(pane_group_id, pane_id, ctx),
+            Err(error) => {
+                report_error!(error.context("Failed to detach a terminal session"));
+                self.toast_stack.update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::error(
+                            "This session could not be detached, so the pane was left open."
+                                .to_owned(),
+                        ),
+                        ctx,
+                    );
+                });
+            }
+        }
+    }
+
+    /// Gives one pane's session, its screen, and what is known about it to the
+    /// supervisor, which owns the shell process from then on.
+    #[cfg(feature = "local_tty")]
+    fn hand_session_to_supervisor(
+        &mut self,
+        pane_group_id: EntityId,
+        pane_id: PaneId,
+        ctx: &mut ViewContext<Self>,
+    ) -> anyhow::Result<()> {
+        let pane_group = self
+            .get_pane_group_view_with_id(pane_group_id)
+            .context("The pane group holding this session is gone")?;
+        let manager = pane_group
+            .as_ref(ctx)
+            .terminal_manager_for_pane_id(pane_id, ctx)
+            .context("This pane has no terminal session")?;
+        let session_id = manager
+            .as_ref(ctx)
+            .persistent_session_id()
+            .context("This pane's shell is not owned by a session supervisor")?;
+        let view = pane_group
+            .as_ref(ctx)
+            .terminal_view_from_pane_id(pane_id, ctx)
+            .context("This pane has no terminal view")?;
+
+        let handover = Self::capture_session_handover(session_id, &manager, &view, ctx);
+
+        PtySpawner::handle(ctx)
+            .read(ctx, |spawner, _| {
+                spawner.detach_session(session_id, handover.snapshot, handover.metadata)
+            })
+            .map(|()| {
+                log::info!("Detached terminal session {session_id:?} to the supervisor");
+            })
+    }
+
+    /// Reads one pane's screen and identity into a handover for the supervisor.
+    #[cfg(feature = "local_tty")]
+    fn capture_session_handover(
+        session_id: warp_core::SessionId,
+        manager: &ModelHandle<Box<dyn TerminalManager>>,
+        view: &ViewHandle<TerminalView>,
+        ctx: &AppContext,
+    ) -> PendingDetach {
+        use warp_terminal::local_tty::supervisor::message::SessionMetadata;
+
+        // Scoped so the model lock is released before anything else is read:
+        // the view accessors below reach back into this same pane, and
+        // `TerminalModel`'s mutex is not reentrant.
+        let snapshot = {
+            let model = manager.as_ref(ctx).model();
+            let locked = model.lock();
+            locked.screen_snapshot()
+        };
+
+        PendingDetach {
+            session_id,
+            snapshot,
+            metadata: SessionMetadata {
+                shell: view
+                    .as_ref(ctx)
+                    .shell_launch_data_if_local(ctx)
+                    .map(|shell| detached_sessions::shell_label(&shell.shell_detail()))
+                    .unwrap_or_default(),
+                working_directory: view.as_ref(ctx).pwd_if_local(ctx).unwrap_or_default(),
+                title: CLIAgentSessionsModel::as_ref(ctx)
+                    .session(view.id())
+                    .and_then(|session| session.session_context.display_title())
+                    .unwrap_or_default(),
+            },
+        }
+    }
+
+    /// The sessions in this window that must outlive the app, each carrying the
+    /// screen it was showing.
+    ///
+    /// A pane is kept when it has work in it that the user would lose: a
+    /// tracked CLI agent, or a foreground command still running. A pane sitting
+    /// at a prompt is not kept -- quitting is still allowed to end an idle
+    /// shell, which is what it has always done.
+    ///
+    /// A launch-config session window is the exception: its whole point is that
+    /// reopening it finds the same shells, so every session in it is kept
+    /// whether or not anything is running.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn sessions_to_detach_at_exit(&self, ctx: &AppContext) -> Vec<PendingDetach> {
+        let keep_idle_sessions = self
+            .launch_config_source
+            .as_ref()
+            .is_some_and(LaunchConfigWindowSource::is_session_config);
+
+        let mut handovers = Vec::new();
+        for tab in self.tabs.iter() {
+            let pane_group = tab.pane_group.as_ref(ctx);
+            for pane_id in pane_group.pane_ids() {
+                let Some(manager) = pane_group.terminal_manager_for_pane_id(pane_id, ctx) else {
+                    continue;
+                };
+                let Some(session_id) = manager.as_ref(ctx).persistent_session_id() else {
+                    continue;
+                };
+                let Some(view) = pane_group.terminal_view_from_pane_id(pane_id, ctx) else {
+                    continue;
+                };
+
+                let has_running_agent = CLIAgentSessionsModel::as_ref(ctx)
+                    .session(view.id())
+                    .is_some();
+                let is_busy = {
+                    let model = manager.as_ref(ctx).model();
+                    let locked = model.lock();
+                    locked
+                        .block_list()
+                        .active_block()
+                        .is_active_and_long_running()
+                };
+                if !(keep_idle_sessions || has_running_agent || is_busy) {
+                    continue;
+                }
+
+                handovers.push(Self::capture_session_handover(
+                    session_id, &manager, &view, ctx,
+                ));
+            }
+        }
+        handovers
+    }
+
+    #[cfg(not(feature = "local_tty"))]
+    fn hand_session_to_supervisor(
+        &mut self,
+        _pane_group_id: EntityId,
+        _pane_id: PaneId,
+        _ctx: &mut ViewContext<Self>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Detaching a terminal session is not supported in this build")
+    }
+
+    fn toggle_attach_session_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.attach_session_menu_modal.is_open() {
+            self.close_attach_session_menu(ctx);
+            return;
+        }
+
+        // A blocking round trip to the supervisor, on the UI thread. It runs
+        // only when the user opens the picker, and the alternative -- a cached
+        // list -- would offer sessions that have since been reaped or claimed.
+        let sessions = detached_sessions::list(ctx);
+        if sessions.is_empty() {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::new(
+                        "No detached sessions to attach.".to_owned(),
+                        ToastFlavor::Default,
+                    ),
+                    ctx,
+                );
+            });
+            return;
+        }
+
+        let items: Vec<MenuItem<WorkspaceAction>> = sessions
+            .into_iter()
+            .map(|session| {
+                MenuItemFields::new(session.label)
+                    .with_on_select_action(WorkspaceAction::AttachDetachedSession {
+                        session_id: session.session_id,
+                    })
+                    .with_icon(icons::Icon::Terminal)
+                    .into_item()
+            })
+            .collect();
+        self.attach_session_menu_modal
+            .view
+            .update(ctx, |modal, ctx| {
+                modal.body().update(ctx, |menu, ctx| {
+                    menu.set_items(items, ctx);
+                });
+            });
+        self.attach_session_menu_modal.open();
+        ctx.notify();
+    }
+
+    fn close_attach_session_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        self.attach_session_menu_modal.close();
+        ctx.notify();
+    }
+
+    /// Opens a tab whose terminal takes over an already-running session rather
+    /// than starting a shell of its own.
+    fn attach_detached_session(
+        &mut self,
+        session_id: warp_core::SessionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.add_tab_with_pane_layout(
+            PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                attach_session_id: Some(session_id),
+                ..Default::default()
+            })),
+            Arc::new(HashMap::new()),
+            None, /*custom_tab_title*/
+            ctx,
+        );
     }
 
     fn add_new_session_tab_with_default_mode(
@@ -24927,6 +25216,12 @@ impl TypedActionView for Workspace {
                 }
             }
             ChangeShell { shell } => self.start_shell_restart(Some(shell.clone()), ctx),
+            DetachSession => self.detach_focused_session(ctx),
+            DetachSessionForTerminalView { terminal_view_id } => {
+                self.detach_session_for_terminal_view(*terminal_view_id, ctx)
+            }
+            ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
+            AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
             AddGetStartedTab => self.add_get_started_tab(ctx),
             AddAmbientAgentTab => self.add_ambient_agent_tab(ctx),
             AddAgentTab => self.add_terminal_tab_with_new_agent_view(ctx),
@@ -27241,6 +27536,18 @@ impl View for Workspace {
             context.set.insert("Workspace_PaneCanRestartShell");
         }
 
+        // Same reason as above, for the detach command: a pane whose shell this
+        // process owns outright has no session to hand over, and offering the
+        // command there would promise a detach that cannot happen.
+        if detached_sessions::are_supported(app)
+            && self
+                .focused_terminal_manager_in(app)
+                .and_then(|manager| manager.as_ref(app).persistent_session_id())
+                .is_some()
+        {
+            context.set.insert("Workspace_PaneCanDetachSession");
+        }
+
         // TODO: This is temporary. We currently check if any code pane is open where it should
         // really be whether the code pane is opened and focused.
         if self
@@ -28171,6 +28478,10 @@ impl View for Workspace {
             stack.add_child(self.change_shell_menu_modal.render());
         }
 
+        if self.attach_session_menu_modal.is_open() {
+            stack.add_child(self.attach_session_menu_modal.render());
+        }
+
         if self.workflow_modal.as_ref(app).is_open() {
             stack.add_child(ChildView::new(&self.workflow_modal).finish());
         }
@@ -28777,7 +29088,7 @@ impl View for Workspace {
         {
             let window = self.snapshot(ctx.window_id(), false, ctx);
             #[cfg(feature = "local_tty")]
-            let persistent_session_ids = window.persistent_session_ids();
+            let handovers = self.sessions_to_detach_at_exit(ctx);
             if let Err(error) =
                 model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
                     windows: vec![window],
@@ -28791,7 +29102,7 @@ impl View for Workspace {
             }
             #[cfg(feature = "local_tty")]
             if let Err(error) = PtySpawner::handle(ctx).read(ctx, |spawner, _| {
-                spawner.prepare_sessions_for_handoff(persistent_session_ids)
+                spawner.prepare_sessions_for_handoff(handovers)
             }) {
                 report_error!(
                     error.context("Failed to detach terminal sessions before window close")

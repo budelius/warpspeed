@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use warp_core::SessionId;
-#[cfg(windows)]
 use warp_core::features::FeatureFlag;
 #[cfg(unix)]
 use warp_errors::report_error;
@@ -13,10 +12,36 @@ use {
 
 #[cfg(target_os = "windows")]
 use super::PseudoConsoleChild;
+#[cfg(unix)]
+use super::unix_supervisor::UnixTerminalSupervisorClient;
 #[cfg(windows)]
 use super::windows::supervisor_client::WindowsTerminalSupervisorClient;
 use super::{PtyOptions, PtySpawnResult};
+use crate::local_tty::screen::ScreenSnapshot;
+use crate::local_tty::supervisor::message::{SessionMetadata, SessionSummary};
 use crate::local_tty::{self};
+
+/// One session to hand to the supervisor, with the screen it was last showing.
+///
+/// The supervisor is blind while a client is attached, so the screen has to
+/// travel with the handover or the session resumes from a blank one.
+pub struct PendingDetach {
+    pub session_id: SessionId,
+    pub snapshot: ScreenSnapshot,
+    pub metadata: SessionMetadata,
+}
+
+impl PendingDetach {
+    /// A handover from a caller that has no live grid to render -- a session
+    /// named only by a persisted snapshot, or a window already torn down.
+    pub fn without_screen(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            snapshot: ScreenSnapshot::default(),
+            metadata: SessionMetadata::default(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum PtySpawnMode {
@@ -103,6 +128,47 @@ impl PtyHandle for DirectPtyHandle {
     }
 }
 
+/// A handle for a PTY the Unix session supervisor owns.
+///
+/// Killing it is conditional: a session that was detached belongs to the
+/// supervisor now, and ending it here would defeat the detach.
+#[cfg(unix)]
+struct SupervisorOwnedPtyHandle {
+    client: std::sync::Arc<UnixTerminalSupervisorClient>,
+    session_id: SessionId,
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl PtyHandle for SupervisorOwnedPtyHandle {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn has_process_terminated(&mut self) -> Result<bool> {
+        self.client
+            .is_running(self.session_id)
+            .map(|running| !running)
+    }
+
+    fn persistent_session_id(&self) -> Option<SessionId> {
+        Some(self.session_id)
+    }
+
+    /// The shell is not this process's child, so `SIGCHLD` never fires for it.
+    fn requires_exit_polling(&self) -> bool {
+        true
+    }
+
+    fn kill(&mut self) -> Result<()> {
+        if self.client.take_preserved(self.session_id) {
+            Ok(())
+        } else {
+            self.client.kill(self.session_id)
+        }
+    }
+}
+
 #[cfg(windows)]
 struct SupervisorOwnedPtyHandle {
     client: std::sync::Arc<WindowsTerminalSupervisorClient>,
@@ -138,6 +204,28 @@ impl PtyHandle for SupervisorOwnedPtyHandle {
         }
     }
 }
+/// Puts a session's replay bytes somewhere the PTY event loop can read them.
+///
+/// The Unix event loop takes its replay as a descriptor, and the v2 supervisor
+/// hands the bytes over in its attach response. An unlinked temp file is what
+/// bridges the two: a pipe would deadlock, since the ring holds far more than a
+/// pipe's buffer and nothing drains it until the event loop starts.
+#[cfg(unix)]
+fn replay_descriptor(replay: &[u8]) -> Result<Option<std::os::fd::RawFd>> {
+    use std::io::{Seek, Write};
+    use std::os::fd::IntoRawFd;
+
+    if replay.is_empty() {
+        return Ok(None);
+    }
+    let mut file = tempfile::tempfile().context("Failed to stage a terminal session's replay")?;
+    file.write_all(replay)
+        .context("Failed to write a terminal session's replay")?;
+    file.rewind()
+        .context("Failed to rewind a terminal session's replay")?;
+    Ok(Some(file.into_raw_fd()))
+}
+
 /// Invokes the provided callback function without crash reporting enabled.
 fn invoke_without_crash_reporting<T>(hooks: &dyn PtySpawnHooks, func: impl FnOnce() -> T) -> T {
     // Uninitialize cocoa-sentry before spawning the shell process to avoid passing any custom state
@@ -172,6 +260,8 @@ pub(super) struct PtySpawnInfo {
 pub struct PtySpawner {
     #[cfg(unix)]
     server: Option<TerminalServer>,
+    #[cfg(unix)]
+    supervisor: Option<std::sync::Arc<UnixTerminalSupervisorClient>>,
     #[cfg(windows)]
     supervisor: Option<std::sync::Arc<WindowsTerminalSupervisorClient>>,
 }
@@ -185,9 +275,23 @@ impl PtySpawner {
     pub fn new() -> Result<Self> {
         cfg_if::cfg_if! {
             if #[cfg(unix)] {
-                let server = super::server::TerminalServer::new()?;
+                let supervisor = FeatureFlag::PersistentTerminalSessions
+                    .is_enabled()
+                    .then(UnixTerminalSupervisorClient::new)
+                    .transpose()?
+                    .map(std::sync::Arc::new);
+                // With the v2 supervisor running, the older persistent server
+                // would be a second daemon supervising nothing: every session
+                // is spawned through the supervisor below. The server stays as
+                // the fallback spawn path, which needs no supervision.
+                let server = if supervisor.is_some() {
+                    super::server::TerminalServer::new_ephemeral()?
+                } else {
+                    super::server::TerminalServer::new()?
+                };
                 Ok(Self {
                     server: Some(server),
+                    supervisor,
                 })
             } else if #[cfg(target_os = "windows")] {
                 let supervisor = FeatureFlag::PersistentTerminalSessions
@@ -206,7 +310,7 @@ impl PtySpawner {
     pub fn new_for_test() -> Self {
         cfg_if::cfg_if! {
             if #[cfg(unix)] {
-                Self{ server: None }
+                Self { server: None, supervisor: None }
             } else if #[cfg(target_os = "windows")] {
                 Self { supervisor: None }
             } else {
@@ -217,20 +321,28 @@ impl PtySpawner {
 
     /// Marks selected supervised sessions for transfer without relinquishing this process's
     /// terminal-server client, since other windows may continue creating shells here.
-    pub fn prepare_sessions_for_handoff(
-        &self,
-        persistent_session_ids: Vec<SessionId>,
-    ) -> Result<()> {
+    pub fn prepare_sessions_for_handoff(&self, handovers: Vec<PendingDetach>) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(supervisor) = self.supervisor.as_ref() {
+            for handover in handovers {
+                supervisor.detach(handover.session_id, handover.snapshot, handover.metadata)?;
+            }
+            return Ok(());
+        }
         #[cfg(unix)]
         if let Some(server) = self.server.as_ref()
             && server.client().is_persistent()
         {
-            server.prepare_for_app_termination(persistent_session_ids)?;
+            let session_ids = handovers
+                .iter()
+                .map(|handover| handover.session_id)
+                .collect();
+            server.prepare_for_app_termination(session_ids)?;
         }
         #[cfg(windows)]
         if let Some(supervisor) = self.supervisor.as_ref() {
-            for session_id in persistent_session_ids {
-                supervisor.detach(session_id)?;
+            for handover in handovers {
+                supervisor.detach(handover.session_id, handover.snapshot, handover.metadata)?;
             }
         }
         Ok(())
@@ -238,11 +350,38 @@ impl PtySpawner {
 
     /// Does any work necessary to clean up state in advance of the app
     /// terminating.
-    pub fn prepare_for_app_termination(&mut self, persistent_session_ids: Vec<SessionId>) {
+    ///
+    /// Every session in `handovers` outlives this process; everything else the
+    /// supervisor holds for it is killed as its PTY handle is dropped.
+    pub fn prepare_for_app_termination(&mut self, handovers: Vec<PendingDetach>) {
+        #[cfg(unix)]
+        let handovers = match self.supervisor.as_ref() {
+            Some(supervisor) => {
+                for handover in handovers {
+                    let session_id = handover.session_id;
+                    if let Err(error) =
+                        supervisor.detach(session_id, handover.snapshot, handover.metadata)
+                    {
+                        log::error!(
+                            "Failed to detach supervised terminal session {session_id:?}: {error:#}"
+                        );
+                    }
+                }
+                // The v1 server never owned these sessions, so it has nothing
+                // left to be told about; it still has to be torn down below.
+                Vec::new()
+            }
+            None => handovers,
+        };
+
         #[cfg(unix)]
         if let Some(server) = self.server.take() {
             if server.client().is_persistent() {
-                if let Err(error) = server.prepare_for_app_termination(persistent_session_ids) {
+                let session_ids = handovers
+                    .iter()
+                    .map(|handover| handover.session_id)
+                    .collect();
+                if let Err(error) = server.prepare_for_app_termination(session_ids) {
                     log::error!(
                         "Failed to prepare supervised terminal sessions for app termination: {error:#}"
                     );
@@ -255,13 +394,74 @@ impl PtySpawner {
 
         #[cfg(windows)]
         if let Some(supervisor) = self.supervisor.as_ref() {
-            for session_id in persistent_session_ids {
-                if let Err(error) = supervisor.detach(session_id) {
+            for handover in handovers {
+                let session_id = handover.session_id;
+                if let Err(error) =
+                    supervisor.detach(session_id, handover.snapshot, handover.metadata)
+                {
                     log::error!(
                         "Failed to detach supervised terminal session {session_id:?}: {error:#}"
                     );
                 }
             }
+        }
+    }
+
+    /// Whether a session can be handed to a supervisor and later found again
+    /// from a list, which is what a user-driven detach and attach needs.
+    ///
+    /// The Unix supervisor is still on protocol v1, which can preserve a
+    /// session across app exit but cannot enumerate what it is holding. A
+    /// detach the user cannot undo is worse than no detach at all, so the
+    /// feature stays off there until v1 is migrated.
+    pub fn supports_detached_sessions(&self) -> bool {
+        #[cfg(any(unix, windows))]
+        {
+            self.supervisor.is_some()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
+    }
+
+    /// Hands one session to the supervisor and leaves it running there.
+    ///
+    /// The session's PTY handle stops being this process's to kill, so closing
+    /// the pane that held it leaves the shell and everything under it alive.
+    #[cfg_attr(not(any(unix, windows)), allow(unused_variables))]
+    pub fn detach_session(
+        &self,
+        session_id: SessionId,
+        snapshot: ScreenSnapshot,
+        metadata: SessionMetadata,
+    ) -> Result<()> {
+        #[cfg(any(unix, windows))]
+        {
+            let supervisor = self
+                .supervisor
+                .as_ref()
+                .context("No terminal supervisor is running to detach this session to")?;
+            supervisor.detach(session_id, snapshot, metadata)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            anyhow::bail!("Detaching a terminal session is not supported on this platform")
+        }
+    }
+
+    /// The sessions the supervisor is holding with no client attached.
+    pub fn list_detached_sessions(&self) -> Result<Vec<SessionSummary>> {
+        #[cfg(any(unix, windows))]
+        {
+            let Some(supervisor) = self.supervisor.as_ref() else {
+                return Ok(Vec::new());
+            };
+            supervisor.list_sessions()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(Vec::new())
         }
     }
 
@@ -290,6 +490,43 @@ impl PtySpawner {
         let is_fallback = false;
         #[cfg(unix)]
         let mut is_fallback = false;
+
+        // The v2 supervisor first where it is running: it owns the shell
+        // outright, which is what lets the session outlive this process. The
+        // terminal server below is the older path and only preserves sessions
+        // for launch-config windows.
+        #[cfg(unix)]
+        if let Some(client) = &self.supervisor {
+            let result = invoke_without_crash_reporting(hooks, || {
+                client
+                    .spawn(persistent_session_id, &options)
+                    .map(|endpoint| PtySpawnResult {
+                        pid: endpoint.pid,
+                        leader_fd: endpoint.raw as std::os::fd::RawFd,
+                        replay_fd: None,
+                    })
+            });
+            match result {
+                Ok(result) => {
+                    hooks.spawned(PtySpawnMode::TerminalServer, ctx);
+                    let pid = result.pid;
+                    return Ok((
+                        result,
+                        Box::new(SupervisorOwnedPtyHandle {
+                            client: client.clone(),
+                            session_id: persistent_session_id,
+                            pid,
+                        }),
+                    ));
+                }
+                Err(error) => {
+                    log_env_var_diagnostics(&options.env_vars);
+                    log::warn!(
+                        "Failed to spawn a supervised terminal; falling back to the terminal                          server: {error:#}"
+                    );
+                }
+            }
+        }
 
         #[cfg(unix)]
         if let Some(server) = &self.server {
@@ -407,10 +644,47 @@ impl PtySpawner {
         Ok((result, handle))
     }
 
+    /// Takes an existing supervisor-owned session back.
+    ///
+    /// `include_snapshot` decides whether the session's screen is replayed
+    /// alongside the output buffered since it was rendered. A restored pane has
+    /// already painted its own scrollback from sqlite and would show the screen
+    /// twice; a pane opening fresh onto a detached session has nothing and
+    /// needs it.
     pub(super) fn attach_pty(
         &self,
         session_id: SessionId,
+        #[cfg_attr(unix, allow(unused_variables))] include_snapshot: bool,
     ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>)>> {
+        #[cfg(unix)]
+        if let Some(client) = self.supervisor.as_ref() {
+            let attached = client.attach(session_id)?;
+            let endpoint = attached
+                .endpoint
+                .context("Terminal supervisor did not lend a PTY endpoint")?;
+            // A wrapped ring means the buffered output no longer reaches back
+            // to the snapshot, so the screen has to be repainted whatever the
+            // caller asked for -- otherwise the gap reads as continuous output.
+            let mut replay = if include_snapshot || attached.output_was_dropped {
+                attached.snapshot.repaint
+            } else {
+                Vec::new()
+            };
+            replay.extend(attached.buffered_output);
+
+            let result = PtySpawnResult {
+                pid: endpoint.pid,
+                leader_fd: endpoint.raw as std::os::fd::RawFd,
+                replay_fd: replay_descriptor(&replay)?,
+            };
+            let handle = Box::new(SupervisorOwnedPtyHandle {
+                client: client.clone(),
+                session_id,
+                pid: endpoint.pid,
+            });
+            return Ok(Some((result, handle)));
+        }
+
         #[cfg(unix)]
         {
             use crate::local_tty::server::ServerOwnedPtyHandle;
@@ -439,7 +713,10 @@ impl PtySpawner {
             let endpoint = attached
                 .endpoint
                 .context("Windows terminal supervisor did not lend a PTY endpoint")?;
-            let mut replay = if attached.output_was_dropped {
+            // A wrapped ring means the buffered output no longer reaches back
+            // to the snapshot, so the screen has to be repainted whatever the
+            // caller asked for -- otherwise the gap reads as continuous output.
+            let mut replay = if include_snapshot || attached.output_was_dropped {
                 attached.snapshot.repaint
             } else {
                 Vec::new()

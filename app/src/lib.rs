@@ -760,6 +760,10 @@ pub fn run() -> Result<()> {
     if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
         return warp_terminal::local_tty::windows::supervisor_daemon::run();
     }
+    #[cfg(all(feature = "local_tty", unix))]
+    if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
+        return warp_terminal::local_tty::unix_supervisor::supervisor_daemon::run();
+    }
     if let Some(args) = warp_cli::local_control::ControlArgs::from_control_mode_env() {
         #[cfg(windows)]
         warp_util::windows::attach_to_parent_console();
@@ -2738,21 +2742,44 @@ pub(crate) fn app_callbacks(
             // when we bring up the new process.  Additionally, this must occur
             // after terminating the persistence writer, so we don't keep track
             // of the fact that the shell sessions terminated.
+
+            // Which sessions outlive the app. Where the v2 supervisor is
+            // reachable, every window is asked what it is holding that the user
+            // would lose -- a CLI agent mid-turn, a build still running -- and
+            // each answer carries the pane's screen, so the session resumes
+            // showing what it was showing. Everywhere else the old rule stands:
+            // launch-config session windows only, named from the persisted
+            // snapshot because there is no screen to hand over. That keeps the
+            // Unix v1 supervisor's set of preserved sessions unchanged; its raw
+            // output spool cannot reproduce an alternate screen, so widening
+            // the set there would mean more panes reattaching to garbage.
             #[cfg(feature = "local_tty")]
-            let persistent_session_ids = get_app_state(ctx)
-                .windows
-                .into_iter()
-                .filter(|window| {
-                    window.launch_config_source.as_ref().is_some_and(
-                        launch_configs::launch_config::LaunchConfigWindowSource::is_session_config,
-                    )
-                })
-                .flat_map(|window| window.persistent_session_ids())
-                .collect();
+            let handovers: Vec<terminal::local_tty::spawner::PendingDetach> =
+                if terminal::detached_sessions::are_supported(ctx) {
+                    workspace::WorkspaceRegistry::as_ref(ctx)
+                        .all_workspaces(ctx)
+                        .into_iter()
+                        .flat_map(|(_, workspace)| {
+                            workspace.as_ref(ctx).sessions_to_detach_at_exit(ctx)
+                        })
+                        .collect()
+                } else {
+                    get_app_state(ctx)
+                        .windows
+                        .into_iter()
+                        .filter(|window| {
+                            window.launch_config_source.as_ref().is_some_and(
+                                launch_configs::launch_config::LaunchConfigWindowSource::is_session_config,
+                            )
+                        })
+                        .flat_map(|window| window.persistent_session_ids())
+                        .map(terminal::local_tty::spawner::PendingDetach::without_screen)
+                        .collect()
+                };
 
             #[cfg(feature = "local_tty")]
             terminal::local_tty::spawner::PtySpawner::handle(ctx).update(ctx, |pty_spawner, _| {
-                pty_spawner.prepare_for_app_termination(persistent_session_ids);
+                pty_spawner.prepare_for_app_termination(handovers);
             });
 
             #[cfg(all(feature = "local_tty", windows))]

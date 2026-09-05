@@ -11,7 +11,9 @@ use super::daemon_spawn::spawn_detached_supervisor;
 use super::pipe_transport::{PipeTransport, supervisor_pipe_name};
 use crate::local_tty::PtyOptions;
 use crate::local_tty::screen::ScreenSnapshot;
-use crate::local_tty::supervisor::message::{AttachedSession, Message, SessionMetadata};
+use crate::local_tty::supervisor::message::{
+    AttachedSession, Message, SessionMetadata, SessionSummary,
+};
 use crate::local_tty::supervisor::transport::{Endpoint, Transport};
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -56,17 +58,17 @@ impl WindowsTerminalSupervisorClient {
         }
     }
 
-    pub fn detach(&self, session_id: SessionId) -> Result<()> {
-        let snapshot = ScreenSnapshot {
-            columns: 80,
-            rows: 24,
-            repaint: Vec::new(),
-        };
-        let metadata = SessionMetadata {
-            shell: String::new(),
-            working_directory: String::new(),
-            title: String::new(),
-        };
+    /// Hands a session back to the supervisor, along with the screen it was
+    /// last showing and what the client knows about it.
+    ///
+    /// The supervisor is blind while a client is attached, so a session that
+    /// detaches without a snapshot resumes from a blank screen.
+    pub fn detach(
+        &self,
+        session_id: SessionId,
+        snapshot: ScreenSnapshot,
+        metadata: SessionMetadata,
+    ) -> Result<()> {
         match self.request(Message::Detach {
             session_id,
             snapshot,
@@ -82,6 +84,16 @@ impl WindowsTerminalSupervisorClient {
             Message::DetachResponse { error: Some(error) } => bail!(error),
             response => {
                 bail!("Terminal supervisor returned an invalid detach response: {response:?}")
+            }
+        }
+    }
+
+    /// Every session the supervisor is currently holding, attached or not.
+    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        match self.request(Message::ListSessions)? {
+            Message::ListSessionsResponse { sessions } => Ok(sessions),
+            response => {
+                bail!("Terminal supervisor returned an invalid session list: {response:?}")
             }
         }
     }

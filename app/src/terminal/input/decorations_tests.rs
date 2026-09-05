@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use warp_completer::completer::SuggestionTypeName;
 use warpui::App;
 use warpui::text_layout::TextStyle;
@@ -25,7 +27,16 @@ fn test_decorations_with_multibyte_chars() {
             .to_ansi_color(&terminal_colors_normal)
             .into();
 
-        let session_info = SessionInfo::new_for_test();
+        // `echo` is declared rather than discovered. Left to discovery it comes
+        // from whatever the host happens to have: on Unix the completer's
+        // file-path fallback finds `/usr/bin/echo` under the simulated
+        // directory, and on Windows nothing does -- `TestCommandExecutor` shells
+        // out to `pwsh`, which need not be installed, and `Get-Command
+        // -CommandType Application` would not list a shell builtin anyway. The
+        // test is about spans across multibyte text, so what makes a command
+        // known is not the thing under test.
+        let session_info =
+            SessionInfo::new_for_test().with_builtins(HashSet::from_iter(["echo".into()]));
         let session_id = session_info.session_id;
 
         let terminal =

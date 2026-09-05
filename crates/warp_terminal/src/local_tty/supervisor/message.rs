@@ -114,7 +114,7 @@ pub struct AttachedSession {
 
 /// What a client knows about a session that the supervisor cannot work out for
 /// itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     /// The shell the session is running.
     pub shell: String,
@@ -138,4 +138,8 @@ pub struct SessionSummary {
     /// How long the session has been detached. Computed by the supervisor, not
     /// supplied by the client.
     pub detached_for_seconds: u64,
+
+    /// `true` while another client holds this session. Such a session is listed
+    /// but cannot be attached, because a second client would read the same PTY.
+    pub attached: bool,
 }

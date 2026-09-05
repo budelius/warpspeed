@@ -19,6 +19,8 @@ use warp_core::semantic_selection::SemanticSelection;
 use warp_errors::report_error;
 pub use warp_terminal::event::ExitReason;
 use warp_terminal::event::validate_and_decode_in_band_command_output_to_bytes;
+use warp_terminal::local_tty::screen::ScreenSnapshot;
+use warp_terminal::model::grid::render_ansi;
 pub use warp_terminal::model::{BlockIndex, RangeInModel};
 use warp_terminal::model::{KeyboardModes, KeyboardModesApplyBehavior};
 use warpui::AppContext;
@@ -2015,10 +2017,39 @@ impl TerminalModel {
     }
 
     pub fn raw_grid_for_ref_tests(&self) -> &GridHandler {
+        self.active_grid()
+    }
+
+    /// The grid currently receiving output.
+    fn active_grid(&self) -> &GridHandler {
         if self.alt_screen_active {
             self.alt_screen.grid_handler()
         } else {
             self.block_list.active_block().grid_handler()
+        }
+    }
+
+    /// The current screen as a repaint sequence the session supervisor can
+    /// hand back on a later attach.
+    ///
+    /// Only the screen travels. Scrollback stays in sqlite, and the parts of a
+    /// cell a repaint cannot express -- hyperlinks, inline images -- are
+    /// documented on `render_ansi`.
+    pub fn screen_snapshot(&self) -> ScreenSnapshot {
+        let size = self.block_list.size();
+        let mut repaint = Vec::new();
+
+        // The receiver has to be on the alternate screen before the repaint
+        // draws anything, or the erase and the content land on the primary one.
+        if self.alt_screen_active {
+            repaint.extend_from_slice(b"[?1049h");
+        }
+        repaint.extend_from_slice(&render_ansi::render_screen(self.active_grid()));
+
+        ScreenSnapshot {
+            columns: size.columns as u16,
+            rows: size.rows as u16,
+            repaint,
         }
     }
 

@@ -17,12 +17,11 @@ use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
 
 use super::mio_channel::Receiver;
-use crate::SizeInfo;
 use crate::event::ExitReason;
 use crate::event_listener::ChannelEventListener;
-use crate::local_tty;
 use crate::model::ansi;
 use crate::writeable_pty::Message;
+use crate::{SizeInfo, local_tty};
 
 /// The size of the buffer to read data into from the PTY.
 const READ_BUFFER_SIZE: usize = 0x4_0000;

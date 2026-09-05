@@ -459,6 +459,24 @@ pub struct Pty {
     )>,
     replay: Option<Vec<u8>>,
     pty_closed: bool,
+    /// The last size handed to the console host, as `(columns, rows)`.
+    last_applied_size: Option<(i16, i16)>,
+}
+
+/// Whether a resize to `next` is worth sending to the console host.
+///
+/// ConPTY is told a `COORD` and nothing else, so a resize that leaves the
+/// column and row counts alone tells it nothing — but it still costs a full
+/// buffer reflow in the console host and a prompt repaint in the attached
+/// shell. Pane pixel sizes change on every frame of a window drag, which is
+/// how a single drag used to storm every open session with resizes that said
+/// the same thing.
+fn resize_is_worth_sending(
+    last_applied: Option<(i16, i16)>,
+    next: (i16, i16),
+    forced: bool,
+) -> bool {
+    forced || last_applied != Some(next)
 }
 
 impl Pty {
@@ -474,7 +492,8 @@ impl Pty {
             pty_spawner.spawn_pty(options, persistent_session_id, hooks, event_loop_tx, ctx)
         })?;
         let mut pty = Self::from_spawn_result(result, handle);
-        pty.on_resize(&size);
+        // Forced: the console host has to learn the session's starting size.
+        pty.on_resize(&size, true);
         Ok(pty)
     }
 
@@ -491,7 +510,8 @@ impl Pty {
             return Ok(None);
         };
         let mut pty = Self::from_spawn_result(result, handle);
-        pty.on_resize(size);
+        // Forced: a reattached session needs its size re-announced.
+        pty.on_resize(size, true);
         Ok(Some(pty))
     }
 
@@ -506,6 +526,7 @@ impl Pty {
             supervisor: result.supervisor,
             replay: result.replay,
             pty_closed: false,
+            last_applied_size: None,
         }
     }
 
@@ -620,15 +641,34 @@ impl EventedPty for Pty {
         None
     }
 
-    fn on_resize(&mut self, size: &crate::SizeInfo) {
-        if let Some((client, session_id)) = self.supervisor.as_ref() {
-            report_if_error!(client.resize(*session_id, size.columns as u16, size.rows as u16,));
+    fn on_resize(&mut self, size: &crate::SizeInfo, forced: bool) {
+        let coord = size.to_coord();
+        let next = (coord.X, coord.Y);
+        if !resize_is_worth_sending(self.last_applied_size, next, forced) {
+            return;
+        }
+        // Only a size the console host actually accepted counts as applied, so
+        // a resize that failed can be retried by the next one that repeats it.
+        let applied = if let Some((client, session_id)) = self.supervisor.as_ref() {
+            let result = client.resize(*session_id, size.columns as u16, size.rows as u16);
+            let applied = result.is_ok();
+            report_if_error!(result);
+            applied
         } else if let (Some(conpty_api), Some(pty_handle)) = (&self.conpty_api, self.pty_handle) {
-            report_if_error!(unsafe {
+            let result = unsafe {
                 conpty_api
-                    .resize(pty_handle, size.to_coord())
+                    .resize(pty_handle, coord)
                     .context("Failed to resize pseudoconsole")
-            });
+            };
+            let applied = result.is_ok();
+            report_if_error!(result);
+            applied
+        } else {
+            false
+        };
+
+        if applied {
+            self.last_applied_size = Some(next);
         }
     }
 
@@ -643,3 +683,7 @@ impl Drop for Pty {
         self.close_pseudoconsole();
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

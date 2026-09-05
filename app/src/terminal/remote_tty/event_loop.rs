@@ -133,7 +133,13 @@ impl EventLoop {
                                 );
                             };
                         }
-                        EventLoopMessage::Resize(size_info) => {
+                        // The remote host is told the pane's pixel size as well
+                        // as its rows and columns, so every resize carries
+                        // something new and none of them are dropped here.
+                        EventLoopMessage::Resize {
+                            size: size_info,
+                            forced: _,
+                        } => {
                             let size_change = WindowSizeChange {
                                 width: size_info.columns as u32,
                                 height: size_info.rows as u32,

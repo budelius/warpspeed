@@ -19,5 +19,14 @@ pub enum Message {
     ChildExited,
 
     /// Instruction to resize the PTY.
-    Resize(SizeInfo),
+    Resize {
+        size: SizeInfo,
+        /// Whether the PTY must be told this size even if it already has it.
+        ///
+        /// A refresh exists to re-announce a size the child may have missed —
+        /// see `TerminalView::resize_alt_screen_redundantly` — so it has to go
+        /// through untouched. Every other resize may be dropped by a PTY that
+        /// would learn nothing from it.
+        forced: bool,
+    },
 }

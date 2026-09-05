@@ -641,7 +641,8 @@ impl Pty {
             signals,
             signals_token: SIGNALS_TOKEN,
         };
-        pty.on_resize(&size);
+        // Forced: the kernel has to learn the session's starting size.
+        pty.on_resize(&size, true);
         Ok(pty)
     }
 
@@ -675,7 +676,8 @@ impl Pty {
             signals,
             signals_token: SIGNALS_TOKEN,
         };
-        pty.on_resize(size);
+        // Forced: a reattached session needs its size re-announced.
+        pty.on_resize(size, true);
         Ok(Some(pty))
     }
 
@@ -778,7 +780,10 @@ impl EventedPty for Pty {
         self.pty_handle.requires_exit_polling()
     }
 
-    fn on_resize(&mut self, size: &SizeInfo) {
+    // `winsize` carries the pane's pixel dimensions as well as its rows and
+    // columns, so every resize the view sends says something new here and
+    // there is nothing to drop.
+    fn on_resize(&mut self, size: &SizeInfo, _forced: bool) {
         let win = size.to_winsize();
 
         let res = unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCSWINSZ, &win as *const _) };

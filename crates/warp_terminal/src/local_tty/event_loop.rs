@@ -17,6 +17,7 @@ use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
 
 use super::mio_channel::Receiver;
+use crate::SizeInfo;
 use crate::event::ExitReason;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty;
@@ -141,6 +142,20 @@ enum ChannelResult {
     TerminateLoop { child_exited: bool },
 }
 
+/// Folds a newly received resize into the one already waiting to be applied.
+///
+/// Only the newest size survives: each earlier one was superseded before the
+/// PTY ever saw it. `forced` is sticky across the fold, because it is a claim
+/// about what the child has been told rather than a property of a size — a
+/// refresh that gets overtaken still has to reach the child.
+fn fold_pending_resize(
+    pending: Option<(SizeInfo, bool)>,
+    incoming: (SizeInfo, bool),
+) -> (SizeInfo, bool) {
+    let (size, forced) = incoming;
+    (size, forced || matches!(pending, Some((_, true))))
+}
+
 impl<P, M> EventLoop<P, M>
 where
     P: local_tty::EventedPty + Send + 'static,
@@ -166,20 +181,39 @@ where
     ///
     /// Returns `false` when a shutdown message was received.
     fn drain_recv_channel(&mut self, state: &mut State) -> ChannelResult {
+        // Only the last size in a batch means anything: each earlier one was
+        // already superseded before the PTY ever saw it. Applying every one of
+        // them makes a window drag cost the child a resize per frame. A forced
+        // resize inside the batch keeps the survivor forced, since forcing is a
+        // statement about the child's knowledge rather than about a size.
+        let mut pending_resize: Option<(SizeInfo, bool)> = None;
+        let mut result = ChannelResult::Continue;
+
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Message::Input(input) => state.write_list.push_back(input),
                 Message::Shutdown => {
-                    return ChannelResult::TerminateLoop {
+                    result = ChannelResult::TerminateLoop {
                         child_exited: false,
                     };
+                    break;
                 }
-                Message::Resize(size) => self.pty.on_resize(&size),
-                Message::ChildExited => return ChannelResult::TerminateLoop { child_exited: true },
+                Message::Resize { size, forced } => {
+                    pending_resize = Some(fold_pending_resize(pending_resize, (size, forced)));
+                }
+                Message::ChildExited => {
+                    result = ChannelResult::TerminateLoop { child_exited: true };
+                    break;
+                }
             }
         }
 
-        ChannelResult::Continue
+        // A PTY that is about to be torn down has no use for a new size.
+        if let (ChannelResult::Continue, Some((size, forced))) = (&result, pending_resize) {
+            self.pty.on_resize(&size, forced);
+        }
+
+        result
     }
 
     /// Returns a `bool` indicating whether or not the event loop should continue running.
@@ -542,3 +576,7 @@ where
             .expect("thread spawn works")
     }
 }
+
+#[cfg(test)]
+#[path = "event_loop_tests.rs"]
+mod tests;

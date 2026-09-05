@@ -87,7 +87,11 @@ pub trait EventedPty: EventedReadWrite {
     ///
     /// Tells the kernel that the window size changed with the new pixel
     /// dimensions and line/column counts.
-    fn on_resize(&mut self, size: &SizeInfo);
+    ///
+    /// `forced` marks a size the child may have missed and must be told again
+    /// even if nothing changed. Without it an implementation is free to drop a
+    /// resize that carries nothing its transport can express.
+    fn on_resize(&mut self, size: &SizeInfo, forced: bool);
 
     /// Terminate the PTY process
     fn kill(self) -> Result<()>;

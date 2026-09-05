@@ -56,6 +56,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Dragging a window's edge pinned every open shell's CPU.** A drag relaid the
+  terminal out every frame, and each of those frames sent its PTY a resize --
+  even the frames that only changed the pane's pixel size and left the column
+  and row counts alone. ConPTY is told nothing but columns and rows, so those
+  resizes said nothing new, but each one still cost the console host a full
+  buffer reflow and the shell a prompt repaint. With a dozen sessions open, one
+  drag was a dozen of those per frame; PowerShell sessions in particular ran hot
+  enough to throttle the machine.
+
+  The Windows PTY now drops a resize whose column and row counts it already has,
+  and the PTY event loop applies only the newest size in a batch instead of
+  every size it was handed. A refresh -- the deliberate re-announcement that
+  gets an alt-screen program's attention -- still goes through untouched. Unix
+  is unchanged: `winsize` carries the pane's pixel dimensions, so every resize
+  there does say something new.
+
 - **A shell could not start at all when Warp ran inside a job object that
   forbids breakaway.** The Windows PTY spawn asked for `CREATE_BREAKAWAY_FROM_JOB`
   and treated the refusal as fatal, so `CreateProcessW` returned

@@ -605,7 +605,13 @@ impl<T: EventLoopSender> PtyController<T> {
             || size_update.is_refresh()
             || size_update.rows_or_columns_changed()
         {
-            self.send_message_to_event_loop(Message::Resize(size_update.new_size), ctx);
+            self.send_message_to_event_loop(
+                Message::Resize {
+                    size: size_update.new_size,
+                    forced: size_update.is_refresh(),
+                },
+                ctx,
+            );
         }
     }
 

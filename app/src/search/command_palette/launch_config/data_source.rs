@@ -1,19 +1,65 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
-use fuzzy_match::match_indices_case_insensitive;
+use fuzzy_match::{FuzzyMatchResult, match_indices_case_insensitive};
+use parking_lot::Mutex;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use crate::launch_configs::launch_config::LaunchConfig;
+use crate::launch_configs::session_store::{self, StoredSessionSummary};
 use crate::search::command_palette::launch_config::search_item::SearchItem;
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::data_source::{DataSourceSearchError, Query, QueryResult};
 use crate::search::mixer::{DataSourceRunErrorWrapper, SyncDataSource};
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 
-/// Datasource that searches against `LaunchConfig`s.
+/// Datasource for reusable launch configurations and their stored sessions.
 pub struct DataSource {
     searcher: Box<dyn LaunchConfigSearcher>,
+    stored_sessions: Mutex<StoredSessionCache>,
+}
+
+#[derive(Default)]
+struct StoredSessionCache {
+    loaded: bool,
+    revision: Option<SystemTime>,
+    sessions: Vec<Arc<StoredSessionSummary>>,
+}
+
+impl StoredSessionCache {
+    fn search(&mut self, search_term: &str) -> Vec<SearchItem> {
+        let revision = session_store::catalog_revision();
+        if !self.loaded || revision != self.revision {
+            self.sessions = session_store::list_summaries()
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+            self.revision = session_store::catalog_revision();
+            self.loaded = true;
+        }
+
+        self.sessions
+            .iter()
+            .filter_map(|summary| {
+                let match_result = if search_term.is_empty() {
+                    FuzzyMatchResult::no_match()
+                } else if let Some(result) =
+                    match_indices_case_insensitive(summary.name(), search_term)
+                {
+                    result
+                } else {
+                    let result =
+                        match_indices_case_insensitive(&summary.searchable_text(), search_term)?;
+                    FuzzyMatchResult {
+                        score: result.score,
+                        matched_indices: Vec::new(),
+                    }
+                };
+                Some(SearchItem::stored_session(summary.clone(), match_result))
+            })
+            .collect()
+    }
 }
 
 impl DataSource {
@@ -35,7 +81,10 @@ impl DataSource {
         ctx.subscribe_to_model(&WarpConfig::handle(ctx), Self::handle_config_event);
         let mut searcher = Box::new(FuzzyLaunchConfigSearcher::default());
         searcher.refresh_search_index(ctx);
-        Self { searcher }
+        Self {
+            searcher,
+            stored_sessions: Default::default(),
+        }
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -45,7 +94,10 @@ impl DataSource {
             ctx.background_executor(),
         ));
         searcher.refresh_search_index(ctx);
-        Self { searcher }
+        Self {
+            searcher,
+            stored_sessions: Default::default(),
+        }
     }
 
     fn handle_config_event(
@@ -70,15 +122,14 @@ impl SyncDataSource for DataSource {
         query: &Query,
         _app: &AppContext,
     ) -> Result<Vec<QueryResult<Self::Action>>, DataSourceRunErrorWrapper> {
-        Ok(self
-            .searcher
-            .search(&query.text.trim().to_lowercase())
-            .map_err(|err| {
-                Box::new(DataSourceSearchError::new(err.to_string())) as DataSourceRunErrorWrapper
-            })?
-            .into_iter()
-            .map(QueryResult::from)
-            .collect())
+        let search_term = query.text.trim().to_lowercase();
+        let mut results = self.searcher.search(&search_term).map_err(|err| {
+            Box::new(DataSourceSearchError::new(err.to_string())) as DataSourceRunErrorWrapper
+        })?;
+        if warp_core::features::FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+            results.extend(self.stored_sessions.lock().search(&search_term));
+        }
+        Ok(results.into_iter().map(QueryResult::from).collect())
     }
 }
 

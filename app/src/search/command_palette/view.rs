@@ -26,7 +26,7 @@ use crate::appearance::Appearance;
 use crate::drive::CloudObjectTypeAndId;
 use crate::features::FeatureFlag;
 use crate::palette::PaletteMode;
-use crate::root_view::OpenLaunchConfigArg;
+use crate::root_view::{OpenLaunchConfigArg, OpenStoredSessionArg};
 use crate::search::QueryFilter;
 use crate::search::action::search_item::MatchedBinding;
 use crate::search::binding_source::{BindingFilterFn, BindingSource};
@@ -890,6 +890,15 @@ impl View {
                     OpenLaunchConfigArg {
                         open_in_active_window,
                         launch_config: config.deref().clone(),
+                        ui_location: LaunchConfigUiLocation::CommandPalette,
+                    },
+                );
+            }
+            CommandPaletteItemAction::OpenStoredSession { summary } => {
+                ctx.dispatch_global_action(
+                    "root_view:open_stored_session",
+                    OpenStoredSessionArg {
+                        summary,
                         ui_location: LaunchConfigUiLocation::CommandPalette,
                     },
                 );

@@ -8,6 +8,7 @@ use warpui::{EntityId, WindowId};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::drive::CloudObjectTypeAndId;
 use crate::launch_configs::launch_config::LaunchConfig;
+use crate::launch_configs::session_store::StoredSessionSummary;
 use crate::search::command_palette::new_session::{NewSessionOption, NewSessionOptionId};
 use crate::search::mixer::SearchMixer;
 use crate::server::ids::SyncId;
@@ -58,6 +59,9 @@ pub enum CommandPaletteItemAction {
         config: Arc<LaunchConfig>,
         /// See [`OpenLaunchConfigArg::open_in_active_window`].
         open_in_active_window: bool,
+    },
+    OpenStoredSession {
+        summary: Arc<StoredSessionSummary>,
     },
     NewSession {
         source: Arc<NewSessionOption>,
@@ -113,7 +117,8 @@ impl CommandPaletteItemAction {
             CommandPaletteItemAction::NewSession { source } => ItemSummary::NewSession {
                 id: source.id().clone(),
             },
-            CommandPaletteItemAction::OpenLaunchConfiguration { .. } => {
+            CommandPaletteItemAction::OpenLaunchConfiguration { .. }
+            | CommandPaletteItemAction::OpenStoredSession { .. } => {
                 ItemSummary::LaunchConfiguration
             }
             CommandPaletteItemAction::ViewInWarpDrive { id } => match id {

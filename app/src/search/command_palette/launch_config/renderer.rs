@@ -1,4 +1,4 @@
-use warpui::Element;
+use chrono::{DateTime, Utc};
 use warpui::elements::{
     Align, Border, ConstrainedBox, Container, CornerRadius, Flex, Highlight, ParentElement, Radius,
     Shrinkable, Text,
@@ -6,11 +6,14 @@ use warpui::elements::{
 use warpui::fonts::{Properties, Weight};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::ui_components::text::Span;
+use warpui::{Element, SingletonEntity};
 
 use crate::appearance::Appearance;
 use crate::launch_configs::launch_config::LaunchConfig;
+use crate::launch_configs::session_store::{StoredPaneSummary, StoredSessionSummary};
 use crate::search::result_renderer::ItemHighlightState;
 use crate::themes::theme::Fill;
+use crate::util::time_format::format_approx_duration_from_now_utc;
 
 impl LaunchConfig {
     /// Renders a [`LaunchConfig`] using a [`StylesProvider`]. Any character indices of the launch
@@ -125,6 +128,7 @@ impl LaunchConfig {
         }
         Flex::row()
             .with_children(vec![
+                Self::render_string_with_pill_styling("Configuration", appearance),
                 Self::render_string_with_pill_styling(windows_str, appearance),
                 Self::render_string_with_pill_styling(tabs_str, appearance),
             ])
@@ -145,6 +149,225 @@ impl LaunchConfig {
         let bg_color = background_fill(item_highlight_state, appearance);
         text.with_color(appearance.theme().sub_text_color(bg_color).into_solid())
     }
+}
+
+impl StoredSessionSummary {
+    pub(super) fn render(
+        &self,
+        appearance: &Appearance,
+        item_highlight_state: ItemHighlightState,
+        highlight_indices: Vec<usize>,
+    ) -> Box<dyn Element> {
+        let bg_color = background_fill(item_highlight_state, appearance);
+        let text_color = appearance.theme().main_text_color(bg_color).into_solid();
+        let highlight = Highlight::new()
+            .with_properties(Properties::default().weight(Weight::Bold))
+            .with_foreground_color(text_color);
+        let label = Text::new_inline(
+            self.name().to_owned(),
+            appearance.ui_font_family(),
+            appearance.monospace_font_size(),
+        )
+        .with_color(appearance.theme().sub_text_color(bg_color).into_solid())
+        .with_single_highlight(highlight, highlight_indices)
+        .finish();
+
+        let mut row = Flex::row();
+        row.add_child(Shrinkable::new(1., Align::new(label).left().finish()).finish());
+        let saved = DateTime::<Utc>::from_timestamp(self.saved_at_unix_seconds(), 0)
+            .map(format_approx_duration_from_now_utc)
+            .unwrap_or_else(|| "unknown time".to_owned());
+        row.add_child(LaunchConfig::render_string_with_pill_styling(
+            format!(
+                "{} {saved}",
+                if self.is_current() {
+                    "Autosaved"
+                } else {
+                    "Stored"
+                }
+            ),
+            appearance,
+        ));
+        row.add_child(LaunchConfig::render_string_with_pill_styling(
+            count_label(self.tabs().count(), "tab"),
+            appearance,
+        ));
+        if self.agent_count() > 0 {
+            row.add_child(LaunchConfig::render_string_with_pill_styling(
+                count_label(self.agent_count(), "agent"),
+                appearance,
+            ));
+        }
+
+        ConstrainedBox::new(row.finish()).with_height(40.).finish()
+    }
+
+    pub(super) fn render_details(&self, app: &warpui::AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let background = appearance.theme().surface_2();
+        let main_text = appearance.theme().main_text_color(background).into_solid();
+        let sub_text = appearance.theme().sub_text_color(background).into_solid();
+        let mut details = Flex::column();
+        details.add_child(
+            Container::new(
+                Text::new_inline(
+                    self.name().to_owned(),
+                    appearance.ui_font_family(),
+                    appearance.monospace_font_size(),
+                )
+                .with_color(main_text)
+                .finish(),
+            )
+            .with_margin_bottom(4.)
+            .finish(),
+        );
+
+        let saved = DateTime::<Utc>::from_timestamp(self.saved_at_unix_seconds(), 0)
+            .map(format_approx_duration_from_now_utc)
+            .unwrap_or_else(|| "unknown time".to_owned());
+        details.add_child(
+            Container::new(
+                Text::new_inline(
+                    format!(
+                        "{} session · saved {saved} · {} · {}",
+                        if self.is_current() {
+                            "Autosaved"
+                        } else {
+                            "Stored"
+                        },
+                        count_label(self.windows().len(), "window"),
+                        count_label(self.pane_count(), "pane")
+                    ),
+                    appearance.ui_font_family(),
+                    appearance.monospace_font_size() - 1.,
+                )
+                .with_color(sub_text)
+                .finish(),
+            )
+            .with_margin_bottom(4.)
+            .finish(),
+        );
+        let mut provenance = Vec::new();
+        if let Some(profile) = self.profile() {
+            provenance.push(format!("Profile: {profile}"));
+        }
+        if let Some(source_path) = self.source_path() {
+            provenance.push(format!("Source: {}", source_path.display()));
+        }
+        if !provenance.is_empty() {
+            details.add_child(
+                Container::new(
+                    Text::new(
+                        provenance.join(" · "),
+                        appearance.ui_font_family(),
+                        appearance.monospace_font_size() - 2.,
+                    )
+                    .with_color(sub_text)
+                    .finish(),
+                )
+                .with_margin_bottom(8.)
+                .finish(),
+            );
+        }
+
+        for window in self.windows() {
+            if self.windows().len() > 1 {
+                details.add_child(detail_heading(
+                    format!("Window {}", window.window_index() + 1),
+                    appearance,
+                    main_text,
+                ));
+            }
+            for tab in window.tabs() {
+                let tab_name = tab
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("Tab {}", tab.tab_index + 1));
+                details.add_child(detail_heading(tab_name, appearance, main_text));
+                for pane in &tab.panes {
+                    details.add_child(render_pane_detail(pane, appearance, sub_text));
+                }
+            }
+        }
+        details.finish()
+    }
+}
+
+fn count_label(count: usize, singular: &str) -> String {
+    format!("{count} {singular}{}", if count == 1 { "" } else { "s" })
+}
+
+fn detail_heading(
+    text: String,
+    appearance: &Appearance,
+    color: pathfinder_color::ColorU,
+) -> Box<dyn Element> {
+    Container::new(
+        Text::new_inline(
+            text,
+            appearance.ui_font_family(),
+            appearance.monospace_font_size() - 1.,
+        )
+        .with_color(color)
+        .finish(),
+    )
+    .with_margin_top(4.)
+    .with_margin_bottom(2.)
+    .finish()
+}
+
+fn render_pane_detail(
+    pane: &StoredPaneSummary,
+    appearance: &Appearance,
+    color: pathfinder_color::ColorU,
+) -> Box<dyn Element> {
+    let pane_id = pane.pane_uuid.chars().take(8).collect::<String>();
+    let shell = pane.shell.as_deref().unwrap_or("Default shell");
+    let (agent, activity) = match &pane.agent {
+        Some(agent) => {
+            let mut metadata = Vec::new();
+            if let Some(title) = &agent.title {
+                metadata.push(title.clone());
+            }
+            if let Some(session_id) = &agent.session_id {
+                metadata.push(format!("Session {session_id}"));
+            } else {
+                metadata.push("Session ID unavailable; install the Warp agent plugin".to_owned());
+            }
+            if let Some(resume_command) = &agent.resume_command {
+                metadata.push(format!("Resume: {resume_command}"));
+            }
+            (agent.agent.display_name().to_owned(), metadata.join(" · "))
+        }
+        None => ("Shell".to_owned(), "No agent captured".to_owned()),
+    };
+    let cwd = pane.cwd.as_deref().unwrap_or("Unknown directory");
+    let recovery = if pane.has_persistent_process {
+        "reattach process if available"
+    } else if pane
+        .agent
+        .as_ref()
+        .is_some_and(|agent| agent.resume_command.is_some())
+    {
+        "agent resume"
+    } else {
+        "shell restore"
+    };
+    Container::new(
+        Text::new(
+            format!(
+                "Pane {} ({pane_id}) · {agent} · {shell}\n{activity}\n{cwd} · {recovery}",
+                pane.pane_number
+            ),
+            appearance.ui_font_family(),
+            appearance.monospace_font_size() - 2.,
+        )
+        .with_color(color)
+        .finish(),
+    )
+    .with_margin_left(6.)
+    .with_margin_bottom(6.)
+    .finish()
 }
 
 fn background_fill(item_highlight_state: ItemHighlightState, appearance: &Appearance) -> Fill {

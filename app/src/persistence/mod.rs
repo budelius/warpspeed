@@ -353,6 +353,8 @@ pub enum ModelEvent {
         windows: Vec<crate::app_state::WindowSnapshot>,
         /// Captures block history before a window's persisted panes can be cleaned up.
         include_blocks: bool,
+        /// The run to retain as a separately reopenable entry in session history.
+        history_id: Option<String>,
     },
     UpsertWorkflows(Vec<CloudWorkflow>),
     UpsertNotebooks(Vec<CloudNotebook>),

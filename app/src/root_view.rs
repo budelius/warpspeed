@@ -70,6 +70,7 @@ use crate::experiments::{BlockOnboarding, Experiment};
 use crate::features::FeatureFlag;
 use crate::interval_timer::IntervalTimer;
 use crate::launch_configs::launch_config;
+use crate::launch_configs::session_store::{RestoredWindowSession, StoredSessionSummary};
 use crate::linear::LinearIssueWork;
 use crate::notebooks::manager::NotebookSource;
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
@@ -257,6 +258,11 @@ pub struct OpenLaunchConfigArg {
     pub open_in_active_window: bool,
 }
 
+pub struct OpenStoredSessionArg {
+    pub summary: Arc<StoredSessionSummary>,
+    pub ui_location: LaunchConfigUiLocation,
+}
+
 pub struct OpenPath {
     pub path: PathBuf,
 }
@@ -317,6 +323,7 @@ pub fn init(app: &mut AppContext) {
         open_new_tab_insert_subshell_command_and_bootstrap_if_supported,
     );
     app.add_global_action("root_view:open_launch_config", open_launch_config);
+    app.add_global_action("root_view:open_stored_session", open_stored_session);
     app.add_global_action("root_view:send_feedback", send_feedback);
     app.add_global_action(
         "root_view:toggle_quake_mode_window",
@@ -562,9 +569,9 @@ fn active_workspace(ctx: &mut AppContext) -> Option<ViewHandle<Workspace>> {
 }
 
 fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
-    let session_source = arg
-        .launch_config
-        .window_source(0)
+    let first_source = arg.launch_config.window_source(0);
+    let session_source = first_source
+        .clone()
         .filter(launch_config::LaunchConfigWindowSource::is_session_config);
     if let Some(source) = session_source.as_ref()
         && let Some((window_id, _)) = WorkspaceRegistry::as_ref(ctx)
@@ -594,6 +601,23 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
                 report_error!(error.context("Failed to claim session config ownership"));
                 return;
             }
+        }
+    }
+
+    if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+        && let Some(source) = first_source.as_ref()
+    {
+        let run_is_open = WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .filter_map(|(_, workspace)| workspace.as_ref(ctx).launch_config_source())
+            .any(|open_source| {
+                open_source.path == source.path
+                    && open_source.document_index == source.document_index
+                    && open_source.config_name == source.config_name
+            });
+        if !run_is_open {
+            crate::launch_configs::session_store::begin_run(source);
         }
     }
 
@@ -651,6 +675,70 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
     );
 }
 
+fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
+    if !FeatureFlag::PersistentLaunchConfigSessions.is_enabled() {
+        return;
+    }
+
+    let Some(source) = crate::launch_configs::session_store::first_source(&arg.summary) else {
+        return;
+    };
+    if let Some((window_id, _)) = WorkspaceRegistry::as_ref(ctx)
+        .all_workspaces(ctx)
+        .into_iter()
+        .find(|(_, workspace)| {
+            workspace
+                .as_ref(ctx)
+                .launch_config_source()
+                .is_some_and(|source| arg.summary.contains_source(source))
+        })
+    {
+        ctx.windows().show_window_and_focus_app(window_id);
+        return;
+    }
+
+    #[cfg(feature = "local_fs")]
+    if source.is_session_config() {
+        match crate::session_configs::claim_session(source) {
+            Ok(true) => {}
+            Ok(false) => {
+                safe_warn!(
+                    safe: ("Stored session is already open in another process"),
+                    full: ("Stored session {:?} is already open in another process", source.session_id())
+                );
+                return;
+            }
+            Err(error) => {
+                report_error!(error.context("Failed to claim stored session ownership"));
+                return;
+            }
+        }
+    }
+
+    let sessions = match crate::launch_configs::session_store::load_stored_session(&arg.summary) {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            safe_warn!(
+                safe: ("Failed to open autosaved terminal session"),
+                full: ("Failed to open autosaved terminal session: {error:#}")
+            );
+            return;
+        }
+    };
+    crate::launch_configs::session_store::begin_run(source);
+    for session in sessions {
+        open_new_with_workspace_source(restored_launch_config_workspace_source(session, ctx), ctx);
+    }
+
+    send_telemetry_from_app_ctx!(
+        TelemetryEvent::OpenLaunchConfig {
+            ui_location: arg.ui_location,
+            open_in_active_window: false,
+        },
+        ctx
+    );
+}
+
 fn launch_config_workspace_source(
     launch_config: &launch_config::LaunchConfig,
     window_index: usize,
@@ -666,50 +754,11 @@ fn launch_config_workspace_source(
     });
     if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
         && !source_is_open
-        && let Some(source) = launch_config_source
-            .as_ref()
-            .filter(|source| source.is_session_config())
+        && let Some(source) = launch_config_source.as_ref()
+        && source.is_session_config()
     {
         match crate::launch_configs::session_store::load(source) {
-            Ok(Some(session)) => {
-                let window_snapshot = session.window;
-                let conversation_ids = window_snapshot.conversation_ids_to_restore();
-                crate::ai::blocklist::BlocklistAIHistoryModel::handle(ctx)
-                    .update(ctx, |history, _| {
-                        history.detach_conversations_for_restore(&conversation_ids)
-                    });
-                crate::ai::restored_conversations::RestoredAgentConversations::handle(ctx)
-                    .update(ctx, |conversations, _| {
-                        conversations.release_conversations(&conversation_ids)
-                    });
-                #[cfg(feature = "local_fs")]
-                let block_lists = if session.block_lists.is_empty() {
-                    // Only the panes of the window being restored -- this runs
-                    // on the UI thread, and reading every block in the database
-                    // stalls it in proportion to the user's whole history.
-                    let pane_uuids =
-                        crate::launch_configs::session_store::terminal_pane_uuids(&window_snapshot);
-                    crate::persistence::load_restored_blocks_for_launch_config(&pane_uuids)
-                        .unwrap_or_else(|error| {
-                            safe_warn!(
-                                safe: ("Failed to load terminal history for launch config session"),
-                                full: (
-                                    "Failed to load terminal history for launch config session: {error:#}"
-                                )
-                            );
-                            Default::default()
-                        })
-                } else {
-                    session.block_lists
-                };
-                #[cfg(not(feature = "local_fs"))]
-                let block_lists = session.block_lists;
-                return NewWorkspaceSource::Restored {
-                    window_snapshot,
-                    block_lists,
-                    defer_shell_start: false,
-                };
-            }
+            Ok(Some(session)) => return restored_launch_config_workspace_source(session, ctx),
             Ok(None) => {}
             Err(error) => {
                 safe_warn!(
@@ -729,6 +778,46 @@ fn launch_config_workspace_source(
         } else {
             launch_config_source
         },
+    }
+}
+
+fn restored_launch_config_workspace_source(
+    session: RestoredWindowSession,
+    ctx: &mut AppContext,
+) -> NewWorkspaceSource {
+    let window_snapshot = session.window;
+    let conversation_ids = window_snapshot.conversation_ids_to_restore();
+    crate::ai::blocklist::BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
+        history.detach_conversations_for_restore(&conversation_ids)
+    });
+    crate::ai::restored_conversations::RestoredAgentConversations::handle(ctx)
+        .update(ctx, |conversations, _| {
+            conversations.release_conversations(&conversation_ids)
+        });
+    #[cfg(feature = "local_fs")]
+    let block_lists = if session.block_lists.is_empty() {
+        // Only the panes of the window being restored -- this runs on the UI thread, and reading
+        // every block in the database stalls it in proportion to the user's whole history.
+        let pane_uuids =
+            crate::launch_configs::session_store::terminal_pane_uuids(&window_snapshot);
+        crate::persistence::load_restored_blocks_for_launch_config(&pane_uuids).unwrap_or_else(
+            |error| {
+                safe_warn!(
+                    safe: ("Failed to load terminal history for launch config session"),
+                    full: ("Failed to load terminal history for launch config session: {error:#}")
+                );
+                Default::default()
+            },
+        )
+    } else {
+        session.block_lists
+    };
+    #[cfg(not(feature = "local_fs"))]
+    let block_lists = session.block_lists;
+    NewWorkspaceSource::Restored {
+        window_snapshot,
+        block_lists,
+        defer_shell_start: false,
     }
 }
 

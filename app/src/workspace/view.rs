@@ -29080,19 +29080,20 @@ impl View for Workspace {
         if !self.window_process_restart_in_progress
             && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
             && *GeneralSettings::as_ref(ctx).restore_session
-            && self
-                .launch_config_source
-                .as_ref()
-                .is_some_and(LaunchConfigWindowSource::is_session_config)
+            && self.launch_config_source.is_some()
             && let Some(model_event_sender) = self.model_event_sender.as_ref()
         {
             let window = self.snapshot(ctx.window_id(), false, ctx);
+            let history_id = crate::launch_configs::session_store::history_id_for_windows(
+                std::slice::from_ref(&window),
+            );
             #[cfg(feature = "local_tty")]
             let handovers = self.sessions_to_detach_at_exit(ctx);
             if let Err(error) =
                 model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
                     windows: vec![window],
                     include_blocks: true,
+                    history_id,
                 })
             {
                 report_error!(

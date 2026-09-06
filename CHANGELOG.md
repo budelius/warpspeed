@@ -7,6 +7,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two terminal supervisors could end up serving one pipe, splitting the
+  sessions between them.** `CreateNamedPipeW` does not fail on a name that
+  already exists -- it adds another *server* instance, and a client is handed
+  whichever is free. Two app instances starting at the same moment each found no
+  supervisor, each spawned one, and both bound the name. Each then held sessions
+  the other had never heard of: the detached-session picker listed half of them,
+  and an attach landing on the wrong daemon reported the session missing and
+  opened a fresh shell instead. Found on a dogfood machine running three daemons
+  against two pipe names, two of them started a second apart.
+
+  The listener's first instance now asks for `FILE_FLAG_FIRST_PIPE_INSTANCE`, so
+  the second supervisor fails at bind and exits; its client's existing retry loop
+  then connects to the one that won. This is what the Unix supervisor already did
+  by refusing a socket another supervisor was serving.
+
 ### Added
 
 - **Detach and attach a terminal session by hand.** "Detach session" in a pane's

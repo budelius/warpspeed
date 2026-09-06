@@ -45,6 +45,61 @@ fn connected_pair(label: &str) -> (PipeTransport, PipeTransport) {
     (client, supervisor)
 }
 
+/// Two supervisors must not end up serving one name.
+///
+/// `CreateNamedPipeW` is happy to add a second *server* instance to an existing
+/// name, and a client is then handed whichever instance is free. Each supervisor
+/// would hold sessions the other never saw: the picker would list half of them,
+/// and an attach landing on the wrong one would report the session missing and
+/// open a fresh shell. Observed in the wild as three daemons against two names,
+/// two of them started a second apart.
+#[test]
+fn a_second_supervisor_is_refused_the_same_pipe_name() {
+    let name = test_pipe_name("exclusive");
+    let _first = PipeListener::bind(name.clone()).expect("the first bind must succeed");
+
+    let second = PipeListener::bind(name.clone());
+
+    let Err(error) = second else {
+        panic!("a second supervisor must not take the name");
+    };
+    assert!(
+        error.to_string().contains("already listening"),
+        "error was {error}"
+    );
+}
+
+/// The refusal has to be about *another* process holding the name, not about
+/// exclusivity as such: a listener creates a fresh instance after every accept,
+/// and asking for a first instance there would refuse its own name.
+#[test]
+fn a_listener_can_still_serve_client_after_client() {
+    let name = test_pipe_name("sequential");
+    let mut listener = PipeListener::bind(name.clone()).expect("bind must succeed");
+
+    for _ in 0..3 {
+        let mut client = PipeTransport::connect(&name).expect("connect must succeed");
+        let mut supervisor = listener.accept().expect("accept must succeed");
+        client.send(&Message::Ping).expect("send must succeed");
+        assert_eq!(
+            supervisor.receive().expect("receive must succeed"),
+            Some(Message::Ping)
+        );
+    }
+}
+
+/// A name whose supervisor has gone is free to take, so a restart is not locked
+/// out by its own predecessor.
+#[test]
+fn a_name_released_by_a_dead_supervisor_can_be_taken_again() {
+    let name = test_pipe_name("released");
+    drop(PipeListener::bind(name.clone()).expect("the first bind must succeed"));
+
+    let second = PipeListener::bind(name.clone());
+
+    assert!(second.is_ok(), "a released name must be bindable again");
+}
+
 /// The control channel end to end: a message crosses a real Windows pipe.
 #[test]
 fn a_message_crosses_a_real_pipe() {

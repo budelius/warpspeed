@@ -14,11 +14,12 @@ use anyhow::{Context, Result, bail};
 use instant::Instant;
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-    ReadFile, WriteFile,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
@@ -58,15 +59,46 @@ fn wide(name: &str) -> Vec<u16> {
     name.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Whether this is the instance that claims the pipe name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PipeInstance {
+    /// The listener's first instance, which must be the only server on the
+    /// name. See [`create_instance`].
+    First,
+    /// A further instance of a name this process already owns.
+    Additional,
+}
+
 /// Creates one unconnected instance of the named pipe.
-fn create_instance(name: &str, security: &PipeSecurity) -> Result<HANDLE> {
+///
+/// ## Why the first instance is exclusive
+///
+/// `CreateNamedPipeW` does not fail on a name that already exists -- it adds
+/// another *server* instance of it, and a connecting client is handed whichever
+/// instance happens to be free. Two supervisors on one name therefore both
+/// serve it, and each holds sessions the other has never heard of: `ListSessions`
+/// answers with half the detached sessions, and an `Attach` that lands on the
+/// wrong one reports the session missing and opens a fresh shell instead.
+///
+/// That is not hypothetical. Two app instances starting at the same moment each
+/// find no supervisor and each spawn one; this was observed in the wild with
+/// three daemons alive against two pipe names, two of them started one second
+/// apart. `FILE_FLAG_FIRST_PIPE_INSTANCE` makes the second one fail at bind, so
+/// it exits and its client falls back to connecting to the supervisor that won.
+/// It is the Windows counterpart of `unix_supervisor::socket::bind_listener`
+/// refusing a socket another supervisor is already serving.
+fn create_instance(name: &str, security: &PipeSecurity, instance: PipeInstance) -> Result<HANDLE> {
     let attributes = security.attributes();
     let wide_name = wide(name);
+    let open_mode = match instance {
+        PipeInstance::First => PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PipeInstance::Additional => PIPE_ACCESS_DUPLEX,
+    };
 
     let handle = unsafe {
         CreateNamedPipeW(
             PCWSTR(wide_name.as_ptr()),
-            PIPE_ACCESS_DUPLEX,
+            open_mode,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             MAX_PIPE_INSTANCES,
             PIPE_BUFFER_BYTES,
@@ -77,10 +109,13 @@ fn create_instance(name: &str, security: &PipeSecurity) -> Result<HANDLE> {
     };
 
     if handle == INVALID_HANDLE_VALUE {
-        bail!(
-            "Failed to create the supervisor pipe {name}: {}",
-            std::io::Error::last_os_error()
-        );
+        let error = std::io::Error::last_os_error();
+        if instance == PipeInstance::First
+            && error.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32)
+        {
+            bail!("Another terminal supervisor is already listening on {name}");
+        }
+        bail!("Failed to create the supervisor pipe {name}: {error}");
     }
 
     Ok(handle)
@@ -106,7 +141,7 @@ impl PipeListener {
     pub fn bind(name: impl Into<String>) -> Result<Self> {
         let name = name.into();
         let security = PipeSecurity::current_user_only()?;
-        let pending_instance = create_instance(&name, &security)?;
+        let pending_instance = create_instance(&name, &security, PipeInstance::First)?;
 
         Ok(Self {
             name,
@@ -130,8 +165,11 @@ impl PipeListener {
         }
 
         // Hand this instance to the caller and stand up the next one, so the
-        // name never disappears from the namespace between clients.
-        self.pending_instance = create_instance(&self.name, &self.security)?;
+        // name never disappears from the namespace between clients. Not a first
+        // instance: this process already owns the name, and asking for
+        // exclusivity again would refuse our own listener.
+        self.pending_instance =
+            create_instance(&self.name, &self.security, PipeInstance::Additional)?;
 
         Ok(PipeTransport {
             handle,

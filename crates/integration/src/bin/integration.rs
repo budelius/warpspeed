@@ -59,6 +59,17 @@ pub fn main() -> Result<()> {
         },
     ));
 
+    // The supervisor client starts its daemon by re-running `current_exe`, which
+    // in a test is this binary rather than the app's. Without this the daemon
+    // would fail `Args::parse` -- an integration test name is required -- exit
+    // immediately, and every session would quietly fall back to a shell owned by
+    // this process, which is precisely what the detach tests are checking is not
+    // happening. Handled before parsing for the same reason `warp::run` does.
+    #[cfg(unix)]
+    if env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
+        return warp::terminal::local_tty::unix_supervisor::supervisor_daemon::run();
+    }
+
     let args = Args::parse();
 
     if let Some(command) = &args.command {
@@ -131,6 +142,7 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_add_and_close_session);
     register_test!(test_add_many_sessions);
     register_test!(test_ctrl_tab_session_switching);
+    register_test!(test_detach_and_attach_a_session);
     register_test!(test_ctrl_d_eot);
     register_test!(test_ctrl_d_exit);
     register_test!(test_ctrl_d_handled_by_read_during_bootstrapping);

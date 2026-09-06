@@ -255,3 +255,146 @@ pub fn resolves_to_commit(repository: &Repository, reference: &str) -> bool {
         .and_then(|object| object.peel_to_commit())
         .is_ok()
 }
+
+/// A commit with the per-file line counts of its own diff, the shape
+/// `git log --format=COMMIT:%H\t%s --numstat` produced one commit at a time.
+#[derive(Debug, Clone)]
+pub struct NativeCommit {
+    pub hash: String,
+    pub subject: String,
+    /// `(path, additions, deletions)` per changed file.
+    pub files: Vec<(String, usize, usize)>,
+}
+
+/// Per-file `(path, additions, deletions)` for an already-built diff.
+///
+/// A binary delta has no patch to count lines from and is reported at zero
+/// rather than dropped, matching numstat's `-\t-` columns.
+fn diff_file_counts(diff: &git2::Diff<'_>) -> anyhow::Result<Vec<(String, usize, usize)>> {
+    let mut entries = Vec::new();
+    for index in 0..diff.deltas().len() {
+        let delta = diff.get_delta(index).context("Missing diff delta")?;
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            // git stores paths with forward slashes on every platform, so
+            // `to_string_lossy` needs no separator conversion here.
+            .map(|path| path.to_string_lossy().into_owned())
+            .context("Diff delta has no path")?;
+
+        let (additions, deletions) = match git2::Patch::from_diff(diff, index)? {
+            Some(patch) => {
+                let (_context, additions, deletions) = patch.line_stats()?;
+                (additions, deletions)
+            }
+            None => (0, 0),
+        };
+        entries.push((path, additions, deletions));
+    }
+    Ok(entries)
+}
+
+/// The commit where HEAD diverged from every *other* branch.
+///
+/// Matches `detect_fork_point`: the current branch and its own remote-tracking
+/// ref are excluded, so a branch is never subtracted from itself. Returns the
+/// parent of the oldest commit unique to HEAD, or HEAD itself when no commit is
+/// unique. A root commit has no parent, so that case yields `None`.
+pub fn fork_point(
+    repository: &Repository,
+    current_branch_name: Option<&str>,
+) -> anyhow::Result<Option<git2::Oid>> {
+    let current = current_branch_name
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty() && *branch != "HEAD");
+    let excluded: Vec<String> = current
+        .map(|branch| vec![branch.to_owned(), format!("origin/{branch}")])
+        .unwrap_or_default();
+
+    let mut revwalk = repository.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME)?;
+    revwalk.push_head()?;
+    for reference in repository.references()? {
+        let reference = reference?;
+        if !(reference.is_branch() || reference.is_remote()) {
+            continue;
+        }
+        let Some(name) = reference.shorthand() else {
+            continue;
+        };
+        if excluded.iter().any(|branch| branch == name) {
+            continue;
+        }
+        if let Some(oid) = reference.target() {
+            // A ref pointing outside this walk is simply nothing to hide.
+            let _ = revwalk.hide(oid);
+        }
+    }
+
+    let unique = revwalk.collect::<Result<Vec<_>, _>>()?;
+    let Some(oldest_unique) = unique.last() else {
+        // Nothing unique to HEAD: it has not diverged, so it is its own fork.
+        return Ok(Some(repository.head()?.peel_to_commit()?.id()));
+    };
+    Ok(repository
+        .find_commit(*oldest_unique)?
+        .parent(0)
+        .ok()
+        .map(|parent| parent.id()))
+}
+
+/// The upstream of the current branch, as `origin/main`.
+///
+/// Matches `git rev-parse --abbrev-ref --symbolic-full-name @{u}`, yielding
+/// `None` where that command fails because no upstream is configured.
+pub fn upstream_ref_name(repository: &Repository) -> Option<String> {
+    let head = repository.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+    let branch = repository
+        .find_branch(head.shorthand()?, BranchType::Local)
+        .ok()?;
+    let upstream = branch.upstream().ok()?;
+    let name = upstream.name().ok().flatten()?;
+    Some(name.to_owned())
+}
+
+/// Commits reachable from HEAD but not from `hide`, newest first, each with the
+/// per-file counts of its own diff against its first parent.
+///
+/// Passing `None` walks the whole history of HEAD.
+pub fn commits_with_stats(
+    repository: &Repository,
+    hide: Option<git2::Oid>,
+) -> anyhow::Result<Vec<NativeCommit>> {
+    let mut revwalk = repository.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME)?;
+    revwalk.push_head()?;
+    if let Some(hide) = hide {
+        revwalk.hide(hide)?;
+    }
+
+    let mut commits = Vec::new();
+    for oid in revwalk {
+        let commit = repository.find_commit(oid?)?;
+        let commit_tree = commit.tree()?;
+        // A root commit has no parent; diff it against nothing, which is how
+        // git renders its whole content as additions.
+        let parent_tree = match commit.parent(0) {
+            Ok(parent) => Some(parent.tree()?),
+            Err(_) => None,
+        };
+        let mut diff =
+            repository.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
+        diff.find_similar(Some(git2::DiffFindOptions::new().renames(true)))?;
+
+        commits.push(NativeCommit {
+            hash: commit.id().to_string(),
+            subject: commit.summary().unwrap_or_default().to_owned(),
+            files: diff_file_counts(&diff)?,
+        });
+    }
+    Ok(commits)
+}

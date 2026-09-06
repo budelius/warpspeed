@@ -4,9 +4,9 @@ use git2::Repository;
 use tempfile::TempDir;
 
 use super::{
-    branch_commit_summaries, committed_file_changes, current_branch_display,
-    current_branch_name_or_head, diff_text_between, local_branch_names, main_branch_ref,
-    resolves_to_commit,
+    branch_commit_summaries, commits_with_stats, committed_file_changes, current_branch_display,
+    current_branch_name_or_head, diff_text_between, fork_point, local_branch_names,
+    main_branch_ref, resolves_to_commit, upstream_ref_name,
 };
 
 /// A repository with one commit on `main`, built with git2 so the fixture
@@ -451,4 +451,95 @@ fn resolves_to_commit_distinguishes_present_and_absent_refs() {
     assert!(resolves_to_commit(&repository, "main"));
     assert!(resolves_to_commit(&repository, "HEAD"));
     assert!(!resolves_to_commit(&repository, "origin/nope"));
+}
+
+/// `detect_fork_point` finds where HEAD diverged from every *other* branch, so
+/// the current branch and its own remote-tracking ref are excluded from the
+/// comparison — otherwise a branch is subtracted from itself and the answer is
+/// always HEAD.
+#[test]
+fn fork_point_is_the_commit_the_branch_grew_from() {
+    let (_dir, repository) = repo_with_one_commit();
+    let base = repository.head().unwrap().peel_to_commit().unwrap();
+    repository.branch("feature", &base, true).unwrap();
+    repository.set_head("refs/heads/feature").unwrap();
+    commit_file(&repository, "b.txt", "b\n");
+    commit_file(&repository, "c.txt", "c\n");
+
+    let fork = fork_point(&repository, Some("feature")).unwrap();
+    assert_eq!(
+        fork,
+        Some(base.id()),
+        "the fork point is the tip of main, not the branch's own commits"
+    );
+}
+
+/// With no commits of its own, a branch has not diverged, so the fork point is
+/// HEAD itself.
+#[test]
+fn fork_point_is_head_when_the_branch_has_diverged_from_nothing() {
+    let (_dir, repository) = repo_with_one_commit();
+    let base = repository.head().unwrap().peel_to_commit().unwrap();
+    repository.branch("feature", &base, true).unwrap();
+    repository.set_head("refs/heads/feature").unwrap();
+
+    let fork = fork_point(&repository, Some("feature")).unwrap();
+    assert_eq!(fork, Some(base.id()));
+}
+
+#[test]
+fn upstream_ref_name_reports_the_tracking_branch() {
+    let (_dir, repository) = repo_with_one_commit();
+    assert_eq!(
+        upstream_ref_name(&repository),
+        None,
+        "no upstream configured yet"
+    );
+
+    // `set_upstream` resolves the remote behind the ref, so the remote itself
+    // has to exist -- a remote-tracking ref alone is not enough.
+    repository
+        .remote("origin", "https://example.invalid/repo.git")
+        .unwrap();
+    let head_commit = repository.head().unwrap().peel_to_commit().unwrap();
+    repository
+        .reference("refs/remotes/origin/main", head_commit.id(), true, "test")
+        .unwrap();
+    repository
+        .find_branch("main", git2::BranchType::Local)
+        .unwrap()
+        .set_upstream(Some("origin/main"))
+        .unwrap();
+
+    assert_eq!(
+        upstream_ref_name(&repository),
+        Some("origin/main".to_string())
+    );
+}
+
+/// Each commit carries its own per-file counts, diffed against its first
+/// parent — the shape `git log --numstat` produced one commit at a time.
+#[test]
+fn commits_with_stats_counts_each_commit_separately() {
+    let (_dir, repository) = repo_with_one_commit();
+    let base = repository.head().unwrap().peel_to_commit().unwrap();
+    repository.branch("feature", &base, true).unwrap();
+    repository.set_head("refs/heads/feature").unwrap();
+    commit_file(&repository, "b.txt", "one\ntwo\n");
+    commit_file(&repository, "c.txt", "three\n");
+
+    let commits = commits_with_stats(&repository, Some(base.id())).unwrap();
+    assert_eq!(
+        commits.len(),
+        2,
+        "expected the two branch commits: {commits:?}"
+    );
+
+    assert_eq!(commits[0].subject, "add c.txt", "newest first");
+    assert_eq!(commits[0].files.len(), 1);
+    assert_eq!(commits[0].files[0], ("c.txt".to_string(), 1, 0));
+
+    assert_eq!(commits[1].subject, "add b.txt");
+    assert_eq!(commits[1].files[0], ("b.txt".to_string(), 2, 0));
+    assert_eq!(commits[1].hash.len(), 40, "full SHA, as %H produced");
 }

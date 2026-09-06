@@ -82,6 +82,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The git branch, branch status and diff stats chips no longer run shell commands
+  on a repository the libgit2-backed `GitRepoStatusModel` already reports on. All
+  three took their values from that model and *also* from a shell generator whose
+  result the model then overwrote, so every run was discarded work -- and a
+  PowerShell process, on Windows. Where the shell could not run at all, a closed
+  pane left the chips on a dead session and each refresh logged a warning, marked
+  the chip failed and cleared a value the model had already filled: three logs
+  from 2026-09-04 hold 3,108, 4,905 and 12,591 of those warnings, in bursts of
+  hundreds inside a single second.
+
+  This also closes the second shell path the libgit2 dropdown work left open.
+  That change stopped the dropdown *refresh* from shelling out, but the chip's
+  on-click generator still ran after every value fetch, so `git branch
+  --sort=-committerdate` and `git worktree list --porcelain` kept running whether
+  or not anyone opened the dropdown.
+
+  Remote sessions are unchanged. Every chip value is carried over the wire; only
+  the branch list is not, and the fallback that fetches it reaches the on-click
+  generator by a path this guard does not sit on.
+
 - Test-suite hygiene, chasing 36 failures on a developer machine down to the 14
   that need a Windows privilege this repo cannot grant itself. Each was a test
   reading something the machine happened to have, or something another test left

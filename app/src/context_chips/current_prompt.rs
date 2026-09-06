@@ -729,6 +729,16 @@ impl CurrentPrompt {
             self.set_chip_update_status(chip_kind, ChipUpdateStatus::Disabled);
             return;
         }
+        // A chip an external source keeps current needs no generator: the value
+        // this would produce is overwritten by that source anyway. Returning
+        // above the `match` skips the value command, and returning above the
+        // trailing `refresh_on_click_values` call skips the on-click command
+        // with it. The status is `Cached` rather than `Error`, because the value
+        // is present and current -- only the generator was skipped.
+        if self.is_updated_externally(chip_kind) {
+            self.set_chip_update_status(chip_kind, ChipUpdateStatus::Cached);
+            return;
+        }
         if self.maybe_skip_fetch_due_to_matching_fingerprint(
             chip_kind,
             fingerprint,

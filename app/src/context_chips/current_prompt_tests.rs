@@ -1143,6 +1143,231 @@ fn test_git_status_pr_info_updates_github_pr_chip_value() {
     });
 }
 
+/// Builds a prompt whose only chips are the three git chips the repository
+/// model supplies values for, wired to a live bootstrapped session so a shell
+/// generator would run if anything asked for one.
+#[cfg(feature = "local_fs")]
+fn setup_git_chip_prompt(
+    app: &mut App,
+    session_id: SessionId,
+) -> (
+    Arc<RecordingCommandExecutor>,
+    warpui::ModelHandle<CurrentPrompt>,
+    warpui::ModelHandle<GitRepoStatusModel>,
+) {
+    app.add_singleton_model(|_| {
+        Prompt::mock_with(
+            [
+                ContextChipKind::ShellGitBranch,
+                ContextChipKind::GitBranchStatus,
+                ContextChipKind::GitDiffStats,
+            ],
+            false,
+            WarpPromptSeparator::None,
+        )
+    });
+    app.add_singleton_model(SessionSettings::new_with_defaults);
+    app.add_singleton_model(|_ctx| {
+        settings::PublicPreferences::new(
+            Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+        )
+    });
+    app.add_singleton_model(|_| {
+        settings::PrivatePreferences::new(
+            Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+        )
+    });
+    app.add_singleton_model(|_| History::new(vec![]));
+    app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+    app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+    app.add_singleton_model(AppTelemetryContextProvider::new_context_provider);
+    app.add_singleton_model(AuthManager::new_for_test);
+    app.add_singleton_model(|_| crate::settings::manager::SettingsManager::default());
+    crate::settings::InputSettings::register(app);
+    app.update(crate::settings::AISettings::register_and_subscribe_to_events);
+    app.add_singleton_model(crate::workspaces::user_workspaces::UserWorkspaces::default_mock);
+    #[cfg(windows)]
+    app.add_singleton_model(SystemInfo::new);
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let watcher_handle = app.add_singleton_model(DirectoryWatcher::new_for_testing);
+    let repo_handle = watcher_handle.update(app, |watcher, ctx| {
+        watcher
+            .add_directory(
+                warp_util::standardized_path::StandardizedPath::from_local_canonicalized(
+                    temp_dir.path(),
+                )
+                .unwrap(),
+                ctx,
+            )
+            .unwrap()
+    });
+    let initial_metadata = git_status_metadata("main");
+    let git_status = app.add_model(move |ctx| {
+        GitRepoStatusModel::new_local_for_test(repo_handle, Some(initial_metadata), ctx)
+    });
+
+    let executor = Arc::new(RecordingCommandExecutor::default());
+    let executor_for_sessions = executor.clone();
+    let sessions = app.add_model(move |ctx| {
+        let mut sessions = Sessions::new_for_test().with_command_executor(executor_for_sessions);
+        sessions.initialize_bootstrapped_session(
+            SessionInfo::new_for_test().with_id(session_id),
+            "test command".to_string(),
+            vec![],
+            None,
+            ctx,
+        );
+        sessions
+    });
+    let current_prompt = app.add_model(move |ctx| CurrentPrompt::new(sessions, ctx));
+
+    (executor, current_prompt, git_status)
+}
+
+/// The three git chips take their values from `GitRepoStatusModel`, so running
+/// their shell generators is discarded work. With a repository model attached,
+/// a context change must run no command at all.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_git_chips_run_no_shell_command_when_repo_model_supplies_values() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(4242);
+        let (executor, current_prompt, git_status) = setup_git_chip_prompt(&mut app, session_id);
+
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.set_git_repo_status(Some(git_status.downgrade()), ctx);
+            cp.latest_context = Some(PromptContext {
+                active_block_metadata: BlockMetadata::new(
+                    Some(session_id),
+                    Some("/tmp/project".to_string()),
+                ),
+                environment: Environment::default(),
+            });
+            cp.update_states_with_new_context(ctx);
+        });
+        current_prompt
+            .update(&mut app, |cp, ctx| cp.await_generators(ctx))
+            .await;
+
+        let commands = executor.commands.lock().clone();
+        assert!(
+            commands.is_empty(),
+            "chips backed by the repository model should run no shell command, but ran: {commands:?}"
+        );
+    });
+}
+
+/// The suppression is conditional on a repository model existing. A session
+/// without one has no other source for these values, so the shell generators
+/// must still run.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_git_chips_still_run_shell_command_without_a_repo_model() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(4243);
+        let (executor, current_prompt, _git_status) = setup_git_chip_prompt(&mut app, session_id);
+
+        // Deliberately skip `set_git_repo_status`: nothing supplies these
+        // values externally, so the shell path is the only one left.
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.latest_context = Some(PromptContext {
+                active_block_metadata: BlockMetadata::new(
+                    Some(session_id),
+                    Some("/tmp/project".to_string()),
+                ),
+                environment: Environment::default(),
+            });
+            cp.update_states_with_new_context(ctx);
+        });
+        current_prompt
+            .update(&mut app, |cp, ctx| cp.await_generators(ctx))
+            .await;
+
+        let commands = executor.commands.lock().clone();
+        assert!(
+            commands.iter().any(|command| command.contains("git")),
+            "without a repository model the git chips must fall back to the shell, but ran: {commands:?}"
+        );
+    });
+}
+
+/// `is_updated_externally` gates the suppression, so its scope is the scope of
+/// the change. It must name the three git chips and nothing else.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_only_git_chips_are_updated_externally_by_the_repo_model() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(4244);
+        let (_executor, current_prompt, git_status) = setup_git_chip_prompt(&mut app, session_id);
+
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.set_git_repo_status(Some(git_status.downgrade()), ctx);
+        });
+
+        app.read(|ctx| {
+            let cp = current_prompt.as_ref(ctx);
+            for chip_kind in [
+                ContextChipKind::ShellGitBranch,
+                ContextChipKind::GitBranchStatus,
+                ContextChipKind::GitDiffStats,
+            ] {
+                assert!(
+                    cp.is_updated_externally(&chip_kind),
+                    "{chip_kind:?} takes its value from the repository model"
+                );
+            }
+            assert!(
+                !cp.is_updated_externally(&ContextChipKind::WorkingDirectory),
+                "a chip the repository model does not supply must keep its generator"
+            );
+        });
+    });
+}
+
+/// A remote session carries every chip value over the wire but leaves
+/// `branch_dropdown_lines` empty, which is what makes `apply_git_branch_dropdown`
+/// fall back to the shell. That fallback reaches `refresh_on_click_values`
+/// directly rather than through `fetch_chip_value_once`, so the early return
+/// must not reach it.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_branch_dropdown_falls_back_to_the_shell_when_the_model_supplies_no_lines() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(4245);
+        let (executor, current_prompt, git_status) = setup_git_chip_prompt(&mut app, session_id);
+
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.set_git_repo_status(Some(git_status.downgrade()), ctx);
+            cp.latest_context = Some(PromptContext {
+                active_block_metadata: BlockMetadata::new(
+                    Some(session_id),
+                    Some("/tmp/project".to_string()),
+                ),
+                environment: Environment::default(),
+            });
+            cp.update_states_with_new_context(ctx);
+        });
+        executor.clear();
+
+        // `git_status_metadata` leaves `branch_dropdown_lines` empty, standing
+        // in for a remote repository whose branch list is not carried over the
+        // wire. Changing the branch is what triggers the dropdown refresh.
+        git_status.update(&mut app, |model, ctx| {
+            model.set_metadata_for_test(Some(git_status_metadata("feature-branch")), ctx);
+        });
+        current_prompt
+            .update(&mut app, |cp, ctx| cp.await_generators(ctx))
+            .await;
+
+        let commands = executor.commands.lock().clone();
+        assert!(
+            commands.iter().any(|command| command.contains("branch")),
+            "the dropdown must fall back to the shell when the model supplies no lines, but ran: {commands:?}"
+        );
+    });
+}
+
 /// A [`CommandExecutor`] implementation that records which commands were run, but does not
 /// execute them.
 #[derive(Debug, Default)]

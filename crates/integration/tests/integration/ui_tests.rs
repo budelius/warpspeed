@@ -235,6 +235,7 @@ integration_tests! {
     test_multi_tab_drag_back_to_source_and_out_again,
 
     test_restore_single_closed_pane,
+    test_detach_and_attach_a_session,
     test_restore_multiple_closed_panes,
     test_undo_close_grace_period_cleanup,
     test_closed_panes_cleared_on_rearrangement,

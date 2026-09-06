@@ -178,42 +178,6 @@ impl LocalGitRepoStatusModel {
         changed_count > 0
     }
 
-    fn current_branch_name(repository: &GitRepository) -> anyhow::Result<String> {
-        match repository.head() {
-            Ok(head) if head.is_branch() => head
-                .shorthand()
-                .map(str::to_owned)
-                .context("Git HEAD branch name is not valid UTF-8"),
-            Ok(head) => head
-                .target()
-                .map(|oid| oid.to_string().chars().take(7).collect())
-                .context("Detached Git HEAD has no target"),
-            Err(error) if error.code() == ErrorCode::UnbornBranch => repository
-                .find_reference("HEAD")?
-                .symbolic_target()
-                .and_then(|target| target.strip_prefix("refs/heads/"))
-                .map(str::to_owned)
-                .context("Unborn Git HEAD has no branch name"),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    fn main_branch_name(repository: &GitRepository, current_branch_name: &str) -> String {
-        if let Ok(origin_head) = repository.find_reference("refs/remotes/origin/HEAD")
-            && let Some(branch) = origin_head
-                .symbolic_target()
-                .and_then(|target| target.strip_prefix("refs/remotes/origin/"))
-        {
-            return branch.to_owned();
-        }
-
-        ["main", "master", "trunk", "develop"]
-            .into_iter()
-            .find(|candidate| repository.find_branch(candidate, BranchType::Local).is_ok())
-            .unwrap_or(current_branch_name)
-            .to_owned()
-    }
-
     fn diff_stats(repository: &GitRepository) -> anyhow::Result<DiffStats> {
         let head_tree = match repository.head().and_then(|head| head.peel_to_tree()) {
             Ok(tree) => Some(tree),
@@ -361,8 +325,9 @@ impl LocalGitRepoStatusModel {
             let repository = GitRepository::open(&repo_path).with_context(|| {
                 format!("Unable to open Git repository {}", repo_path.display())
             })?;
-            let current_branch_name = Self::current_branch_name(&repository)?;
-            let main_branch_name = Self::main_branch_name(&repository, &current_branch_name);
+            let current_branch_name = crate::util::git_native::current_branch_display(&repository)?;
+            let main_branch_name =
+                crate::util::git_native::main_branch_name(&repository, &current_branch_name);
             let stats_against_head = Self::diff_stats(&repository)?;
             let branch_tracking_status =
                 Self::branch_tracking_status(&repository, &current_branch_name);

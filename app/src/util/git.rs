@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+#[cfg(feature = "local_fs")]
+use crate::util::git_native;
+#[cfg(feature = "local_fs")]
+use anyhow::Context as _;
 use anyhow::{Result, anyhow};
 use warp_core::safe_warn;
 use warp_util::git::run_git_command;
@@ -49,16 +53,13 @@ pub async fn detect_current_branch(_repo_path: &Path) -> Result<String> {
 /// In detached HEAD state this returns the literal string "HEAD".
 #[cfg(feature = "local_fs")]
 pub async fn detect_current_branch(repo_path: &Path) -> Result<String> {
-    log::debug!("[GIT OPERATION] git.rs detect_current_branch git rev-parse --abbrev-ref HEAD");
-    let result = run_git_command(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
-
-    if result.is_err() {
-        log::debug!("[GIT OPERATION] git.rs detect_current_branch git branch --show-current");
-        run_git_command(repo_path, &["branch", "--show-current"]).await
-    } else {
-        result
-    }
-    .map(|branch_name| branch_name.trim().to_owned())
+    let repo_path = repo_path.to_owned();
+    blocking::unblock(move || {
+        let repository = git2::Repository::open(&repo_path)
+            .with_context(|| format!("Unable to open Git repository {}", repo_path.display()))?;
+        git_native::current_branch_name_or_head(&repository)
+    })
+    .await
 }
 
 /// Like [`detect_current_branch`], but in detached HEAD state returns the short
@@ -66,14 +67,13 @@ pub async fn detect_current_branch(repo_path: &Path) -> Result<String> {
 /// (Matches the shell command `git symbolic-ref --short HEAD || git rev-parse --short HEAD`.)
 #[cfg(feature = "local_fs")]
 pub async fn detect_current_branch_display(repo_path: &Path) -> Result<String> {
-    let branch = detect_current_branch(repo_path).await?;
-    if branch == "HEAD" {
-        run_git_command(repo_path, &["rev-parse", "--short", "HEAD"])
-            .await
-            .map(|sha| sha.trim().to_owned())
-    } else {
-        Ok(branch)
-    }
+    let repo_path = repo_path.to_owned();
+    blocking::unblock(move || {
+        let repository = git2::Repository::open(&repo_path)
+            .with_context(|| format!("Unable to open Git repository {}", repo_path.display()))?;
+        git_native::current_branch_display(&repository)
+    })
+    .await
 }
 
 #[cfg(not(feature = "local_fs"))]

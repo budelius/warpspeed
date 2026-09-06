@@ -37,7 +37,7 @@ fn native_git_metadata_supports_unborn_branch() {
     let repository = GitRepository::init(temp_dir.path()).unwrap();
     std::fs::write(temp_dir.path().join("untracked.txt"), "new\n").unwrap();
 
-    let current_branch = LocalGitRepoStatusModel::current_branch_name(&repository).unwrap();
+    let current_branch = crate::util::git_native::current_branch_display(&repository).unwrap();
     let stats = LocalGitRepoStatusModel::diff_stats(&repository).unwrap();
 
     assert!(!current_branch.is_empty());
@@ -62,8 +62,8 @@ fn native_git_metadata_reads_branch_and_worktree_diff() {
     std::fs::write(temp_dir.path().join("tracked.txt"), "one\ntwo\n").unwrap();
     std::fs::write(temp_dir.path().join("untracked.txt"), "new\n").unwrap();
 
-    let current_branch = LocalGitRepoStatusModel::current_branch_name(&repository).unwrap();
-    let main_branch = LocalGitRepoStatusModel::main_branch_name(&repository, &current_branch);
+    let current_branch = crate::util::git_native::current_branch_display(&repository).unwrap();
+    let main_branch = crate::util::git_native::main_branch_name(&repository, &current_branch);
     let stats = LocalGitRepoStatusModel::diff_stats(&repository).unwrap();
 
     assert!(!current_branch.is_empty());
@@ -117,7 +117,7 @@ fn branch_dropdown_lines_match_the_git_branch_command_shape() {
         .unwrap();
     commit_at(&repository, "c.txt", 3_000);
 
-    let head_branch = LocalGitRepoStatusModel::current_branch_name(&repository).unwrap();
+    let head_branch = crate::util::git_native::current_branch_display(&repository).unwrap();
     let lines = LocalGitRepoStatusModel::branch_dropdown_lines(&repository).unwrap();
 
     let separator_index = lines

@@ -79,3 +79,134 @@ pub fn main_branch_name(repository: &Repository, current_branch_name: &str) -> S
         .unwrap_or(current_branch_name)
         .to_owned()
 }
+
+/// The repository's default branch as a *ref name*, remote prefix intact.
+///
+/// Matches [`crate::util::git::detect_main_branch`], which reports
+/// `origin/main` rather than `main` — the distinction every downstream
+/// `merge-base` and `base..HEAD` range depends on. This is deliberately not
+/// [`main_branch_name`], which strips the remote and searches local branches
+/// only.
+///
+/// Falls back to the current branch, and to an empty string on a detached HEAD,
+/// mirroring `git branch --show-current`, which prints nothing when detached.
+pub fn main_branch_ref(repository: &Repository) -> String {
+    if let Ok(origin_head) = repository.find_reference("refs/remotes/origin/HEAD")
+        && let Some(branch) = origin_head
+            .symbolic_target()
+            .and_then(|target| target.strip_prefix("refs/remotes/"))
+    {
+        return branch.to_owned();
+    }
+
+    let candidate = ["origin/main", "origin/master", "main", "master", "develop"]
+        .into_iter()
+        .find(|candidate| {
+            repository
+                .revparse_single(candidate)
+                .and_then(|object| object.peel_to_commit())
+                .is_ok()
+        });
+    if let Some(candidate) = candidate {
+        return candidate.to_owned();
+    }
+
+    match repository.head() {
+        Ok(head) if head.is_branch() => head.shorthand().unwrap_or_default().to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Every local branch name. Remote-tracking refs are not included.
+///
+/// Matches `git branch --list --format=%(refname:short)`, and keeps that
+/// helper's contract of yielding an empty set rather than failing.
+pub fn local_branch_names(repository: &Repository) -> std::collections::HashSet<String> {
+    let Ok(branches) = repository.branches(Some(BranchType::Local)) else {
+        return std::collections::HashSet::new();
+    };
+    branches
+        .filter_map(|branch| branch.ok())
+        .filter_map(|(branch, _)| branch.name().ok().flatten().map(str::to_owned))
+        .collect()
+}
+
+/// Commit subject lines on HEAD that `base` does not have, newest first.
+///
+/// Matches `git log <base>..HEAD --format=%s`.
+pub fn branch_commit_summaries(repository: &Repository, base: &str) -> anyhow::Result<Vec<String>> {
+    let base_commit = repository
+        .revparse_single(base)
+        .and_then(|object| object.peel_to_commit())
+        .with_context(|| format!("Unable to resolve base ref {base}"))?;
+
+    let mut revwalk = repository.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME)?;
+    revwalk.push_head()?;
+    revwalk.hide(base_commit.id())?;
+
+    let mut summaries = Vec::new();
+    for oid in revwalk {
+        let commit = repository.find_commit(oid?)?;
+        if let Some(summary) = commit.summary() {
+            summaries.push(summary.to_owned());
+        }
+    }
+    Ok(summaries)
+}
+
+/// Per-file line counts for the commits on HEAD that `main_branch` does not
+/// have: the committed-only diff, equivalent to `git diff --numstat
+/// $(git merge-base HEAD <main>) HEAD`.
+///
+/// Returns `(path, additions, deletions)`. A binary file is reported with zero
+/// counts rather than dropped, matching how the shell implementation turned
+/// numstat's `-\t-` into zeroes. No merge base yields an empty vector rather
+/// than an error, which is also what the shell implementation did.
+pub fn committed_file_changes(
+    repository: &Repository,
+    main_branch: &str,
+) -> anyhow::Result<Vec<(String, usize, usize)>> {
+    let Ok(main_commit) = repository
+        .revparse_single(main_branch)
+        .and_then(|object| object.peel_to_commit())
+    else {
+        return Ok(Vec::new());
+    };
+    let head_commit = repository.head()?.peel_to_commit()?;
+    let Ok(merge_base) = repository.merge_base(head_commit.id(), main_commit.id()) else {
+        return Ok(Vec::new());
+    };
+
+    let base_tree = repository.find_commit(merge_base)?.tree()?;
+    let head_tree = head_commit.tree()?;
+    let mut diff = repository.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)?;
+    // `diff.renames` defaults to true in git, so the shell implementation saw
+    // rename detection on. Match it, but report the new path rather than
+    // numstat's combined "old => new" string, which is not a usable path.
+    diff.find_similar(Some(git2::DiffFindOptions::new().renames(true)))?;
+
+    let mut entries = Vec::new();
+    for index in 0..diff.deltas().len() {
+        let delta = diff.get_delta(index).context("Missing diff delta")?;
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            // git stores paths with forward slashes on every platform, so
+            // `to_string_lossy` needs no separator conversion here.
+            .map(|path| path.to_string_lossy().into_owned())
+            .context("Diff delta has no path")?;
+
+        // A binary delta has no patch to count lines from; report it at zero.
+        let (additions, deletions) = match git2::Patch::from_diff(&diff, index)? {
+            Some(patch) => {
+                let (_context, additions, deletions) = patch.line_stats()?;
+                (additions, deletions)
+            }
+            None => (0, 0),
+        };
+        entries.push((path, additions, deletions));
+    }
+    Ok(entries)
+}

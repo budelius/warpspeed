@@ -2,14 +2,15 @@ use std::collections::HashSet;
 use std::path::Path;
 
 #[cfg(feature = "local_fs")]
-use crate::util::git_native;
-#[cfg(feature = "local_fs")]
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
 use warp_core::safe_warn;
 use warp_util::git::run_git_command;
 #[cfg(feature = "local_fs")]
 use warp_util::git::run_git_command_with_env;
+
+#[cfg(feature = "local_fs")]
+use crate::util::git_native;
 
 #[cfg(test)]
 #[path = "git_tests.rs"]
@@ -21,20 +22,9 @@ mod tests;
 /// Returns an empty set on any failure (not a git repo, git not found, etc.).
 #[cfg(feature = "local_fs")]
 pub fn list_local_branches_sync(repo_path: &Path) -> HashSet<String> {
-    let output = command::blocking::Command::new("git")
-        .args(["branch", "--list", "--format=%(refname:short)"])
-        .current_dir(repo_path)
-        .stdout(command::Stdio::piped())
-        .stderr(command::Stdio::null())
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|line| line.trim().to_string())
-            .filter(|line| !line.is_empty())
-            .collect(),
-        _ => HashSet::new(),
+    match git2::Repository::open(repo_path) {
+        Ok(repository) => git_native::local_branch_names(&repository),
+        Err(_) => HashSet::new(),
     }
 }
 
@@ -90,43 +80,13 @@ pub async fn detect_main_branch(_repo_path: &Path) -> Result<String> {
 /// Detects the main branch using git-branchless style heuristics.
 #[cfg(feature = "local_fs")]
 pub async fn detect_main_branch(repo_path: &Path) -> Result<String> {
-    // First try to get the default branch from origin
-    log::debug!(
-        "[GIT OPERATION] git.rs detect_main_branch git symbolic-ref refs/remotes/origin/HEAD"
-    );
-    match run_git_command(repo_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]).await {
-        Ok(output) => {
-            let branch_ref = output.trim();
-            if let Some(branch_name) = branch_ref.strip_prefix("refs/remotes/") {
-                return Ok(branch_name.to_string());
-            }
-        }
-        Err(_) => {
-            // If remote fetch fails, fall back to candidates.
-        }
-    }
-
-    // Fallback: try common main branch names in order of preference.
-    let candidates = ["origin/main", "origin/master", "main", "master", "develop"];
-
-    for candidate in candidates {
-        log::debug!(
-            "[GIT OPERATION] git.rs detect_main_branch git rev-parse --verify {candidate}^{{}}"
-        );
-        let result = run_git_command(
-            repo_path,
-            &["rev-parse", "--verify", &format!("{candidate}^{{}}")],
-        )
-        .await;
-
-        if result.is_ok() {
-            return Ok(candidate.to_string());
-        }
-    }
-
-    // Final fallback if all else fails.
-    log::debug!("[GIT OPERATION] git.rs detect_main_branch git branch --show-current");
-    run_git_command(repo_path, &["branch", "--show-current"]).await
+    let repo_path = repo_path.to_owned();
+    blocking::unblock(move || {
+        let repository = git2::Repository::open(&repo_path)
+            .with_context(|| format!("Unable to open Git repository {}", repo_path.display()))?;
+        Ok(git_native::main_branch_ref(&repository))
+    })
+    .await
 }
 
 /// Returns the SHA where `HEAD` forked from any other ref. Use
@@ -334,39 +294,24 @@ pub async fn get_file_change_entries(
 /// yet, or the branch shares no history with main).
 #[cfg(feature = "local_fs")]
 pub async fn get_committed_branch_file_entries(repo_path: &Path) -> Result<Vec<FileChangeEntry>> {
-    let main_branch = detect_main_branch(repo_path).await?;
-    let merge_base =
-        match run_git_command(repo_path, &["merge-base", "HEAD", main_branch.trim()]).await {
-            Ok(output) => output.trim().to_string(),
-            Err(err) => {
-                log::warn!("Could not determine merge base against branch {main_branch}: {err:?}");
-                return Ok(Vec::new());
-            }
-        };
-
-    // `git diff --numstat <merge_base> HEAD` is the committed-only diff
-    // (equivalent to `main...HEAD`): no working-tree edits, no untracked files.
-    let output = run_git_command(repo_path, &["diff", "--numstat", &merge_base, "HEAD"])
-        .await
-        .unwrap_or_default();
-    let mut entries = Vec::new();
-    for line in output.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 3 {
-            entries.push(FileChangeEntry {
-                path: parts[2].to_string(),
-                // Binary files render as "-\t-\t<path>"; parse failures fall back
-                // to 0, mirroring `get_file_change_entries`.
-                additions: parts[0].parse().unwrap_or(0),
-                deletions: parts[1].parse().unwrap_or(0),
-            });
-        }
-    }
-
-    Ok(entries)
+    let repo_path = repo_path.to_owned();
+    blocking::unblock(move || {
+        let repository = git2::Repository::open(&repo_path)
+            .with_context(|| format!("Unable to open Git repository {}", repo_path.display()))?;
+        // The committed-only diff, `<merge-base>..HEAD`: no working-tree edits
+        // and no untracked files.
+        let main_branch = git_native::main_branch_ref(&repository);
+        let entries = git_native::committed_file_changes(&repository, main_branch.trim())?;
+        Ok(entries
+            .into_iter()
+            .map(|(path, additions, deletions)| FileChangeEntry {
+                path,
+                additions,
+                deletions,
+            })
+            .collect())
+    })
+    .await
 }
 
 #[cfg(not(feature = "local_fs"))]
@@ -1009,15 +954,14 @@ pub async fn get_diff_for_pr(_repo_path: &Path) -> Result<String> {
 /// Commit subject lines on the current branch since the default branch.
 #[cfg(feature = "local_fs")]
 pub async fn get_branch_commit_messages(repo_path: &Path) -> Result<Vec<String>> {
-    let base = detect_main_branch(repo_path).await?;
-    let base = base.trim();
-    let range = format!("{base}..HEAD");
-    let output = run_git_command(repo_path, &["log", &range, "--format=%s"]).await?;
-    Ok(output
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect())
+    let repo_path = repo_path.to_owned();
+    blocking::unblock(move || {
+        let repository = git2::Repository::open(&repo_path)
+            .with_context(|| format!("Unable to open Git repository {}", repo_path.display()))?;
+        let base = git_native::main_branch_ref(&repository);
+        git_native::branch_commit_summaries(&repository, base.trim())
+    })
+    .await
 }
 
 #[cfg(not(feature = "local_fs"))]

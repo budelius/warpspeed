@@ -5,7 +5,8 @@ use tempfile::TempDir;
 
 use super::{
     branch_commit_summaries, committed_file_changes, current_branch_display,
-    current_branch_name_or_head, local_branch_names, main_branch_ref,
+    current_branch_name_or_head, diff_text_between, local_branch_names, main_branch_ref,
+    resolves_to_commit,
 };
 
 /// A repository with one commit on `main`, built with git2 so the fixture
@@ -400,4 +401,54 @@ fn committed_file_changes_reports_a_rename_under_its_new_path() {
         entries[0].0, "renamed.txt",
         "the entry must carry a usable path, not numstat's \"old => new\""
     );
+}
+
+#[test]
+fn diff_text_between_renders_the_commit_range_as_a_patch() {
+    let (_dir, repository) = repo_with_one_commit();
+    let base = repository.head().unwrap().peel_to_commit().unwrap();
+    repository.branch("feature", &base, true).unwrap();
+    repository.set_head("refs/heads/feature").unwrap();
+    commit_file(&repository, "b.txt", "alpha\nbeta\n");
+
+    let patch = diff_text_between(&repository, "main", "HEAD").unwrap();
+    assert!(
+        patch.contains("b.txt"),
+        "patch should name the file: {patch}"
+    );
+    assert!(
+        patch.contains("+alpha"),
+        "patch should show additions: {patch}"
+    );
+    assert!(
+        patch.contains("+beta"),
+        "patch should show additions: {patch}"
+    );
+}
+
+/// The diff is commit-to-commit, so an uncommitted edit never appears in it.
+#[test]
+fn diff_text_between_ignores_the_working_tree() {
+    let (_dir, repository) = repo_with_one_commit();
+    let base = repository.head().unwrap().peel_to_commit().unwrap();
+    repository.branch("feature", &base, true).unwrap();
+    repository.set_head("refs/heads/feature").unwrap();
+    commit_file(&repository, "b.txt", "alpha\n");
+
+    let workdir = repository.workdir().unwrap().to_owned();
+    std::fs::write(workdir.join("b.txt"), "alpha\nuncommitted\n").unwrap();
+
+    let patch = diff_text_between(&repository, "main", "HEAD").unwrap();
+    assert!(
+        !patch.contains("uncommitted"),
+        "the working tree must not leak into the range diff: {patch}"
+    );
+}
+
+#[test]
+fn resolves_to_commit_distinguishes_present_and_absent_refs() {
+    let (_dir, repository) = repo_with_one_commit();
+    assert!(resolves_to_commit(&repository, "main"));
+    assert!(resolves_to_commit(&repository, "HEAD"));
+    assert!(!resolves_to_commit(&repository, "origin/nope"));
 }

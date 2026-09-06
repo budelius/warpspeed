@@ -210,3 +210,48 @@ pub fn committed_file_changes(
     }
     Ok(entries)
 }
+
+/// The patch text between `base` and `end_ref`, as `git diff <base>..<end_ref>`
+/// would render it.
+///
+/// Both refs are resolved and peeled to trees, so this is the commit-to-commit
+/// diff and never consults the working tree.
+pub fn diff_text_between(
+    repository: &Repository,
+    base: &str,
+    end_ref: &str,
+) -> anyhow::Result<String> {
+    let base_tree = repository
+        .revparse_single(base)
+        .and_then(|object| object.peel_to_commit())
+        .with_context(|| format!("Unable to resolve base ref {base}"))?
+        .tree()?;
+    let end_tree = repository
+        .revparse_single(end_ref)
+        .and_then(|object| object.peel_to_commit())
+        .with_context(|| format!("Unable to resolve ref {end_ref}"))?
+        .tree()?;
+
+    let diff = repository.diff_tree_to_tree(Some(&base_tree), Some(&end_tree), None)?;
+    let mut text = String::new();
+    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        match line.origin() {
+            '+' | '-' | ' ' => text.push(line.origin()),
+            _ => {}
+        }
+        text.push_str(&String::from_utf8_lossy(line.content()));
+        true
+    })?;
+    Ok(text)
+}
+
+/// Whether `reference` resolves to a commit in this repository.
+///
+/// Matches `git rev-parse --verify <ref>`, which is how callers decide between
+/// a remote-tracking ref and `HEAD`.
+pub fn resolves_to_commit(repository: &Repository, reference: &str) -> bool {
+    repository
+        .revparse_single(reference)
+        .and_then(|object| object.peel_to_commit())
+        .is_ok()
+}

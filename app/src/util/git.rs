@@ -921,29 +921,33 @@ pub fn is_gh_missing_error(error_msg: &str) -> bool {
 /// truncated for AI token limits.
 #[cfg(feature = "local_fs")]
 pub async fn get_diff_for_pr(repo_path: &Path) -> Result<String> {
-    let base = detect_main_branch(repo_path).await?;
-    let base = base.trim();
-    let current = detect_current_branch(repo_path).await?;
-    let remote_ref = format!("origin/{current}");
+    let repo_path = repo_path.to_owned();
+    blocking::unblock(move || {
+        let repository = git2::Repository::open(&repo_path)
+            .with_context(|| format!("Unable to open Git repository {}", repo_path.display()))?;
+        let base = git_native::main_branch_ref(&repository);
+        let current = git_native::current_branch_name_or_head(&repository)?;
 
-    let end_ref = if run_git_command(repo_path, &["rev-parse", "--verify", &remote_ref])
-        .await
-        .is_ok()
-    {
-        remote_ref
-    } else {
-        "HEAD".to_string()
-    };
+        // Prefer what the remote already has for this branch, so the diff
+        // matches what a reviewer would see; fall back to HEAD when the branch
+        // has never been pushed.
+        let remote_ref = format!("origin/{current}");
+        let end_ref = if git_native::resolves_to_commit(&repository, &remote_ref) {
+            remote_ref
+        } else {
+            "HEAD".to_string()
+        };
 
-    let range = format!("{base}..{end_ref}");
-    let mut diff = run_git_command(repo_path, &["diff", &range]).await?;
-    if diff.len() > MAX_DIFF_CHARS_FOR_AI {
-        diff = format!(
-            "{}\n... (diff truncated)",
-            truncate_on_char_boundary(&diff, MAX_DIFF_CHARS_FOR_AI)
-        );
-    }
-    Ok(diff)
+        let mut diff = git_native::diff_text_between(&repository, base.trim(), &end_ref)?;
+        if diff.len() > MAX_DIFF_CHARS_FOR_AI {
+            diff = format!(
+                "{}\n... (diff truncated)",
+                truncate_on_char_boundary(&diff, MAX_DIFF_CHARS_FOR_AI)
+            );
+        }
+        Ok(diff)
+    })
+    .await
 }
 
 #[cfg(not(feature = "local_fs"))]

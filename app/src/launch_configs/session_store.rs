@@ -7,14 +7,17 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result, bail};
+#[cfg(feature = "local_fs")]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::ai::blocklist::SerializedBlockListItem;
+#[cfg(feature = "local_fs")]
+use crate::app_state::LeafSnapshot;
 use crate::app_state::{
-    LeafContents, LeafSnapshot, PaneNodeSnapshot, PaneUuid, TabSnapshot, TerminalPaneSnapshot,
-    WindowSnapshot,
+    LeafContents, PaneNodeSnapshot, PaneUuid, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::terminal::CLIAgent;
@@ -889,6 +892,12 @@ fn release_owned_identities(node: &mut PaneNodeSnapshot) {
         // a session, a conversation -- must be given its own arm above
         // deliberately: falling through here hands the clone the original's
         // identity, and persisted blocks are keyed by pane uuid.
+        //
+        // `LeafContents::CodeReview`'s `CodeReviewPaneSnapshot::Local` already
+        // falls through here carrying an owned `terminal_uuid`. That is safe
+        // only by accident: `pane_group::mod.rs` rejects code-review panes on
+        // restore, so the copied uuid never binds a live pane. Restoring them
+        // again would make this arm a bug.
         PaneNodeSnapshot::Leaf(_) => {}
     }
 }
@@ -959,20 +968,15 @@ fn clone_checkpoints_in_dir(
     Ok(sources)
 }
 
+// The sole caller lives in `clone_session`, which is itself `local_fs`-only, so
+// a `not(local_fs)` arm here would be unreachable rather than merely unused.
+#[cfg(feature = "local_fs")]
 pub(crate) fn clone_checkpoints(
     from: &LaunchConfigWindowSource,
     to_path: &Path,
     to_config_name: &str,
 ) -> Result<Vec<LaunchConfigWindowSource>> {
-    #[cfg(feature = "local_fs")]
-    {
-        clone_checkpoints_in_dir(&sessions_dir(), from, to_path, to_config_name)
-    }
-    #[cfg(not(feature = "local_fs"))]
-    {
-        let _ = (from, to_path, to_config_name);
-        bail!("Cloning a session requires local filesystem support")
-    }
+    clone_checkpoints_in_dir(&sessions_dir(), from, to_path, to_config_name)
 }
 
 pub(crate) fn first_source(summary: &StoredSessionSummary) -> Option<&LaunchConfigWindowSource> {

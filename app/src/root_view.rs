@@ -98,6 +98,8 @@ use crate::terminal::view::{TerminalAction, cell_size_and_padding};
 use crate::themes::onboarding_theme_picker_themes;
 use crate::themes::theme::{AnsiColorIdentifier, Blend, Fill, ThemeKind, WarpThemeConfig};
 use crate::uri::{OpenMCPSettingsArgs, OpenSettingsArgs, url_reports_checkout_success};
+// Only the `local_fs` session-lease path resolves a template through the config.
+#[cfg(feature = "local_fs")]
 use crate::user_config::WarpConfig;
 use crate::util::bindings::{self, is_binding_pty_compliant};
 use crate::util::traffic_lights::{TrafficLightData, TrafficLightMouseStates, traffic_light_data};
@@ -1166,8 +1168,10 @@ pub(crate) fn open_window_from_template(
 /// A session another process owns cannot be opened here, but the user still has
 /// a way forward. Offer the choices in the active window; with no window to host
 /// a dialog, open the template rather than doing nothing at all.
-// Only ever reached from claiming a session lease, which is `local_fs`-only.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
+// Only ever reached from claiming a session lease, which is `local_fs`-only,
+// and its `SessionOwner` parameter names a module that does not exist without
+// `local_fs`.
+#[cfg(feature = "local_fs")]
 fn offer_session_in_use_choices(
     name: String,
     source: launch_config::LaunchConfigWindowSource,

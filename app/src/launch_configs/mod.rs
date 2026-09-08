@@ -6,6 +6,9 @@
 pub mod clone_session;
 pub mod launch_config;
 pub mod save_modal;
+// The dialog names `session_configs::SessionOwner`, and `session_configs` only
+// exists under `local_fs`, so on wasm this module would not compile at all.
+#[cfg(feature = "local_fs")]
 pub mod session_in_use_dialog;
 pub mod session_store;
 
@@ -13,5 +16,13 @@ use warpui::AppContext;
 
 pub fn init(app: &mut AppContext) {
     save_modal::init(app);
+    init_session_in_use_dialog(app);
+}
+
+#[cfg(feature = "local_fs")]
+fn init_session_in_use_dialog(app: &mut AppContext) {
     session_in_use_dialog::init(app);
 }
+
+#[cfg(not(feature = "local_fs"))]
+fn init_session_in_use_dialog(_app: &mut AppContext) {}

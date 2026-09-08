@@ -287,6 +287,7 @@ use crate::env_vars::manager::{EnvVarCollectionManager, EnvVarCollectionSource};
 use crate::experiments::{BlockOnboarding, Experiment};
 use crate::launch_configs::launch_config::{LaunchConfigWindowSource, WindowTemplate};
 use crate::launch_configs::save_modal::{LaunchConfigModalEvent, LaunchConfigSaveModal};
+#[cfg(feature = "local_fs")]
 use crate::launch_configs::session_in_use_dialog::{SessionInUseDialog, SessionInUseEvent};
 use crate::menu::{
     Event as MenuEvent, MENU_VERTICAL_PADDING, Menu, MenuItem, MenuItemFields, MenuSelectionSource,
@@ -1274,8 +1275,10 @@ pub struct Workspace {
     tab_config_action_sidecar_item: Option<SidecarItemKind>,
     tab_config_action_sidecar_mouse_states: crate::tab_configs::action_sidecar::SidecarMouseStates,
     remove_tab_config_confirmation_dialog: ViewHandle<RemoveTabConfigConfirmationDialog>,
+    #[cfg(feature = "local_fs")]
     session_in_use_dialog: ViewHandle<SessionInUseDialog>,
     /// What the dialog acts on when the user picks Clone or Open from Template.
+    #[cfg(feature = "local_fs")]
     session_in_use_request: Option<SessionInUseRequest>,
     handoff_environment_creation_modal: Option<ViewHandle<HandoffEnvironmentCreationModal>>,
     /// Workspace-level modal hosting `AuthSecretFtuxView` for the
@@ -1284,6 +1287,7 @@ pub struct Workspace {
     create_auth_secret_modal: Option<ViewHandle<Modal<AuthSecretFtuxView>>>,
 }
 
+#[cfg(feature = "local_fs")]
 struct SessionInUseRequest {
     source: LaunchConfigWindowSource,
     /// `None` when the session's config could not be resolved to a template --
@@ -2414,6 +2418,7 @@ impl Workspace {
         report_error!("Cannot delete a tab config from the web");
     }
 
+    #[cfg(feature = "local_fs")]
     fn build_session_in_use_dialog(ctx: &mut ViewContext<Self>) -> ViewHandle<SessionInUseDialog> {
         let dialog = ctx.add_typed_action_view(SessionInUseDialog::new);
         ctx.subscribe_to_view(&dialog, |me, _, event, ctx| {
@@ -2422,6 +2427,7 @@ impl Workspace {
         dialog
     }
 
+    #[cfg(feature = "local_fs")]
     fn handle_session_in_use_event(
         &mut self,
         event: &SessionInUseEvent,
@@ -2466,17 +2472,10 @@ impl Workspace {
         });
     }
 
-    #[cfg(not(feature = "local_fs"))]
-    fn clone_session_in_use(
-        &mut self,
-        _source: &LaunchConfigWindowSource,
-        _ctx: &mut ViewContext<Self>,
-    ) {
-        report_error!("Cannot clone a session config from the web");
-    }
-
-    // Only ever reached from claiming a session lease, which is `local_fs`-only.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    // Only ever reached from claiming a session lease, which is `local_fs`-only,
+    // and its `SessionOwner` parameter names a module that does not exist
+    // without `local_fs`.
+    #[cfg(feature = "local_fs")]
     pub(crate) fn open_session_in_use_dialog(
         &mut self,
         name: String,
@@ -3807,7 +3806,9 @@ impl Workspace {
             tab_config_action_sidecar_mouse_states: Default::default(),
             remove_tab_config_confirmation_dialog:
                 Self::build_remove_tab_config_confirmation_dialog(ctx),
+            #[cfg(feature = "local_fs")]
             session_in_use_dialog: Self::build_session_in_use_dialog(ctx),
+            #[cfg(feature = "local_fs")]
             session_in_use_request: None,
             handoff_environment_creation_modal: None,
             create_auth_secret_modal: None,
@@ -28869,6 +28870,7 @@ impl View for Workspace {
             );
         }
 
+        #[cfg(feature = "local_fs")]
         if self.current_workspace_state.is_session_in_use_dialog_open {
             stack.add_positioned_overlay_child(
                 ChildView::new(&self.session_in_use_dialog).finish(),

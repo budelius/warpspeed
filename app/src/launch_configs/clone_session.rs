@@ -3,6 +3,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use walkdir::WalkDir;
 
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::launch_configs::session_store;
@@ -29,12 +30,19 @@ const MAX_CLONE_SUFFIX: usize = 100;
 /// The session ids already spoken for in this directory. Ids are normalized, so
 /// distinct file names can name the same session: `OBACHAN 2.toml` already holds
 /// `obachan-2`, which is the id `OBACHAN-2.toml` would take.
+///
+/// The walk has to match `load_session_configs`, which recurses: a config in a
+/// subdirectory is a live session, and missing it would let the clone take an id
+/// whose checkpoint directory and lease already belong to that session.
 fn taken_session_ids(session_configs_dir: &Path) -> HashSet<String> {
-    let Ok(entries) = std::fs::read_dir(session_configs_dir) else {
+    if !session_configs_dir.is_dir() {
         return HashSet::new();
-    };
-    entries
+    }
+    WalkDir::new(session_configs_dir)
+        .follow_links(true)
+        .into_iter()
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
         .filter_map(|entry| {
             let path = entry.path();
             if path.extension()? != "toml" {

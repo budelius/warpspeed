@@ -5,10 +5,15 @@
 //! have remotes on two different forges, and this one does.
 //!
 //! Landing in stages, per `docs/superpowers/specs/2026-09-08-forge-layer-design.md`.
-//! Stage one is this file: the types and remote-URL parsing, which are pure and
-//! fully tested but have no caller yet — the first one arrives with the GitHub
-//! client in stage four, when `gh pr view` is replaced. Drop the `dead_code`
-//! allowance then.
+//! Built so far: these types and remote-URL parsing, the credential chain
+//! ([`credentials`], [`os_credentials`]), host detection ([`detect`]), the
+//! client seam ([`client`]) with a GitHub implementation ([`github`]), and the
+//! HTTP transport behind them ([`transport`]).
+//!
+//! Nothing outside this module calls any of it yet. The switchover replaces
+//! `gh pr view` in `GitHubRepoModel`, which is the point at which behavior
+//! changes for existing users, so it lands separately and with the `gh`
+//! fallback still in place. Drop the `dead_code` allowance then.
 #![allow(dead_code)]
 
 pub mod client;
@@ -16,6 +21,7 @@ pub mod credentials;
 pub mod detect;
 pub mod github;
 pub mod os_credentials;
+pub mod transport;
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]

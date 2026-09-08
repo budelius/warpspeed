@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use super::{
@@ -7,10 +8,12 @@ use super::{
     save_windows_to_dir,
 };
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::SerializedBlockListItem;
 use crate::app_state::{
-    CliAgentResumeDescriptor, LeafContents, LeafSnapshot, PaneNodeSnapshot, PaneUuid, TabSnapshot,
-    TerminalPaneSnapshot, WindowSnapshot,
+    AmbientAgentPaneSnapshot, BranchSnapshot, CliAgentResumeDescriptor, LeafContents, LeafSnapshot,
+    PaneFlex, PaneNodeSnapshot, PaneUuid, SplitDirection, TabSnapshot, TerminalPaneSnapshot,
+    WindowSnapshot,
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::tab::SelectedTabColor;
@@ -414,4 +417,102 @@ fn cloning_registers_the_clone_in_the_catalog() {
     assert!(names.contains(&"OBACHAN"));
     assert!(names.contains(&"OBACHAN (2)"));
     assert_eq!(catalog.len(), 2);
+}
+
+fn ambient_task_id() -> AmbientAgentTaskId {
+    AmbientAgentTaskId::from_str("2f2b0a5c-6f2f-4a3b-9a1b-0f8f8b1c2d3e")
+        .expect("the fixture task id should parse")
+}
+
+/// A window whose tab root is a split rather than a bare leaf, with one
+/// terminal pane and one ambient agent pane. Both the `Branch` recursion and a
+/// non-terminal leaf go unexercised by the single-leaf fixture.
+fn split_window(source: LaunchConfigWindowSource) -> WindowSnapshot {
+    let mut window = window(source);
+    let terminal = window.tabs[0].root.clone();
+    window.tabs[0].root = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            (PaneFlex(1.0), terminal),
+            (
+                PaneFlex(1.0),
+                PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    is_focused: false,
+                    custom_vertical_tabs_title: None,
+                    contents: LeafContents::AmbientAgent(AmbientAgentPaneSnapshot {
+                        uuid: vec![4, 5, 6],
+                        task_id: Some(ambient_task_id()),
+                    }),
+                }),
+            ),
+        ],
+    });
+    window
+}
+
+fn split_panes(window: &WindowSnapshot) -> (&TerminalPaneSnapshot, &AmbientAgentPaneSnapshot) {
+    let PaneNodeSnapshot::Branch(branch) = &window.tabs[0].root else {
+        panic!("the split fixture window has a branch root");
+    };
+    let mut terminal = None;
+    let mut ambient = None;
+    for (_, child) in &branch.children {
+        let PaneNodeSnapshot::Leaf(leaf) = child else {
+            panic!("the split fixture branch holds only leaves");
+        };
+        match &leaf.contents {
+            LeafContents::Terminal(pane) => terminal = Some(pane),
+            LeafContents::AmbientAgent(pane) => ambient = Some(pane),
+            other => panic!("unexpected leaf contents in the split fixture: {other:?}"),
+        }
+    }
+    (
+        terminal.expect("the split fixture has a terminal pane"),
+        ambient.expect("the split fixture has an ambient agent pane"),
+    )
+}
+
+#[test]
+fn cloning_releases_identities_inside_a_split_including_the_ambient_agent_pane() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = session_source("/cfg/OBACHAN.toml", 1, 0);
+    save_to_dir(
+        dir.path(),
+        &source,
+        &split_window(source.clone()),
+        &HashMap::new(),
+        false,
+        1_767_225_600,
+    )
+    .expect("the source checkpoint should be written");
+
+    let cloned = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect("cloning should succeed");
+
+    let restored = load_from_dir(dir.path(), &cloned[0])
+        .expect("the clone should load")
+        .expect("the clone should exist");
+    let original = load_from_dir(dir.path(), &source)
+        .expect("the original should load")
+        .expect("the original should exist");
+    let (clone_terminal, clone_ambient) = split_panes(&restored.window);
+    let (original_terminal, original_ambient) = split_panes(&original.window);
+
+    assert_ne!(clone_terminal.uuid, original_terminal.uuid);
+    assert!(!clone_terminal.uuid.is_empty());
+    assert_ne!(
+        clone_ambient.uuid, original_ambient.uuid,
+        "the clone must not share the original's ambient pane uuid: block lists are keyed by it"
+    );
+    assert!(!clone_ambient.uuid.is_empty());
+    assert_eq!(
+        clone_ambient.task_id, None,
+        "the clone must start its own ambient conversation, not join the original's"
+    );
+    assert_eq!(original_ambient.task_id, Some(ambient_task_id()));
 }

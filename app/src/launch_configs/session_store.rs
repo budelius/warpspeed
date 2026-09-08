@@ -874,6 +874,21 @@ fn release_owned_identities(node: &mut PaneNodeSnapshot) {
             terminal.conversation_ids_to_restore.clear();
             terminal.active_conversation_id = None;
         }
+        PaneNodeSnapshot::Leaf(LeafSnapshot {
+            contents: LeafContents::AmbientAgent(ambient),
+            ..
+        }) => {
+            ambient.uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
+            // A restored ambient pane with a task id attaches to that task's
+            // existing conversation; `None` restores as a new cloud
+            // conversation, which is what the clone dialog promises.
+            ambient.task_id = None;
+        }
+        // Every other leaf is content the clone may copy verbatim. A future
+        // leaf variant that carries an id the live window owns -- a pane uuid,
+        // a session, a conversation -- must be given its own arm above
+        // deliberately: falling through here hands the clone the original's
+        // identity, and persisted blocks are keyed by pane uuid.
         PaneNodeSnapshot::Leaf(_) => {}
     }
 }

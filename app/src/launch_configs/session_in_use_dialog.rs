@@ -59,7 +59,6 @@ pub(crate) struct SessionInUseDialog {
 }
 
 impl SessionInUseDialog {
-    #[expect(dead_code, reason = "hosted by the workspace in a later task")]
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
         let cancel_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("Cancel", NakedTheme).on_click(|ctx| {
@@ -89,7 +88,6 @@ impl SessionInUseDialog {
         }
     }
 
-    #[expect(dead_code, reason = "hosted by the workspace in a later task")]
     pub fn set_session(&mut self, name: String, owner: Option<SessionOwner>) {
         self.session_name = name;
         self.owner = owner;

@@ -13,10 +13,6 @@ pub(crate) struct CloneIdentity {
     pub name: String,
 }
 
-#[expect(
-    dead_code,
-    reason = "consumed by the session-in-use dialog in a later task"
-)]
 pub(crate) struct ClonedSession {
     pub name: String,
     pub config_path: PathBuf,
@@ -66,10 +62,6 @@ fn clone_config_file(
     Ok(path)
 }
 
-#[expect(
-    dead_code,
-    reason = "consumed by the session-in-use dialog in a later task"
-)]
 pub(crate) fn clone_session(from: &LaunchConfigWindowSource) -> Result<ClonedSession> {
     let session_configs_dir = crate::user_config::session_configs_dir();
     let from_stem = from

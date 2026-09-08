@@ -287,6 +287,7 @@ use crate::env_vars::manager::{EnvVarCollectionManager, EnvVarCollectionSource};
 use crate::experiments::{BlockOnboarding, Experiment};
 use crate::launch_configs::launch_config::{LaunchConfigWindowSource, WindowTemplate};
 use crate::launch_configs::save_modal::{LaunchConfigModalEvent, LaunchConfigSaveModal};
+use crate::launch_configs::session_in_use_dialog::{SessionInUseDialog, SessionInUseEvent};
 use crate::menu::{
     Event as MenuEvent, MENU_VERTICAL_PADDING, Menu, MenuItem, MenuItemFields, MenuSelectionSource,
     MenuVariant,
@@ -1273,11 +1274,19 @@ pub struct Workspace {
     tab_config_action_sidecar_item: Option<SidecarItemKind>,
     tab_config_action_sidecar_mouse_states: crate::tab_configs::action_sidecar::SidecarMouseStates,
     remove_tab_config_confirmation_dialog: ViewHandle<RemoveTabConfigConfirmationDialog>,
+    session_in_use_dialog: ViewHandle<SessionInUseDialog>,
+    /// What the dialog acts on when the user picks Clone or Open from Template.
+    session_in_use_request: Option<SessionInUseRequest>,
     handoff_environment_creation_modal: Option<ViewHandle<HandoffEnvironmentCreationModal>>,
     /// Workspace-level modal hosting `AuthSecretFtuxView` for the
     /// orchestration cards' "New API key…" flow. Cloud mode renders the
     /// FTUX view inline and does not use this.
     create_auth_secret_modal: Option<ViewHandle<Modal<AuthSecretFtuxView>>>,
+}
+
+struct SessionInUseRequest {
+    source: LaunchConfigWindowSource,
+    window_template: WindowTemplate,
 }
 
 impl Workspace {
@@ -2400,6 +2409,85 @@ impl Workspace {
         _ctx: &mut ViewContext<Self>,
     ) {
         report_error!("Cannot delete a tab config from the web");
+    }
+
+    fn build_session_in_use_dialog(ctx: &mut ViewContext<Self>) -> ViewHandle<SessionInUseDialog> {
+        let dialog = ctx.add_typed_action_view(SessionInUseDialog::new);
+        ctx.subscribe_to_view(&dialog, |me, _, event, ctx| {
+            me.handle_session_in_use_event(event, ctx);
+        });
+        dialog
+    }
+
+    fn handle_session_in_use_event(
+        &mut self,
+        event: &SessionInUseEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.current_workspace_state.is_session_in_use_dialog_open = false;
+        ctx.notify();
+        let Some(request) = self.session_in_use_request.take() else {
+            return;
+        };
+        match event {
+            SessionInUseEvent::Cancel => {}
+            SessionInUseEvent::OpenFromTemplate => {
+                crate::root_view::open_window_from_template(request.window_template, ctx);
+            }
+            SessionInUseEvent::Clone => self.clone_session_in_use(&request.source, ctx),
+        }
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn clone_session_in_use(
+        &mut self,
+        source: &LaunchConfigWindowSource,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match crate::launch_configs::clone_session::clone_session(source) {
+            Ok(cloned) => crate::root_view::open_cloned_session(cloned, ctx),
+            Err(error) => {
+                report_error!(error.context("Failed to clone session config"));
+                self.toast_stack.update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::error("Failed to clone the session.".to_owned()),
+                        ctx,
+                    );
+                });
+            }
+        }
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn clone_session_in_use(
+        &mut self,
+        _source: &LaunchConfigWindowSource,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+        report_error!("Cannot clone a session config from the web");
+    }
+
+    #[expect(dead_code, reason = "called by root_view in a later task")]
+    pub(crate) fn open_session_in_use_dialog(
+        &mut self,
+        name: String,
+        source: LaunchConfigWindowSource,
+        window_template: WindowTemplate,
+        owner: Option<crate::session_configs::SessionOwner>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.close_palette(true, None, ctx);
+        self.session_in_use_request = Some(SessionInUseRequest {
+            source,
+            window_template,
+        });
+        self.session_in_use_dialog.update(ctx, |dialog, ctx| {
+            dialog.set_session(name, owner);
+            ctx.notify();
+        });
+        self.current_workspace_state.is_session_in_use_dialog_open = true;
+        ctx.focus(&self.session_in_use_dialog);
+        ctx.notify();
     }
 
     fn handle_session_config_modal_event(
@@ -3710,6 +3798,8 @@ impl Workspace {
             tab_config_action_sidecar_mouse_states: Default::default(),
             remove_tab_config_confirmation_dialog:
                 Self::build_remove_tab_config_confirmation_dialog(ctx),
+            session_in_use_dialog: Self::build_session_in_use_dialog(ctx),
+            session_in_use_request: None,
             handoff_environment_creation_modal: None,
             create_auth_secret_modal: None,
         };
@@ -28761,6 +28851,18 @@ impl View for Workspace {
         {
             stack.add_positioned_overlay_child(
                 ChildView::new(&self.remove_tab_config_confirmation_dialog).finish(),
+                OffsetPositioning::offset_from_parent(
+                    Vector2F::zero(),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::Center,
+                    ChildAnchor::Center,
+                ),
+            );
+        }
+
+        if self.current_workspace_state.is_session_in_use_dialog_open {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.session_in_use_dialog).finish(),
                 OffsetPositioning::offset_from_parent(
                     Vector2F::zero(),
                     ParentOffsetBounds::WindowByPosition,

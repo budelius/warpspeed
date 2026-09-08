@@ -1167,6 +1167,63 @@ pub(crate) fn open_new_with_workspace_source(
     })
 }
 
+/// Opens a launch config window that claims no lease and writes no checkpoints,
+/// so it cannot contend with the process that owns the session.
+pub(crate) fn open_window_from_template(
+    window_template: launch_config::WindowTemplate,
+    ctx: &mut AppContext,
+) {
+    open_new_with_workspace_source(
+        NewWorkspaceSource::FromTemplate {
+            window_template,
+            launch_config_source: None,
+        },
+        ctx,
+    );
+}
+
+pub(crate) fn open_cloned_session(
+    cloned: crate::launch_configs::clone_session::ClonedSession,
+    ctx: &mut AppContext,
+) {
+    let name = cloned.name;
+    let config_path = cloned.config_path;
+    for source in cloned.windows {
+        #[cfg(feature = "local_fs")]
+        match crate::session_configs::claim_session(&source) {
+            Ok(crate::session_configs::SessionClaim::Claimed) => {}
+            Ok(crate::session_configs::SessionClaim::HeldBy(_)) => {
+                safe_warn!(
+                    safe: ("A freshly cloned session was already claimed"),
+                    full: ("A freshly cloned session {name:?} was already claimed: {source:?}")
+                );
+                continue;
+            }
+            Err(error) => {
+                report_error!(error.context("Failed to claim the cloned session"));
+                continue;
+            }
+        }
+
+        match crate::launch_configs::session_store::load(&source) {
+            Ok(Some(session)) => {
+                crate::launch_configs::session_store::begin_run(&source);
+                open_new_with_workspace_source(
+                    restored_launch_config_workspace_source(session, ctx),
+                    ctx,
+                );
+            }
+            Ok(None) => safe_warn!(
+                safe: ("A cloned session has no checkpoint"),
+                full: (
+                    "Cloned session {name:?} at {config_path:?} has no checkpoint: {source:?}"
+                )
+            ),
+            Err(error) => report_error!(error.context("Failed to open the cloned session")),
+        }
+    }
+}
+
 pub(crate) fn open_new_from_path(
     arg: &OpenPath,
     ctx: &mut AppContext,

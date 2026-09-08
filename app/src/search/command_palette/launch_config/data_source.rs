@@ -204,10 +204,9 @@ mod full_text_searcher {
     use crate::search::searcher::{AsyncSearcher, DEFAULT_MEMORY_BUDGET, SCORE_CONVERSION_FACTOR};
     use crate::user_config::WarpConfig;
 
-    // The name of the launch configs are duplicated to ensure that the searcher
-    // hashes the name to uniquely identify the launch config.
-    // Also, it makes sense from a schema POV: the name is the identifying key.
-    // TODO: Add a proper Launch Config ID
+    // `name` is the only field matched on; `name_id` identifies which config a
+    // hit belongs to and carries `config_key`'s source key, not the name, so two
+    // configs sharing a name -- a YAML and a session config, say -- stay distinct.
     define_search_schema!(
         schema_name: LAUNCH_CONFIG_SCHEMA,
         config_name: ConfigSearcherConfig,

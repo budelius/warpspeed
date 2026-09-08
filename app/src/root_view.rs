@@ -589,13 +589,10 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
         match crate::session_configs::claim_session(source) {
             Ok(crate::session_configs::SessionClaim::Claimed) => {}
             Ok(crate::session_configs::SessionClaim::HeldBy(owner)) => {
-                let Some(window_template) = arg.launch_config.windows.first().cloned() else {
-                    return;
-                };
                 offer_session_in_use_choices(
                     arg.launch_config.name.clone(),
                     source.clone(),
-                    window_template,
+                    arg.launch_config.windows.first().cloned(),
                     owner,
                     ctx,
                 );
@@ -706,20 +703,16 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
         match crate::session_configs::claim_session(source) {
             Ok(crate::session_configs::SessionClaim::Claimed) => {}
             Ok(crate::session_configs::SessionClaim::HeldBy(owner)) => {
+                // The template is a bonus, not a precondition: the config may
+                // have been renamed since the checkpoint was written, or fail
+                // validation and so be missing from the loaded configs while its
+                // catalog entry is still offered in the palette. Cloning needs
+                // only the source, so the dialog is still the right answer -- it
+                // just drops the button it cannot honor.
                 let window_template = WarpConfig::as_ref(ctx)
                     .launch_and_session_configs()
                     .find(|config| config.window_source(0).as_ref() == Some(source))
                     .and_then(|config| config.windows.first().cloned());
-                let Some(window_template) = window_template else {
-                    safe_warn!(
-                        safe: ("Stored session is already open in another process"),
-                        full: (
-                            "Stored session {:?} is already open in another process",
-                            source.session_id()
-                        )
-                    );
-                    return;
-                };
                 offer_session_in_use_choices(
                     arg.summary.name().to_owned(),
                     source.clone(),
@@ -1171,32 +1164,48 @@ pub(crate) fn open_window_from_template(
 }
 
 /// A session another process owns cannot be opened here, but the user still has
-/// two ways forward. Offer them in the active window; with no window to host a
-/// dialog, open the template rather than doing nothing at all.
+/// a way forward. Offer the choices in the active window; with no window to host
+/// a dialog, open the template rather than doing nothing at all.
+// Only ever reached from claiming a session lease, which is `local_fs`-only.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn offer_session_in_use_choices(
     name: String,
     source: launch_config::LaunchConfigWindowSource,
-    window_template: launch_config::WindowTemplate,
+    window_template: Option<launch_config::WindowTemplate>,
     owner: Option<crate::session_configs::SessionOwner>,
     ctx: &mut AppContext,
 ) {
-    match active_workspace(ctx) {
-        Some(workspace) => workspace.update(ctx, |workspace, ctx| {
+    match (active_workspace(ctx), window_template) {
+        (Some(workspace), window_template) => workspace.update(ctx, |workspace, ctx| {
             workspace.open_session_in_use_dialog(name, source, window_template, owner, ctx);
         }),
-        None => open_window_from_template(window_template, ctx),
+        (None, Some(window_template)) => open_window_from_template(window_template, ctx),
+        // Nothing to host a dialog and nothing to open from. Saying so in the
+        // log is all that is left.
+        (None, None) => safe_warn!(
+            safe: ("Session is already open in another process"),
+            full: (
+                "Session {:?} is already open in another process, with no window to offer a choice in",
+                source.session_id()
+            )
+        ),
     }
 }
 
+/// Opens every window of a freshly cloned session. Each failure is logged here,
+/// where the redacting macros can carry the session name and path; the returned
+/// error carries none of that, and exists only so the caller can tell the user
+/// their Clone did not land -- the same way a failure to clone at all does.
+#[cfg(feature = "local_fs")]
 pub(crate) fn open_cloned_session(
     cloned: crate::launch_configs::clone_session::ClonedSession,
     ctx: &mut AppContext,
-) {
+) -> anyhow::Result<()> {
     let name = cloned.name;
     let config_path = cloned.config_path;
+    let mut failed_windows = 0_usize;
     for source in cloned.windows {
         let window_index = source.window_index;
-        #[cfg(feature = "local_fs")]
         match crate::session_configs::claim_session(&source) {
             Ok(crate::session_configs::SessionClaim::Claimed) => {}
             Ok(crate::session_configs::SessionClaim::HeldBy(_)) => {
@@ -1206,10 +1215,12 @@ pub(crate) fn open_cloned_session(
                         "A freshly cloned session was already claimed: {name:?} window {window_index} at {config_path:?}"
                     )
                 );
+                failed_windows += 1;
                 continue;
             }
             Err(error) => {
                 report_error!(error.context("Failed to claim the cloned session"));
+                failed_windows += 1;
                 continue;
             }
         }
@@ -1222,15 +1233,26 @@ pub(crate) fn open_cloned_session(
                     ctx,
                 );
             }
-            Ok(None) => safe_warn!(
-                safe: ("A cloned session window has no checkpoint"),
-                full: (
-                    "A cloned session window has no checkpoint: {name:?} window {window_index} at {config_path:?}"
-                )
-            ),
-            Err(error) => report_error!(error.context("Failed to open the cloned session")),
+            Ok(None) => {
+                safe_warn!(
+                    safe: ("A cloned session window has no checkpoint"),
+                    full: (
+                        "A cloned session window has no checkpoint: {name:?} window {window_index} at {config_path:?}"
+                    )
+                );
+                failed_windows += 1;
+            }
+            Err(error) => {
+                report_error!(error.context("Failed to open the cloned session"));
+                failed_windows += 1;
+            }
         }
     }
+
+    if failed_windows > 0 {
+        anyhow::bail!("Failed to open {failed_windows} window(s) of a cloned session");
+    }
+    Ok(())
 }
 
 pub(crate) fn open_new_from_path(

@@ -1286,7 +1286,10 @@ pub struct Workspace {
 
 struct SessionInUseRequest {
     source: LaunchConfigWindowSource,
-    window_template: WindowTemplate,
+    /// `None` when the session's config could not be resolved to a template --
+    /// renamed, or invalid. Cloning still works; the dialog hides the button
+    /// that would not.
+    window_template: Option<WindowTemplate>,
 }
 
 impl Workspace {
@@ -2432,7 +2435,9 @@ impl Workspace {
         match event {
             SessionInUseEvent::Cancel => {}
             SessionInUseEvent::OpenFromTemplate => {
-                crate::root_view::open_window_from_template(request.window_template, ctx);
+                if let Some(window_template) = request.window_template {
+                    crate::root_view::open_window_from_template(window_template, ctx);
+                }
             }
             SessionInUseEvent::Clone => self.clone_session_in_use(&request.source, ctx),
         }
@@ -2444,18 +2449,21 @@ impl Workspace {
         source: &LaunchConfigWindowSource,
         ctx: &mut ViewContext<Self>,
     ) {
-        match crate::launch_configs::clone_session::clone_session(source) {
-            Ok(cloned) => crate::root_view::open_cloned_session(cloned, ctx),
+        // One user action, one convention: whichever half of the clone fails,
+        // the user is told. `open_cloned_session` has already logged the detail.
+        let message = match crate::launch_configs::clone_session::clone_session(source) {
+            Ok(cloned) => match crate::root_view::open_cloned_session(cloned, ctx) {
+                Ok(()) => return,
+                Err(_) => "Failed to open the cloned session.",
+            },
             Err(error) => {
                 report_error!(error.context("Failed to clone session config"));
-                self.toast_stack.update(ctx, |toast_stack, ctx| {
-                    toast_stack.add_ephemeral_toast(
-                        DismissibleToast::error("Failed to clone the session.".to_owned()),
-                        ctx,
-                    );
-                });
+                "Failed to clone the session."
             }
-        }
+        };
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            toast_stack.add_ephemeral_toast(DismissibleToast::error(message.to_owned()), ctx);
+        });
     }
 
     #[cfg(not(feature = "local_fs"))]
@@ -2467,22 +2475,24 @@ impl Workspace {
         report_error!("Cannot clone a session config from the web");
     }
 
+    // Only ever reached from claiming a session lease, which is `local_fs`-only.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) fn open_session_in_use_dialog(
         &mut self,
         name: String,
         source: LaunchConfigWindowSource,
-        window_template: WindowTemplate,
+        window_template: Option<WindowTemplate>,
         owner: Option<crate::session_configs::SessionOwner>,
         ctx: &mut ViewContext<Self>,
     ) {
         self.close_palette(true, None, ctx);
+        self.session_in_use_dialog.update(ctx, |dialog, ctx| {
+            dialog.set_session(name, owner, window_template.as_ref());
+            ctx.notify();
+        });
         self.session_in_use_request = Some(SessionInUseRequest {
             source,
             window_template,
-        });
-        self.session_in_use_dialog.update(ctx, |dialog, ctx| {
-            dialog.set_session(name, owner);
-            ctx.notify();
         });
         self.current_workspace_state.is_session_in_use_dialog_open = true;
         ctx.focus(&self.session_in_use_dialog);

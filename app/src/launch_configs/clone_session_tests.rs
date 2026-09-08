@@ -56,3 +56,32 @@ fn copying_rewrites_the_identity_and_keeps_everything_else() {
     assert!(contents.contains("config = \"sessions/OBACHAN/05-shield.toml\""));
     assert!(contents.contains("# keep me"));
 }
+
+#[test]
+fn an_identity_whose_session_id_is_already_taken_is_skipped() {
+    let dir = tempfile::tempdir().expect("config directory should be created");
+    write_config(dir.path(), "OBACHAN", "obachan", "OBACHAN");
+    // A different file name, but the same normalized session id `OBACHAN-2.toml`
+    // would take -- and the id is what the checkpoint directory and lease are
+    // derived from.
+    write_config(dir.path(), "OBACHAN 2", "obachan-2", "OBACHAN 2");
+
+    let identity = free_identity(dir.path(), "OBACHAN").expect("an identity should be free");
+
+    assert_eq!(identity.file_stem, "OBACHAN-3");
+    assert_eq!(identity.id, "obachan-3");
+    assert_eq!(identity.name, "OBACHAN (3)");
+}
+
+#[test]
+fn copying_refuses_to_overwrite_a_config_that_appeared_after_the_check() {
+    let dir = tempfile::tempdir().expect("config directory should be created");
+    let from = write_config(dir.path(), "OBACHAN", "obachan", "OBACHAN");
+    let identity = free_identity(dir.path(), "OBACHAN").expect("an identity should be free");
+    write_config(dir.path(), "OBACHAN-2", "obachan-2", "OBACHAN (2)");
+
+    let error = clone_config_file(&from, dir.path(), &identity)
+        .expect_err("the copy should not overwrite the config that appeared");
+
+    assert!(format!("{error:#}").contains("Failed to create cloned session config"));
+}

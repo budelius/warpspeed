@@ -148,7 +148,10 @@ fn normalized_existing_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn normalized_session_id(value: &str) -> String {
+/// The session id a config file name stands for. A config is only valid when
+/// its declared id normalizes to the same thing, so this is also the identity
+/// two differently spelled file names would collide on.
+pub(crate) fn normalized_session_id(value: &str) -> String {
     value
         .chars()
         .flat_map(char::to_lowercase)

@@ -12,6 +12,7 @@ use warpui::{
 };
 
 use crate::appearance::Appearance;
+use crate::launch_configs::launch_config::WindowTemplate;
 use crate::session_configs::SessionOwner;
 use crate::ui_components::dialog::{Dialog, dialog_styles};
 use crate::view_components::action_button::{
@@ -56,6 +57,9 @@ pub(crate) struct SessionInUseDialog {
     clone_button: ViewHandle<ActionButton>,
     session_name: String,
     owner: Option<SessionOwner>,
+    /// Whether this session resolves to a window template. Without one there is
+    /// nothing to open from, so the button is left out rather than shown dead.
+    has_template: bool,
 }
 
 impl SessionInUseDialog {
@@ -85,12 +89,19 @@ impl SessionInUseDialog {
             clone_button,
             session_name: String::new(),
             owner: None,
+            has_template: false,
         }
     }
 
-    pub fn set_session(&mut self, name: String, owner: Option<SessionOwner>) {
+    pub fn set_session(
+        &mut self,
+        name: String,
+        owner: Option<SessionOwner>,
+        window_template: Option<&WindowTemplate>,
+    ) {
         self.session_name = name;
         self.owner = owner;
+        self.has_template = window_template.is_some();
     }
 
     fn body(&self) -> String {
@@ -138,11 +149,8 @@ impl View for SessionInUseDialog {
         let cancel_button = Container::new(ChildView::new(&self.cancel_button).finish())
             .with_margin_right(12.)
             .finish();
-        let template_button = Container::new(ChildView::new(&self.template_button).finish())
-            .with_margin_right(12.)
-            .finish();
 
-        let dialog = Dialog::new(
+        let mut dialog = Dialog::new(
             format!("'{}' is already open", self.session_name),
             Some(self.body()),
             UiComponentStyles {
@@ -150,11 +158,18 @@ impl View for SessionInUseDialog {
                 ..dialog_styles(appearance)
             },
         )
-        .with_bottom_row_child(cancel_button)
-        .with_bottom_row_child(template_button)
-        .with_bottom_row_child(ChildView::new(&self.clone_button).finish())
-        .build()
-        .finish();
+        .with_bottom_row_child(cancel_button);
+        if self.has_template {
+            dialog = dialog.with_bottom_row_child(
+                Container::new(ChildView::new(&self.template_button).finish())
+                    .with_margin_right(12.)
+                    .finish(),
+            );
+        }
+        let dialog = dialog
+            .with_bottom_row_child(ChildView::new(&self.clone_button).finish())
+            .build()
+            .finish();
 
         let mut stack = Stack::new();
         stack.add_positioned_child(

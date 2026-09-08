@@ -670,6 +670,16 @@ pub async fn get_repository_info(
     repo_path: &Path,
     path_env: Option<&str>,
 ) -> Result<Option<RepositoryInfo>> {
+    // The forge's own API answers this without a subprocess. Every failure is
+    // recoverable by design, so a repository on a forge this layer cannot speak
+    // to yet behaves exactly as it did before.
+    match crate::forge::resolve::repository_info(repo_path).await {
+        Ok(info) => return Ok(Some(info)),
+        Err(error) => {
+            log::debug!("forge: repository lookup unavailable ({error}); falling back to gh");
+        }
+    }
+
     if run_git_command(repo_path, &["rev-parse", "--is-inside-work-tree"])
         .await
         .is_err()
@@ -749,6 +759,16 @@ async fn run_gh_command(repo_path: &Path, args: &[&str], path_env: Option<&str>)
 /// (auth, network, gh not installed).
 #[cfg(feature = "local_fs")]
 pub async fn get_pr_for_branch(repo_path: &Path, path_env: Option<&str>) -> Result<Option<PrInfo>> {
+    // The forge's own API answers this without a subprocess. Falling back on
+    // any error -- including "not signed in" -- keeps today's behavior exactly:
+    // `gh` carries its own authentication and may still succeed.
+    match crate::forge::resolve::pr_for_branch(repo_path).await {
+        Ok(pr) => return Ok(pr),
+        Err(error) => {
+            log::debug!("forge: PR lookup unavailable ({error}); falling back to gh");
+        }
+    }
+
     if run_git_command(repo_path, &["rev-parse", "--is-inside-work-tree"])
         .await
         .is_err()

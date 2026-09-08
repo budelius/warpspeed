@@ -1,4 +1,4 @@
-use super::may_attach_credential;
+use super::{authority_of, may_attach_credential};
 
 #[test]
 fn a_credential_travels_to_its_own_host() {
@@ -76,4 +76,20 @@ fn a_port_is_part_of_the_authority_match() {
         "https://git.example.com/api/v3/repos/o/r",
         "git.example.com:8443"
     ));
+}
+
+/// A transport must be built with the host it will actually talk to. For
+/// github.com that is `api.github.com`, which is not the host the credential
+/// was stored under.
+#[test]
+fn authority_of_reads_the_host_and_port_a_url_addresses() {
+    assert_eq!(
+        authority_of("https://api.github.com").as_deref(),
+        Some("api.github.com")
+    );
+    assert_eq!(
+        authority_of("https://git.example.com:8443/api/v3").as_deref(),
+        Some("git.example.com:8443")
+    );
+    assert_eq!(authority_of("not a url"), None);
 }

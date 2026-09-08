@@ -9,10 +9,9 @@
 
 use async_trait::async_trait;
 
-use crate::util::git::{PrInfo, RepositoryInfo};
-
 use super::RepoRef;
 use super::client::{ForgeClient, ForgeError, ForgeTransport, classify_status};
+use crate::util::git::{PrInfo, RepositoryInfo};
 
 #[cfg(test)]
 #[path = "github_tests.rs"]

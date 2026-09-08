@@ -10,10 +10,13 @@
 //! client seam ([`client`]) with a GitHub implementation ([`github`]), and the
 //! HTTP transport behind them ([`transport`]).
 //!
-//! Nothing outside this module calls any of it yet. The switchover replaces
-//! `gh pr view` in `GitHubRepoModel`, which is the point at which behavior
-//! changes for existing users, so it lands separately and with the `gh`
-//! fallback still in place. Drop the `dead_code` allowance then.
+//! [`resolve`] is the entry point `util::git` consults before shelling out to
+//! `gh`. Every failure it can return is recoverable, so a repository on a forge
+//! this layer cannot speak to yet behaves exactly as it did before.
+//!
+//! The allowance below covers what the later stages will call: the GitLab and
+//! Gitea variants, and the detector, which the switchover does not yet use
+//! because no client exists for a probed host to be served by.
 #![allow(dead_code)]
 
 pub mod client;
@@ -21,6 +24,7 @@ pub mod credentials;
 pub mod detect;
 pub mod github;
 pub mod os_credentials;
+pub mod resolve;
 pub mod transport;
 
 #[cfg(test)]

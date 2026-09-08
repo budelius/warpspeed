@@ -46,6 +46,20 @@ pub fn may_attach_credential(url: &str, credential_host: &str) -> bool {
     authority.eq_ignore_ascii_case(credential_host)
 }
 
+/// The `host[:port]` a URL addresses.
+///
+/// This is what a transport must be built with, so the host it guards is the
+/// host it will actually talk to — for github.com that is `api.github.com`,
+/// which is not the host the credential was stored under.
+pub fn authority_of(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    Some(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
+}
+
 /// Talks to one forge host.
 pub struct HttpForgeTransport {
     client: http_client::Client,

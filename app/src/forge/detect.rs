@@ -13,9 +13,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use instant::Instant;
-
 use async_trait::async_trait;
+use instant::Instant;
 use parking_lot::Mutex;
 
 use super::ForgeKind;

@@ -5,9 +5,8 @@
 
 use async_trait::async_trait;
 
-use crate::util::git::{PrInfo, RepositoryInfo};
-
 use super::RepoRef;
+use crate::util::git::{PrInfo, RepositoryInfo};
 
 /// A response from a forge's API.
 #[derive(Debug, Clone)]

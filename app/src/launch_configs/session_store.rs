@@ -944,7 +944,6 @@ fn clone_checkpoints_in_dir(
     Ok(sources)
 }
 
-#[expect(dead_code, reason = "consumed by clone_session in the next task")]
 pub(crate) fn clone_checkpoints(
     from: &LaunchConfigWindowSource,
     to_path: &Path,

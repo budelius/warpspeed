@@ -1,3 +1,4 @@
+pub mod clone_session;
 pub mod launch_config;
 pub mod save_modal;
 pub mod session_store;

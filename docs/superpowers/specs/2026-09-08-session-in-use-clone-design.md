@@ -2,7 +2,7 @@
 
 **Status:** design
 **Date:** 2026-09-08
-**Scope:** replace the silent no-op when a session config's lease is held elsewhere with a modal that names the owner and offers to clone the session or open it from its template; stop session configs from shadowing same-named launch configs in the palette.
+**Scope:** replace the silent no-op when a session config's lease is held elsewhere with a dialog that names the owner and offers to clone the session or open it from its template; stop session configs from shadowing same-named launch configs in the palette.
 
 ## Problem
 
@@ -72,7 +72,7 @@ Observed on a machine running ten `warpspeed.exe` processes: the `obachan`, `jus
 ```rust
 pub struct SessionOwner {
     pub pid: u32,
-    pub started_at_unix_seconds: i64,
+    pub claimed_at_unix_seconds: i64,
     pub app_id: String,
 }
 
@@ -87,18 +87,19 @@ exclusive lock, so no two processes race on that file.
 
 A failed claim reads `owner.json` back. A stale file cannot mislead: it is only read when the lock
 is *held*, which proves the recorded process is still alive. When the file is missing or
-unparseable the modal falls back to "another Warp process".
+unparseable the dialog falls back to "another Warp process".
 
-## The modal
+## The dialog
 
-`app/src/launch_configs/session_in_use_modal.rs`, following `LaunchConfigSaveModal` exactly:
-`init` registered from `launch_configs/mod.rs`, a `ModalViewState<SessionInUseModal>` field on
-`Workspace`, rendered into the same stack in `workspace/view.rs`, and an
-`is_session_in_use_modal_open` flag in `workspace/util.rs`.
+`app/src/launch_configs/session_in_use_dialog.rs`, following
+`tab_configs/remove_confirmation_dialog.rs`, which is the house pattern for a small decision
+dialog: `init` registered from `launch_configs/mod.rs`, a `ViewHandle<SessionInUseDialog>` field on
+`Workspace`, an `is_session_in_use_dialog_open` flag in `workspace/util.rs`, and a `Dialog` with a
+title, a body, and a bottom row of `ActionButton`s.
 
 ```text
 ┌ OBACHAN is already open ──────────────────────────────┐
-│ Held by Warp process 43364, started Sep 4 at 12:08.   │
+│ Held by WarpSpeed process 43364, since Sep 04 12:08.  │
 │                                                       │
 │ Clone copies the layout, working directories and      │
 │ shells. Running processes, scrollback and agent       │
@@ -108,10 +109,11 @@ unparseable the modal falls back to "another Warp process".
 └───────────────────────────────────────────────────────┘
 ```
 
-`SessionInUseModalEvent` carries `Close`, `Clone`, and `OpenFromTemplate`.
+`SessionInUseEvent` carries `Clone`, `OpenFromTemplate`, and `Cancel`. Enter clones, escape
+cancels.
 
 `open_launch_config` and `open_stored_session` replace their `return` with a call that opens this
-modal on the active workspace. When there is no active workspace — a URI launch into a cold app
+dialog on the active workspace. When there is no active workspace — a URI launch into a cold app
 with no windows — they fall back to opening from the template. That is a visible window instead of
 nothing, which is the point of the change.
 
@@ -140,15 +142,18 @@ session.
 
 ## Clone implementation
 
-`app/src/launch_configs/clone_session.rs`.
+`app/src/launch_configs/clone_session.rs` owns identity selection, the TOML copy, and orchestration.
+Step 3 below lives in `session_store.rs` instead, because that module owns the checkpoint format,
+the pane snapshot tree, and the catalog.
 
 **1. Pick a free identity.** From `OBACHAN`, try `OBACHAN-2`, `OBACHAN-3`, … until neither
 `session_configurations/<stem>.toml` exists nor `<id>` collides with an already-loaded session id.
 Yields `id = "obachan-2"`, `name = "OBACHAN (2)"`.
 
-**2. Copy the TOML.** Rewrite only `id`, `name`, and `generation = 1`. The `[[tabs]]` entries point
-at shared read-only tab configs under `tab_configs/sessions/consolidated/OBACHAN/`, so nothing else
-is copied. `SessionConfigFile` gains `Serialize`; comments in the original file are lost.
+**2. Copy the TOML.** Rewrite only `id`, `name`, and `generation = 1`, using `toml_edit`, which is
+already a dependency and edits in place so comments and formatting survive. The `[[tabs]]` entries
+point at shared read-only tab configs under `tab_configs/sessions/consolidated/OBACHAN/`, so
+nothing else is copied.
 
 **3. Copy the checkpoints.** For each `window-<n>.json` under `<sessions_dir>/obachan/1/`, rewrite
 `source` to the clone's source, set `saved_at_unix_seconds` to now, drop `block_lists`, and walk
@@ -165,10 +170,9 @@ the `PaneNodeSnapshot` tree sanitizing every `TerminalPaneSnapshot`:
 Write each to `<sessions_dir>/obachan-2/1/window-<n>.json`.
 
 **4. Register in the catalog.** `load_or_rebuild_catalog` trusts `stored-sessions.json` whenever it
-parses, so a checkpoint on disk alone stays invisible. A new
-`session_store::register_cloned_windows` appends the summaries and rewrites the catalog. That also
-bumps the catalog's mtime, which is what `catalog_revision()` compares, so the palette's
-`StoredSessionCache` refreshes on its own.
+parses, so a checkpoint on disk alone stays invisible. `session_store::clone_checkpoints` passes the
+new summaries to the existing `update_catalog`. That also bumps the catalog's mtime, which is what
+`catalog_revision()` compares, so the palette's `StoredSessionCache` refreshes on its own.
 
 **5. Open it.** Claim the clone's lease — always free, since the id is new — and open through the
 normal restore path.
@@ -182,13 +186,14 @@ Key `FuzzyLaunchConfigSearcher.configs` and its full-text counterpart by `config
 `(path, document_index)` pair — falling back to the lowercased name only when `source` is `None`.
 Both entries then survive.
 
-`SearchItem` carries the source kind so `render_item` appends a `[session]` or `[yaml]` pill
-through the existing `render_string_with_pill_styling`:
+`LaunchConfig::render_config_description` already opens its pill row with a hardcoded
+`"Configuration"` label that carries no information. Replace it with the source kind, so the two
+rows read apart at a glance:
 
 ```text
 > obachan
-  OBACHAN            [session]   6 tabs
-  OBACHAN            [yaml]      6 tabs
+  OBACHAN            Session  1 window  6 tabs
+  OBACHAN            YAML     1 window  6 tabs
 ```
 
 ## Testing

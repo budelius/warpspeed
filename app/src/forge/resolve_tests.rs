@@ -39,3 +39,45 @@ fn several_unrecognised_remotes_yield_no_choice() {
 fn no_remotes_yield_no_choice() {
     assert_eq!(preferred_remote(&[]), None);
 }
+
+/// Sends a real request to api.github.com using the machine's own credential,
+/// so it is ignored by default and never runs in CI. Run it by hand to confirm
+/// the whole path works end to end -- remote parsing, credential resolution,
+/// the transport's host guard, the request, and the parse:
+///
+/// ```text
+/// cargo test -p warp --lib forge::resolve -- --ignored --nocapture
+/// ```
+///
+/// It reads a public repository and prints no credential.
+#[test]
+#[ignore = "makes a real request to api.github.com"]
+fn repository_info_round_trips_against_github() {
+    // `CARGO_MANIFEST_DIR` is the `app` crate; its parent is the repository,
+    // whose `origin` is https://github.com/warpdotdev/Warp.git.
+    let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("app crate has a parent directory")
+        .to_owned();
+
+    let info = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(super::repository_info(&repo_path))
+        .expect("repository lookup should succeed against GitHub");
+
+    println!(
+        "forge answered: name={:?} owner={:?} host={:?}",
+        info.name, info.owner, info.host
+    );
+    // The forge reports the repository's *canonical* name, which need not match
+    // the casing in the remote URL: `origin` spells it `Warp`, GitHub calls it
+    // `warp`. `gh repo view --json name` returns the same canonical spelling, so
+    // this matches what the shell path produced rather than diverging from it.
+    assert!(
+        info.name.eq_ignore_ascii_case("warp"),
+        "unexpected repository name {:?}",
+        info.name
+    );
+    assert_eq!(info.owner.as_deref(), Some("warpdotdev"));
+    assert_eq!(info.host.as_deref(), Some("github.com"));
+}

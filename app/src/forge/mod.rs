@@ -11,6 +11,9 @@
 //! allowance then.
 #![allow(dead_code)]
 
+pub mod credentials;
+pub mod os_credentials;
+
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;

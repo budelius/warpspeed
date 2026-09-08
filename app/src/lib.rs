@@ -40,6 +40,7 @@ mod experiments;
 mod external_secrets;
 #[cfg(target_family = "wasm")]
 mod font_fallback;
+mod forge;
 mod global_resource_handles;
 mod gpu_state;
 mod input_classifier;

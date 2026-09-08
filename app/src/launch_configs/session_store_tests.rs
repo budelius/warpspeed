@@ -7,6 +7,7 @@ use super::{
     save_windows_to_dir,
 };
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::blocklist::SerializedBlockListItem;
 use crate::app_state::{
     CliAgentResumeDescriptor, LeafContents, LeafSnapshot, PaneNodeSnapshot, PaneUuid, TabSnapshot,
     TerminalPaneSnapshot, WindowSnapshot,
@@ -297,13 +298,16 @@ fn only_terminal(window: &WindowSnapshot) -> &TerminalPaneSnapshot {
     terminal
 }
 
-fn seed_source_checkpoint(dir: &Path) -> LaunchConfigWindowSource {
+fn seed_source_checkpoint(
+    dir: &Path,
+    block_lists: &HashMap<PaneUuid, Vec<SerializedBlockListItem>>,
+) -> LaunchConfigWindowSource {
     let source = session_source("/cfg/OBACHAN.toml", 1, 0);
     save_to_dir(
         dir,
         &source,
         &window(source.clone()),
-        &HashMap::new(),
+        block_lists,
         false,
         1_767_225_600,
     )
@@ -314,7 +318,7 @@ fn seed_source_checkpoint(dir: &Path) -> LaunchConfigWindowSource {
 #[test]
 fn cloning_rewrites_the_source_and_keeps_the_layout() {
     let dir = tempfile::tempdir().expect("session directory should be created");
-    let source = seed_source_checkpoint(dir.path());
+    let source = seed_source_checkpoint(dir.path(), &HashMap::new());
 
     let cloned = clone_checkpoints_in_dir(
         dir.path(),
@@ -350,7 +354,11 @@ fn cloning_rewrites_the_source_and_keeps_the_layout() {
 #[test]
 fn cloning_releases_every_identity_owned_by_the_live_window() {
     let dir = tempfile::tempdir().expect("session directory should be created");
-    let source = seed_source_checkpoint(dir.path());
+    let block_lists = HashMap::from([(
+        PaneUuid(vec![1, 2, 3]),
+        vec![SerializedBlock::default().into()],
+    )]);
+    let source = seed_source_checkpoint(dir.path(), &block_lists);
 
     let cloned = clone_checkpoints_in_dir(
         dir.path(),
@@ -379,12 +387,16 @@ fn cloning_releases_every_identity_owned_by_the_live_window() {
 
     assert!(original_pane.persistent_session_id.is_some());
     assert!(original_pane.cli_agent_resume_descriptor.is_some());
+    assert!(
+        !original.block_lists.is_empty(),
+        "cloning must not destroy the original's block lists"
+    );
 }
 
 #[test]
 fn cloning_registers_the_clone_in_the_catalog() {
     let dir = tempfile::tempdir().expect("session directory should be created");
-    let source = seed_source_checkpoint(dir.path());
+    let source = seed_source_checkpoint(dir.path(), &HashMap::new());
 
     clone_checkpoints_in_dir(
         dir.path(),

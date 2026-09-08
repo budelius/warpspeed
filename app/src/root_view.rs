@@ -1189,13 +1189,16 @@ pub(crate) fn open_cloned_session(
     let name = cloned.name;
     let config_path = cloned.config_path;
     for source in cloned.windows {
+        let window_index = source.window_index;
         #[cfg(feature = "local_fs")]
         match crate::session_configs::claim_session(&source) {
             Ok(crate::session_configs::SessionClaim::Claimed) => {}
             Ok(crate::session_configs::SessionClaim::HeldBy(_)) => {
                 safe_warn!(
                     safe: ("A freshly cloned session was already claimed"),
-                    full: ("A freshly cloned session {name:?} was already claimed: {source:?}")
+                    full: (
+                        "A freshly cloned session was already claimed: {name:?} window {window_index} at {config_path:?}"
+                    )
                 );
                 continue;
             }
@@ -1214,9 +1217,9 @@ pub(crate) fn open_cloned_session(
                 );
             }
             Ok(None) => safe_warn!(
-                safe: ("A cloned session has no checkpoint"),
+                safe: ("A cloned session window has no checkpoint"),
                 full: (
-                    "Cloned session {name:?} at {config_path:?} has no checkpoint: {source:?}"
+                    "A cloned session window has no checkpoint: {name:?} window {window_index} at {config_path:?}"
                 )
             ),
             Err(error) => report_error!(error.context("Failed to open the cloned session")),

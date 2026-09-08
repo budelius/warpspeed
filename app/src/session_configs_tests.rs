@@ -120,3 +120,80 @@ config = "tab.toml"
     assert_eq!(errors.len(), 1);
     assert!(errors[0].message.contains("duplicate tab id"));
 }
+
+use std::collections::HashMap;
+
+use super::{SessionClaim, claim_in_dir, read_owner};
+
+#[test]
+fn claiming_a_free_lease_records_the_owner() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let mut leases = HashMap::new();
+
+    let claim = claim_in_dir(dir.path(), "obachan", 1, &mut leases)
+        .expect("claiming a free lease should succeed");
+
+    assert!(matches!(claim, SessionClaim::Claimed));
+    let owner = read_owner(dir.path(), "obachan", 1).expect("owner record should be written");
+    assert_eq!(owner.pid, std::process::id());
+    assert!(owner.claimed_at_unix_seconds > 0);
+}
+
+#[test]
+fn a_second_holder_sees_the_recorded_owner() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let mut first = HashMap::new();
+    let mut second = HashMap::new();
+
+    claim_in_dir(dir.path(), "obachan", 1, &mut first).expect("first claim should succeed");
+    let claim = claim_in_dir(dir.path(), "obachan", 1, &mut second)
+        .expect("a contended claim should not error");
+
+    let SessionClaim::HeldBy(Some(owner)) = claim else {
+        panic!("a held lease should report its owner");
+    };
+    assert_eq!(owner.pid, std::process::id());
+}
+
+#[test]
+fn an_already_held_lease_is_reentrant_for_its_holder() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let mut leases = HashMap::new();
+
+    claim_in_dir(dir.path(), "obachan", 1, &mut leases).expect("first claim should succeed");
+    let claim =
+        claim_in_dir(dir.path(), "obachan", 1, &mut leases).expect("reclaiming should succeed");
+
+    assert!(matches!(claim, SessionClaim::Claimed));
+}
+
+#[test]
+fn a_corrupt_owner_record_still_reports_the_lease_as_held() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let mut first = HashMap::new();
+    let mut second = HashMap::new();
+    claim_in_dir(dir.path(), "obachan", 1, &mut first).expect("first claim should succeed");
+    std::fs::write(
+        dir.path().join("obachan").join("1").join("owner.json"),
+        "{ not json",
+    )
+    .expect("owner record should be overwritable");
+
+    let claim = claim_in_dir(dir.path(), "obachan", 1, &mut second)
+        .expect("a contended claim should not error");
+
+    assert!(matches!(claim, SessionClaim::HeldBy(None)));
+}
+
+#[test]
+fn different_generations_do_not_contend() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let mut first = HashMap::new();
+    let mut second = HashMap::new();
+
+    claim_in_dir(dir.path(), "obachan", 1, &mut first).expect("first claim should succeed");
+    let claim = claim_in_dir(dir.path(), "obachan", 2, &mut second)
+        .expect("a fresh generation should be claimable");
+
+    assert!(matches!(claim, SessionClaim::Claimed));
+}

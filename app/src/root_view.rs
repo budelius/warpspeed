@@ -586,15 +586,30 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
     #[cfg(feature = "local_fs")]
     if let Some(source) = session_source.as_ref() {
         match crate::session_configs::claim_session(source) {
-            Ok(true) => {}
-            Ok(false) => {
-                safe_warn!(
-                    safe: ("Session config is already open in another process"),
-                    full: (
-                        "Session config {:?} is already open in another process",
-                        source.session_id()
-                    )
-                );
+            Ok(crate::session_configs::SessionClaim::Claimed) => {}
+            Ok(crate::session_configs::SessionClaim::HeldBy(owner)) => {
+                match owner {
+                    Some(owner) => {
+                        let pid = owner.pid;
+                        let claimed_at_unix_seconds = owner.claimed_at_unix_seconds;
+                        safe_warn!(
+                            safe: ("Session config is already open in another process"),
+                            full: (
+                                "Session config {:?} is already open in another process (held by pid {pid}, claimed at {claimed_at_unix_seconds})",
+                                source.session_id()
+                            )
+                        );
+                    }
+                    None => {
+                        safe_warn!(
+                            safe: ("Session config is already open in another process"),
+                            full: (
+                                "Session config {:?} is already open in another process (owner record missing or unreadable)",
+                                source.session_id()
+                            )
+                        );
+                    }
+                }
                 return;
             }
             Err(error) => {
@@ -700,12 +715,30 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
     #[cfg(feature = "local_fs")]
     if source.is_session_config() {
         match crate::session_configs::claim_session(source) {
-            Ok(true) => {}
-            Ok(false) => {
-                safe_warn!(
-                    safe: ("Stored session is already open in another process"),
-                    full: ("Stored session {:?} is already open in another process", source.session_id())
-                );
+            Ok(crate::session_configs::SessionClaim::Claimed) => {}
+            Ok(crate::session_configs::SessionClaim::HeldBy(owner)) => {
+                match owner {
+                    Some(owner) => {
+                        let pid = owner.pid;
+                        let claimed_at_unix_seconds = owner.claimed_at_unix_seconds;
+                        safe_warn!(
+                            safe: ("Stored session is already open in another process"),
+                            full: (
+                                "Stored session {:?} is already open in another process (held by pid {pid}, claimed at {claimed_at_unix_seconds})",
+                                source.session_id()
+                            )
+                        );
+                    }
+                    None => {
+                        safe_warn!(
+                            safe: ("Stored session is already open in another process"),
+                            full: (
+                                "Stored session {:?} is already open in another process (owner record missing or unreadable)",
+                                source.session_id()
+                            )
+                        );
+                    }
+                }
                 return;
             }
             Err(error) => {

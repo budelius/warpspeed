@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod credentials;
+pub mod detect;
 pub mod os_credentials;
 
 #[cfg(test)]

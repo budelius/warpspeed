@@ -11,8 +11,10 @@
 //! allowance then.
 #![allow(dead_code)]
 
+pub mod client;
 pub mod credentials;
 pub mod detect;
+pub mod github;
 pub mod os_credentials;
 
 #[cfg(test)]

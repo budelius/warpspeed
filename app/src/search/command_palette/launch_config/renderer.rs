@@ -128,11 +128,25 @@ impl LaunchConfig {
         }
         Flex::row()
             .with_children(vec![
-                Self::render_string_with_pill_styling("Configuration", appearance),
+                Self::render_string_with_pill_styling(self.source_label(), appearance),
                 Self::render_string_with_pill_styling(windows_str, appearance),
                 Self::render_string_with_pill_styling(tabs_str, appearance),
             ])
             .finish()
+    }
+
+    /// A YAML template and the session config derived from it commonly share a
+    /// name, so the row has to say which one it is.
+    fn source_label(&self) -> &'static str {
+        match self
+            .source
+            .as_ref()
+            .and_then(|source| source.path.extension())
+        {
+            Some(extension) if extension == "toml" => "Session",
+            Some(_) => "YAML",
+            None => "Configuration",
+        }
     }
 
     fn render_launch_config_name(

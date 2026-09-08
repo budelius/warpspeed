@@ -2467,7 +2467,6 @@ impl Workspace {
         report_error!("Cannot clone a session config from the web");
     }
 
-    #[expect(dead_code, reason = "called by root_view in a later task")]
     pub(crate) fn open_session_in_use_dialog(
         &mut self,
         name: String,

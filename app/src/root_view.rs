@@ -98,6 +98,7 @@ use crate::terminal::view::{TerminalAction, cell_size_and_padding};
 use crate::themes::onboarding_theme_picker_themes;
 use crate::themes::theme::{AnsiColorIdentifier, Blend, Fill, ThemeKind, WarpThemeConfig};
 use crate::uri::{OpenMCPSettingsArgs, OpenSettingsArgs, url_reports_checkout_success};
+use crate::user_config::WarpConfig;
 use crate::util::bindings::{self, is_binding_pty_compliant};
 use crate::util::traffic_lights::{TrafficLightData, TrafficLightMouseStates, traffic_light_data};
 use crate::view_components::DismissibleToast;
@@ -588,28 +589,16 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
         match crate::session_configs::claim_session(source) {
             Ok(crate::session_configs::SessionClaim::Claimed) => {}
             Ok(crate::session_configs::SessionClaim::HeldBy(owner)) => {
-                match owner {
-                    Some(owner) => {
-                        let pid = owner.pid;
-                        let claimed_at_unix_seconds = owner.claimed_at_unix_seconds;
-                        safe_warn!(
-                            safe: ("Session config is already open in another process"),
-                            full: (
-                                "Session config {:?} is already open in another process (held by pid {pid}, claimed at {claimed_at_unix_seconds})",
-                                source.session_id()
-                            )
-                        );
-                    }
-                    None => {
-                        safe_warn!(
-                            safe: ("Session config is already open in another process"),
-                            full: (
-                                "Session config {:?} is already open in another process (owner record missing or unreadable)",
-                                source.session_id()
-                            )
-                        );
-                    }
-                }
+                let Some(window_template) = arg.launch_config.windows.first().cloned() else {
+                    return;
+                };
+                offer_session_in_use_choices(
+                    arg.launch_config.name.clone(),
+                    source.clone(),
+                    window_template,
+                    owner,
+                    ctx,
+                );
                 return;
             }
             Err(error) => {
@@ -717,28 +706,27 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
         match crate::session_configs::claim_session(source) {
             Ok(crate::session_configs::SessionClaim::Claimed) => {}
             Ok(crate::session_configs::SessionClaim::HeldBy(owner)) => {
-                match owner {
-                    Some(owner) => {
-                        let pid = owner.pid;
-                        let claimed_at_unix_seconds = owner.claimed_at_unix_seconds;
-                        safe_warn!(
-                            safe: ("Stored session is already open in another process"),
-                            full: (
-                                "Stored session {:?} is already open in another process (held by pid {pid}, claimed at {claimed_at_unix_seconds})",
-                                source.session_id()
-                            )
-                        );
-                    }
-                    None => {
-                        safe_warn!(
-                            safe: ("Stored session is already open in another process"),
-                            full: (
-                                "Stored session {:?} is already open in another process (owner record missing or unreadable)",
-                                source.session_id()
-                            )
-                        );
-                    }
-                }
+                let window_template = WarpConfig::as_ref(ctx)
+                    .launch_and_session_configs()
+                    .find(|config| config.window_source(0).as_ref() == Some(source))
+                    .and_then(|config| config.windows.first().cloned());
+                let Some(window_template) = window_template else {
+                    safe_warn!(
+                        safe: ("Stored session is already open in another process"),
+                        full: (
+                            "Stored session {:?} is already open in another process",
+                            source.session_id()
+                        )
+                    );
+                    return;
+                };
+                offer_session_in_use_choices(
+                    arg.summary.name().to_owned(),
+                    source.clone(),
+                    window_template,
+                    owner,
+                    ctx,
+                );
                 return;
             }
             Err(error) => {
@@ -1180,6 +1168,24 @@ pub(crate) fn open_window_from_template(
         },
         ctx,
     );
+}
+
+/// A session another process owns cannot be opened here, but the user still has
+/// two ways forward. Offer them in the active window; with no window to host a
+/// dialog, open the template rather than doing nothing at all.
+fn offer_session_in_use_choices(
+    name: String,
+    source: launch_config::LaunchConfigWindowSource,
+    window_template: launch_config::WindowTemplate,
+    owner: Option<crate::session_configs::SessionOwner>,
+    ctx: &mut AppContext,
+) {
+    match active_workspace(ctx) {
+        Some(workspace) => workspace.update(ctx, |workspace, ctx| {
+            workspace.open_session_in_use_dialog(name, source, window_template, owner, ctx);
+        }),
+        None => open_window_from_template(window_template, ctx),
+    }
 }
 
 pub(crate) fn open_cloned_session(

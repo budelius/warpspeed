@@ -81,3 +81,33 @@ fn repository_info_round_trips_against_github() {
     assert_eq!(info.owner.as_deref(), Some("warpdotdev"));
     assert_eq!(info.host.as_deref(), Some("github.com"));
 }
+
+/// The pull request endpoint is a different URL, with a different response
+/// shape, so verifying `/repos` says nothing about it. Ignored for the same
+/// reason as the test above: it makes a real request.
+///
+/// ```text
+/// cargo test -p warp --lib forge::resolve -- --ignored --nocapture
+/// ```
+///
+/// The assertion is deliberately weak. This branch has no pull request on
+/// `warpdotdev/Warp`, so the answer is `None` — but reaching `None` proves the
+/// request was authorised and the empty list parsed, where an auth or shape
+/// problem would have surfaced as an error instead.
+#[test]
+#[ignore = "makes a real request to api.github.com"]
+fn pr_lookup_round_trips_against_github() {
+    let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("app crate has a parent directory")
+        .to_owned();
+
+    let outcome = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(super::pr_for_branch(&repo_path));
+
+    match outcome {
+        Ok(pr) => println!("forge answered: pr={pr:?}"),
+        Err(error) => panic!("the pull request lookup should have been authorised: {error}"),
+    }
+}

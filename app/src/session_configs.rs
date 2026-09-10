@@ -52,7 +52,10 @@ fn default_generation() -> u64 {
     1
 }
 
-const OWNER_FILE_NAME: &str = "owner.json";
+/// `owner.json` lives beside `window-<n>.json` in the same checkpoint tree
+/// (`sessions_state_dir` here and `session_store::sessions_dir` are the same
+/// path), so `session_store::scan_catalog` must skip it by this name.
+pub(crate) const OWNER_FILE_NAME: &str = "owner.json";
 
 /// Which process holds a session lease. Written by the claimer while it holds
 /// the exclusive lock, so concurrent writers cannot interleave.

@@ -2463,8 +2463,17 @@ impl Workspace {
                 Err(_) => "Failed to open the cloned session.",
             },
             Err(error) => {
+                // "Has no checkpoints yet" is actionable; a generic failure is
+                // not, so it gets its own message before the detail is logged.
+                let has_no_checkpoints = error
+                    .downcast_ref::<crate::launch_configs::session_store::NoCheckpointsToClone>()
+                    .is_some();
                 report_error!(error.context("Failed to clone session config"));
-                "Failed to clone the session."
+                if has_no_checkpoints {
+                    "This session has not been checkpointed yet."
+                } else {
+                    "Failed to clone the session."
+                }
             }
         };
         self.toast_stack.update(ctx, |toast_stack, ctx| {

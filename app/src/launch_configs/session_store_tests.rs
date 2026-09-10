@@ -3,9 +3,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use pathfinder_geometry::rect::RectF;
+use pathfinder_geometry::vector::vec2f;
+
 use super::{
-    clone_checkpoints_in_dir, group_summaries, load_from_dir, read_catalog, save_to_dir,
-    save_windows_to_dir,
+    NoCheckpointsToClone, clone_checkpoints_in_dir, group_summaries, load_from_dir, read_catalog,
+    save_to_dir, save_windows_to_dir,
 };
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -417,6 +420,64 @@ fn cloning_registers_the_clone_in_the_catalog() {
     assert!(names.contains(&"OBACHAN"));
     assert!(names.contains(&"OBACHAN (2)"));
     assert_eq!(catalog.len(), 2);
+}
+
+#[test]
+fn cloning_a_session_with_no_checkpoints_yet_fails_distinguishably() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = session_source("/cfg/OBACHAN.toml", 1, 0);
+    // `claim_session` creates the lease directory before any checkpoint is
+    // ever written, so this state -- present but empty -- is reachable, not
+    // hypothetical.
+    std::fs::create_dir_all(dir.path().join("obachan").join("1"))
+        .expect("the empty checkpoint directory should be created");
+
+    let error = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect_err("cloning a session with no checkpoints should fail");
+
+    assert!(
+        error.downcast_ref::<NoCheckpointsToClone>().is_some(),
+        "the failure must be distinguishable so the dialog can show an actionable message \
+         instead of a generic one"
+    );
+}
+
+#[test]
+fn cloning_clears_the_original_bounds_so_the_clone_is_not_placed_on_top_of_it() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = session_source("/cfg/OBACHAN.toml", 1, 0);
+    let mut original = window(source.clone());
+    original.bounds = Some(RectF::new(vec2f(100., 200.), vec2f(800., 600.)));
+    save_to_dir(
+        dir.path(),
+        &source,
+        &original,
+        &HashMap::new(),
+        false,
+        1_767_225_600,
+    )
+    .expect("the source checkpoint should be written");
+
+    let cloned = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect("cloning should succeed");
+
+    let restored = load_from_dir(dir.path(), &cloned[0])
+        .expect("the clone should load")
+        .expect("the clone should exist");
+    assert_eq!(
+        restored.window.bounds, None,
+        "a cloned window must get default placement, not sit on top of the original"
+    );
 }
 
 fn ambient_task_id() -> AmbientAgentTaskId {

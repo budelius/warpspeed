@@ -450,6 +450,7 @@ fn scan_catalog(dir: &Path) -> Vec<StoredWindowSummary> {
                     .extension()
                     .is_some_and(|extension| extension == "json")
                 && entry.path() != catalog_path(dir)
+                && entry.file_name() != crate::session_configs::OWNER_FILE_NAME
         })
         .filter_map(|entry| {
             let path = entry.path();
@@ -902,6 +903,13 @@ fn release_owned_identities(node: &mut PaneNodeSnapshot) {
     }
 }
 
+/// Distinguishes "nothing to copy yet" from every other way cloning can fail,
+/// so the dialog can show an actionable message instead of a generic one.
+#[cfg(feature = "local_fs")]
+#[derive(Debug, thiserror::Error)]
+#[error("Session {0:?} has not been checkpointed yet")]
+pub(crate) struct NoCheckpointsToClone(pub String);
+
 #[cfg(feature = "local_fs")]
 fn clone_checkpoints_in_dir(
     dir: &Path,
@@ -931,7 +939,7 @@ fn clone_checkpoints_in_dir(
         .collect::<Vec<_>>();
     window_indexes.sort_unstable();
     if window_indexes.is_empty() {
-        bail!("Session {session_id:?} has no checkpoints to clone");
+        return Err(NoCheckpointsToClone(session_id).into());
     }
 
     let saved_at_unix_seconds = chrono::Utc::now().timestamp();
@@ -954,6 +962,10 @@ fn clone_checkpoints_in_dir(
             release_owned_identities(&mut tab.root);
         }
         stored.window.launch_config_source = Some(to_window.clone());
+        // Inherited bounds would place the clone exactly on top of the
+        // original, which on a single monitor reads as nothing having
+        // happened at all -- the complaint this feature exists to fix.
+        stored.window.bounds = None;
         stored.source = to_window.clone();
         stored.block_lists.clear();
         stored.saved_at_unix_seconds = saved_at_unix_seconds;

@@ -19,7 +19,8 @@ fn the_first_free_identity_is_suffixed_with_two() {
     let dir = tempfile::tempdir().expect("config directory should be created");
     write_config(dir.path(), "OBACHAN", "obachan", "OBACHAN");
 
-    let identity = free_identity(dir.path(), "OBACHAN").expect("an identity should be free");
+    let identity =
+        free_identity(dir.path(), "OBACHAN", "OBACHAN").expect("an identity should be free");
 
     assert_eq!(identity.file_stem, "OBACHAN-2");
     assert_eq!(identity.id, "obachan-2");
@@ -32,7 +33,8 @@ fn a_taken_identity_advances_to_the_next_free_one() {
     write_config(dir.path(), "OBACHAN", "obachan", "OBACHAN");
     write_config(dir.path(), "OBACHAN-2", "obachan-2", "OBACHAN (2)");
 
-    let identity = free_identity(dir.path(), "OBACHAN").expect("an identity should be free");
+    let identity =
+        free_identity(dir.path(), "OBACHAN", "OBACHAN").expect("an identity should be free");
 
     assert_eq!(identity.file_stem, "OBACHAN-3");
     assert_eq!(identity.id, "obachan-3");
@@ -40,10 +42,25 @@ fn a_taken_identity_advances_to_the_next_free_one() {
 }
 
 #[test]
+fn the_clone_name_uses_the_original_display_name_not_the_file_stem() {
+    let dir = tempfile::tempdir().expect("config directory should be created");
+    // The file is `obachan.toml`, but its declared `name` is different --
+    // exactly the case the design doc's example (stem == name) hid.
+    write_config(dir.path(), "obachan", "obachan", "Obachan Prod");
+
+    let identity =
+        free_identity(dir.path(), "obachan", "Obachan Prod").expect("an identity should be free");
+
+    assert_eq!(identity.file_stem, "obachan-2");
+    assert_eq!(identity.name, "Obachan Prod (2)");
+}
+
+#[test]
 fn copying_rewrites_the_identity_and_keeps_everything_else() {
     let dir = tempfile::tempdir().expect("config directory should be created");
     let from = write_config(dir.path(), "OBACHAN", "obachan", "OBACHAN");
-    let identity = free_identity(dir.path(), "OBACHAN").expect("an identity should be free");
+    let identity =
+        free_identity(dir.path(), "OBACHAN", "OBACHAN").expect("an identity should be free");
 
     let path = clone_config_file(&from, dir.path(), &identity).expect("the copy should succeed");
 
@@ -66,7 +83,8 @@ fn an_identity_whose_session_id_is_already_taken_is_skipped() {
     // derived from.
     write_config(dir.path(), "OBACHAN 2", "obachan-2", "OBACHAN 2");
 
-    let identity = free_identity(dir.path(), "OBACHAN").expect("an identity should be free");
+    let identity =
+        free_identity(dir.path(), "OBACHAN", "OBACHAN").expect("an identity should be free");
 
     assert_eq!(identity.file_stem, "OBACHAN-3");
     assert_eq!(identity.id, "obachan-3");
@@ -77,7 +95,8 @@ fn an_identity_whose_session_id_is_already_taken_is_skipped() {
 fn copying_refuses_to_overwrite_a_config_that_appeared_after_the_check() {
     let dir = tempfile::tempdir().expect("config directory should be created");
     let from = write_config(dir.path(), "OBACHAN", "obachan", "OBACHAN");
-    let identity = free_identity(dir.path(), "OBACHAN").expect("an identity should be free");
+    let identity =
+        free_identity(dir.path(), "OBACHAN", "OBACHAN").expect("an identity should be free");
     write_config(dir.path(), "OBACHAN-2", "obachan-2", "OBACHAN (2)");
 
     let error = clone_config_file(&from, dir.path(), &identity)

@@ -4,6 +4,7 @@ use markdown_parser::{
 use pathfinder_geometry::vector::vec2f;
 use serde::{Deserialize, Serialize};
 use warp_core::paths::home_relative_path;
+#[cfg(feature = "local_fs")]
 use warp_core::safe_warn;
 use warp_core::ui::theme::Fill;
 use warpui::accessibility::{AccessibilityContent, WarpA11yRole};
@@ -25,9 +26,12 @@ use crate::appearance::Appearance;
 use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
 };
-use crate::launch_configs::launch_config::{
-    LaunchConfig, LaunchConfigSource, LaunchConfigWindowSource, WindowTemplate,
-};
+use crate::launch_configs::launch_config::{LaunchConfig, LaunchConfigWindowSource};
+// Only `try_save_launch_config` builds these, and it writes the YAML, so it is
+// `local_fs`-only. Ungated, they are unused imports on wasm, where the job runs
+// with `-D warnings`.
+#[cfg(feature = "local_fs")]
+use crate::launch_configs::launch_config::{LaunchConfigSource, WindowTemplate};
 use crate::send_telemetry_from_ctx;
 use crate::server::telemetry::TelemetryEvent;
 use crate::user_config::launch_configs_dir;

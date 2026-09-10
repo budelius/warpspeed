@@ -7,11 +7,15 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result, bail};
+#[cfg(feature = "local_fs")]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::ai::blocklist::SerializedBlockListItem;
+#[cfg(feature = "local_fs")]
+use crate::app_state::LeafSnapshot;
 use crate::app_state::{
     LeafContents, PaneNodeSnapshot, PaneUuid, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
 };
@@ -446,6 +450,7 @@ fn scan_catalog(dir: &Path) -> Vec<StoredWindowSummary> {
                     .extension()
                     .is_some_and(|extension| extension == "json")
                 && entry.path() != catalog_path(dir)
+                && entry.file_name() != crate::session_configs::OWNER_FILE_NAME
         })
         .filter_map(|entry| {
             let path = entry.path();
@@ -494,7 +499,7 @@ fn scan_catalog(dir: &Path) -> Vec<StoredWindowSummary> {
 }
 
 #[cfg(feature = "local_fs")]
-fn read_catalog(dir: &Path) -> Result<Vec<StoredWindowSummary>> {
+pub(crate) fn read_catalog(dir: &Path) -> Result<Vec<StoredWindowSummary>> {
     let path = catalog_path(dir);
     let file = std::fs::File::open(&path)
         .with_context(|| format!("Failed to open stored session catalog at {path:?}"))?;
@@ -849,6 +854,141 @@ pub(crate) fn load_stored_session(
         let _ = summary;
         Ok(Vec::new())
     }
+}
+
+/// Frees every identity the live window owns so the clone cannot contend with
+/// it: a persistent process has exactly one owner, restoring a window detaches
+/// its conversations from the previous holder, and block lists are keyed by
+/// pane uuid.
+#[cfg(feature = "local_fs")]
+fn release_owned_identities(node: &mut PaneNodeSnapshot) {
+    match node {
+        PaneNodeSnapshot::Branch(branch) => {
+            for (_, child) in &mut branch.children {
+                release_owned_identities(child);
+            }
+        }
+        PaneNodeSnapshot::Leaf(LeafSnapshot {
+            contents: LeafContents::Terminal(terminal),
+            ..
+        }) => {
+            terminal.uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
+            terminal.persistent_session_id = None;
+            terminal.cli_agent_resume_descriptor = None;
+            terminal.conversation_ids_to_restore.clear();
+            terminal.active_conversation_id = None;
+        }
+        PaneNodeSnapshot::Leaf(LeafSnapshot {
+            contents: LeafContents::AmbientAgent(ambient),
+            ..
+        }) => {
+            ambient.uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
+            // A restored ambient pane with a task id attaches to that task's
+            // existing conversation; `None` restores as a new cloud
+            // conversation, which is what the clone dialog promises.
+            ambient.task_id = None;
+        }
+        // Every other leaf is content the clone may copy verbatim. A future
+        // leaf variant that carries an id the live window owns -- a pane uuid,
+        // a session, a conversation -- must be given its own arm above
+        // deliberately: falling through here hands the clone the original's
+        // identity, and persisted blocks are keyed by pane uuid.
+        //
+        // `LeafContents::CodeReview`'s `CodeReviewPaneSnapshot::Local` already
+        // falls through here carrying an owned `terminal_uuid`. That is safe
+        // only by accident: `pane_group::mod.rs` rejects code-review panes on
+        // restore, so the copied uuid never binds a live pane. Restoring them
+        // again would make this arm a bug.
+        PaneNodeSnapshot::Leaf(_) => {}
+    }
+}
+
+/// Distinguishes "nothing to copy yet" from every other way cloning can fail,
+/// so the dialog can show an actionable message instead of a generic one.
+#[cfg(feature = "local_fs")]
+#[derive(Debug, thiserror::Error)]
+#[error("Session {0:?} has not been checkpointed yet")]
+pub(crate) struct NoCheckpointsToClone(pub String);
+
+#[cfg(feature = "local_fs")]
+fn clone_checkpoints_in_dir(
+    dir: &Path,
+    from: &LaunchConfigWindowSource,
+    to_path: &Path,
+    to_config_name: &str,
+) -> Result<Vec<LaunchConfigWindowSource>> {
+    let session_id = from
+        .session_id()
+        .context("Cloning requires a session config source")?;
+    let generation = from
+        .session_generation()
+        .context("Cloning requires a session config generation")?;
+    let source_dir = dir.join(&session_id).join(generation.to_string());
+
+    let mut window_indexes = std::fs::read_dir(&source_dir)
+        .with_context(|| format!("Failed to read session checkpoints in {source_dir:?}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            name.strip_prefix("window-")?
+                .strip_suffix(".json")?
+                .parse::<usize>()
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    window_indexes.sort_unstable();
+    if window_indexes.is_empty() {
+        return Err(NoCheckpointsToClone(session_id).into());
+    }
+
+    let saved_at_unix_seconds = chrono::Utc::now().timestamp();
+    let mut sources = Vec::with_capacity(window_indexes.len());
+    let mut summaries = Vec::with_capacity(window_indexes.len());
+    for window_index in window_indexes {
+        let from_window = LaunchConfigWindowSource {
+            window_index,
+            ..from.clone()
+        };
+        let mut stored = read_stored_window(&session_path(dir, &from_window))?;
+        let to_window = LaunchConfigWindowSource {
+            path: to_path.to_path_buf(),
+            document_index: 1,
+            window_index,
+            config_name: to_config_name.to_owned(),
+        };
+
+        for tab in &mut stored.window.tabs {
+            release_owned_identities(&mut tab.root);
+        }
+        stored.window.launch_config_source = Some(to_window.clone());
+        // Inherited bounds would place the clone exactly on top of the
+        // original, which on a single monitor reads as nothing having
+        // happened at all -- the complaint this feature exists to fix.
+        stored.window.bounds = None;
+        stored.source = to_window.clone();
+        stored.block_lists.clear();
+        stored.saved_at_unix_seconds = saved_at_unix_seconds;
+
+        let path = session_path(dir, &to_window);
+        write_json_atomically(&path, &stored)?;
+        summaries.push(window_summary(dir, &path, &stored, None)?);
+        sources.push(to_window);
+    }
+
+    update_catalog(dir, summaries, Vec::new())?;
+    Ok(sources)
+}
+
+// The sole caller lives in `clone_session`, which is itself `local_fs`-only, so
+// a `not(local_fs)` arm here would be unreachable rather than merely unused.
+#[cfg(feature = "local_fs")]
+pub(crate) fn clone_checkpoints(
+    from: &LaunchConfigWindowSource,
+    to_path: &Path,
+    to_config_name: &str,
+) -> Result<Vec<LaunchConfigWindowSource>> {
+    clone_checkpoints_in_dir(&sessions_dir(), from, to_path, to_config_name)
 }
 
 pub(crate) fn first_source(summary: &StoredSessionSummary) -> Option<&LaunchConfigWindowSource> {

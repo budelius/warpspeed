@@ -8,6 +8,7 @@ use fs4::fs_std::FileExt as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
+use warp_core::safe_warn;
 
 use crate::launch_configs::launch_config::{
     LaunchConfig, LaunchConfigSource, LaunchConfigWindowSource, TabTemplate, WindowTemplate,
@@ -112,7 +113,15 @@ fn claim_in_dir(
         .with_context(|| format!("Failed to open session lease {lease_path:?}"))?;
     match lease.try_lock_exclusive() {
         Ok(true) => {
-            write_owner(&lease_dir)?;
+            // The owner record is best-effort: the lock itself is what makes
+            // the claim real. Losing only the cosmetic record of who holds it
+            // must not throw away a lease that was already acquired.
+            if let Err(error) = write_owner(&lease_dir) {
+                safe_warn!(
+                    safe: ("Failed to write session owner record"),
+                    full: ("Failed to write session owner record: {error:#}")
+                );
+            }
             leases.insert(key, lease);
             Ok(SessionClaim::Claimed)
         }

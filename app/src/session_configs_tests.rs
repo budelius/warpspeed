@@ -186,6 +186,26 @@ fn a_corrupt_owner_record_still_reports_the_lease_as_held() {
 }
 
 #[test]
+fn a_failed_owner_write_does_not_throw_away_the_lease() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let mut leases = HashMap::new();
+    // A directory at the owner record's path makes `fs::write` fail there
+    // without disturbing the lock file itself.
+    std::fs::create_dir_all(dir.path().join("obachan").join("1").join("owner.json"))
+        .expect("owner.json should be creatable as a directory to force the write to fail");
+
+    let claim = claim_in_dir(dir.path(), "obachan", 1, &mut leases).expect(
+        "a lock already held should not fail just because the owner record could not be written",
+    );
+
+    assert!(matches!(claim, SessionClaim::Claimed));
+    assert!(
+        leases.contains_key(&("obachan".to_owned(), 1)),
+        "the acquired lease must not be dropped when only the owner record fails"
+    );
+}
+
+#[test]
 fn different_generations_do_not_contend() {
     let dir = tempfile::tempdir().expect("lease directory should be created");
     let mut first = HashMap::new();

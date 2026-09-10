@@ -2754,16 +2754,25 @@ pub(crate) fn app_callbacks(
             // Unix v1 supervisor's set of preserved sessions unchanged; its raw
             // output spool cannot reproduce an alternate screen, so widening
             // the set there would mean more panes reattaching to garbage.
+            //
+            // Whether any window is still registered here is a platform
+            // detail. macOS terminates the app first and closes its windows
+            // after, so this finds them; Windows and Linux end the event loop
+            // only once the last window has gone, and this finds nothing --
+            // there, `Workspace::hand_sessions_to_supervisor_for_exit` has
+            // already done the work on the way out of each window.
             #[cfg(feature = "local_tty")]
             let handovers: Vec<terminal::local_tty::spawner::PendingDetach> =
                 if terminal::detached_sessions::are_supported(ctx) {
-                    workspace::WorkspaceRegistry::as_ref(ctx)
-                        .all_workspaces(ctx)
-                        .into_iter()
-                        .flat_map(|(_, workspace)| {
-                            workspace.as_ref(ctx).sessions_to_detach_at_exit(ctx)
-                        })
-                        .collect()
+                    let workspaces = workspace::WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx);
+                    let mut handovers = Vec::new();
+                    for (_, workspace) in workspaces {
+                        workspace.update(ctx, |workspace, ctx| {
+                            handovers.extend(workspace.sessions_to_detach_at_exit(ctx));
+                            workspace.mark_sessions_handed_over();
+                        });
+                    }
+                    handovers
                 } else {
                     get_app_state(ctx)
                         .windows

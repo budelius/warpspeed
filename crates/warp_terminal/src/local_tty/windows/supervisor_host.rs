@@ -36,6 +36,11 @@ impl Drop for AttachedClient {
 struct HostedSession {
     pty: SupervisedPty,
     attached_client: Option<AttachedClient>,
+
+    /// Whether this session's pipe has ever been lent to a client.
+    ///
+    /// It can only be lent once, ever. See [`WindowsSessionHost::lend_endpoint`].
+    pipe_was_lent: bool,
 }
 
 /// The Windows process and ConPTY resources owned by the terminal supervisor.
@@ -66,6 +71,7 @@ impl SessionHost for WindowsSessionHost {
             HostedSession {
                 pty,
                 attached_client: Some(attached_client),
+                pipe_was_lent: true,
             },
         );
         Ok(endpoint)
@@ -124,15 +130,47 @@ impl SessionHost for WindowsSessionHost {
         session.pty.kill()
     }
 
+    /// Refuses to lend a pipe a second time, because Windows will not let a
+    /// second client read it.
+    ///
+    /// Lending duplicates a handle, and a duplicate points at the same kernel
+    /// file object. The first client registers that object for asynchronous
+    /// reads, which binds it to that client's completion port -- permanently:
+    /// "a handle can be associated with only one I/O completion port, and after
+    /// making the association, the handle remains associated with that I/O
+    /// completion port until it is closed". The binding is on the object, so it
+    /// outlives the handle, the completion port, and the process.
+    ///
+    /// A second client therefore cannot read what it is lent. It used to find
+    /// that out by registering the handle and having the kernel refuse with
+    /// `ERROR_INVALID_PARAMETER`, which arrived as a panic on the `PTY reader`
+    /// thread and a tab that closed itself -- while the supervisor went on
+    /// believing the session was in use, so nothing could attach it afterwards
+    /// either. `local_tty::windows::iocp_reuse_tests` pins the underlying
+    /// behaviour down.
+    ///
+    /// Refusing here instead leaves the session exactly where it was: the serve
+    /// loop marks it detached again and the client reports a failed attach, so
+    /// the shell keeps running and stays available to a build that can take it.
+    ///
+    /// Making attach work needs the supervisor to stop lending this pipe twice
+    /// -- by handing over a fresh pipe and relaying between the two, or by
+    /// giving the client something it can read without a completion port.
     fn lend_endpoint(&mut self, session_id: SessionId, client_pid: u32) -> Result<Endpoint> {
         let session = self
             .sessions
             .get_mut(&session_id)
             .with_context(|| format!("Terminal session {session_id:?} was not found"))?;
+        if session.pipe_was_lent {
+            bail!(
+                "Terminal session {session_id:?} cannot be attached on Windows: its pipe has                  already been lent to one client, and Windows binds a pipe to the first reader                  for the life of the pipe. The session is still running and has been left                  detached."
+            );
+        }
         let endpoint = Endpoint {
             pid: session.pty.pid(),
             raw: lend_handle_to_process(session.pty.pipe_handle(), client_pid)?,
         };
+        session.pipe_was_lent = true;
         session.attached_client = Some(AttachedClient::open(client_pid)?);
         Ok(endpoint)
     }

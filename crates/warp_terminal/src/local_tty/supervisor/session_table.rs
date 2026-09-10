@@ -151,6 +151,7 @@ impl SessionTable {
                 sequence: session.ring.sequence(),
                 output_was_dropped: true,
                 endpoint: None,
+                metadata: session.metadata.clone(),
             })
         } else {
             Ok(AttachedSession {
@@ -159,6 +160,7 @@ impl SessionTable {
                 sequence: session.ring.sequence(),
                 output_was_dropped: false,
                 endpoint: None,
+                metadata: session.metadata.clone(),
             })
         }
     }

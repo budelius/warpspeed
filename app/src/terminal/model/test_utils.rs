@@ -337,6 +337,25 @@ impl TerminalModel {
         )
     }
 
+    /// A [`TerminalModel`] that has never heard from a shell.
+    ///
+    /// [`TerminalModel::mock`] hands back a model that has already been through
+    /// the whole startup handshake, which is the wrong starting point for
+    /// anything testing what happens when a pane never sees one.
+    pub fn mock_before_bootstrap() -> TerminalModel {
+        TerminalModel::new_before_bootstrap_for_test(
+            block_size(),
+            color::List::from(&Colors::default()),
+            ChannelEventListener::new_for_test(),
+            Arc::new(Background::default()),
+            false,
+            None,
+            false,
+            false, /* is_inverted */
+            None,
+        )
+    }
+
     /// Simulates the creation of a block as if the `input` command
     /// was run and it produced `output` bytes.
     ///

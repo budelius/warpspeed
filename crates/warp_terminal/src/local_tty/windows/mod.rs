@@ -5,6 +5,9 @@ mod environment;
 pub mod handle_lending;
 pub mod pipe_security;
 pub mod pipe_transport;
+#[cfg(test)]
+#[path = "iocp_reuse_tests.rs"]
+mod iocp_reuse_tests;
 mod pipes;
 mod proc_thread_attribute_list;
 pub mod supervised_pty;
@@ -44,6 +47,7 @@ use super::{EventedPty, EventedReadWrite, PtyOptions, SizeInfo, mio_channel};
 use crate::local_tty::spawner::{PtySpawnInfo, PtySpawner};
 use crate::local_tty::windows::proc_thread_attribute_list::ProcThreadAttributeList;
 use crate::writeable_pty;
+use crate::local_tty::supervisor::message::SessionMetadata;
 
 trait ToCoord {
     fn to_coord(&self) -> COORD;
@@ -502,17 +506,22 @@ impl Pty {
         size: &SizeInfo,
         include_snapshot: bool,
         ctx: &mut AppContext,
-    ) -> anyhow::Result<Option<Self>> {
-        let Some((result, handle)) = PtySpawner::handle(ctx).update(ctx, |spawner, _| {
-            spawner.attach_pty(session_id, include_snapshot)
-        })?
+    ) -> anyhow::Result<Option<(Self, SessionMetadata)>> {
+        let Some((result, handle, metadata)) = PtySpawner::handle(ctx)
+            .update(ctx, |spawner, _| {
+                spawner.attach_pty(
+                    session_id,
+                    include_snapshot,
+                    (size.columns() as u16, size.rows() as u16),
+                )
+            })?
         else {
             return Ok(None);
         };
         let mut pty = Self::from_spawn_result(result, handle);
         // Forced: a reattached session needs its size re-announced.
         pty.on_resize(size, true);
-        Ok(Some(pty))
+        Ok(Some((pty, metadata)))
     }
 
     fn from_spawn_result(result: PtySpawnResult, handle: Box<dyn PtyHandle>) -> Self {

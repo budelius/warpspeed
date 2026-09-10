@@ -21,6 +21,7 @@ pub mod rewind_confirmation_dialog;
 pub mod sync_inputs;
 pub mod tab_group;
 pub mod tab_settings;
+pub(crate) mod terminal_panes;
 mod toast_stack;
 pub mod util;
 pub mod view;
@@ -62,6 +63,7 @@ pub fn panel_header_corner_radius() -> warpui::elements::CornerRadius {
 
 pub use one_time_modal_model::OneTimeModalModel;
 pub use registry::WorkspaceRegistry;
+pub(crate) use terminal_panes::TerminalPaneInfo;
 pub use toast_stack::{ToastStack, ToastStackEvent};
 
 use crate::workspace::view::{

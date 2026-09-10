@@ -1300,16 +1300,35 @@ fn on_shell_determined<S: TerminalSurface>(
     // Consumed by this attach: a later restart of the same pane replaces the
     // session rather than taking one over, and must not repaint.
     let include_snapshot = std::mem::take(&mut manager.repaint_screen_on_attach);
-    let attached_pty = manager.persistent_session_id.and_then(|session_id| {
+    let attached = manager.persistent_session_id.and_then(|session_id| {
         let size = manager.model().lock().block_list().size().to_owned();
         match Pty::attach(session_id, &size, include_snapshot, ctx) {
-            Ok(pty) => pty,
+            Ok(attached) => attached,
             Err(error) => {
                 log::warn!("Failed to reattach terminal session: {error:#}");
                 None
             }
         }
     });
+
+    // The shell's announcement is carried across the detach and is available
+    // here as `metadata.bootstrap` -- but replaying it into this pane is not
+    // yet safe, so it is deliberately not used.
+    //
+    // An attached pane never receives the `InitShell` and `Bootstrapped` hooks:
+    // the shell sent them once, to a Warp process that has exited. So it stays
+    // in `TerminalInputState::NotBootstrapped`, draws no blocks and refuses
+    // every keystroke, which is why an attached session is currently
+    // unusable. `TerminalModel::restore_bootstrap` replays exactly those two
+    // hooks and fixes that much -- but a pane taken that far then panics in the
+    // grid (`assertion failed: requested < self.len`) while it renders, which a
+    // pane that never bootstrapped never reached. Wiring this up before that is
+    // understood trades an unusable pane for a crashing one.
+    //
+    // Kept, rather than dropped, because the supervisor now preserves the
+    // announcement and the fix needs it: what is missing is the rendering half,
+    // not the state.
+    let attached_pty = attached.map(|(pty, _metadata)| pty);
 
     // Enqueue the init shell script (for shells that need it), then create
     // the PTY and start its corresponding event loop.

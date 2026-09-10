@@ -27,6 +27,14 @@ const MAX_SOCKET_PATH_BYTES: usize = 103;
 /// handed a spawn request carrying the complete environment (injected API keys
 /// and cloud credentials included), and answer with a descriptor of their
 /// choosing as the terminal the user types into.
+/// `pub` because the app's remote-control channel needs the same directory for
+/// the same reasons: per-user, `0700`, never `/tmp`, and short enough for a
+/// `sockaddr_un`. A second directory chosen separately would be a second place
+/// to get those properties wrong.
+pub fn supervisor_socket_directory() -> PathBuf {
+    socket_directory()
+}
+
 fn socket_directory() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)

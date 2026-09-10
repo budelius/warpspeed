@@ -143,6 +143,7 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_add_many_sessions);
     register_test!(test_ctrl_tab_session_switching);
     register_test!(test_detach_and_attach_a_session);
+    register_test!(test_a_closing_window_hands_its_session_to_the_supervisor);
     register_test!(test_ctrl_d_eot);
     register_test!(test_ctrl_d_exit);
     register_test!(test_ctrl_d_handled_by_read_during_bootstrapping);

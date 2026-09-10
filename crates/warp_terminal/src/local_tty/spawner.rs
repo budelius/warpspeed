@@ -450,6 +450,26 @@ impl PtySpawner {
         }
     }
 
+    /// Ends a session the supervisor is holding, killing its shell.
+    ///
+    /// Only meaningful for a detached session. A session a client is attached
+    /// to is that client's to end, by closing the pane showing it.
+    #[cfg_attr(not(any(unix, windows)), allow(unused_variables))]
+    pub fn kill_detached_session(&self, session_id: SessionId) -> Result<()> {
+        #[cfg(any(unix, windows))]
+        {
+            let supervisor = self
+                .supervisor
+                .as_ref()
+                .context("No terminal supervisor is running to end this session")?;
+            supervisor.kill(session_id)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            anyhow::bail!("Ending a supervised terminal session is not supported on this platform")
+        }
+    }
+
     /// The sessions the supervisor is holding with no client attached.
     pub fn list_detached_sessions(&self) -> Result<Vec<SessionSummary>> {
         #[cfg(any(unix, windows))]
@@ -651,11 +671,18 @@ impl PtySpawner {
     /// already painted its own scrollback from sqlite and would show the screen
     /// twice; a pane opening fresh onto a detached session has nothing and
     /// needs it.
+    /// Takes a session back from the supervisor, with what the client that let
+    /// it go knew about it.
+    ///
+    /// The metadata travels with the endpoint because the pane adopting this
+    /// shell has no other way to learn what the shell already announced -- see
+    /// [`SessionMetadata::bootstrap`].
     pub(super) fn attach_pty(
         &self,
         session_id: SessionId,
         #[cfg_attr(unix, allow(unused_variables))] include_snapshot: bool,
-    ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>)>> {
+        pane_size: (u16, u16),
+    ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata)>> {
         #[cfg(unix)]
         if let Some(client) = self.supervisor.as_ref() {
             let attached = client.attach(session_id)?;
@@ -665,7 +692,9 @@ impl PtySpawner {
             // A wrapped ring means the buffered output no longer reaches back
             // to the snapshot, so the screen has to be repainted whatever the
             // caller asked for -- otherwise the gap reads as continuous output.
-            let mut replay = if include_snapshot || attached.output_was_dropped {
+            let mut replay = if snapshot_fits_pane(&attached.snapshot, pane_size)
+                && (include_snapshot || attached.output_was_dropped)
+            {
                 attached.snapshot.repaint
             } else {
                 Vec::new()
@@ -682,7 +711,7 @@ impl PtySpawner {
                 session_id,
                 pid: endpoint.pid,
             });
-            return Ok(Some((result, handle)));
+            return Ok(Some((result, handle, attached.metadata)));
         }
 
         #[cfg(unix)]
@@ -701,7 +730,10 @@ impl PtySpawner {
                 persistent_session_id: Some(session_id),
                 client,
             });
-            Ok(Some((result, handle)))
+            // The v1 server keeps a raw output spool and nothing else, so there
+            // is no announcement to hand back. A pane attaching through it is
+            // left where it has always been left.
+            Ok(Some((result, handle, SessionMetadata::default())))
         }
 
         #[cfg(windows)]
@@ -716,7 +748,9 @@ impl PtySpawner {
             // A wrapped ring means the buffered output no longer reaches back
             // to the snapshot, so the screen has to be repainted whatever the
             // caller asked for -- otherwise the gap reads as continuous output.
-            let mut replay = if include_snapshot || attached.output_was_dropped {
+            let mut replay = if snapshot_fits_pane(&attached.snapshot, pane_size)
+                && (include_snapshot || attached.output_was_dropped)
+            {
                 attached.snapshot.repaint
             } else {
                 Vec::new()
@@ -733,9 +767,37 @@ impl PtySpawner {
                 session_id,
                 pid: endpoint.pid,
             });
-            Ok(Some((result, handle)))
+            Ok(Some((result, handle, attached.metadata)))
         }
     }
+}
+
+/// Whether a snapshot describes a screen the size of the pane about to show it.
+///
+/// A snapshot is a repaint sequence, and a repaint positions the cursor with
+/// absolute coordinates taken from the screen it was rendered from. Replaying
+/// one into a smaller pane addresses rows that pane does not have, which the
+/// grid asserts against in a debug build and silently mis-indexes in a release
+/// one -- the `assertion failed: requested < self.len` and `index out of bounds`
+/// panics that a detached split, reattached as a full-width tab, produced every
+/// time.
+///
+/// Skipping the repaint costs the screen as it was; the session's buffered
+/// output still arrives, and the pane is live and usable. Restoring a screen
+/// across a size change needs the supervisor to re-render at the new size,
+/// which is a change to the attach round trip rather than a guard here.
+fn snapshot_fits_pane(snapshot: &ScreenSnapshot, pane_size: (u16, u16)) -> bool {
+    let fits = (snapshot.columns, snapshot.rows) == pane_size;
+    if !fits {
+        log::info!(
+            "Not repainting an attached session's screen: it was {}x{} and this pane is {}x{}",
+            snapshot.columns,
+            snapshot.rows,
+            pane_size.0,
+            pane_size.1
+        );
+    }
+    fits
 }
 
 impl Entity for PtySpawner {

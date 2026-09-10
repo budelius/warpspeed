@@ -121,7 +121,7 @@ fn label_for(
 }
 
 /// A detach age in the coarsest unit that still says something useful.
-fn humanize_age(seconds: u64) -> String {
+pub(crate) fn humanize_age(seconds: u64) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;

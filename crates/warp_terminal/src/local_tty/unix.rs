@@ -40,6 +40,7 @@ use crate::local_tty::shell::{
     DirectShellStarter, ShellStarter, extra_path_entries, ssh_socket_dir,
 };
 use crate::shell::{ShellType, shell_escape_single_quotes};
+use crate::local_tty::supervisor::message::SessionMetadata;
 
 const BASH_HISTORY_SIZE_SENTINEL: &str = "57265949261";
 
@@ -651,12 +652,16 @@ impl Pty {
         size: &SizeInfo,
         include_snapshot: bool,
         ctx: &mut AppContext,
-    ) -> Result<Option<Self>> {
+    ) -> Result<Option<(Self, SessionMetadata)>> {
         let signals = Signals::new([signal_hook::consts::SIGCHLD])
             .context("error preparing signal handling")?;
-        let Some((result, pty_handle)) = PtySpawner::handle(ctx)
+        let Some((result, pty_handle, metadata)) = PtySpawner::handle(ctx)
             .update(ctx, |pty_spawner, _| {
-                pty_spawner.attach_pty(session_id, include_snapshot)
+                pty_spawner.attach_pty(
+                    session_id,
+                    include_snapshot,
+                    (size.columns() as u16, size.rows() as u16),
+                )
             })?
         else {
             return Ok(None);
@@ -678,7 +683,7 @@ impl Pty {
         };
         // Forced: a reattached session needs its size re-announced.
         pty.on_resize(size, true);
-        Ok(Some(pty))
+        Ok(Some((pty, metadata)))
     }
 
     pub fn get_pid(&self) -> u32 {

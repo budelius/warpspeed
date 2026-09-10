@@ -122,11 +122,10 @@ impl<H: SessionHost> Supervisor<H> {
                     rows: 24,
                     repaint: Vec::new(),
                 },
-                SessionMetadata {
-                    shell: String::new(),
-                    working_directory: String::new(),
-                    title: String::new(),
-                },
+                // Nothing is known about a session whose client vanished
+                // without handing it over: the announcement it would have
+                // carried lives in the client that died with it.
+                SessionMetadata::default(),
                 now_unix_seconds,
                 event_listener.clone(),
             );

@@ -20,6 +20,7 @@ use warp_errors::report_error;
 pub use warp_terminal::event::ExitReason;
 use warp_terminal::event::validate_and_decode_in_band_command_output_to_bytes;
 use warp_terminal::local_tty::screen::ScreenSnapshot;
+use warp_terminal::local_tty::supervisor::message::SessionBootstrap;
 use warp_terminal::model::grid::render_ansi;
 pub use warp_terminal::model::{BlockIndex, RangeInModel};
 use warp_terminal::model::{KeyboardModes, KeyboardModesApplyBehavior};
@@ -527,6 +528,13 @@ pub struct TerminalModel {
     /// bootstrap init scripts. Used to validate DCS hook integrity: hooks
     /// carrying an unrecognized session_id are rejected.
     registered_session_ids: HashSet<SessionId>,
+
+    /// What the shell announced about itself, kept so an attaching pane can be
+    /// told the same thing.
+    ///
+    /// See [`SessionBootstrap`]: a shell introduces itself once, and a pane
+    /// that adopts a running shell was not there to hear it.
+    captured_bootstrap: Option<SessionBootstrap>,
 }
 
 #[derive(Clone, Debug)]
@@ -946,12 +954,14 @@ impl TerminalModel {
     pub fn set_is_input_dirty(&mut self, value: bool) {
         self.is_input_dirty = value;
     }
+    /// Returns a `TerminalModel` that has never heard from a shell.
+    ///
+    /// The state a pane is in from the moment it opens until the shell's first
+    /// prompt -- and, until [`Self::restore_bootstrap`] existed, the state a
+    /// pane that adopted an already-running shell stayed in forever.
     #[cfg(any(test, feature = "test-util"))]
     #[allow(clippy::too_many_arguments)]
-    /// Returns a bootstrapped `TerminalModel` with no restored blocks
-    /// and just one default block to avoid any side effects of being
-    /// in the middle of the bootstrap sequence.
-    pub(crate) fn new_for_test(
+    pub(crate) fn new_before_bootstrap_for_test(
         sizes: BlockSize,
         colors: color::List,
         event_proxy: ChannelEventListener,
@@ -962,9 +972,7 @@ impl TerminalModel {
         is_inverted: bool,
         session_startup_path: Option<PathBuf>,
     ) -> Self {
-        use super::session::get_local_hostname;
-
-        let mut terminal_model = Self::new(
+        Self::new(
             restored_blocks,
             sizes,
             colors,
@@ -983,6 +991,37 @@ impl TerminalModel {
                 display_name: ShellName::blank(),
                 shell_type: ShellType::Zsh,
             },
+        )
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    #[allow(clippy::too_many_arguments)]
+    /// Returns a bootstrapped `TerminalModel` with no restored blocks
+    /// and just one default block to avoid any side effects of being
+    /// in the middle of the bootstrap sequence.
+    pub(crate) fn new_for_test(
+        sizes: BlockSize,
+        colors: color::List,
+        event_proxy: ChannelEventListener,
+        background_executor: Arc<Background>,
+        should_show_bootstrap_block: bool,
+        restored_blocks: Option<&[SerializedBlockListItem]>,
+        honor_ps1: bool,
+        is_inverted: bool,
+        session_startup_path: Option<PathBuf>,
+    ) -> Self {
+        use super::session::get_local_hostname;
+
+        let mut terminal_model = Self::new_before_bootstrap_for_test(
+            sizes,
+            colors,
+            event_proxy,
+            background_executor,
+            should_show_bootstrap_block,
+            restored_blocks,
+            honor_ps1,
+            is_inverted,
+            session_startup_path,
         );
 
         let session_id = 123.into();
@@ -1101,6 +1140,7 @@ impl TerminalModel {
             // Start mid-way through the u32 range to avoid collisions
             next_kitty_image_id: 2147483647,
             registered_session_ids: HashSet::new(),
+            captured_bootstrap: None,
         }
     }
 
@@ -2583,11 +2623,93 @@ macro_rules! delegate {
     }
 }
 
+/// A set of shell tags as a sorted list.
+///
+/// Sorted because the set's iteration order is not stable, and an unstable
+/// order would make two encodings of one bootstrap differ byte for byte.
+fn sorted_tags(tags: &HashSet<String>) -> Vec<String> {
+    let mut tags: Vec<String> = tags.iter().cloned().collect();
+    tags.sort();
+    tags
+}
+
 impl TerminalModel {
     /// Registers a client-generated session ID so that DCS hooks carrying
     /// this ID will be accepted by the integrity check.
     pub fn register_session_id(&mut self, session_id: SessionId) {
         self.registered_session_ids.insert(session_id);
+    }
+
+    /// What the shell announced about itself, for handing to whoever adopts
+    /// this session next.
+    ///
+    /// `None` until the shell has bootstrapped, which is also exactly when
+    /// there is nothing worth preserving.
+    pub fn captured_bootstrap(&self) -> Option<&SessionBootstrap> {
+        self.captured_bootstrap.as_ref()
+    }
+
+    /// Tells this pane what the shell said to a pane that no longer exists.
+    ///
+    /// Replays the two hooks a warpified shell sends exactly once at startup,
+    /// through the same entry points the shell's own messages take. Without
+    /// this a pane that adopts a running shell stays in
+    /// `TerminalInputState::NotBootstrapped` for the rest of its life: it draws
+    /// no blocks and refuses every keystroke, while the shell behind it runs
+    /// perfectly well.
+    ///
+    /// Registering the shell's own hook id matters as much as the bootstrap
+    /// flag. The shell goes on stamping every later hook -- each prompt, each
+    /// finished command -- with the id it was given at startup, and a pane that
+    /// has not registered it discards them all as coming from a session it does
+    /// not know.
+    pub fn restore_bootstrap(&mut self, bootstrap: &SessionBootstrap) {
+        let session_id = SessionId::from(bootstrap.hook_session_id);
+        self.register_session_id(session_id);
+
+        self.init_shell(InitShellValue {
+            session_id,
+            shell: bootstrap.shell.clone(),
+            is_subshell: bootstrap.is_subshell,
+            user: bootstrap.user.clone(),
+            hostname: bootstrap.hostname.clone(),
+            wsl_name: bootstrap.wsl_name.clone(),
+        });
+
+        self.bootstrapped(BootstrappedValue {
+            session_id: Some(bootstrap.hook_session_id),
+            shell: bootstrap.shell.clone(),
+            histfile: bootstrap.histfile.clone(),
+            home_dir: bootstrap.home_dir.clone(),
+            path: bootstrap.path.clone(),
+            cdpath: bootstrap.cdpath.clone(),
+            editor: bootstrap.editor.clone(),
+            aliases: bootstrap.aliases.clone(),
+            abbreviations: bootstrap.abbreviations.clone(),
+            function_names: bootstrap.function_names.clone(),
+            env_var_names: bootstrap.env_var_names.clone(),
+            builtins: bootstrap.builtins.clone(),
+            keywords: bootstrap.keywords.clone(),
+            shell_version: bootstrap.shell_version.clone(),
+            vi_mode_enabled: bootstrap.vi_mode_enabled.clone(),
+            os_category: bootstrap.os_category.clone(),
+            linux_distribution: bootstrap.linux_distribution.clone(),
+            wsl_name: bootstrap.wsl_name.clone(),
+            shell_path: bootstrap.shell_path.clone(),
+            shell_options: bootstrap
+                .shell_options
+                .as_ref()
+                .map(|options| options.iter().cloned().collect::<HashSet<String>>()),
+            shell_plugins: bootstrap
+                .shell_plugins
+                .as_ref()
+                .map(|plugins| plugins.iter().cloned().collect::<HashSet<String>>()),
+            // Deliberately not carried: these measure how long the shell spent
+            // sourcing rcfiles at startup, and reporting that again for a pane
+            // that did no such thing would be inventing a number.
+            rcfiles_start_time: None,
+            rcfiles_end_time: None,
+        });
     }
 
     pub fn needs_bracketed_paste(&mut self) -> bool {
@@ -3121,6 +3243,28 @@ impl ansi::Handler for TerminalModel {
     }
 
     fn bootstrapped(&mut self, value: BootstrappedValue) {
+        if let Some(captured) = self.captured_bootstrap.as_mut() {
+            captured.histfile = value.histfile.clone();
+            captured.home_dir = value.home_dir.clone();
+            captured.path = value.path.clone();
+            captured.cdpath = value.cdpath.clone();
+            captured.editor = value.editor.clone();
+            captured.aliases = value.aliases.clone();
+            captured.abbreviations = value.abbreviations.clone();
+            captured.function_names = value.function_names.clone();
+            captured.env_var_names = value.env_var_names.clone();
+            captured.builtins = value.builtins.clone();
+            captured.keywords = value.keywords.clone();
+            captured.shell_version = value.shell_version.clone();
+            captured.vi_mode_enabled = value.vi_mode_enabled.clone();
+            captured.os_category = value.os_category.clone();
+            captured.linux_distribution = value.linux_distribution.clone();
+            captured.shell_path = value.shell_path.clone();
+            // Sorted, so two encodings of one bootstrap are the same bytes.
+            captured.shell_options = value.shell_options.as_ref().map(sorted_tags);
+            captured.shell_plugins = value.shell_plugins.as_ref().map(sorted_tags);
+        }
+
         self.block_list.bootstrapped(value.clone());
 
         let pending_session_info = match self.pending_session_info.take() {
@@ -3204,6 +3348,17 @@ impl ansi::Handler for TerminalModel {
     fn init_shell(&mut self, data: InitShellValue) {
         if !self.ignore_bootstrapping_messages {
             let hook_session_id = Some(data.session_id.as_u64());
+            // Recorded before `data` is consumed below. Half the announcement;
+            // `bootstrapped` fills in the rest.
+            self.captured_bootstrap = Some(SessionBootstrap {
+                hook_session_id: data.session_id.as_u64(),
+                shell: data.shell.clone(),
+                user: data.user.clone(),
+                hostname: data.hostname.clone(),
+                wsl_name: data.wsl_name.clone(),
+                is_subshell: data.is_subshell,
+                ..SessionBootstrap::default()
+            });
             let transition = self.plan_lifecycle_transition(
                 LifecycleInput::InitShell,
                 None,

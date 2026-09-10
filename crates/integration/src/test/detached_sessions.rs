@@ -23,6 +23,7 @@ use warp::integration_testing::terminal::{
     wait_until_bootstrapped_single_pane_for_tab,
 };
 use warp::integration_testing::view_getters::{pane_group_view, workspace_view};
+use warp::integration_testing::window::{add_and_save_window, close_window, save_active_window_id};
 use warp::integration_testing::workspace::assert_tab_count;
 use warp::workspace::WorkspaceAction;
 use warpui_core::integration::TestStep;
@@ -151,10 +152,21 @@ pub fn test_detach_and_attach_a_session() -> Builder {
                 .add_assertion(assert_tab_count(2)),
         )
         .with_step(
-            // Deliberately not waiting for a bootstrap here. An attached pane
-            // takes over a shell that bootstrapped long ago, so the events that
-            // `wait_until_bootstrapped_pane` waits on are never coming; the
-            // session id arriving is the signal that the attach landed.
+            // Deliberately not waiting for a bootstrap here, and that is a
+            // known defect rather than a property of the design.
+            //
+            // An attached pane takes over a shell that bootstrapped long ago,
+            // in a different Warp process. Bootstrap completion is signalled by
+            // the shell's `InitShell` hook, which fires once, on a prompt that
+            // has already been printed -- so the pane waits for a handshake
+            // that is never coming and stays in `TerminalInputState::
+            // NotBootstrapped` for good. The shell really is reattached and
+            // really is running; the pane just refuses input, logging
+            // `Tried to execute command but can_execute_command was false:
+            // NotBootstrapped` for every keystroke.
+            //
+            // Until an attach can restore that state from what the supervisor
+            // knows, the session id arriving is all this can assert.
             TestStep::new("The same session came back")
                 .set_timeout(Duration::from_secs(30))
                 .set_retries(2)
@@ -174,5 +186,75 @@ pub fn test_detach_and_attach_a_session() -> Builder {
                         )
                     },
                 ),
+        )
+}
+
+/// The key the window under test is saved under, so the close step can name it
+/// after another window has taken over as active.
+const CLOSING_WINDOW: &str = "the window that closes";
+
+/// Closing a window with work in it keeps the work running.
+///
+/// This is the exit path, tested at the only place a test can reach it. On
+/// Windows and Linux, quitting Warp *is* closing its windows: the event loop
+/// ends once the last one has gone, and every window removes itself from the
+/// workspace registry on the way out. The app's termination hook therefore runs
+/// with nothing left to ask, which is why handing sessions over has to happen
+/// as each window closes.
+///
+/// A second window is opened first so that closing the first one is a window
+/// close and not the end of the process -- which would take the test with it.
+/// The mechanism is the same either way: `Workspace::on_window_closed` runs
+/// once per window, and the last one to run is the one that quits the app.
+pub fn test_a_closing_window_hands_its_session_to_the_supervisor() -> Builder {
+    FeatureFlag::PersistentTerminalSessions.set_enabled(true);
+
+    let session = Rc::new(RefCell::new(None::<u64>));
+    let for_capture = session.clone();
+    let for_check = session.clone();
+
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        // The rule is that a pane with work in it survives and an idle one does
+        // not, so the pane has to be busy for this to be testing anything.
+        .with_step(execute_long_running_command_for_pane(0, 0, "sleep 300"))
+        .with_step(
+            TestStep::new("Record the session that must survive the close")
+                .add_named_assertion(
+                    "the pane's shell is supervisor-owned",
+                    move |app, window_id| {
+                        let session_id = pane_session(app, window_id, 0, 0);
+                        *for_capture.borrow_mut() = session_id;
+                        async_assert!(
+                            session_id.is_some(),
+                            "the pane's shell must belong to the supervisor for closing the window                              to be able to keep it; no session id means the supervisor was                              unreachable and the spawn fell back to a child of this process"
+                        )
+                    },
+                )
+                .add_assertion(save_active_window_id(CLOSING_WINDOW)),
+        )
+        // Somewhere for the app to keep living once the busy window has gone.
+        .with_step(add_and_save_window("the window that stays"))
+        .with_step(close_window(CLOSING_WINDOW, 1))
+        .with_step(
+            TestStep::new("The supervisor kept the session")
+                .set_timeout(Duration::from_secs(30))
+                .set_retries(2)
+                .add_named_assertion("the closed window's session is still held", {
+                    move |app: &mut App, window_id: WindowId| {
+                        let expected = for_check
+                            .borrow()
+                            .expect("the session id was recorded before the close");
+                        let held = workspace_view(app, window_id).read(app, |_, ctx| {
+                            warp::terminal::detached_sessions::list(ctx)
+                                .into_iter()
+                                .any(|session| session.session_id.as_u64() == expected)
+                        });
+                        async_assert!(
+                            held,
+                            "closing a window must hand its running sessions to the supervisor                              rather than killing them; session {expected} is gone, so quitting                              Warp would lose whatever was running in it"
+                        )
+                    }
+                }),
         )
 }

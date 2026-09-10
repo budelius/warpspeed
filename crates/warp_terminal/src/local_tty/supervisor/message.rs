@@ -10,8 +10,25 @@ use super::transport::Endpoint;
 use crate::local_tty::screen::ScreenSnapshot;
 
 /// The protocol version, carried in the socket and pipe name so a client never
-/// speaks v2 to a v1 supervisor.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// speaks one version of this protocol to a supervisor speaking another.
+///
+/// ## Bump this whenever anything below changes shape
+///
+/// A supervisor outlives the app by design, so at any moment the daemon
+/// answering may have been started weeks ago by a build that is no longer
+/// installed. The name is the only thing that keeps those two apart, and it
+/// separates them only if this number moves.
+///
+/// v2 to v3 is the lesson. `SessionSummary` gained an `attached` flag without a
+/// bump, so a new client and a still-running old supervisor shared one pipe
+/// name and disagreed about the bytes on it. Every `ListSessions` came back as
+/// `invalid u8 while decoding bool`, every attach found a session the other
+/// supervisor was holding, and panes reported their shell as having exited
+/// prematurely -- none of which named the protocol as the cause.
+///
+/// [`super::framing_tests`] pins the encoding so that changing it without
+/// coming here fails a test rather than a user's terminal.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// A message in either direction between a client and the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +127,14 @@ pub struct AttachedSession {
     /// `None` means output arrives as streamed messages instead -- the case for
     /// every transport that leaves the machine.
     pub endpoint: Option<Endpoint>,
+
+    /// What the client that detached knew about the session.
+    ///
+    /// Travels back on the attach because the pane taking the session over has
+    /// no other source for it: it is adopting a shell it never started, and
+    /// [`SessionMetadata::bootstrap`] is what lets it do so without the shell
+    /// having to introduce itself a second time.
+    pub metadata: SessionMetadata,
 }
 
 /// What a client knows about a session that the supervisor cannot work out for
@@ -124,6 +149,92 @@ pub struct SessionMetadata {
 
     /// The session's title, for telling two shells apart at a glance.
     pub title: String,
+
+    /// What the shell said about itself when it started.
+    ///
+    /// `None` for a session detached before it finished bootstrapping, and for
+    /// one handed over by a client that never saw the handshake.
+    pub bootstrap: Option<SessionBootstrap>,
+}
+
+/// The shell's own account of itself, as it gave it once and will not give
+/// again.
+///
+/// A warpified shell announces who and what it is exactly once, on the prompt
+/// after startup: an `InitShell` hook naming the shell, user and host, then a
+/// `Bootstrapped` hook carrying everything the client needs for completions.
+/// A pane that misses those two never leaves
+/// `TerminalInputState::NotBootstrapped` -- it renders no blocks and refuses
+/// every keystroke.
+///
+/// Which is precisely the position an attaching pane is in. The shell it takes
+/// over said all of this to a Warp process that has since exited, and it has no
+/// reason to say it twice. So the pane that hands the session over records the
+/// announcement here, and the pane that picks it up replays it.
+///
+/// A plain mirror of the two hook payloads rather than the payloads themselves,
+/// because those deserialize through hand-written impls that accept the shell's
+/// JSON shape -- tolerating empty strings for absent values, and numbers
+/// written as strings. Sending them through bincode would ask those impls to
+/// read a wire format they were never written for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBootstrap {
+    /// The id the shell stamps on every hook it sends.
+    ///
+    /// Not the supervisor's [`SessionId`]: this one is baked into the shell's
+    /// prompt function at startup, and the shell keeps using it. A pane that
+    /// does not register it rejects every later hook from the shell as coming
+    /// from an unknown session.
+    pub hook_session_id: u64,
+
+    /// The shell's name, as `ShellType::from_name` understands it.
+    pub shell: String,
+
+    /// Who the shell is running as.
+    pub user: String,
+
+    /// The host it is running on, which is how a local session is told from a
+    /// remote one.
+    pub hostname: String,
+
+    /// The WSL distribution, when the shell is inside one.
+    pub wsl_name: Option<String>,
+
+    /// Whether the announcement came from a subshell.
+    pub is_subshell: bool,
+
+    pub histfile: Option<String>,
+    pub home_dir: Option<String>,
+    pub path: Option<String>,
+    /// `CDPATH`, colon-separated.
+    pub cdpath: Option<String>,
+    pub editor: Option<String>,
+    pub aliases: Option<String>,
+    pub abbreviations: Option<String>,
+    pub function_names: Option<String>,
+    pub env_var_names: Option<String>,
+    pub builtins: Option<String>,
+    pub keywords: Option<String>,
+    pub shell_version: Option<String>,
+
+    /// Whether the shell's own vi mode is on.
+    pub vi_mode_enabled: Option<String>,
+
+    /// The operating system category, e.g. `MacOS`, `Linux`, `Windows`.
+    pub os_category: Option<String>,
+
+    pub linux_distribution: Option<String>,
+
+    /// The full path to the running shell binary.
+    pub shell_path: Option<String>,
+
+    /// The shell options in effect. A sorted list rather than the set it comes
+    /// from, so that two encodings of the same bootstrap are the same bytes.
+    pub shell_options: Option<Vec<String>>,
+
+    /// Tags for known shell configurations and plugins, sorted for the same
+    /// reason as `shell_options`.
+    pub shell_plugins: Option<Vec<String>>,
 }
 
 /// A session as shown in the detached-sessions drawer.

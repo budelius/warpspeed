@@ -124,6 +124,8 @@ use self::vertical_tabs::{
     render_settings_popup, render_summary_pane_kind_icons, show_before_indicator,
     vtab_group_position_id,
 };
+#[cfg(feature = "local_tty")]
+use super::TerminalPaneInfo;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use super::action::AutoCloudHandoffTrigger;
 use super::action::{
@@ -1149,6 +1151,10 @@ pub struct Workspace {
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
     window_process_restart_in_progress: bool,
+    /// Whether this window has already given its surviving sessions to the
+    /// supervisor. Set once, so the window-close path and the app-termination
+    /// path cannot both hand over the same session.
+    sessions_handed_over: bool,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
@@ -3610,6 +3616,7 @@ impl Workspace {
             attach_session_menu_modal,
             pending_shell_restart: None,
             window_process_restart_in_progress: false,
+            sessions_handed_over: false,
             close_session_confirmation_dialog,
             rewind_confirmation_dialog,
             delete_conversation_confirmation_dialog,
@@ -13594,23 +13601,15 @@ impl Workspace {
         pane_id: PaneId,
         ctx: &mut ViewContext<Self>,
     ) -> anyhow::Result<()> {
-        let pane_group = self
-            .get_pane_group_view_with_id(pane_group_id)
-            .context("The pane group holding this session is gone")?;
-        let manager = pane_group
-            .as_ref(ctx)
-            .terminal_manager_for_pane_id(pane_id, ctx)
+        let pane = self
+            .terminal_panes(ctx)
+            .into_iter()
+            .find(|pane| pane.pane_group_id == pane_group_id && pane.pane_id == pane_id)
             .context("This pane has no terminal session")?;
-        let session_id = manager
-            .as_ref(ctx)
-            .persistent_session_id()
+        let handover = self
+            .capture_handover(&pane, ctx)
             .context("This pane's shell is not owned by a session supervisor")?;
-        let view = pane_group
-            .as_ref(ctx)
-            .terminal_view_from_pane_id(pane_id, ctx)
-            .context("This pane has no terminal view")?;
-
-        let handover = Self::capture_session_handover(session_id, &manager, &view, ctx);
+        let session_id = handover.session_id;
 
         PtySpawner::handle(ctx)
             .read(ctx, |spawner, _| {
@@ -13621,96 +13620,220 @@ impl Workspace {
             })
     }
 
-    /// Reads one pane's screen and identity into a handover for the supervisor.
-    #[cfg(feature = "local_tty")]
-    fn capture_session_handover(
-        session_id: warp_core::SessionId,
-        manager: &ModelHandle<Box<dyn TerminalManager>>,
-        view: &ViewHandle<TerminalView>,
-        ctx: &AppContext,
-    ) -> PendingDetach {
-        use warp_terminal::local_tty::supervisor::message::SessionMetadata;
-
-        // Scoped so the model lock is released before anything else is read:
-        // the view accessors below reach back into this same pane, and
-        // `TerminalModel`'s mutex is not reentrant.
-        let snapshot = {
-            let model = manager.as_ref(ctx).model();
-            let locked = model.lock();
-            locked.screen_snapshot()
-        };
-
-        PendingDetach {
-            session_id,
-            snapshot,
-            metadata: SessionMetadata {
-                shell: view
-                    .as_ref(ctx)
-                    .shell_launch_data_if_local(ctx)
-                    .map(|shell| detached_sessions::shell_label(&shell.shell_detail()))
-                    .unwrap_or_default(),
-                working_directory: view.as_ref(ctx).pwd_if_local(ctx).unwrap_or_default(),
-                title: CLIAgentSessionsModel::as_ref(ctx)
-                    .session(view.id())
-                    .and_then(|session| session.session_context.display_title())
-                    .unwrap_or_default(),
-            },
-        }
-    }
-
-    /// The sessions in this window that must outlive the app, each carrying the
-    /// screen it was showing.
+    /// Every terminal pane in this window, described once for every caller
+    /// that has to reason about them.
     ///
-    /// A pane is kept when it has work in it that the user would lose: a
-    /// tracked CLI agent, or a foreground command still running. A pane sitting
-    /// at a prompt is not kept -- quitting is still allowed to end an idle
-    /// shell, which is what it has always done.
-    ///
-    /// A launch-config session window is the exception: its whole point is that
-    /// reopening it finds the same shells, so every session in it is kept
-    /// whether or not anything is running.
+    /// See [`TerminalPaneInfo`] for why the exit path, a window close, and
+    /// `sessions panes` share one traversal rather than three.
     #[cfg(feature = "local_tty")]
-    pub(crate) fn sessions_to_detach_at_exit(&self, ctx: &AppContext) -> Vec<PendingDetach> {
+    pub(crate) fn terminal_panes(&self, ctx: &AppContext) -> Vec<TerminalPaneInfo> {
+        // A launch-config session window keeps every session, idle or not: its
+        // whole point is that reopening it finds the same shells.
         let keep_idle_sessions = self
             .launch_config_source
             .as_ref()
             .is_some_and(LaunchConfigWindowSource::is_session_config);
 
-        let mut handovers = Vec::new();
-        for tab in self.tabs.iter() {
+        let mut panes = Vec::new();
+        for (tab_index, tab) in self.tabs.iter().enumerate() {
+            let pane_group_id = tab.pane_group.id();
             let pane_group = tab.pane_group.as_ref(ctx);
             for pane_id in pane_group.pane_ids() {
-                let Some(manager) = pane_group.terminal_manager_for_pane_id(pane_id, ctx) else {
-                    continue;
-                };
-                let Some(session_id) = manager.as_ref(ctx).persistent_session_id() else {
-                    continue;
-                };
                 let Some(view) = pane_group.terminal_view_from_pane_id(pane_id, ctx) else {
                     continue;
                 };
+                let manager = pane_group.terminal_manager_for_pane_id(pane_id, ctx);
+                let session_id = manager
+                    .as_ref()
+                    .and_then(|manager| manager.as_ref(ctx).persistent_session_id());
 
-                let has_running_agent = CLIAgentSessionsModel::as_ref(ctx)
-                    .session(view.id())
-                    .is_some();
-                let is_busy = {
+                // Scoped so the model lock is released before anything else is
+                // read: the view accessors below reach back into this same
+                // pane, and `TerminalModel`'s mutex is not reentrant.
+                let is_busy = manager.as_ref().is_some_and(|manager| {
                     let model = manager.as_ref(ctx).model();
                     let locked = model.lock();
                     locked
                         .block_list()
                         .active_block()
                         .is_active_and_long_running()
-                };
-                if !(keep_idle_sessions || has_running_agent || is_busy) {
-                    continue;
-                }
+                });
 
-                handovers.push(Self::capture_session_handover(
-                    session_id, &manager, &view, ctx,
-                ));
+                let agent_session = CLIAgentSessionsModel::as_ref(ctx).session(view.id());
+                let has_running_agent = agent_session.is_some();
+
+                panes.push(TerminalPaneInfo {
+                    pane_group_id,
+                    pane_id,
+                    tab_index,
+                    session_id,
+                    has_running_agent,
+                    is_busy,
+                    survives_quit: keep_idle_sessions || has_running_agent || is_busy,
+                    title: agent_session
+                        .and_then(|session| session.session_context.display_title())
+                        .unwrap_or_default(),
+                    shell: view
+                        .as_ref(ctx)
+                        .shell_launch_data_if_local(ctx)
+                        .map(|shell| detached_sessions::shell_label(&shell.shell_detail()))
+                        .unwrap_or_default(),
+                    working_directory: view.as_ref(ctx).pwd_if_local(ctx).unwrap_or_default(),
+                });
             }
         }
-        handovers
+        panes
+    }
+
+    /// Reads one pane's screen and identity into a handover for the supervisor.
+    ///
+    /// `None` when the pane's shell is not the supervisor's to keep, which is
+    /// the one case where there is nothing to hand over.
+    #[cfg(feature = "local_tty")]
+    fn capture_handover(&self, pane: &TerminalPaneInfo, ctx: &AppContext) -> Option<PendingDetach> {
+        use warp_terminal::local_tty::supervisor::message::SessionMetadata;
+
+        let session_id = pane.session_id?;
+        let manager = self
+            .get_pane_group_view_with_id(pane.pane_group_id)?
+            .as_ref(ctx)
+            .terminal_manager_for_pane_id(pane.pane_id, ctx)?;
+        // One lock for both: the screen and what the shell said about itself
+        // have to describe the same moment, and `TerminalModel`'s mutex is not
+        // reentrant.
+        let (snapshot, bootstrap) = {
+            let model = manager.as_ref(ctx).model();
+            let locked = model.lock();
+            (locked.screen_snapshot(), locked.captured_bootstrap().cloned())
+        };
+
+        Some(PendingDetach {
+            session_id,
+            snapshot,
+            metadata: SessionMetadata {
+                shell: pane.shell.clone(),
+                working_directory: pane.working_directory.clone(),
+                title: pane.title.clone(),
+                bootstrap,
+            },
+        })
+    }
+
+    /// The sessions in this window that must outlive the app, each carrying the
+    /// screen it was showing.
+    ///
+    /// Empty once this window has already handed its sessions over. Both the
+    /// window-close path and the app-termination path ask, and which of them
+    /// runs first is a platform detail -- windows close before the app
+    /// terminates on Windows and Linux, and the reverse on macOS -- so the
+    /// second one to ask must find nothing left to do rather than detaching a
+    /// session the supervisor already owns.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn sessions_to_detach_at_exit(&self, ctx: &AppContext) -> Vec<PendingDetach> {
+        if self.sessions_handed_over {
+            return Vec::new();
+        }
+        self.terminal_panes(ctx)
+            .into_iter()
+            .filter(|pane| pane.survives_quit)
+            .filter_map(|pane| self.capture_handover(&pane, ctx))
+            .collect()
+    }
+
+    /// Hands every session that must outlive this window to the supervisor.
+    ///
+    /// This is what makes quitting work on the platforms where quitting *is*
+    /// closing the windows. On Windows and Linux the event loop ends only once
+    /// the last window has gone, and a window on its way out has already
+    /// removed itself from [`WorkspaceRegistry`] -- so by the time the app's
+    /// termination hook runs there is no window left to ask what it was
+    /// holding, and asking there alone preserved nothing at all.
+    ///
+    /// Closing one window of several takes the same path, and that is
+    /// deliberate: a window with an agent mid-turn in it should not take the
+    /// agent down with it, whether or not other windows remain.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn hand_sessions_to_supervisor_for_exit(&mut self, ctx: &mut ViewContext<Self>) {
+        // Two closes are not exits, and handing their sessions over would be
+        // actively wrong rather than merely unnecessary.
+        //
+        // A window closing to be reopened by another process has its sessions
+        // moved by the handoff machinery itself. A window whose content was
+        // transferred no longer owns the tabs it still lists -- another window
+        // does -- so detaching them here would take a session out from under
+        // the pane now showing it.
+        if self.window_process_restart_in_progress || self.suppress_detach_panes_on_window_close {
+            return;
+        }
+        let handovers = self.sessions_to_detach_at_exit(ctx);
+        if handovers.is_empty() {
+            self.sessions_handed_over = true;
+            return;
+        }
+
+        let count = handovers.len();
+        match PtySpawner::handle(ctx).read(ctx, |spawner, _| {
+            spawner.prepare_sessions_for_handoff(handovers)
+        }) {
+            Ok(()) => log::info!("Handed {count} terminal session(s) to the supervisor on close"),
+            Err(error) => report_error!(
+                error.context("Failed to hand terminal sessions to the supervisor on close")
+            ),
+        }
+        self.sessions_handed_over = true;
+    }
+
+    /// Records that this window's sessions are the supervisor's now, so no
+    /// later exit path hands the same ones over again.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn mark_sessions_handed_over(&mut self) {
+        self.sessions_handed_over = true;
+    }
+
+    /// Detaches the pane holding `session_id`, for a caller that needs to know
+    /// whether it worked.
+    ///
+    /// The action dispatched by the context menu cannot report back -- it
+    /// reaches the user as a toast -- but `sessions detach` is answering a
+    /// command whose whole value is a truthful exit status.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn detach_session_by_id(
+        &mut self,
+        session_id: warp_core::SessionId,
+        ctx: &mut ViewContext<Self>,
+    ) -> anyhow::Result<()> {
+        let pane = self
+            .terminal_panes(ctx)
+            .into_iter()
+            .find(|pane| pane.session_id == Some(session_id))
+            .with_context(|| format!("No pane in this window holds session {session_id:?}"))?;
+
+        self.hand_session_to_supervisor(pane.pane_group_id, pane.pane_id, ctx)?;
+        self.close_pane(pane.pane_group_id, pane.pane_id, ctx);
+        Ok(())
+    }
+
+    /// Opens a tab attached to a session the supervisor is holding.
+    ///
+    /// Checks that the supervisor still offers the session before opening
+    /// anything. Without that the caller would be told a tab was opened and
+    /// find a brand new shell in it, which is the one outcome an attach must
+    /// never be confused with.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn attach_session_by_id(
+        &mut self,
+        session_id: warp_core::SessionId,
+        ctx: &mut ViewContext<Self>,
+    ) -> anyhow::Result<()> {
+        let offered = detached_sessions::list(ctx)
+            .into_iter()
+            .any(|session| session.session_id == session_id);
+        anyhow::ensure!(
+            offered,
+            "The supervisor is not holding an unattached session {session_id:?}"
+        );
+        self.attach_detached_session(session_id, ctx);
+        Ok(())
     }
 
     #[cfg(not(feature = "local_tty"))]
@@ -29087,8 +29210,6 @@ impl View for Workspace {
             let history_id = crate::launch_configs::session_store::history_id_for_windows(
                 std::slice::from_ref(&window),
             );
-            #[cfg(feature = "local_tty")]
-            let handovers = self.sessions_to_detach_at_exit(ctx);
             if let Err(error) =
                 model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
                     windows: vec![window],
@@ -29101,15 +29222,14 @@ impl View for Workspace {
                         .context("Failed to save launch config session before window close")
                 );
             }
-            #[cfg(feature = "local_tty")]
-            if let Err(error) = PtySpawner::handle(ctx).read(ctx, |spawner, _| {
-                spawner.prepare_sessions_for_handoff(handovers)
-            }) {
-                report_error!(
-                    error.context("Failed to detach terminal sessions before window close")
-                );
-            }
         }
+
+        // Before the panes are torn down, and before this window leaves the
+        // registry: on Windows and Linux the app's termination hook runs after
+        // every window has already gone, so this is the last moment anything
+        // knows what was running here.
+        #[cfg(feature = "local_tty")]
+        self.hand_sessions_to_supervisor_for_exit(ctx);
 
         if !self.suppress_detach_panes_on_window_close {
             for pane_group in self.tab_views() {

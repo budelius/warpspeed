@@ -2330,3 +2330,67 @@ fn a_snapshot_carries_the_screen_size_it_was_taken_at() {
     assert_eq!(snapshot.columns, size.columns as u16);
     assert_eq!(snapshot.rows, size.rows as u16);
 }
+
+/// A pane that adopts a running shell has to be told what the shell already
+/// said, because the shell will not say it again.
+///
+/// A warpified shell announces itself exactly once, on its first prompt. A pane
+/// created to take over a session that is already running was not there for it,
+/// and without this the pane stays in [`TerminalInputState::NotBootstrapped`]
+/// for the rest of its life: no blocks, and every keystroke refused, over a
+/// shell that is running perfectly well.
+#[test]
+fn a_pane_adopting_a_running_shell_is_bootstrapped_by_what_it_is_told() {
+    let announced = TerminalModel::mock(None, None);
+    let captured = announced
+        .captured_bootstrap()
+        .cloned()
+        .expect("a model that saw a shell start must have captured the announcement");
+
+    let mut adopting = TerminalModel::mock_before_bootstrap();
+    assert!(
+        matches!(
+            adopting.terminal_input_state(),
+            TerminalInputState::NotBootstrapped
+        ),
+        "a pane that has heard nothing from a shell starts out refusing input"
+    );
+
+    adopting.restore_bootstrap(&captured);
+
+    assert!(
+        !matches!(
+            adopting.terminal_input_state(),
+            TerminalInputState::NotBootstrapped
+        ),
+        "after being told what the shell announced, the pane must accept input; \
+         staying NotBootstrapped is the bug that made an attached session unusable"
+    );
+}
+
+/// The announcement has to survive the supervisor, which is the only thing that
+/// outlives the app -- and it crosses it as bincode, which is not
+/// self-describing and so unforgiving of a type that does not round trip.
+#[test]
+fn an_announcement_survives_the_journey_through_the_supervisor() {
+    let announced = TerminalModel::mock(None, None);
+    let captured = announced
+        .captured_bootstrap()
+        .cloned()
+        .expect("a model that saw a shell start must have captured the announcement");
+
+    let encoded = bincode::serialize(&captured).expect("an announcement must encode");
+    let carried: warp_terminal::local_tty::supervisor::message::SessionBootstrap =
+        bincode::deserialize(&encoded).expect("an announcement must decode");
+
+    assert_eq!(carried, captured);
+    assert!(
+        !carried.shell.is_empty(),
+        "the shell's name is what the adopting pane resolves a ShellType from"
+    );
+    assert_ne!(
+        carried.hook_session_id, 0,
+        "the shell stamps this id on every later hook; a pane that restores the \
+         wrong one discards everything the shell says from then on"
+    );
+}

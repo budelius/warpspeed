@@ -2482,11 +2482,12 @@ impl Workspace {
         source: LaunchConfigWindowSource,
         window_template: Option<WindowTemplate>,
         owner: Option<crate::session_configs::SessionOwner>,
+        can_clone: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         self.close_palette(true, None, ctx);
         self.session_in_use_dialog.update(ctx, |dialog, ctx| {
-            dialog.set_session(name, owner, window_template.as_ref());
+            dialog.set_session(name, owner, window_template.as_ref(), can_clone);
             ctx.notify();
         });
         self.session_in_use_request = Some(SessionInUseRequest {

@@ -60,6 +60,10 @@ pub(crate) struct SessionInUseDialog {
     /// Whether this session resolves to a window template. Without one there is
     /// nothing to open from, so the button is left out rather than shown dead.
     has_template: bool,
+    /// False for a historical (non-current) summary: cloning would copy
+    /// today's live checkpoint, not the snapshot the user picked, so the
+    /// button that would lie about what it does is left out.
+    can_clone: bool,
 }
 
 impl SessionInUseDialog {
@@ -90,6 +94,7 @@ impl SessionInUseDialog {
             session_name: String::new(),
             owner: None,
             has_template: false,
+            can_clone: true,
         }
     }
 
@@ -98,10 +103,12 @@ impl SessionInUseDialog {
         name: String,
         owner: Option<SessionOwner>,
         window_template: Option<&WindowTemplate>,
+        can_clone: bool,
     ) {
         self.session_name = name;
         self.owner = owner;
         self.has_template = window_template.is_some();
+        self.can_clone = can_clone;
     }
 
     fn body(&self) -> String {
@@ -123,10 +130,14 @@ impl SessionInUseDialog {
             }
             None => "Held by another Warp process.".to_owned(),
         };
-        format!(
-            "{holder}\n\nClone copies the layout, working directories and shells. Running \
-             processes, scrollback and agent conversations stay with the original window."
-        )
+        if self.can_clone {
+            format!(
+                "{holder}\n\nClone copies the layout, working directories and shells. Running \
+                 processes, scrollback and agent conversations stay with the original window."
+            )
+        } else {
+            holder
+        }
     }
 }
 
@@ -166,10 +177,10 @@ impl View for SessionInUseDialog {
                     .finish(),
             );
         }
-        let dialog = dialog
-            .with_bottom_row_child(ChildView::new(&self.clone_button).finish())
-            .build()
-            .finish();
+        if self.can_clone {
+            dialog = dialog.with_bottom_row_child(ChildView::new(&self.clone_button).finish());
+        }
+        let dialog = dialog.build().finish();
 
         let mut stack = Stack::new();
         stack.add_positioned_child(
@@ -194,6 +205,9 @@ impl TypedActionView for SessionInUseDialog {
 
     fn handle_action(&mut self, action: &SessionInUseAction, ctx: &mut ViewContext<Self>) {
         match action {
+            // `enter` is bound unconditionally; without this guard it would
+            // fire the Clone button while it is hidden from `render`.
+            SessionInUseAction::Clone if !self.can_clone => {}
             SessionInUseAction::Clone => ctx.emit(SessionInUseEvent::Clone),
             SessionInUseAction::OpenFromTemplate => ctx.emit(SessionInUseEvent::OpenFromTemplate),
             SessionInUseAction::Cancel => ctx.emit(SessionInUseEvent::Cancel),

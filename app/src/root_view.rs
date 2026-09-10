@@ -596,6 +596,10 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
                     source.clone(),
                     arg.launch_config.windows.first().cloned(),
                     owner,
+                    // Opening a launch config directly targets its current
+                    // checkpoint, not a historical snapshot, so cloning it
+                    // always clones what the user asked for.
+                    true,
                     ctx,
                 );
                 return;
@@ -720,6 +724,10 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
                     source.clone(),
                     window_template,
                     owner,
+                    // A non-current summary is a historical snapshot; cloning
+                    // would copy today's live checkpoint instead, not the one
+                    // the user picked, so the dialog must not offer it.
+                    arg.summary.is_current(),
                     ctx,
                 );
                 return;
@@ -1152,6 +1160,8 @@ pub(crate) fn open_new_with_workspace_source(
 
 /// Opens a launch config window that claims no lease and writes no checkpoints,
 /// so it cannot contend with the process that owns the session.
+// Only ever reached from claiming a session lease, which is `local_fs`-only.
+#[cfg(feature = "local_fs")]
 pub(crate) fn open_window_from_template(
     window_template: launch_config::WindowTemplate,
     ctx: &mut AppContext,
@@ -1177,11 +1187,19 @@ fn offer_session_in_use_choices(
     source: launch_config::LaunchConfigWindowSource,
     window_template: Option<launch_config::WindowTemplate>,
     owner: Option<crate::session_configs::SessionOwner>,
+    can_clone: bool,
     ctx: &mut AppContext,
 ) {
     match (active_workspace(ctx), window_template) {
         (Some(workspace), window_template) => workspace.update(ctx, |workspace, ctx| {
-            workspace.open_session_in_use_dialog(name, source, window_template, owner, ctx);
+            workspace.open_session_in_use_dialog(
+                name,
+                source,
+                window_template,
+                owner,
+                can_clone,
+                ctx,
+            );
         }),
         (None, Some(window_template)) => open_window_from_template(window_template, ctx),
         // Nothing to host a dialog and nothing to open from. Saying so in the

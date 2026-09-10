@@ -623,6 +623,10 @@ pub struct CodeReviewView {
     file_sidebar_expanded_before_maximize: Option<bool>,
     scroll_state: ScrollStateHandle,
     viewported_list_state: ListState<RelocatableScrollContext>,
+    /// Whether this pass has already reported a list index with no file state.
+    /// `render_diff_at_index` runs every frame, so the report is one-shot and
+    /// rearmed whenever the list is rebuilt.
+    reported_missing_diff_index: std::cell::Cell<bool>,
 
     window_id: WindowId,
 
@@ -1333,6 +1337,7 @@ impl CodeReviewView {
             file_sidebar_expanded_before_maximize: None,
             position_id_prefix: random_str,
             viewported_list_state: list_state,
+            reported_missing_diff_index: std::cell::Cell::new(false),
             scroll_state: ScrollStateHandle::default(),
             action_target_provider,
             window_id: ctx.window_id(),
@@ -2535,6 +2540,7 @@ impl CodeReviewView {
 
         // Create a new list state for this update
         self.viewported_list_state = Self::create_list_state(ctx);
+        self.reported_missing_diff_index.set(false);
 
         let file_states_vec = self.build_view_state_for_file_diffs(&diff_data.files, ctx);
         let is_local = self.repo_is_local();
@@ -2550,6 +2556,23 @@ impl CodeReviewView {
                 total_deletions: diff_data.total_deletions,
                 files_changed: diff_data.files_changed,
             });
+        }
+
+        // Instrumentation for the blank-diff-area report: the file sidebar
+        // renders from `file_states` while the diff area renders from the
+        // virtualized list, so a divergence between the two shows as a
+        // populated sidebar beside empty space. A zero viewport height would
+        // do the same for a different reason, so both are recorded here.
+        if let Some(CodeReviewViewState::Loaded(loaded)) =
+            self.active_repo.as_ref().map(|repo| &repo.state)
+        {
+            log::info!(
+                "Code Review Panel: loaded {} files, {} list items, viewport height {:?}, sidebar expanded {}",
+                loaded.file_states.len(),
+                self.viewported_list_state.len(),
+                self.viewported_list_state.get_viewport_height(),
+                self.file_sidebar_expanded,
+            );
         }
 
         send_telemetry_from_ctx!(
@@ -2733,6 +2756,17 @@ impl CodeReviewView {
             _ => return Empty::new().finish(),
         };
         let Some((_, file_state)) = diff_state.get_index(index) else {
+            // The list and `file_states` have drifted apart. Rendering nothing
+            // here is what a blank diff area beside a populated sidebar looks
+            // like, so record it rather than swallowing it. Only the first row
+            // of a pass is reported: this runs on every frame.
+            if index == 0 || !self.reported_missing_diff_index.get() {
+                self.reported_missing_diff_index.set(true);
+                log::warn!(
+                    "Code Review Panel: no file state for list index {index} ({} files known)",
+                    diff_state.len(),
+                );
+            }
             return Empty::new().finish();
         };
 

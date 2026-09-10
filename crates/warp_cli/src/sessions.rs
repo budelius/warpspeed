@@ -1,0 +1,139 @@
+//! Arguments for the `sessions` subcommand, the terminal-session control
+//! surface.
+//!
+//! Two different processes answer these subcommands, and which one it is
+//! decides what the subcommand can do.
+//!
+//! [`SessionsCommand::List`] and [`SessionsCommand::Kill`] talk to the
+//! *supervisor*: the daemon that owns detached shells and outlives the app.
+//! They work with no Warp window open at all.
+//!
+//! Everything else talks to a *running Warp instance*, because the work is the
+//! app's to do. Detaching reads the pane's screen and closes it; attaching
+//! opens a tab. Neither is something a separate process can perform on the
+//! app's behalf, so these subcommands ask a window to do it and report what it
+//! said.
+//!
+//! Only the argument shapes live here. `warp_cli` has no view of terminals or
+//! windows, so the implementation is in the app crate, reached the same way
+//! `--build-info` is.
+
+use clap::{Args, Subcommand};
+
+/// `sessions <subcommand>`.
+#[derive(Debug, Clone, Args)]
+pub struct SessionsArgs {
+    #[command(subcommand)]
+    pub command: SessionsCommand,
+
+    /// Print machine-readable JSON instead of a table.
+    ///
+    /// Global to the group because every subcommand here is something a script
+    /// wants to read back, including the ones whose human output is one line.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Which Warp instance a subcommand is addressed to.
+///
+/// Left out, it means "the only one running". That is the common case at a
+/// prompt, and being explicit about a single obvious target is friction with no
+/// payoff. With several running, the ambiguity is real and the error says so
+/// rather than picking one.
+#[derive(Debug, Clone, Args)]
+pub struct InstanceArg {
+    /// The process id of the Warp instance to address.
+    ///
+    /// Optional while exactly one instance is running. `sessions instances`
+    /// lists the choices.
+    #[arg(long = "instance", value_name = "PID")]
+    pub pid: Option<u32>,
+}
+
+/// A session id, as `sessions list` prints it.
+#[derive(Debug, Clone, Args)]
+pub struct SessionArg {
+    /// The id of the session to act on.
+    #[arg(long = "session", value_name = "ID")]
+    pub session_id: u64,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum SessionsCommand {
+    /// List the sessions the supervisor is holding.
+    ///
+    /// These are shells with no window attached: detached by hand, or left
+    /// running when Warp last quit. Each one can be taken back with `attach`.
+    List,
+
+    /// Report whether a supervisor is reachable, and which one.
+    ///
+    /// Prints the channel it listens on even when nothing answers, which is the
+    /// first thing worth knowing when a detach has failed.
+    Supervisor,
+
+    /// List the running Warp instances that accept these commands.
+    Instances,
+
+    /// List the terminal panes of a running Warp instance.
+    ///
+    /// The session id in each row is what `detach` takes.
+    Panes {
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// Hand a live pane's session to the supervisor and close the pane.
+    ///
+    /// The shell keeps running. What was in the pane is preserved and comes
+    /// back on the next `attach`.
+    Detach {
+        #[command(flatten)]
+        session: SessionArg,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// Open a tab in a running Warp instance holding a detached session.
+    Attach {
+        #[command(flatten)]
+        session: SessionArg,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// End a session the supervisor is holding, killing its shell.
+    ///
+    /// Only reaches detached sessions. A session a window is using belongs to
+    /// that window, and closing its pane is how it ends.
+    Kill {
+        #[command(flatten)]
+        session: SessionArg,
+    },
+
+    /// Ask a running Warp instance to quit, exactly as the user quitting it
+    /// would.
+    ///
+    /// The point of having this is the exit path: quitting runs the same
+    /// teardown that decides which sessions outlive the app, so a test can
+    /// trigger it and then look at what the supervisor kept.
+    ///
+    /// By default this closes every window, which is how a user quits on
+    /// Windows and Linux -- the app has no separate quit there, and the event
+    /// loop ends once the last window has gone.
+    Quit {
+        /// Ask the app to terminate instead of closing its windows.
+        ///
+        /// This is the macOS Cmd-Q path. It skips the per-window teardown
+        /// entirely, so a session that only the window-close path preserves
+        /// will not be preserved by it -- which is the point of being able to
+        /// choose.
+        #[arg(long)]
+        terminate: bool,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+}

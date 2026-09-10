@@ -37,6 +37,8 @@ pub mod provider;
 pub mod runner;
 pub mod schedule;
 pub mod secret;
+#[cfg(not(target_family = "wasm"))]
+pub mod sessions;
 pub mod share;
 pub mod task;
 // Each of these variables is injected under both its `OZ_` and its `WARP_` name, carrying the
@@ -702,6 +704,11 @@ pub enum Command {
     #[clap(long_flag = "print-telemetry-events", hide = true)]
     #[cfg(not(target_family = "wasm"))]
     PrintTelemetryEvents,
+
+    /// Inspect and control terminal sessions, in this machine's supervisor and
+    /// in running Warp windows.
+    #[cfg(not(target_family = "wasm"))]
+    Sessions(sessions::SessionsArgs),
 }
 
 impl Command {
@@ -715,6 +722,8 @@ impl Command {
             Command::DumpSettingsSchema { output_path } => output_path.is_none(),
             #[cfg(not(target_family = "wasm"))]
             Command::PrintTelemetryEvents => true,
+            #[cfg(not(target_family = "wasm"))]
+            Command::Sessions(_) => true,
         }
     }
 }

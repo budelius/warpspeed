@@ -95,7 +95,11 @@ fn main() -> Result<()> {
 
     // Printed so `warpspeed.exe` run from a console says which database it is about to use.
     // The GUI subsystem swallows this in release_bundle builds, which this build is not.
-    println!(
+    //
+    // On stderr, not stdout: subcommands such as `warpspeed sessions panes --json`
+    // write machine-readable output, and a banner ahead of it makes the result
+    // unparseable for the scripts that surface exists to serve.
+    eprintln!(
         "WarpSpeed starting: app_id={application_name} elevated={}",
         is_elevated()
     );

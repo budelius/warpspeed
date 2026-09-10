@@ -69,6 +69,8 @@ mod projects;
 mod prompt;
 mod quit_warning;
 mod referral_theme_status;
+#[cfg(not(target_family = "wasm"))]
+mod remote_control;
 #[allow(dead_code)]
 mod remote_server;
 mod resource_limits;
@@ -79,6 +81,8 @@ mod server;
 #[cfg(feature = "local_fs")]
 mod session_configs;
 mod session_management;
+#[cfg(not(target_family = "wasm"))]
+mod sessions_cli;
 mod shell_indicator;
 mod suggestions;
 mod system;
@@ -840,6 +844,10 @@ pub fn run() -> Result<()> {
                 return settings::schema_generation::dump_settings_schema(output_path.as_deref());
             }
             #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::Sessions(args) => {
+                return sessions_cli::run(args);
+            }
+            #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::PrintTelemetryEvents => {
                 return TelemetryEvent::print_telemetry_events_json();
             }
@@ -1372,6 +1380,18 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
 
         if ImprovedPaletteSearch::improved_search_enabled(ctx) {
             FeatureFlag::UseTantivySearch.set_enabled(true);
+        }
+
+        // The channel the `sessions` subcommand reaches this window through. Registered
+        // after `initialize_app` because every request it answers reaches into
+        // the workspace registry or the PTY spawner, and only windows advertise
+        // themselves: a worker or a CLI invocation has no panes to talk about,
+        // and listing one as an instance to address would be a lie.
+        #[cfg(feature = "local_tty")]
+        if matches!(launch_mode, LaunchMode::App { .. })
+            && FeatureFlag::PersistentTerminalSessions.is_enabled()
+        {
+            ctx.add_singleton_model(remote_control::RemoteControlServer::new);
         }
 
         // The TUI front-end reuses the full `initialize_app` bootstrap above (so
@@ -2794,6 +2814,11 @@ pub(crate) fn app_callbacks(
 
             #[cfg(all(feature = "local_tty", windows))]
             terminal::local_tty::shutdown_all_pty_event_loops(ctx);
+
+            // Stop advertising this process to the `sessions` subcommand, before anything
+            // that could exit without unwinding.
+            #[cfg(not(target_family = "wasm"))]
+            remote_control::withdraw_this_process();
 
             // Tear down app services before spawning the new process, to
             // ensure that the new process doesn't find the old process while

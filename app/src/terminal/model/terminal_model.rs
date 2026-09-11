@@ -1552,8 +1552,9 @@ impl TerminalModel {
     /// which the mark can be cleared safely.
     ///
     /// Exactly one barrier is posted per call, whether or not the replaced shell
-    /// had already exited, and the model is left writable rather than latched:
-    /// the replacement shell writes into this same model.
+    /// had already exited. The model is then prepared for a fresh bootstrap and
+    /// left writable rather than latched: the replacement shell writes into this
+    /// same model.
     pub fn exit_for_restart(&mut self) {
         if self.handled_exit {
             // The replaced shell already exited and this model has already been
@@ -1567,7 +1568,13 @@ impl TerminalModel {
         } else {
             self.exit(ExitReason::Restarting);
         }
+
+        // `Exit` makes the lifecycle's `Terminated` phase absorbing. Reopen it before the
+        // replacement can emit its `InitShell` hook.
         self.handled_exit = false;
+        self.ignore_bootstrapping_messages = false;
+        self.pending_session_info = None;
+        self.lifecycle_coordinator.reset_unknown();
     }
 
     /// Clears the exit latch so a replaced shell's model is writable again.
@@ -3401,7 +3408,7 @@ impl ansi::Handler for TerminalModel {
             );
             self.pending_session_info = Some(pending_session_info.clone());
 
-            if self.block_list().is_bootstrapped() {
+            if self.block_list().is_bootstrapped() || self.block_list().active_block().finished() {
                 self.block_list_mut().reinit_shell();
             }
 

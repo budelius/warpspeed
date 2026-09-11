@@ -13090,7 +13090,28 @@ impl Workspace {
                     });
                 }
 
+                let session_source = workspace
+                    .launch_config_source
+                    .clone()
+                    .filter(LaunchConfigWindowSource::is_session_config);
+                if let Some(source) = session_source.as_ref() {
+                    crate::session_configs::release_session(source);
+                }
+
                 if let Err(error) = outgoing.release() {
+                    if let Some(source) = session_source.as_ref() {
+                        match crate::session_configs::claim_session(source) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                log::error!("Failed to reclaim session config ownership");
+                            }
+                            Err(error) => {
+                                report_error!(error.context(
+                                    "Failed to reclaim session config ownership"
+                                ));
+                            }
+                        }
+                    }
                     outgoing.abort();
                     workspace.window_process_restart_in_progress = false;
                     report_error!(error.context("Failed to release window process handoff"));
@@ -13180,6 +13201,7 @@ impl Workspace {
         handoff: IncomingWindowHandoff,
         ctx: &mut ViewContext<Self>,
     ) {
+        let transfers_session_lease = handoff.transfers_session_lease();
         self.queue_process_handoff_agent_resume_commands(handoff.agent_resume_commands(), ctx);
         if let Err(error) = handoff.mark_ready() {
             report_error!(error.context("Failed to accept window process handoff"));
@@ -13187,22 +13209,51 @@ impl Workspace {
             return;
         }
 
-        ctx.spawn(handoff.wait_for_release(), |workspace, released, ctx| {
-            if !released {
-                log::error!("The original process did not release the handed-off window");
-                ctx.terminate_app(TerminationMode::ForceTerminate, None);
-                return;
-            }
+        ctx.spawn(
+            handoff.wait_for_release(),
+            move |workspace, released, ctx| {
+                if !released {
+                    log::error!("The original process did not release the handed-off window");
+                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                    return;
+                }
 
-            let pane_groups = workspace.tab_views().cloned().collect::<Vec<_>>();
-            for pane_group in pane_groups {
-                pane_group.update(ctx, |pane_group, ctx| {
-                    pane_group.start_deferred_shells(ctx);
-                });
-            }
-            workspace.focus_active_tab(ctx);
-            ctx.notify();
-        });
+                if transfers_session_lease
+                    && let Some(source) = workspace
+                        .launch_config_source
+                        .as_ref()
+                        .filter(|source| source.is_session_config())
+                {
+                    match crate::session_configs::claim_session(source) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            log::error!(
+                                "The replacement process could not claim session config ownership"
+                            );
+                            ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                            return;
+                        }
+                        Err(error) => {
+                            report_error!(
+                                error
+                                    .context("Failed to claim handed-off session config ownership")
+                            );
+                            ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                            return;
+                        }
+                    }
+                }
+
+                let pane_groups = workspace.tab_views().cloned().collect::<Vec<_>>();
+                for pane_group in pane_groups {
+                    pane_group.update(ctx, |pane_group, ctx| {
+                        pane_group.start_deferred_shells(ctx);
+                    });
+                }
+                workspace.focus_active_tab(ctx);
+                ctx.notify();
+            },
+        );
     }
 
     fn show_window_process_restart_error(&self, ctx: &mut ViewContext<Self>) {
@@ -13704,7 +13755,10 @@ impl Workspace {
         let (snapshot, bootstrap) = {
             let model = manager.as_ref(ctx).model();
             let locked = model.lock();
-            (locked.screen_snapshot(), locked.captured_bootstrap().cloned())
+            (
+                locked.screen_snapshot(),
+                locked.captured_bootstrap().cloned(),
+            )
         };
 
         Some(PendingDetach {
@@ -29200,6 +29254,7 @@ impl View for Workspace {
         // when the launch-config session feature is on. Without the check the
         // snapshot below is persisted with `include_blocks: true` -- scrollback
         // and all -- for anyone who turned session restore off.
+        let mut session_release_queued = false;
         if !self.window_process_restart_in_progress
             && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
             && *GeneralSettings::as_ref(ctx).restore_session
@@ -29210,17 +29265,18 @@ impl View for Workspace {
             let history_id = crate::launch_configs::session_store::history_id_for_windows(
                 std::slice::from_ref(&window),
             );
-            if let Err(error) =
-                model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
-                    windows: vec![window],
-                    include_blocks: true,
-                    history_id,
-                })
-            {
-                report_error!(
-                    anyhow::Error::new(error)
-                        .context("Failed to save launch config session before window close")
-                );
+            match model_event_sender.send(ModelEvent::SaveLaunchConfigWindowSessions {
+                windows: vec![window],
+                include_blocks: true,
+                history_id,
+            }) {
+                Ok(()) => session_release_queued = true,
+                Err(error) => {
+                    report_error!(
+                        anyhow::Error::new(error)
+                            .context("Failed to save launch config session before window close")
+                    );
+                }
             }
         }
 
@@ -29244,6 +29300,15 @@ impl View for Workspace {
         WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.unregister(window_id);
         });
+
+        if !session_release_queued
+            && let Some(source) = self
+                .launch_config_source
+                .as_ref()
+                .filter(|source| source.is_session_config())
+        {
+            crate::session_configs::release_session(source);
+        }
 
         // If this workspace's close was registered as part of a tab-drag
         // handoff, clear the entry now that the workspace is gone from the

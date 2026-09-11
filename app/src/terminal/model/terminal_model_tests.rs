@@ -1953,6 +1953,36 @@ fn reset_exit_state_lets_a_restarted_pane_become_writable_again() {
         "a real exit after reset_exit_state should still latch the model read-only"
     );
 }
+
+#[test]
+fn exit_for_restart_allows_the_replacement_shell_to_initialize() {
+    let mut terminal = TerminalModel::mock(None, None);
+    let failed_session_id = SessionId::from(234);
+    terminal.block_list_mut().reinit_shell();
+    terminal.init_shell(InitShellValue {
+        shell: "pwsh".to_owned(),
+        session_id: failed_session_id,
+        ..Default::default()
+    });
+    terminal.exit(ExitReason::PtyDisconnected);
+
+    let replacement_session_id = SessionId::from(456);
+    terminal.exit_for_restart();
+    terminal.register_session_id(replacement_session_id);
+    terminal.init_shell(InitShellValue {
+        shell: "pwsh".to_owned(),
+        session_id: replacement_session_id,
+        ..Default::default()
+    });
+
+    assert_eq!(terminal.pending_session_id(), Some(replacement_session_id));
+    assert_eq!(
+        terminal.block_list().active_block().bootstrap_stage(),
+        BootstrapStage::WarpInput
+    );
+    assert!(!terminal.block_list().active_block().finished());
+}
+
 #[test]
 fn test_alt_screen_selection_tracks_scroll() {
     let mut terminal: TerminalModel = TerminalModel::mock(None, None);

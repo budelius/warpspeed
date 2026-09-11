@@ -16,7 +16,12 @@ use crate::tab_configs::TabConfig;
 
 const SESSION_CONFIG_VERSION: u32 = 1;
 
-static SESSION_LEASES: LazyLock<Mutex<HashMap<(String, u64), File>>> =
+struct SessionLease {
+    _file: File,
+    claim_count: usize,
+}
+
+static SESSION_LEASES: LazyLock<Mutex<HashMap<(String, u64), SessionLease>>> =
     LazyLock::new(Default::default);
 
 #[derive(Clone, Debug)]
@@ -62,7 +67,8 @@ pub fn claim_session(
         .context("Session config source has no generation")?;
     let key = (session_id.clone(), generation);
     let mut leases = SESSION_LEASES.lock();
-    if leases.contains_key(&key) {
+    if let Some(lease) = leases.get_mut(&key) {
+        lease.claim_count += 1;
         return Ok(true);
     }
 
@@ -82,13 +88,35 @@ pub fn claim_session(
         .with_context(|| format!("Failed to open session lease {lease_path:?}"))?;
     match lease.try_lock_exclusive() {
         Ok(true) => {
-            leases.insert(key, lease);
+            leases.insert(
+                key,
+                SessionLease {
+                    _file: lease,
+                    claim_count: 1,
+                },
+            );
             Ok(true)
         }
         Ok(false) => Ok(false),
         Err(error) => {
             Err(error).with_context(|| format!("Failed to claim session lease {lease_path:?}"))
         }
+    }
+}
+
+pub fn release_session(source: &crate::launch_configs::launch_config::LaunchConfigWindowSource) {
+    let (Some(session_id), Some(generation)) = (source.session_id(), source.session_generation())
+    else {
+        return;
+    };
+    let key = (session_id, generation);
+    let mut leases = SESSION_LEASES.lock();
+    match leases.get_mut(&key) {
+        Some(lease) if lease.claim_count > 1 => lease.claim_count -= 1,
+        Some(_) => {
+            leases.remove(&key);
+        }
+        None => {}
     }
 }
 

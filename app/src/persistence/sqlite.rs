@@ -632,6 +632,9 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                         } => {
                             if paused {
                                 log::info!("Ignoring event as SQLite Writer is on pause");
+                                if include_blocks {
+                                    release_session_leases(&windows);
+                                }
                                 continue;
                             }
                             let block_lists = if include_blocks {
@@ -648,6 +651,9 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                                     history_id.as_deref(),
                                 )
                             });
+                            if include_blocks {
+                                release_session_leases(&windows);
+                            }
                             if let Err(error) = result {
                                 safe_error!(
                                     safe: ("Failed to save launch config window sessions"),
@@ -943,6 +949,18 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     log_access("Database", database_path);
 
     report_error!(err.context(format!("SQLite {err_kind} error")));
+}
+
+fn release_session_leases(windows: &[WindowSnapshot]) {
+    for window in windows {
+        if let Some(source) = window
+            .launch_config_source
+            .as_ref()
+            .filter(|source| source.is_session_config())
+        {
+            crate::session_configs::release_session(source);
+        }
+    }
 }
 
 /// Filter a collection of model events to remove superseded snapshots.

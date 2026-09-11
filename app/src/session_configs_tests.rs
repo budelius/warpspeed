@@ -1,7 +1,7 @@
 use std::fs;
 
-use super::load_session_configs;
-use crate::launch_configs::launch_config::PaneTemplateType;
+use super::{SESSION_LEASES, SessionLease, claim_session, load_session_configs, release_session};
+use crate::launch_configs::launch_config::{LaunchConfigWindowSource, PaneTemplateType};
 
 fn write_tab_config(dir: &std::path::Path, file_name: &str, name: &str, directory: &str) {
     fs::write(
@@ -11,6 +11,34 @@ fn write_tab_config(dir: &std::path::Path, file_name: &str, name: &str, director
         ),
     )
     .expect("tab config should be written");
+}
+
+#[test]
+fn session_lease_is_released_after_the_last_local_claim() {
+    let id = uuid::Uuid::new_v4().to_string();
+    let source = LaunchConfigWindowSource {
+        path: format!("{id}.toml").into(),
+        document_index: 3,
+        window_index: 0,
+        config_name: "Test".to_owned(),
+    };
+    let key = (id, 3);
+    SESSION_LEASES.lock().insert(
+        key.clone(),
+        SessionLease {
+            _file: tempfile::tempfile().expect("temporary lease should be created"),
+            claim_count: 1,
+        },
+    );
+
+    assert!(claim_session(&source).expect("second local claim should succeed"));
+    assert_eq!(SESSION_LEASES.lock()[&key].claim_count, 2);
+
+    release_session(&source);
+    assert_eq!(SESSION_LEASES.lock()[&key].claim_count, 1);
+
+    release_session(&source);
+    assert!(!SESSION_LEASES.lock().contains_key(&key));
 }
 
 #[test]

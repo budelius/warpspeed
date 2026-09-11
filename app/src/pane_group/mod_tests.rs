@@ -4726,8 +4726,16 @@ fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
 
         let panes_before =
             app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count()));
-        let blocks_before =
-            app.read(|ctx| view.as_ref(ctx).model.lock().block_list().blocks().len());
+        let block_ids_before = app.read(|ctx| {
+            view.as_ref(ctx)
+                .model
+                .lock()
+                .block_list()
+                .blocks()
+                .iter()
+                .map(|block| block.id().clone())
+                .collect::<Vec<_>>()
+        });
         let active_conversation_before =
             app.read(|ctx| view.as_ref(ctx).active_conversation_id(ctx));
 
@@ -4788,11 +4796,20 @@ fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
             panes_before,
             "a restart must not close the pane it is restarting"
         );
+        let block_ids_after = app.read(|ctx| {
+            view.as_ref(ctx)
+                .model
+                .lock()
+                .block_list()
+                .blocks()
+                .iter()
+                .map(|block| block.id().clone())
+                .collect::<Vec<_>>()
+        });
         assert_eq!(
-            app.read(|ctx| view.as_ref(ctx).model.lock().block_list().blocks().len()),
-            blocks_before,
-            "a restart must leave the scrollback alone: no terminated banner, no \
-             initialization block"
+            &block_ids_after[..block_ids_before.len()],
+            block_ids_before.as_slice(),
+            "a restart must preserve every existing scrollback block"
         );
         assert_eq!(
             app.read(|ctx| view.as_ref(ctx).active_conversation_id(ctx)),
@@ -5192,12 +5209,12 @@ fn restartable_pane(
 
 /// The replaced shell's post-mortem must not outlive it.
 ///
-/// Four pieces of state are written by a shell dying and never cleared by
-/// anything else: the pinned "shell exited" banner, the forced-on
-/// initialization block, `pty_spawn_failed`, and `is_login_shell_bootstrapped`.
-/// A user whose shell config broke -- the case the feature exists for -- fixes
-/// it, restarts, and must get a clean pane, not a healthy prompt sitting under
-/// a banner describing a process that no longer exists.
+/// Four pieces of state are written after a bootstrapped shell dies and never cleared by
+/// anything else: the pinned "shell exited" banner, the forced-on initialization block,
+/// `pty_spawn_failed`, and `is_login_shell_bootstrapped`. A user whose shell config broke fixes it,
+/// restarts, and must get a clean pane, not a healthy prompt sitting under a banner describing a
+/// process that no longer exists. The unbootstrapped rich-content banner path is covered by the
+/// terminal-view unit tests.
 ///
 /// Asserted on the state directly, one assertion per assignment, so deleting
 /// any single reset in `on_session_restart_started` fails exactly one
@@ -5210,10 +5227,8 @@ fn test_restart_clears_the_replaced_shells_post_mortem_state() {
         initialize_app(&mut app);
         let (_pane_group, manager, view) = restartable_pane(&mut app);
 
-        // The banner is only pinned for a shell that *had* come up
-        // (`insert_shell_process_terminated_banner` routes an unbootstrapped
-        // death into a rich-content block instead, which is scrollback and
-        // deliberately survives a restart).
+        // The banner is only pinned for a shell that had come up; an unbootstrapped death uses
+        // the separately tested rich-content banner path.
         app.update(|ctx| {
             view.update(ctx, |view, ctx| {
                 view.set_login_shell_bootstrapped_for_test();

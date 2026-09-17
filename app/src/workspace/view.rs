@@ -13814,7 +13814,10 @@ impl Workspace {
         let (snapshot, bootstrap) = {
             let model = manager.as_ref(ctx).model();
             let locked = model.lock();
-            (locked.screen_snapshot(), locked.captured_bootstrap().cloned())
+            (
+                locked.screen_snapshot(),
+                locked.captured_bootstrap().cloned(),
+            )
         };
 
         Some(PendingDetach {

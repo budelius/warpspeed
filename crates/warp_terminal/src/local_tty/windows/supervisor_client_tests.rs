@@ -100,7 +100,9 @@ fn client_reattaches_same_process_through_daemon() {
         .attach(session_id)
         .expect_err("a second client cannot be lent this pipe");
     assert!(
-        refusal.to_string().contains("cannot be attached on Windows"),
+        refusal
+            .to_string()
+            .contains("cannot be attached on Windows"),
         "the refusal must name the reason, got: {refusal}"
     );
 

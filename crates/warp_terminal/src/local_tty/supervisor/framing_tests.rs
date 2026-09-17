@@ -55,7 +55,6 @@ fn bootstrap() -> SessionBootstrap {
     }
 }
 
-
 fn detach() -> Message {
     Message::Detach {
         session_id: SessionId::from(7u64),

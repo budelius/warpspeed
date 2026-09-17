@@ -19,6 +19,7 @@ mod keyboard_protocol;
 mod launch_configs;
 mod notebooks;
 mod osc8_hyperlinks;
+mod pane_maximize;
 mod pane_restoration;
 #[cfg(target_os = "macos")]
 mod preview_config_migration;
@@ -67,6 +68,7 @@ pub use keyboard_protocol::*;
 pub use launch_configs::*;
 pub use notebooks::*;
 pub use osc8_hyperlinks::*;
+pub use pane_maximize::*;
 pub use pane_restoration::*;
 use parking_lot::Mutex;
 use pathfinder_geometry::rect::RectF;

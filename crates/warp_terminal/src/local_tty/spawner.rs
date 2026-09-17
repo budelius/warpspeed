@@ -79,6 +79,8 @@ pub trait PtyHandle: Send + Sync {
     fn kill(&mut self) -> Result<()>;
 }
 
+type AttachedPty = (PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata);
+
 /// A handle for a pty that is a direct child of the current process.
 #[cfg(unix)]
 struct DirectPtyHandle {
@@ -682,7 +684,7 @@ impl PtySpawner {
         session_id: SessionId,
         #[cfg_attr(unix, allow(unused_variables))] include_snapshot: bool,
         pane_size: (u16, u16),
-    ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata)>> {
+    ) -> Result<Option<AttachedPty>> {
         #[cfg(unix)]
         if let Some(client) = self.supervisor.as_ref() {
             let attached = client.attach(session_id)?;

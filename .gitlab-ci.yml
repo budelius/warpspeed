@@ -85,6 +85,10 @@ fmt:
 clippy:
   stage: lint
   timeout: 3h
+  variables:
+    # The OSS Kubernetes runner is memory-bounded; unrestricted rustc
+    # parallelism OOM-killed this workspace before clippy reached our code.
+    CARGO_BUILD_JOBS: "2"
   script:
     - cat /etc/warpspeed-ci-image
     - df -h / | tail -1

@@ -308,7 +308,12 @@ New-Item -ItemType Directory -Force -Path $local_bin | Out-Null
 $cli_shim_path = Join-Path $local_bin 'warpspeed.cmd'
 $cli_shim = @"
 @echo off
-call "$launcher_path" %*
+setlocal
+set "WARPSPEED_INSTALL_ROOT=$INSTALL_ROOT\"
+set /p WARPSPEED_VERSION=<"$INSTALL_ROOT\current.txt"
+if not defined WARPSPEED_VERSION exit /b 1
+"$INSTALL_ROOT\versions\%WARPSPEED_VERSION%\warpspeed.exe" %*
+exit /b %ERRORLEVEL%
 "@
 [IO.File]::WriteAllText($cli_shim_path, $cli_shim, [Text.Encoding]::ASCII)
 

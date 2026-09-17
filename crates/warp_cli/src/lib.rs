@@ -30,6 +30,8 @@ pub mod harness_support;
 pub mod integration;
 pub mod json_filter;
 pub mod local_control;
+#[cfg(not(target_family = "wasm"))]
+pub mod managed_sessions;
 pub mod mcp;
 pub mod memory_store;
 pub mod model;
@@ -709,6 +711,10 @@ pub enum Command {
     /// in running Warp windows.
     #[cfg(not(target_family = "wasm"))]
     Sessions(sessions::SessionsArgs),
+
+    /// Open self-hosted AgentCtrl managed sessions through the dashboard.
+    #[cfg(not(target_family = "wasm"))]
+    AgentCtrl(managed_sessions::ManagedSessionsArgs),
 }
 
 impl Command {
@@ -723,7 +729,7 @@ impl Command {
             #[cfg(not(target_family = "wasm"))]
             Command::PrintTelemetryEvents => true,
             #[cfg(not(target_family = "wasm"))]
-            Command::Sessions(_) => true,
+            Command::Sessions(_) | Command::AgentCtrl(_) => true,
         }
     }
 }

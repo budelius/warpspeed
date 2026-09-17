@@ -50,6 +50,7 @@ mod linear;
 mod local_control;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod login_item;
+mod managed_sessions_cli;
 mod menu;
 mod modal;
 mod network;
@@ -846,6 +847,10 @@ pub fn run() -> Result<()> {
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::Sessions(args) => {
                 return sessions_cli::run(args);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::AgentCtrl(args) => {
+                return managed_sessions_cli::run(args);
             }
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::PrintTelemetryEvents => {

@@ -39,8 +39,8 @@ use crate::local_tty::docker_sandbox::{DOCKER_SANDBOX_HOME_DIR, DockerSandboxShe
 use crate::local_tty::shell::{
     DirectShellStarter, ShellStarter, extra_path_entries, ssh_socket_dir,
 };
-use crate::shell::{ShellType, shell_escape_single_quotes};
 use crate::local_tty::supervisor::message::SessionMetadata;
+use crate::shell::{ShellType, shell_escape_single_quotes};
 
 const BASH_HISTORY_SIZE_SENTINEL: &str = "57265949261";
 
@@ -655,8 +655,8 @@ impl Pty {
     ) -> Result<Option<(Self, SessionMetadata)>> {
         let signals = Signals::new([signal_hook::consts::SIGCHLD])
             .context("error preparing signal handling")?;
-        let Some((result, pty_handle, metadata)) = PtySpawner::handle(ctx)
-            .update(ctx, |pty_spawner, _| {
+        let Some((result, pty_handle, metadata)) =
+            PtySpawner::handle(ctx).update(ctx, |pty_spawner, _| {
                 pty_spawner.attach_pty(
                     session_id,
                     include_snapshot,

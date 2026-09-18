@@ -16,6 +16,10 @@ terminal startup and session-restore behaviour.
 - **Lazy session restore.** Restored tabs defer starting their shells until activated,
   so opening a large saved session forks shells for the active tab rather than every
   pane. The reduction in shell count has not been measured.
+- **Self-hosted AgentCtrl sessions.** `warpspeed agent-ctrl` discovers, starts,
+  follows, resumes, messages, closes, and stops staging agents through the
+  authenticated STOZN dashboard. This path does not use Warp accounts, Oz,
+  Session Sharing, Remote Control, hosted transcripts, or Warp API keys.
 
 ## Building
 
@@ -35,6 +39,21 @@ The installer stages only the `warpspeed` release binary under `target/warpspeed
 Installing never disturbs a running WarpSpeed. Each instance keeps running from the version directory it launched with, and only new launches pick up the newly installed version -- the launcher resolves `current.txt` at launch time. Old version directories are pruned only when every running instance can be identified; if one will not report its executable path (an elevated instance, typically), the installer says so and leaves every version in place.
 
 File-backed session configs compose reusable tab configs into one persistent, lazily restored window. On Windows, definitions live under `%APPDATA%\warp\WarpSpeed\data\session_configurations`; full runtime snapshots live under `%LOCALAPPDATA%\warp\WarpSpeed\data\session_config_sessions`. Open one directly with a URL argument such as `warplocal://launch/JustVIBE.toml`. YAML launch configurations remain static templates and no longer restore an evolving runtime snapshot.
+
+## Self-hosted managed agents
+
+Authenticate with a dashboard bearer token in `STOZN_TOKEN` or `~/.stozn.json`, then use the compiled staging profile:
+
+```bash
+warpspeed agent-ctrl list
+warpspeed agent-ctrl start staging-claude-interactive --interactive
+warpspeed agent-ctrl attach <job-id>
+warpspeed agent-ctrl input <job-id> "Inspect the failing test"
+warpspeed agent-ctrl close <job-id>
+warpspeed agent-ctrl stop <job-id>
+```
+
+The dashboard endpoint, environment, and fleet identity are compiled/operator-owned; CLI callers cannot supply controller URLs or runtime overrides. Local bookmarks contain only safe identifiers, labels, cursors, state, and timestamps. Closing `attach` never stops the Kubernetes process.
 
 ## Recovering CLI agent sessions
 

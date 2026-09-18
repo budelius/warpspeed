@@ -11,6 +11,25 @@ use crate::SizeInfo;
 use crate::local_tty::shell::{DirectShellStarter, ShellStarter};
 use crate::shell::ShellType;
 
+#[test]
+fn delayed_old_handle_cleanup_cannot_consume_a_new_handles_detach() {
+    use std::sync::atomic::Ordering;
+
+    let client = UnixTerminalSupervisorClient::new().unwrap();
+    let session_id = SessionId::from(42);
+
+    let old = client.register_handle(session_id);
+    client.mark_current_handle_preserved(session_id);
+    let current = client.register_handle(session_id);
+
+    assert!(old.swap(false, Ordering::AcqRel));
+    assert!(!current.load(Ordering::Acquire));
+
+    client.mark_current_handle_preserved(session_id);
+    assert!(current.swap(false, Ordering::AcqRel));
+    assert!(!old.load(Ordering::Acquire));
+}
+
 fn shell_options(args: &[&str]) -> PtyOptions {
     PtyOptions {
         size: SizeInfo::new_without_font_metrics(24, 80),
@@ -88,6 +107,8 @@ fn a_client_reattaches_the_same_process_through_the_daemon() {
         shell: "sh".to_owned(),
         working_directory: "/tmp".to_owned(),
         title: "Claude Code".to_owned(),
+        input_editor_active: false,
+        bootstrap: None,
     };
     client
         .detach(session_id, snapshot.clone(), metadata.clone())

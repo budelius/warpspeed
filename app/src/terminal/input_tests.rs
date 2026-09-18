@@ -373,6 +373,7 @@ fn bootstrap_terminal(
                 restored_block_commands,
                 rcfiles_duration_seconds,
                 spawning_command,
+                ..
             } = bootstrapped_event;
             sessions.initialize_bootstrapped_session(
                 *session_info,
@@ -442,6 +443,7 @@ pub async fn add_window_with_bootstrapped_terminal_and_window_id(
             .collect_vec(),
         rcfiles_duration_seconds: None,
         spawning_command: "test command".to_string(),
+        restored: false,
     };
     bootstrap_terminal(&terminal, bootstrapped_event, app);
 

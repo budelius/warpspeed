@@ -12929,6 +12929,7 @@ impl TerminalView {
             }
             ModelEvent::Handler(AnsiHandlerEvent::InitShell {
                 pending_session_info,
+                ..
             }) => {
                 // The remote confirmed a subshell bootstrap is starting. Hide the
                 // original long-running block now so the user doesn't see the

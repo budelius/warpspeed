@@ -535,6 +535,15 @@ pub struct TerminalModel {
     /// See [`SessionBootstrap`]: a shell introduces itself once, and a pane
     /// that adopts a running shell was not there to hear it.
     captured_bootstrap: Option<SessionBootstrap>,
+
+    /// True only while a saved shell announcement is being applied to a pane
+    /// that adopted an already-running process. Subscribers must initialize
+    /// their state without sourcing the bootstrap script into that shell again.
+    restoring_bootstrap: bool,
+
+    /// Lifecycle state to apply only after the event loop has parsed the
+    /// attachment's staged screen replay.
+    pending_attached_state: Option<(SessionBootstrap, bool, Option<String>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1141,6 +1150,8 @@ impl TerminalModel {
             next_kitty_image_id: 2147483647,
             registered_session_ids: HashSet::new(),
             captured_bootstrap: None,
+            restoring_bootstrap: false,
+            pending_attached_state: None,
         }
     }
 
@@ -2666,6 +2677,7 @@ impl TerminalModel {
     pub fn restore_bootstrap(&mut self, bootstrap: &SessionBootstrap) {
         let session_id = SessionId::from(bootstrap.hook_session_id);
         self.register_session_id(session_id);
+        self.restoring_bootstrap = true;
 
         self.init_shell(InitShellValue {
             session_id,
@@ -2710,6 +2722,47 @@ impl TerminalModel {
             rcfiles_start_time: None,
             rcfiles_end_time: None,
         });
+        self.restoring_bootstrap = false;
+    }
+
+    /// Records lifecycle state for application after screen replay.
+    pub fn prepare_attached_state(
+        &mut self,
+        bootstrap: SessionBootstrap,
+        input_editor_active: bool,
+        working_directory: Option<String>,
+    ) {
+        self.pending_attached_state = Some((bootstrap, input_editor_active, working_directory));
+    }
+
+    /// Applies an adopted shell's lifecycle after staged repaint bytes.
+    pub fn restore_attached_state(&mut self) {
+        let Some((bootstrap, input_editor_active, working_directory)) =
+            self.pending_attached_state.take()
+        else {
+            return;
+        };
+        self.restore_bootstrap(&bootstrap);
+        if input_editor_active {
+            // The shell emitted its completion and `Precmd` hooks before the
+            // old pane detached and will not emit another until it runs a
+            // command. Replaying that lifecycle evidence reactivates the
+            // editor without re-sourcing bootstrap. The completion first moves
+            // the coordinator from `Unknown` to `AwaitingPrecmd`; only then is
+            // a prompt-only marker valid.
+            self.command_finished(CommandFinishedValue {
+                completion_metadata: CompletionMetadata {
+                    next_block_id: BlockId::new(),
+                    ..CompletionMetadata::default()
+                },
+                session_id: Some(bootstrap.hook_session_id),
+            });
+            self.prompt_only_precmd(PromptMetadata {
+                pwd: working_directory,
+                session_id: Some(bootstrap.hook_session_id),
+                ..PromptMetadata::default()
+            });
+        }
     }
 
     pub fn needs_bracketed_paste(&mut self) -> bool {
@@ -2742,6 +2795,7 @@ pub enum CommandType {
 pub enum HandlerEvent {
     InitShell {
         pending_session_info: Box<SessionInfo>,
+        restored: bool,
     },
     Bootstrapped(BootstrappedEvent),
     Precmd {
@@ -3301,6 +3355,7 @@ impl ansi::Handler for TerminalModel {
             session_info: Box::new(fully_populated_session_info),
             restored_block_commands: self.restored_block_commands(),
             rcfiles_duration_seconds,
+            restored: self.restoring_bootstrap,
         }));
     }
 
@@ -3407,6 +3462,7 @@ impl ansi::Handler for TerminalModel {
 
             self.emit_handler_event(HandlerEvent::InitShell {
                 pending_session_info: Box::new(pending_session_info),
+                restored: self.restoring_bootstrap,
             });
             self.commit_lifecycle_transition(&transition);
         }

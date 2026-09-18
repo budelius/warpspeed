@@ -1,4 +1,54 @@
-use super::resize_is_worth_sending;
+use anyhow::Result;
+
+use super::super::ChildEvent;
+use super::super::spawner::PtyHandle;
+use super::{next_polled_child_event, resize_is_worth_sending};
+
+struct PollingHandle {
+    terminated: bool,
+    polling: bool,
+}
+
+impl PtyHandle for PollingHandle {
+    fn pid(&self) -> u32 {
+        42
+    }
+
+    fn has_process_terminated(&mut self) -> Result<bool> {
+        Ok(self.terminated)
+    }
+
+    fn requires_exit_polling(&self) -> bool {
+        self.polling
+    }
+
+    fn kill(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn supervised_child_exit_is_reported_by_polling() {
+    let mut handle = PollingHandle {
+        terminated: true,
+        polling: true,
+    };
+
+    assert_eq!(
+        next_polled_child_event(&mut handle),
+        Some(ChildEvent::Exited)
+    );
+}
+
+#[test]
+fn non_polling_child_is_left_to_its_event_watcher() {
+    let mut handle = PollingHandle {
+        terminated: true,
+        polling: false,
+    };
+
+    assert_eq!(next_polled_child_event(&mut handle), None);
+}
 
 #[test]
 fn first_resize_is_always_sent() {

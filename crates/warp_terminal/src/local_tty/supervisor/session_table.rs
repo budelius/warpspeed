@@ -57,6 +57,14 @@ pub struct SupervisedSession {
 
     /// `true` while a client holds this session.
     attached: bool,
+
+    /// The detach-point scrollback was collapsed into a resized repaint.
+    ///
+    /// A restored pane normally suppresses the snapshot because sqlite already
+    /// painted its old screen. Resizing for a different pane makes that stored
+    /// screen inapplicable, so attach must force the fresh repaint and expose
+    /// the resulting scrollback gap.
+    replay_was_truncated: bool,
 }
 
 impl SupervisedSession {
@@ -114,6 +122,7 @@ impl SessionTable {
                 metadata,
                 detached_at_unix_seconds,
                 attached: false,
+                replay_was_truncated: false,
             },
         );
     }
@@ -128,6 +137,30 @@ impl SessionTable {
         };
         session.ring.push(bytes);
         session.screen.feed(bytes);
+    }
+
+    /// Reflows a detached session to the dimensions of the pane taking it.
+    ///
+    /// The returned flag tells the caller whether historical scrollback was
+    /// collapsed into the current visible screen. Output arriving after this
+    /// point is still retained from the new snapshot sequence.
+    pub fn resize_detached(&mut self, session_id: SessionId, columns: u16, rows: u16) -> bool {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return false;
+        };
+        if session.attached
+            || columns == 0
+            || rows == 0
+            || (session.snapshot.columns == columns && session.snapshot.rows == rows)
+        {
+            return false;
+        }
+
+        session.screen.resize(columns, rows);
+        session.snapshot = session.screen.snapshot();
+        session.snapshot_sequence = session.ring.sequence();
+        session.replay_was_truncated = true;
+        true
     }
 
     /// Hands a session back to a client.
@@ -158,7 +191,7 @@ impl SessionTable {
                 snapshot: session.snapshot.clone(),
                 buffered_output,
                 sequence: session.ring.sequence(),
-                output_was_dropped: false,
+                output_was_dropped: session.replay_was_truncated,
                 endpoint: None,
                 metadata: session.metadata.clone(),
             })

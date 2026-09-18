@@ -7,6 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use command::blocking::Command;
 use instant::Instant;
 use warp_core::SessionId;
 
@@ -237,7 +238,7 @@ fn binding_replaces_a_stale_socket() {
 fn spooled_output_is_capped_and_keeps_the_most_recent_bytes() {
     let root = tempfile::tempdir().unwrap();
     let mut session = SupervisedSession {
-        child: std::process::Command::new("/bin/sh")
+        child: Command::new("/bin/sh")
             .args(["-c", "sleep 10"])
             .spawn()
             .unwrap(),
@@ -354,7 +355,7 @@ fn a_recycled_pid_does_not_keep_a_session_attached() {
 
 #[test]
 fn a_dead_client_releases_its_session() {
-    let mut child = std::process::Command::new("/bin/sh")
+    let mut child = Command::new("/bin/sh")
         .args(["-c", "exit 0"])
         .spawn()
         .unwrap();

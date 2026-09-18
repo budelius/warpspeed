@@ -1,13 +1,14 @@
+mod attachment_relay;
 mod child;
 mod conpty_api;
 pub mod daemon_spawn;
 mod environment;
 pub mod handle_lending;
-pub mod pipe_security;
-pub mod pipe_transport;
 #[cfg(test)]
 #[path = "iocp_reuse_tests.rs"]
 mod iocp_reuse_tests;
+pub mod pipe_security;
+pub mod pipe_transport;
 mod pipes;
 mod proc_thread_attribute_list;
 pub mod supervised_pty;
@@ -45,9 +46,9 @@ use super::shell::{DirectShellStarter, ShellStarter, WslShellStarter};
 use super::spawner::PtyHandle;
 use super::{EventedPty, EventedReadWrite, PtyOptions, SizeInfo, mio_channel};
 use crate::local_tty::spawner::{PtySpawnInfo, PtySpawner};
+use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::windows::proc_thread_attribute_list::ProcThreadAttributeList;
 use crate::writeable_pty;
-use crate::local_tty::supervisor::message::SessionMetadata;
 
 trait ToCoord {
     fn to_coord(&self) -> COORD;
@@ -507,8 +508,8 @@ impl Pty {
         include_snapshot: bool,
         ctx: &mut AppContext,
     ) -> anyhow::Result<Option<(Self, SessionMetadata)>> {
-        let Some((result, handle, metadata)) = PtySpawner::handle(ctx)
-            .update(ctx, |spawner, _| {
+        let Some((result, handle, metadata)) =
+            PtySpawner::handle(ctx).update(ctx, |spawner, _| {
                 spawner.attach_pty(
                     session_id,
                     include_snapshot,
@@ -631,6 +632,21 @@ impl EventedReadWrite for Pty {
     }
 }
 
+fn next_polled_child_event(handle: &mut dyn PtyHandle) -> Option<super::ChildEvent> {
+    if !handle.requires_exit_polling() {
+        return None;
+    }
+
+    match handle.has_process_terminated() {
+        Ok(true) => Some(super::ChildEvent::Exited),
+        Ok(false) => None,
+        Err(error) => {
+            log::warn!("Failed to poll supervised terminal process status: {error:#}");
+            None
+        }
+    }
+}
+
 impl EventedPty for Pty {
     fn child_event_token(&self) -> mio::Token {
         SIGNALS_TOKEN
@@ -647,7 +663,7 @@ impl EventedPty for Pty {
     }
 
     fn next_child_event(&mut self) -> Option<super::ChildEvent> {
-        None
+        next_polled_child_event(self.handle.as_mut())
     }
 
     fn on_resize(&mut self, size: &crate::SizeInfo, forced: bool) {

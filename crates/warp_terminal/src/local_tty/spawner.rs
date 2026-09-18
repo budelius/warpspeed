@@ -79,6 +79,8 @@ pub trait PtyHandle: Send + Sync {
     fn kill(&mut self) -> Result<()>;
 }
 
+type AttachedPty = (PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata);
+
 /// A handle for a pty that is a direct child of the current process.
 #[cfg(unix)]
 struct DirectPtyHandle {
@@ -137,6 +139,7 @@ struct SupervisorOwnedPtyHandle {
     client: std::sync::Arc<UnixTerminalSupervisorClient>,
     session_id: SessionId,
     pid: u32,
+    preserved: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -161,7 +164,10 @@ impl PtyHandle for SupervisorOwnedPtyHandle {
     }
 
     fn kill(&mut self) -> Result<()> {
-        if self.client.take_preserved(self.session_id) {
+        if self
+            .preserved
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             Ok(())
         } else {
             self.client.kill(self.session_id)
@@ -174,6 +180,7 @@ struct SupervisorOwnedPtyHandle {
     client: std::sync::Arc<WindowsTerminalSupervisorClient>,
     session_id: SessionId,
     pid: u32,
+    preserved: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(windows)]
@@ -197,7 +204,10 @@ impl PtyHandle for SupervisorOwnedPtyHandle {
     }
 
     fn kill(&mut self) -> Result<()> {
-        if self.client.take_preserved(self.session_id) {
+        if self
+            .preserved
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             Ok(())
         } else {
             self.client.kill(self.session_id)
@@ -536,6 +546,7 @@ impl PtySpawner {
                             client: client.clone(),
                             session_id: persistent_session_id,
                             pid,
+                            preserved: client.register_handle(persistent_session_id),
                         }),
                     ));
                 }
@@ -601,6 +612,7 @@ impl PtySpawner {
                             client: client.clone(),
                             session_id: persistent_session_id,
                             pid,
+                            preserved: client.register_handle(persistent_session_id),
                         }),
                     ));
                 }
@@ -682,9 +694,12 @@ impl PtySpawner {
         session_id: SessionId,
         #[cfg_attr(unix, allow(unused_variables))] include_snapshot: bool,
         pane_size: (u16, u16),
-    ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata)>> {
+    ) -> Result<Option<AttachedPty>> {
         #[cfg(unix)]
         if let Some(client) = self.supervisor.as_ref() {
+            // Resize while the supervisor is still the sole reader so its
+            // headless screen and the PTY can be repainted for this pane.
+            client.resize(session_id, pane_size.0, pane_size.1)?;
             let attached = client.attach(session_id)?;
             let endpoint = attached
                 .endpoint
@@ -710,6 +725,7 @@ impl PtySpawner {
                 client: client.clone(),
                 session_id,
                 pid: endpoint.pid,
+                preserved: client.register_handle(session_id),
             });
             return Ok(Some((result, handle, attached.metadata)));
         }
@@ -741,6 +757,10 @@ impl PtySpawner {
             let Some(client) = self.supervisor.as_ref() else {
                 return Ok(None);
             };
+            // Windows relays are fresh per attachment. Resize before borrowing
+            // one so replay is rendered at this pane's dimensions instead of
+            // being discarded as an unsafe old-size snapshot.
+            client.resize(session_id, pane_size.0, pane_size.1)?;
             let attached = client.attach(session_id)?;
             let endpoint = attached
                 .endpoint
@@ -766,6 +786,7 @@ impl PtySpawner {
                 client: client.clone(),
                 session_id,
                 pid: endpoint.pid,
+                preserved: client.register_handle(session_id),
             });
             Ok(Some((result, handle, attached.metadata)))
         }

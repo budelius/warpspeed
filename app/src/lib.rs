@@ -848,6 +848,10 @@ pub fn run() -> Result<()> {
                 return sessions_cli::run(args);
             }
             #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::AgentCtrl(args) => {
+                return managed_agent_sessions::run(args);
+            }
+            #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::PrintTelemetryEvents => {
                 return TelemetryEvent::print_telemetry_events_json();
             }

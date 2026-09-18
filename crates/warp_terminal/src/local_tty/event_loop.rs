@@ -40,6 +40,11 @@ pub const SIGNALS_TOKEN: mio::Token = mio::Token(2);
 /// state.
 pub trait ActiveTerminal: ansi::Handler + Send {
     fn exit(&mut self, reason: ExitReason);
+
+    /// Called after staged attachment replay has been parsed, before live PTY
+    /// bytes are read. Implementations can restore lifecycle state that a
+    /// screen repaint would otherwise reset.
+    fn replay_complete(&mut self) {}
 }
 
 pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
@@ -393,8 +398,9 @@ where
                             }
                         }
                     }
-                    self.event_listener.send_wakeup_event();
                 }
+                self.terminal.lock().replay_complete();
+                self.event_listener.send_wakeup_event();
 
                 // Keep track of whether we've "drained" read and write
                 // readiness.  Once we receive a read or write readiness event,

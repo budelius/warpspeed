@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -22,14 +23,17 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Client for the per-profile Windows terminal supervisor.
 pub struct WindowsTerminalSupervisorClient {
     executable: PathBuf,
-    preserved_sessions: Mutex<HashSet<SessionId>>,
+    // The preservation flag belonging to the currently attached handle for
+    // each session. Generations must not share a counter: cleanup of an older
+    // pane can lag behind a later attach and must consume only its own detach.
+    current_handles: Mutex<HashMap<SessionId, Weak<AtomicBool>>>,
 }
 
 impl WindowsTerminalSupervisorClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
             executable: std::env::current_exe().context("Failed to locate the Warp executable")?,
-            preserved_sessions: Mutex::new(HashSet::new()),
+            current_handles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -75,10 +79,7 @@ impl WindowsTerminalSupervisorClient {
             metadata,
         })? {
             Message::DetachResponse { error: None } => {
-                self.preserved_sessions
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(session_id);
+                self.mark_current_handle_preserved(session_id);
                 Ok(())
             }
             Message::DetachResponse { error: Some(error) } => bail!(error),
@@ -131,11 +132,28 @@ impl WindowsTerminalSupervisorClient {
         }
     }
 
-    pub fn take_preserved(&self, session_id: SessionId) -> bool {
-        self.preserved_sessions
+    /// Registers the specific PTY handle that owns the current attachment.
+    pub fn register_handle(&self, session_id: SessionId) -> Arc<AtomicBool> {
+        let preserved = Arc::new(AtomicBool::new(false));
+        self.current_handles
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&session_id)
+            .insert(session_id, Arc::downgrade(&preserved));
+        preserved
+    }
+
+    fn mark_current_handle_preserved(&self, session_id: SessionId) {
+        use std::sync::atomic::Ordering;
+
+        let current = self
+            .current_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&session_id)
+            .and_then(Weak::upgrade);
+        if let Some(preserved) = current {
+            preserved.store(true, Ordering::Release);
+        }
     }
 
     fn request(&self, message: Message) -> Result<Message> {

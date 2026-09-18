@@ -56,6 +56,20 @@ fn rendering_and_reseeding_reproduces_the_screen() {
     assert_detach_boundary_equivalence(b"first line\r\nsecond line", b"");
 }
 
+#[test]
+fn resizing_reflows_both_the_screen_and_its_snapshot() {
+    let mut screen = screen(20, 5);
+    screen.feed(b"a line long enough to wrap across the old width");
+
+    screen.resize(40, 8);
+    let snapshot = screen.snapshot();
+
+    assert_eq!((snapshot.columns, snapshot.rows), (40, 8));
+    assert_eq!(screen.grid_for_test().columns(), 40);
+    assert_eq!(screen.grid_for_test().visible_rows(), 8);
+    assert!(screen.visible_text().contains("a line long enough"));
+}
+
 /// Every cell's appearance, in a form that is cheap to compare and readable
 /// when it differs.
 ///

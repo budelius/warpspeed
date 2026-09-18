@@ -31,6 +31,8 @@ fn a_message_carrying_no_descriptor_round_trips() {
             shell: "bash".to_owned(),
             working_directory: "/home/me".to_owned(),
             title: "Claude Code".to_owned(),
+            input_editor_active: false,
+            bootstrap: None,
         },
     };
 
@@ -117,6 +119,7 @@ fn an_endpoint_without_a_descriptor_is_refused() {
                     sequence: 0,
                     output_was_dropped: false,
                     endpoint: Some(Endpoint { pid: 1, raw: 3 }),
+                    metadata: SessionMetadata::default(),
                 }),
             },
             None,

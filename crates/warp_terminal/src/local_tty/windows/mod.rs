@@ -632,6 +632,21 @@ impl EventedReadWrite for Pty {
     }
 }
 
+fn next_polled_child_event(handle: &mut dyn PtyHandle) -> Option<super::ChildEvent> {
+    if !handle.requires_exit_polling() {
+        return None;
+    }
+
+    match handle.has_process_terminated() {
+        Ok(true) => Some(super::ChildEvent::Exited),
+        Ok(false) => None,
+        Err(error) => {
+            log::warn!("Failed to poll supervised terminal process status: {error:#}");
+            None
+        }
+    }
+}
+
 impl EventedPty for Pty {
     fn child_event_token(&self) -> mio::Token {
         SIGNALS_TOKEN
@@ -648,7 +663,7 @@ impl EventedPty for Pty {
     }
 
     fn next_child_event(&mut self) -> Option<super::ChildEvent> {
-        None
+        next_polled_child_event(self.handle.as_mut())
     }
 
     fn on_resize(&mut self, size: &crate::SizeInfo, forced: bool) {

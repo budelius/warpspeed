@@ -2367,6 +2367,10 @@ fn a_pane_adopting_a_running_shell_is_bootstrapped_by_what_it_is_told() {
     adopting.restore_attached_state();
 
     assert!(
+        adopting.is_active_block_bootstrapped(),
+        "the bootstrap timeout must recognize the restored prompt as ready"
+    );
+    assert!(
         !matches!(
             adopting.terminal_input_state(),
             TerminalInputState::NotBootstrapped

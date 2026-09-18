@@ -11,6 +11,19 @@ use crate::SizeInfo;
 use crate::local_tty::shell::{DirectShellStarter, ShellStarter};
 use crate::shell::ShellType;
 
+#[test]
+fn repeated_detaches_keep_one_preservation_per_closing_handle() {
+    let client = UnixTerminalSupervisorClient::new().unwrap();
+    let session_id = SessionId::from(42);
+
+    client.mark_preserved(session_id);
+    client.mark_preserved(session_id);
+
+    assert!(client.take_preserved(session_id));
+    assert!(client.take_preserved(session_id));
+    assert!(!client.take_preserved(session_id));
+}
+
 fn shell_options(args: &[&str]) -> PtyOptions {
     PtyOptions {
         size: SizeInfo::new_without_font_metrics(24, 80),

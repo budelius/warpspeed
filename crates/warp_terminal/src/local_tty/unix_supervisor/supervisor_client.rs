@@ -5,7 +5,7 @@
 //! detached terminals. The connection is dropped as soon as the answer -- and
 //! any descriptor lent alongside it -- has arrived.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -33,14 +33,16 @@ pub struct UnixTerminalSupervisorClient {
 
     /// Sessions handed to the supervisor, which must not be killed when their
     /// pane's PTY handle is dropped.
-    preserved_sessions: Mutex<HashSet<SessionId>>,
+    // One permit per successful detach. Cleanup of an earlier pane may lag
+    // behind a later detach of the same reattached session.
+    preserved_sessions: Mutex<HashMap<SessionId, usize>>,
 }
 
 impl UnixTerminalSupervisorClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
             executable: std::env::current_exe().context("Failed to locate the Warp executable")?,
-            preserved_sessions: Mutex::new(HashSet::new()),
+            preserved_sessions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -83,10 +85,7 @@ impl UnixTerminalSupervisorClient {
             metadata,
         })? {
             Message::DetachResponse { error: None } => {
-                self.preserved_sessions
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(session_id);
+                self.mark_preserved(session_id);
                 Ok(())
             }
             Message::DetachResponse { error: Some(error) } => bail!(error),
@@ -139,14 +138,31 @@ impl UnixTerminalSupervisorClient {
         }
     }
 
-    /// Whether `session_id` was detached, clearing the mark as it answers.
-    ///
-    /// A detached session's PTY handle must not kill it when the pane closes.
-    pub fn take_preserved(&self, session_id: SessionId) -> bool {
-        self.preserved_sessions
+    fn mark_preserved(&self, session_id: SessionId) {
+        let mut permits = self
+            .preserved_sessions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&session_id)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = permits.entry(session_id).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    /// Whether one successful detach still protects a PTY handle from killing
+    /// `session_id`, consuming exactly one such permit as it answers.
+    pub fn take_preserved(&self, session_id: SessionId) -> bool {
+        let mut permits = self
+            .preserved_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(count) = permits.get_mut(&session_id) else {
+            return false;
+        };
+        if *count == 1 {
+            permits.remove(&session_id);
+        } else {
+            *count -= 1;
+        }
+        true
     }
 
     fn request(&self, message: Message) -> Result<Message> {

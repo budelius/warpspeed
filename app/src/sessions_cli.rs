@@ -438,7 +438,7 @@ fn attach(pid: Option<u32>, session_id: u64, json: bool) -> Result<()> {
     }
 
     bail!(
-        "A tab was opened for session {session_id}, but nothing is holding it: taking the session          over failed and the tab has a new shell in it instead. The session itself is unharmed and          `{} sessions list` will still show it. On Windows this is expected for now -- a session's          pipe can only ever be read by one process, so a session cannot be attached once the pane          that started it has gone.",
+        "A tab was opened for session {session_id}, but nothing is holding it: taking the session          over failed and the tab has a new shell in it instead. The session itself is unharmed and          `{} sessions list` will still show it; retry the attach after the failed tab closes.",
         crate::remote_control::program_name()
     )
 }

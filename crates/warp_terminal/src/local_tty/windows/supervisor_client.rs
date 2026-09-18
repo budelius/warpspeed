@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -22,14 +22,17 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Client for the per-profile Windows terminal supervisor.
 pub struct WindowsTerminalSupervisorClient {
     executable: PathBuf,
-    preserved_sessions: Mutex<HashSet<SessionId>>,
+    // One permit per successful detach. A set is insufficient: pane cleanup
+    // can lag behind a later detach of the same reattached session, and two
+    // outstanding handles must each be prevented from killing the child.
+    preserved_sessions: Mutex<HashMap<SessionId, usize>>,
 }
 
 impl WindowsTerminalSupervisorClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
             executable: std::env::current_exe().context("Failed to locate the Warp executable")?,
-            preserved_sessions: Mutex::new(HashSet::new()),
+            preserved_sessions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -75,10 +78,7 @@ impl WindowsTerminalSupervisorClient {
             metadata,
         })? {
             Message::DetachResponse { error: None } => {
-                self.preserved_sessions
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(session_id);
+                self.mark_preserved(session_id);
                 Ok(())
             }
             Message::DetachResponse { error: Some(error) } => bail!(error),
@@ -131,11 +131,29 @@ impl WindowsTerminalSupervisorClient {
         }
     }
 
-    pub fn take_preserved(&self, session_id: SessionId) -> bool {
-        self.preserved_sessions
+    fn mark_preserved(&self, session_id: SessionId) {
+        let mut permits = self
+            .preserved_sessions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&session_id)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = permits.entry(session_id).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    pub fn take_preserved(&self, session_id: SessionId) -> bool {
+        let mut permits = self
+            .preserved_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(count) = permits.get_mut(&session_id) else {
+            return false;
+        };
+        if *count == 1 {
+            permits.remove(&session_id);
+        } else {
+            *count -= 1;
+        }
+        true
     }
 
     fn request(&self, message: Message) -> Result<Message> {

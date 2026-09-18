@@ -25,6 +25,9 @@ struct FakeHost {
     /// Sessions this host was asked to kill.
     killed: Vec<u64>,
 
+    /// Every terminal resize requested from the host.
+    resized: Vec<(u64, u16, u16)>,
+
     /// Every (session, client) pair an endpoint was lent to.
     lent_to: Vec<(u64, u32)>,
 }
@@ -67,7 +70,8 @@ impl SessionHost for FakeHost {
         !self.ended.contains(&session_id.as_u64())
     }
 
-    fn resize(&mut self, _session_id: SessionId, _columns: u16, _rows: u16) -> Result<()> {
+    fn resize(&mut self, session_id: SessionId, columns: u16, rows: u16) -> Result<()> {
+        self.resized.push((session_id.as_u64(), columns, rows));
         Ok(())
     }
 
@@ -182,6 +186,45 @@ fn attaching_lends_the_session_endpoint_to_the_asking_client() {
         }),
         "the client must be given an endpoint to read the session through"
     );
+}
+
+#[test]
+fn resizing_while_detached_reflows_the_replay_before_attach() {
+    let mut supervisor = supervisor_with_session(1, 0);
+
+    let resized = supervisor.handle_message(
+        &Message::Resize {
+            session_id: SessionId::from(1u64),
+            columns: 90,
+            rows: 30,
+        },
+        9001,
+        0,
+        &listener(),
+    );
+    assert_eq!(resized, Some(Message::ResizeResponse { error: None }));
+
+    let response = supervisor.handle_message(
+        &Message::Attach {
+            session_id: SessionId::from(1u64),
+            after_sequence: None,
+        },
+        9001,
+        0,
+        &listener(),
+    );
+    let Some(Message::AttachResponse {
+        result: Ok(attached),
+    }) = response
+    else {
+        panic!("expected a successful attach, got {response:?}");
+    };
+    assert_eq!(
+        (attached.snapshot.columns, attached.snapshot.rows),
+        (90, 30)
+    );
+    assert!(attached.output_was_dropped);
+    assert_eq!(supervisor.host.resized, [(1, 90, 30)]);
 }
 
 /// Over a transport that cannot carry a descriptor -- anything off-machine --

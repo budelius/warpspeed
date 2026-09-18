@@ -76,6 +76,44 @@ fn buffered_output_actually_carries_what_arrived_while_detached() {
 }
 
 #[test]
+fn resizing_before_attach_repaints_at_the_receiving_size_and_reports_the_gap() {
+    let session_id = SessionId::from(1u64);
+    let mut table = table_with_detached_session(
+        session_id,
+        b"a line long enough to be reflowed at a different width",
+        0,
+    );
+    table.push_output(session_id, b"\r\noutput while detached");
+
+    assert!(table.resize_detached(session_id, 80, 12));
+    let attached = table.attach(session_id).expect("attach should succeed");
+
+    assert_eq!(
+        (attached.snapshot.columns, attached.snapshot.rows),
+        (80, 12)
+    );
+    assert!(
+        attached.output_was_dropped,
+        "resizing collapses old scrollback"
+    );
+    assert!(
+        attached.buffered_output.is_empty(),
+        "the resized current screen already includes output before the resize"
+    );
+    let replayed = HeadlessScreen::from_snapshot(&attached.snapshot, listener());
+    assert!(replayed.visible_text().contains("output while detached"));
+}
+
+#[test]
+fn resizing_an_attached_session_does_not_mutate_its_stored_replay() {
+    let session_id = SessionId::from(1u64);
+    let mut table = table_with_detached_session(session_id, b"content", 0);
+    table.attach(session_id).expect("attach should succeed");
+
+    assert!(!table.resize_detached(session_id, 80, 12));
+}
+
+#[test]
 fn attaching_an_unknown_session_fails() {
     let mut table = SessionTable::new();
 

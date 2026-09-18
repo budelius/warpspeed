@@ -687,6 +687,9 @@ impl PtySpawner {
     ) -> Result<Option<AttachedPty>> {
         #[cfg(unix)]
         if let Some(client) = self.supervisor.as_ref() {
+            // Resize while the supervisor is still the sole reader so its
+            // headless screen and the PTY can be repainted for this pane.
+            client.resize(session_id, pane_size.0, pane_size.1)?;
             let attached = client.attach(session_id)?;
             let endpoint = attached
                 .endpoint
@@ -743,6 +746,10 @@ impl PtySpawner {
             let Some(client) = self.supervisor.as_ref() else {
                 return Ok(None);
             };
+            // Windows relays are fresh per attachment. Resize before borrowing
+            // one so replay is rendered at this pane's dimensions instead of
+            // being discarded as an unsafe old-size snapshot.
+            client.resize(session_id, pane_size.0, pane_size.1)?;
             let attached = client.attach(session_id)?;
             let endpoint = attached
                 .endpoint

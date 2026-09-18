@@ -205,13 +205,20 @@ impl<H: SessionHost> Supervisor<H> {
                 session_id,
                 columns,
                 rows,
-            } => Some(Message::ResizeResponse {
-                error: self
+            } => {
+                let error = self
                     .host
                     .resize(*session_id, *columns, *rows)
                     .err()
-                    .map(|error| error.to_string()),
-            }),
+                    .map(|error| error.to_string());
+                if error.is_none() {
+                    // While detached the supervisor owns both ConPTY and its
+                    // headless screen. Keep them at the receiving pane's size
+                    // so attach can always replay a bounds-safe current screen.
+                    self.table.resize_detached(*session_id, *columns, *rows);
+                }
+                Some(Message::ResizeResponse { error })
+            }
 
             Message::Kill { session_id } => {
                 self.table.remove(*session_id);

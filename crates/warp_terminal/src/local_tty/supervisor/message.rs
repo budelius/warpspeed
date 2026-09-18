@@ -28,7 +28,10 @@ use crate::local_tty::screen::ScreenSnapshot;
 ///
 /// [`super::framing_tests`] pins the encoding so that changing it without
 /// coming here fails a test rather than a user's terminal.
-pub const PROTOCOL_VERSION: u32 = 4;
+// v5 makes pre-attach Resize reflow the supervisor's headless screen before
+// lending an endpoint. The wire shape is unchanged, but old v4 supervisors
+// discard replay when the receiving pane has different dimensions.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// A message in either direction between a client and the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -8082,6 +8082,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "managed_agent_sessions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs 6.0.0",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "uuid",
+ "warp_cli",
+ "warp_core",
+]
+
+[[package]]
 name = "managed_secrets_wasm"
 version = "0.1.0"
 dependencies = [
@@ -15269,6 +15284,7 @@ dependencies = [
  "lsp-types",
  "lz4_flex 0.11.6",
  "mach2 0.5.0",
+ "managed_agent_sessions",
  "markdown_parser",
  "mcp",
  "memchr",

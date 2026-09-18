@@ -93,10 +93,12 @@ clippy:
   script:
     - cat /etc/warpspeed-ci-image
     - df -h / | tail -1
-    # Scoped to the `warp` package: command-signatures-v2 needs Node/yarn,
-    # which this image does not provide. (`integration` was excluded for
-    # libclang too, but the build image now ships libclang-dev.)
-    - cargo clippy -p warp --lib --locked -- -D warnings
+    # Keep the managed HTTP client in its small library and validate it with
+    # the terminal transport it relies on. Building the entire GPU desktop app
+    # exceeds this runner's pod limit even with one rustc process; full app
+    # integration is still covered by local/release builds.
+    - cargo clippy -p managed_agent_sessions -p warp_terminal --all-targets --locked -- -D warnings
+    - cargo test -p managed_agent_sessions -p warp_terminal --lib --locked
     - df -h / | tail -1
   rules:
     - if: $CI_MERGE_REQUEST_ID

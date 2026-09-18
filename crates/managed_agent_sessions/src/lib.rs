@@ -66,7 +66,7 @@ struct EventPage {
     earliest_cursor: Option<String>,
 }
 
-pub(crate) fn run(args: &ManagedSessionsArgs) -> Result<()> {
+pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
     match &args.command {
         ManagedSessionsCommand::List => list(args.json),
         ManagedSessionsCommand::Start {
@@ -621,5 +621,4 @@ fn update_bookmark_cursor(
 }
 
 #[cfg(test)]
-#[path = "managed_sessions_cli_tests.rs"]
 mod tests;

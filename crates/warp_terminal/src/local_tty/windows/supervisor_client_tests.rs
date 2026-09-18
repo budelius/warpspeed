@@ -85,44 +85,27 @@ fn client_reattaches_same_process_through_daemon() {
         .expect("a detached session must appear in the listing");
     assert_eq!(listed.metadata, metadata);
 
-    // Attaching is refused, and this test says so rather than papering over it.
-    //
-    // It used to assert an attach succeeded, which it did -- the protocol round
-    // trip works and always did. What the endpoint it handed back could not do
-    // was be read: Windows binds a pipe to its first reader for the life of the
-    // pipe, so the second client's registration failed and its PTY reader
-    // thread panicked. The test proved the wrong half of the operation, and
-    // that is why the failure reached a user's screen instead of a build.
-    //
-    // See `WindowsSessionHost::lend_endpoint` for the constraint, and
-    // `local_tty::windows::iocp_reuse_tests` for a demonstration of it.
-    let refusal = client
+    // Windows cannot lend the original IOCP-bound pipe to a second client.
+    // The supervisor now keeps ConPTY and the child process, but creates a
+    // fresh relay endpoint for every attachment.
+    let attached = client
         .attach(session_id)
-        .expect_err("a second client cannot be lent this pipe");
-    assert!(
-        refusal
-            .to_string()
-            .contains("cannot be attached on Windows"),
-        "the refusal must name the reason, got: {refusal}"
-    );
+        .expect("a fresh relay should make the session reattachable");
+    let endpoint = attached.endpoint.expect("Windows must lend an endpoint");
+    assert_eq!(endpoint.pid, first.pid, "reattach must preserve the child");
+    assert_eq!(attached.snapshot, snapshot);
+    assert_eq!(attached.metadata, metadata);
+    let _ = unsafe { CloseHandle(HANDLE(endpoint.raw as usize as *mut _)) };
 
-    // Refused, not consumed: the shell is still running and the supervisor is
-    // still holding the session, so nothing has been lost by trying.
     assert!(client.is_running(session_id).unwrap());
     let still_held = client
         .list_sessions()
         .unwrap()
         .into_iter()
         .find(|session| session.session_id == session_id)
-        .expect("a refused attach must leave the session in the listing");
-    assert!(
-        !still_held.attached,
-        "a refused attach must leave the session free for another try"
-    );
-    assert_eq!(
-        still_held.metadata, metadata,
-        "a refused attach must not disturb what the supervisor knows"
-    );
+        .expect("an attached session remains visible in the listing");
+    assert!(still_held.attached);
+    assert_eq!(still_held.metadata, metadata);
 
     client.kill(session_id).unwrap();
 }

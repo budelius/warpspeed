@@ -1311,24 +1311,19 @@ fn on_shell_determined<S: TerminalSurface>(
         }
     });
 
-    // The shell's announcement is carried across the detach and is available
-    // here as `metadata.bootstrap` -- but replaying it into this pane is not
-    // yet safe, so it is deliberately not used.
-    //
-    // An attached pane never receives the `InitShell` and `Bootstrapped` hooks:
-    // the shell sent them once, to a Warp process that has exited. So it stays
-    // in `TerminalInputState::NotBootstrapped`, draws no blocks and refuses
-    // every keystroke, which is why an attached session is currently
-    // unusable. `TerminalModel::restore_bootstrap` replays exactly those two
-    // hooks and fixes that much -- but a pane taken that far then panics in the
-    // grid (`assertion failed: requested < self.len`) while it renders, which a
-    // pane that never bootstrapped never reached. Wiring this up before that is
-    // understood trades an unusable pane for a crashing one.
-    //
-    // Kept, rather than dropped, because the supervisor now preserves the
-    // announcement and the fix needs it: what is missing is the rendering half,
-    // not the state.
+    // The shell announced its identity only once, to the pane that detached.
+    // Restore that announcement before replay starts so the adopting pane can
+    // accept input and classify all later prompt hooks. The supervisor now
+    // resizes its headless screen before attach, so replay cannot address cells
+    // outside this model's grid (the panic that previously made this unsafe).
+    let attached_bootstrap = attached
+        .as_ref()
+        .and_then(|(_, metadata)| metadata.bootstrap.as_ref())
+        .cloned();
     let attached_pty = attached.map(|(pty, _metadata)| pty);
+    if let Some(bootstrap) = attached_bootstrap {
+        manager.model().lock().restore_bootstrap(&bootstrap);
+    }
 
     // Enqueue the init shell script (for shells that need it), then create
     // the PTY and start its corresponding event loop.

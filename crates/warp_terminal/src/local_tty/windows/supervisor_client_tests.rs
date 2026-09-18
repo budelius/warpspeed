@@ -13,16 +13,22 @@ use crate::local_tty::shell::{DirectShellStarter, ShellStarter};
 use crate::shell::ShellType;
 
 #[test]
-fn repeated_detaches_keep_one_preservation_per_closing_handle() {
+fn delayed_old_handle_cleanup_cannot_consume_a_new_handles_detach() {
+    use std::sync::atomic::Ordering;
+
     let client = WindowsTerminalSupervisorClient::new().unwrap();
     let session_id = SessionId::from(42);
 
-    client.mark_preserved(session_id);
-    client.mark_preserved(session_id);
+    let old = client.register_handle(session_id);
+    client.mark_current_handle_preserved(session_id);
+    let current = client.register_handle(session_id);
 
-    assert!(client.take_preserved(session_id));
-    assert!(client.take_preserved(session_id));
-    assert!(!client.take_preserved(session_id));
+    assert!(old.swap(false, Ordering::AcqRel));
+    assert!(!current.load(Ordering::Acquire));
+
+    client.mark_current_handle_preserved(session_id);
+    assert!(current.swap(false, Ordering::AcqRel));
+    assert!(!old.load(Ordering::Acquire));
 }
 
 fn powershell_options() -> PtyOptions {

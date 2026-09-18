@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -31,18 +32,17 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct UnixTerminalSupervisorClient {
     executable: PathBuf,
 
-    /// Sessions handed to the supervisor, which must not be killed when their
-    /// pane's PTY handle is dropped.
-    // One permit per successful detach. Cleanup of an earlier pane may lag
-    // behind a later detach of the same reattached session.
-    preserved_sessions: Mutex<HashMap<SessionId, usize>>,
+    /// The preservation flag belonging to the currently attached handle for
+    /// each session. An older pane may clean up after a later attach and must
+    /// consume only the detach belonging to its own handle generation.
+    current_handles: Mutex<HashMap<SessionId, Weak<AtomicBool>>>,
 }
 
 impl UnixTerminalSupervisorClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
             executable: std::env::current_exe().context("Failed to locate the Warp executable")?,
-            preserved_sessions: Mutex::new(HashMap::new()),
+            current_handles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -85,7 +85,7 @@ impl UnixTerminalSupervisorClient {
             metadata,
         })? {
             Message::DetachResponse { error: None } => {
-                self.mark_preserved(session_id);
+                self.mark_current_handle_preserved(session_id);
                 Ok(())
             }
             Message::DetachResponse { error: Some(error) } => bail!(error),
@@ -138,31 +138,28 @@ impl UnixTerminalSupervisorClient {
         }
     }
 
-    fn mark_preserved(&self, session_id: SessionId) {
-        let mut permits = self
-            .preserved_sessions
+    /// Registers the specific PTY handle that owns the current attachment.
+    pub fn register_handle(&self, session_id: SessionId) -> Arc<AtomicBool> {
+        let preserved = Arc::new(AtomicBool::new(false));
+        self.current_handles
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let count = permits.entry(session_id).or_default();
-        *count = count.saturating_add(1);
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id, Arc::downgrade(&preserved));
+        preserved
     }
 
-    /// Whether one successful detach still protects a PTY handle from killing
-    /// `session_id`, consuming exactly one such permit as it answers.
-    pub fn take_preserved(&self, session_id: SessionId) -> bool {
-        let mut permits = self
-            .preserved_sessions
+    fn mark_current_handle_preserved(&self, session_id: SessionId) {
+        use std::sync::atomic::Ordering;
+
+        let current = self
+            .current_handles
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(count) = permits.get_mut(&session_id) else {
-            return false;
-        };
-        if *count == 1 {
-            permits.remove(&session_id);
-        } else {
-            *count -= 1;
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&session_id)
+            .and_then(Weak::upgrade);
+        if let Some(preserved) = current {
+            preserved.store(true, Ordering::Release);
         }
-        true
     }
 
     fn request(&self, message: Message) -> Result<Message> {

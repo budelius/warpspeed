@@ -139,6 +139,7 @@ struct SupervisorOwnedPtyHandle {
     client: std::sync::Arc<UnixTerminalSupervisorClient>,
     session_id: SessionId,
     pid: u32,
+    preserved: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -163,7 +164,10 @@ impl PtyHandle for SupervisorOwnedPtyHandle {
     }
 
     fn kill(&mut self) -> Result<()> {
-        if self.client.take_preserved(self.session_id) {
+        if self
+            .preserved
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             Ok(())
         } else {
             self.client.kill(self.session_id)
@@ -176,6 +180,7 @@ struct SupervisorOwnedPtyHandle {
     client: std::sync::Arc<WindowsTerminalSupervisorClient>,
     session_id: SessionId,
     pid: u32,
+    preserved: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(windows)]
@@ -199,7 +204,10 @@ impl PtyHandle for SupervisorOwnedPtyHandle {
     }
 
     fn kill(&mut self) -> Result<()> {
-        if self.client.take_preserved(self.session_id) {
+        if self
+            .preserved
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             Ok(())
         } else {
             self.client.kill(self.session_id)
@@ -538,6 +546,7 @@ impl PtySpawner {
                             client: client.clone(),
                             session_id: persistent_session_id,
                             pid,
+                            preserved: client.register_handle(persistent_session_id),
                         }),
                     ));
                 }
@@ -603,6 +612,7 @@ impl PtySpawner {
                             client: client.clone(),
                             session_id: persistent_session_id,
                             pid,
+                            preserved: client.register_handle(persistent_session_id),
                         }),
                     ));
                 }
@@ -715,6 +725,7 @@ impl PtySpawner {
                 client: client.clone(),
                 session_id,
                 pid: endpoint.pid,
+                preserved: client.register_handle(session_id),
             });
             return Ok(Some((result, handle, attached.metadata)));
         }
@@ -775,6 +786,7 @@ impl PtySpawner {
                 client: client.clone(),
                 session_id,
                 pid: endpoint.pid,
+                preserved: client.register_handle(session_id),
             });
             Ok(Some((result, handle, attached.metadata)))
         }

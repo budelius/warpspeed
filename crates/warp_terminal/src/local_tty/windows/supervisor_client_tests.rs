@@ -82,6 +82,7 @@ fn client_reattaches_same_process_through_daemon() {
         shell: "pwsh".to_owned(),
         working_directory: r"C:\src".to_owned(),
         title: "Claude Code".to_owned(),
+        input_editor_active: false,
         bootstrap: None,
     };
     client

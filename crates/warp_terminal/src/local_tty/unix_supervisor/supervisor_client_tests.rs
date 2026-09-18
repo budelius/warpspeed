@@ -101,6 +101,8 @@ fn a_client_reattaches_the_same_process_through_the_daemon() {
         shell: "sh".to_owned(),
         working_directory: "/tmp".to_owned(),
         title: "Claude Code".to_owned(),
+        input_editor_active: false,
+        bootstrap: None,
     };
     client
         .detach(session_id, snapshot.clone(), metadata.clone())

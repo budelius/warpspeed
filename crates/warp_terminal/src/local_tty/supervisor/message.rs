@@ -31,7 +31,9 @@ use crate::local_tty::screen::ScreenSnapshot;
 // v5 makes pre-attach Resize reflow the supervisor's headless screen before
 // lending an endpoint. The wire shape is unchanged, but old v4 supervisors
 // discard replay when the receiving pane has different dimensions.
-pub const PROTOCOL_VERSION: u32 = 5;
+// v6 carries whether the detached shell was waiting at its prompt, allowing
+// the adopting pane to reactivate its editor without sourcing bootstrap again.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A message in either direction between a client and the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +154,12 @@ pub struct SessionMetadata {
 
     /// The session's title, for telling two shells apart at a glance.
     pub title: String,
+
+    /// Whether the shell was waiting at its prompt when handed over.
+    ///
+    /// Restoring this lifecycle marker reactivates the editor without sending
+    /// the one-time bootstrap script to an already-running shell.
+    pub input_editor_active: bool,
 
     /// What the shell said about itself when it started.
     ///

@@ -13811,12 +13811,14 @@ impl Workspace {
         // One lock for both: the screen and what the shell said about itself
         // have to describe the same moment, and `TerminalModel`'s mutex is not
         // reentrant.
-        let (snapshot, bootstrap) = {
+        let (snapshot, bootstrap, input_editor_active) = {
             let model = manager.as_ref(ctx).model();
             let locked = model.lock();
             (
                 locked.screen_snapshot(),
                 locked.captured_bootstrap().cloned(),
+                locked.terminal_input_state()
+                    == crate::terminal::model::terminal_model::TerminalInputState::InputEditor,
             )
         };
 
@@ -13827,6 +13829,7 @@ impl Workspace {
                 shell: pane.shell.clone(),
                 working_directory: pane.working_directory.clone(),
                 title: pane.title.clone(),
+                input_editor_active,
                 bootstrap,
             },
         })

@@ -1316,13 +1316,20 @@ fn on_shell_determined<S: TerminalSurface>(
     // accept input and classify all later prompt hooks. The supervisor now
     // resizes its headless screen before attach, so replay cannot address cells
     // outside this model's grid (the panic that previously made this unsafe).
-    let attached_bootstrap = attached
-        .as_ref()
-        .and_then(|(_, metadata)| metadata.bootstrap.as_ref())
-        .cloned();
+    let attached_metadata = attached.as_ref().map(|(_, metadata)| metadata.clone());
     let attached_pty = attached.map(|(pty, _metadata)| pty);
-    if let Some(bootstrap) = attached_bootstrap {
-        manager.model().lock().restore_bootstrap(&bootstrap);
+    if let Some(metadata) = attached_metadata
+        && let Some(bootstrap) = metadata.bootstrap
+    {
+        let model = manager.model();
+        let mut model = model.lock();
+        model.restore_bootstrap(&bootstrap);
+        if metadata.input_editor_active {
+            model.restore_shell_prompt(
+                bootstrap.hook_session_id,
+                (!metadata.working_directory.is_empty()).then_some(metadata.working_directory),
+            );
+        }
     }
 
     // Enqueue the init shell script (for shells that need it), then create

@@ -2720,6 +2720,19 @@ impl TerminalModel {
         self.restoring_bootstrap = false;
     }
 
+    /// Restores the prompt lifecycle marker for an adopted idle shell.
+    ///
+    /// The shell emitted its `Precmd` hook before the old pane detached and
+    /// will not emit another until it runs a command. Replaying only this
+    /// marker reactivates the line editor without re-sourcing bootstrap.
+    pub fn restore_shell_prompt(&mut self, hook_session_id: u64, pwd: Option<String>) {
+        self.prompt_only_precmd(PromptMetadata {
+            pwd,
+            session_id: Some(hook_session_id),
+            ..PromptMetadata::default()
+        });
+    }
+
     pub fn needs_bracketed_paste(&mut self) -> bool {
         delegate!(self.needs_bracketed_paste())
     }

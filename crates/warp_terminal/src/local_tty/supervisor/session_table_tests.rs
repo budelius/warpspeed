@@ -12,6 +12,7 @@ fn metadata() -> SessionMetadata {
         shell: "bash".to_owned(),
         working_directory: "/home/user".to_owned(),
         title: "build".to_owned(),
+        input_editor_active: false,
         bootstrap: None,
     }
 }

@@ -6,7 +6,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use instant::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};

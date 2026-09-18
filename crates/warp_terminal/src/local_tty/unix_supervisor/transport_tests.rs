@@ -119,6 +119,7 @@ fn an_endpoint_without_a_descriptor_is_refused() {
                     sequence: 0,
                     output_was_dropped: false,
                     endpoint: Some(Endpoint { pid: 1, raw: 3 }),
+                    metadata: SessionMetadata::default(),
                 }),
             },
             None,

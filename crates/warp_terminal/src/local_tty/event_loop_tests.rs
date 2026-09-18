@@ -1,8 +1,24 @@
-use super::fold_pending_resize;
+use super::{fold_pending_resize, should_kill_on_shutdown};
 use crate::SizeInfo;
 
 fn size(columns: usize) -> SizeInfo {
     SizeInfo::new_without_font_metrics(30, columns)
+}
+
+#[test]
+fn a_dead_supervised_child_is_still_removed_from_the_supervisor() {
+    assert!(should_kill_on_shutdown(true, true));
+}
+
+#[test]
+fn a_dead_direct_child_does_not_need_a_second_kill() {
+    assert!(!should_kill_on_shutdown(true, false));
+}
+
+#[test]
+fn a_disconnected_living_child_is_killed_for_both_ownership_modes() {
+    assert!(should_kill_on_shutdown(false, false));
+    assert!(should_kill_on_shutdown(false, true));
 }
 
 #[test]

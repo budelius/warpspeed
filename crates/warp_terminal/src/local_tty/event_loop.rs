@@ -160,6 +160,10 @@ fn fold_pending_resize(
     (size, forced || matches!(pending, Some((_, true))))
 }
 
+fn should_kill_on_shutdown(child_exited: bool, requires_exit_polling: bool) -> bool {
+    !child_exited || requires_exit_polling
+}
+
 impl<P, M> EventLoop<P, M>
 where
     P: local_tty::EventedPty + Send + 'static,
@@ -568,8 +572,10 @@ where
                 let _ = self.poll.registry().deregister(&mut self.rx);
                 let _ = self.pty.deregister(&self.poll);
 
-                // Terminate the PTY process, if it's not the initiator of the shutdown.
-                if !child_exited {
+                // A directly owned child that initiated shutdown is already cleaned up by the
+                // operating system. A supervisor-owned child still needs an explicit Kill request
+                // to remove its durable session entry, even when the process itself is already dead.
+                if should_kill_on_shutdown(child_exited, self.pty.requires_exit_polling()) {
                     let res = self.pty.kill();
                     if let Err(err) = res {
                         log::warn!("Failed to kill PTY process: {err:#}");

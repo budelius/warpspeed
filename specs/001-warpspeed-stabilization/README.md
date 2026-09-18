@@ -2,6 +2,8 @@
 
 Start with [plan.md](plan.md) for the branch inventory and execution order, then
 [tasks.md](tasks.md) for the actionable checklist. [spec.md](spec.md) defines acceptance criteria.
+[macOS CI options](macos-ci.md) covers GitLab runners, native Gitea runner setup with an example
+workflow, and Xcode Cloud prerequisites.
 
 Spec Kit 1.0.6 is initialized using its generic integration. Workflow prompts live under
 `.specify/commands/`; they are files to use with your coding agent, not automatically registered

@@ -2356,7 +2356,15 @@ fn a_pane_adopting_a_running_shell_is_bootstrapped_by_what_it_is_told() {
         "a pane that has heard nothing from a shell starts out refusing input"
     );
 
-    adopting.restore_bootstrap(&captured);
+    adopting.prepare_attached_state(captured, true, Some("/workspace".to_owned()));
+    assert!(
+        matches!(
+            adopting.terminal_input_state(),
+            TerminalInputState::NotBootstrapped
+        ),
+        "attachment state must wait until replay has finished"
+    );
+    adopting.restore_attached_state();
 
     assert!(
         !matches!(

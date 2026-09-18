@@ -1312,24 +1312,23 @@ fn on_shell_determined<S: TerminalSurface>(
     });
 
     // The shell announced its identity only once, to the pane that detached.
-    // Restore that announcement before replay starts so the adopting pane can
-    // accept input and classify all later prompt hooks. The supervisor now
-    // resizes its headless screen before attach, so replay cannot address cells
-    // outside this model's grid (the panic that previously made this unsafe).
+    // Preserve that announcement for the event loop's post-replay boundary so
+    // the adopting pane can accept input and classify later prompt hooks. The
+    // supervisor resizes its headless screen before attach, so replay cannot
+    // address cells outside this model's grid.
     let attached_metadata = attached.as_ref().map(|(_, metadata)| metadata.clone());
     let attached_pty = attached.map(|(pty, _metadata)| pty);
     if let Some(metadata) = attached_metadata
         && let Some(bootstrap) = metadata.bootstrap
     {
-        let model = manager.model();
-        let mut model = model.lock();
-        model.restore_bootstrap(&bootstrap);
-        if metadata.input_editor_active {
-            model.restore_shell_prompt(
-                bootstrap.hook_session_id,
-                (!metadata.working_directory.is_empty()).then_some(metadata.working_directory),
-            );
-        }
+        // The event loop parses staged repaint bytes before live output. Some
+        // repaint sequences reset block lifecycle state, so apply the shell's
+        // saved announcement only after that deterministic replay boundary.
+        manager.model().lock().prepare_attached_state(
+            bootstrap,
+            metadata.input_editor_active,
+            (!metadata.working_directory.is_empty()).then_some(metadata.working_directory),
+        );
     }
 
     // Enqueue the init shell script (for shells that need it), then create

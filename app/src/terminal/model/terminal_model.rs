@@ -540,6 +540,10 @@ pub struct TerminalModel {
     /// that adopted an already-running process. Subscribers must initialize
     /// their state without sourcing the bootstrap script into that shell again.
     restoring_bootstrap: bool,
+
+    /// Lifecycle state to apply only after the event loop has parsed the
+    /// attachment's staged screen replay.
+    pending_attached_state: Option<(SessionBootstrap, bool, Option<String>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1147,6 +1151,7 @@ impl TerminalModel {
             registered_session_ids: HashSet::new(),
             captured_bootstrap: None,
             restoring_bootstrap: false,
+            pending_attached_state: None,
         }
     }
 
@@ -2720,17 +2725,34 @@ impl TerminalModel {
         self.restoring_bootstrap = false;
     }
 
-    /// Restores the prompt lifecycle marker for an adopted idle shell.
-    ///
-    /// The shell emitted its `Precmd` hook before the old pane detached and
-    /// will not emit another until it runs a command. Replaying only this
-    /// marker reactivates the line editor without re-sourcing bootstrap.
-    pub fn restore_shell_prompt(&mut self, hook_session_id: u64, pwd: Option<String>) {
-        self.prompt_only_precmd(PromptMetadata {
-            pwd,
-            session_id: Some(hook_session_id),
-            ..PromptMetadata::default()
-        });
+    /// Records lifecycle state for application after screen replay.
+    pub fn prepare_attached_state(
+        &mut self,
+        bootstrap: SessionBootstrap,
+        input_editor_active: bool,
+        working_directory: Option<String>,
+    ) {
+        self.pending_attached_state = Some((bootstrap, input_editor_active, working_directory));
+    }
+
+    /// Applies an adopted shell's lifecycle after staged repaint bytes.
+    pub fn restore_attached_state(&mut self) {
+        let Some((bootstrap, input_editor_active, working_directory)) =
+            self.pending_attached_state.take()
+        else {
+            return;
+        };
+        self.restore_bootstrap(&bootstrap);
+        if input_editor_active {
+            // The shell emitted its `Precmd` hook before the old pane detached
+            // and will not emit another until it runs a command. Replaying
+            // only this marker reactivates the editor without re-sourcing.
+            self.prompt_only_precmd(PromptMetadata {
+                pwd: working_directory,
+                session_id: Some(bootstrap.hook_session_id),
+                ..PromptMetadata::default()
+            });
+        }
     }
 
     pub fn needs_bracketed_paste(&mut self) -> bool {

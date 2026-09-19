@@ -173,9 +173,13 @@ fn http_auth_and_expired_token_responses_fail_closed() {
         ("401 Unauthorized", "token_expired"),
     ] {
         let base = http_fixture(status, json!({ "error": "denied", "code": code }));
-        let error = send(Client::new().get(format!("{base}/api/agent-control/runs")))
-            .unwrap_err()
-            .to_string();
+        let profile = fixture_profile(base);
+        let error = send(
+            &profile,
+            Client::new().get(format!("{base}/api/agent-control/runs")),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(status.split_once(' ').unwrap().0));
         assert!(error.contains(code));
     }
@@ -219,6 +223,44 @@ fn http_gap_fixture_deduplicates_replayed_events() {
     let events = retain_new_events(page.items, &mut known);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_id, "event-3");
+}
+
+#[test]
+fn full_managed_flow_has_dashboard_only_network_authority() {
+    let profile = profile(ManagedEnvironment::Staging);
+    let client = Client::new();
+    for (method, path) in [
+        ("GET", "/api/agent-control/runs?limit=100"),
+        ("POST", "/api/agent-control/runs"),
+        ("GET", "/api/agent-control/runs/job-123/session"),
+        ("GET", "/api/agent-control/runs/job-123/events"),
+        ("POST", "/api/agent-control/runs/job-123/input"),
+        ("POST", "/api/agent-control/runs/job-123/close"),
+        ("POST", "/api/agent-control/runs/job-123/stop"),
+    ] {
+        let request = client.request(
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+            format!("{}{path}", profile.base_url),
+        );
+        validate_request_destination(profile, &request).unwrap();
+    }
+
+    for forbidden in [
+        "https://api.warp.dev/managed-session",
+        "https://app.warp.dev/api/session-sharing",
+        "https://rtc.warp.dev/connect",
+        "https://oz.warp.dev/run",
+        "https://releases.warp.dev/artifacts/session",
+        "https://app.warp.dev/api/v1/inference",
+    ] {
+        let error = send(profile, client.get(forbidden))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("destination is not the selected dashboard"),
+            "{forbidden} was not denied before network I/O: {error}"
+        );
+    }
 }
 
 #[test]

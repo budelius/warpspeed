@@ -107,6 +107,7 @@ fn list(json_output: bool) -> Result<()> {
     let profile = profile(ManagedEnvironment::Staging);
     let token = dashboard_token()?;
     let page: Value = send(
+        profile,
         Client::new()
             .get(format!(
                 "{}/api/agent-control/runs?limit=100",
@@ -165,6 +166,7 @@ fn start(
         body["prompt"] = Value::String(prompt.to_owned());
     }
     let response = send(
+        profile,
         Client::new()
             .post(format!("{}/api/agent-control/runs", profile.base_url))
             .bearer_auth(&token)
@@ -202,6 +204,7 @@ fn input(
     let action = if text.is_some() { "input" } else { "close" };
     let body = text.map_or_else(|| json!({}), |text| json!({ "text": text }));
     let response = send(
+        profile,
         Client::new()
             .post(format!(
                 "{}/api/agent-control/runs/{job_id}/{action}",
@@ -235,6 +238,7 @@ fn stop(
     let profile = profile(environment);
     let token = dashboard_token()?;
     let response = send(
+        profile,
         Client::new()
             .post(format!(
                 "{}/api/agent-control/runs/{job_id}/stop",
@@ -350,6 +354,7 @@ fn fetch_descriptor(
     token: &str,
 ) -> Result<SessionDescriptor> {
     let descriptor: SessionDescriptor = send(
+        profile,
         client
             .get(format!(
                 "{}/api/agent-control/runs/{job_id}/session",
@@ -384,6 +389,7 @@ fn fetch_event_page(
     if let Some(after) = cursor {
         request = request.query(&[("after", after)]);
     }
+    validate_request_destination(profile, &request)?;
     let response = request
         .send()
         .context("managed-session event request failed")?;
@@ -542,7 +548,34 @@ fn ensure_command_accepted(result: &Value) -> Result<()> {
     bail!("{message}")
 }
 
-fn send(request: reqwest::blocking::RequestBuilder) -> Result<Response> {
+fn validate_request_destination(
+    profile: &EnvironmentProfile,
+    request: &reqwest::blocking::RequestBuilder,
+) -> Result<()> {
+    let request = request
+        .try_clone()
+        .context("managed-session request cannot be safely inspected")?
+        .build()
+        .context("invalid managed-session request")?;
+    let allowed = reqwest::Url::parse(profile.base_url)
+        .context("invalid compiled managed-session dashboard URL")?;
+    let requested = request.url();
+    let same_origin = requested.scheme() == allowed.scheme()
+        && requested.host_str() == allowed.host_str()
+        && requested.port_or_known_default() == allowed.port_or_known_default()
+        && requested.username().is_empty()
+        && requested.password().is_none();
+    if !same_origin {
+        bail!("managed-session network request refused: destination is not the selected dashboard");
+    }
+    Ok(())
+}
+
+fn send(
+    profile: &EnvironmentProfile,
+    request: reqwest::blocking::RequestBuilder,
+) -> Result<Response> {
+    validate_request_destination(profile, &request)?;
     let response = request.send().context("dashboard request failed")?;
     if response.status().is_success() {
         Ok(response)

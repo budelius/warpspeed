@@ -47,6 +47,9 @@ impl super::WarpConfig {
             },
         );
         if FeatureFlag::TabConfigs.is_enabled() {
+            // WarpSpeed ships a fixed-command UI entry. The command opens the
+            // task/agent picker; no task text is interpolated into a shell.
+            let _ = super::ensure_stozn_managed_agent_config();
             let _ = ctx.spawn(
                 async move { load_tab_configs(&tab_configs_dir()) },
                 |me, (tab_configs, tab_config_errors), ctx| {

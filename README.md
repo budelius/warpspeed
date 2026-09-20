@@ -44,16 +44,21 @@ File-backed session configs compose reusable tab configs into one persistent, la
 
 Authenticate with a dashboard bearer token in `STOZN_TOKEN` or `~/.stozn.json`, then use the compiled staging profile:
 
+Choose **STOZN Managed Agent** from WarpSpeed's new-session UI to open the task/agent picker. It lists open STOZN tasks and operator-enabled profiles, launches the selected task-bound session, displays normalized events, and offers bounded `send`, `close`, `stop`, and `detach` controls.
+
+The equivalent CLI remains available for automation:
+
 ```bash
+warpspeed agent-ctrl ui
 warpspeed agent-ctrl list
-warpspeed agent-ctrl start staging-claude-interactive --interactive
+warpspeed agent-ctrl start --agent staging-claude-interactive --task <stozn-task-id> --interactive
 warpspeed agent-ctrl attach <job-id>
 warpspeed agent-ctrl input <job-id> "Inspect the failing test"
 warpspeed agent-ctrl close <job-id>
 warpspeed agent-ctrl stop <job-id>
 ```
 
-The dashboard endpoint, environment, and fleet identity are compiled/operator-owned; CLI callers cannot supply controller URLs or runtime overrides. Local bookmarks contain only safe identifiers, labels, cursors, state, and timestamps. Closing `attach` never stops the Kubernetes process.
+Every new managed session requires a dashboard-validated STOZN task. The dashboard endpoint, environment, and fleet identity are compiled/operator-owned; callers cannot supply controller URLs or runtime overrides. Local bookmarks contain only safe identifiers, labels, cursors, state, and timestamps. Closing `attach` never stops the Kubernetes process.
 
 ## Recovering CLI agent sessions
 

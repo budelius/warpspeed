@@ -19,10 +19,15 @@ pub enum ManagedSessionsCommand {
     /// List locally bookmarked AgentCtrl sessions.
     List,
 
-    /// Start one configured operator-enabled agent.
+    /// Start one task-bound configured operator-enabled agent.
     Start {
+        /// Configured agent profile name.
         #[arg(long)]
         agent: String,
+
+        /// Canonical STOZN task id. Every managed session requires one.
+        #[arg(long)]
+        task: String,
 
         #[arg(long)]
         prompt: Option<String>,
@@ -30,6 +35,12 @@ pub enum ManagedSessionsCommand {
         #[arg(long)]
         interactive: bool,
 
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
+    /// Open the interactive WarpSpeed task/agent picker and managed-session viewer.
+    Ui {
         #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
         environment: ManagedEnvironment,
     },

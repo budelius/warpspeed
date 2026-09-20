@@ -133,10 +133,12 @@ if (-not $SKIP_BUILD) {
     $previous_target_dir = $env:CARGO_TARGET_DIR
     $previous_full_profile = $env:CARGO_FULL_PROFILE
     $previous_protoc = $env:PROTOC
+    $previous_app_name = $env:WARP_APP_NAME
 
     try {
         $env:CARGO_TARGET_DIR = $STAGING_TARGET_DIR
         $env:CARGO_FULL_PROFILE = 'warpspeed-merge/release'
+        $env:WARP_APP_NAME = 'WarpSpeed by STOZN'
         if (-not $env:PROTOC) {
             $protoc = Get-Command protoc -ErrorAction Stop
             $env:PROTOC = $protoc.Source
@@ -155,6 +157,7 @@ if (-not $SKIP_BUILD) {
         $env:CARGO_TARGET_DIR = $previous_target_dir
         $env:CARGO_FULL_PROFILE = $previous_full_profile
         $env:PROTOC = $previous_protoc
+        $env:WARP_APP_NAME = $previous_app_name
     }
 }
 

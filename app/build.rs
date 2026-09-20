@@ -540,16 +540,13 @@ fn embed_resource_file(target_dir: &Path) {
     let version = env::var("GIT_RELEASE_TAG").unwrap_or("v0".to_owned());
     let app_name = env::var("WARP_APP_NAME").unwrap_or("Warp".to_owned());
     let bin_name = env::var("CARGO_BIN_NAME").unwrap_or("local".to_owned());
-    let company_name = if bin_name == "warpspeed" {
+    let is_warpspeed = app_name == "WarpSpeed by STOZN";
+    let company_name = if is_warpspeed {
         "STOZN"
     } else {
         "Denver Technologies, Inc"
     };
-    let product_name = if bin_name == "warpspeed" {
-        "WarpSpeed by STOZN"
-    } else {
-        app_name.as_str()
-    };
+    let product_name = app_name.as_str();
 
     let icon_path = Path::new("channels")
         .join(bin_name)

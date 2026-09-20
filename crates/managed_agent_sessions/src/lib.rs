@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, ManagedSessionsCommand};
 
 const STAGING_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
+const STAGING_WEB_URL: &str = "https://dash-dev.stozn.ai";
 const STAGING_FLEET_ID: &str = "stoz3n-agent-ctrl-staging";
 const SUPPORTED_PROTOCOL: u32 = 1;
 const BOOKMARK_FORMAT: u32 = 1;
@@ -842,6 +843,7 @@ fn render_event(event: &RunEvent, json_output: bool) -> Result<()> {
 struct EnvironmentProfile {
     alias: &'static str,
     base_url: &'static str,
+    web_url: &'static str,
     fleet_id: &'static str,
 }
 
@@ -849,6 +851,7 @@ fn profile(environment: ManagedEnvironment) -> &'static EnvironmentProfile {
     static STAGING: EnvironmentProfile = EnvironmentProfile {
         alias: "staging",
         base_url: STAGING_BASE_URL,
+        web_url: STAGING_WEB_URL,
         fleet_id: STAGING_FLEET_ID,
     };
     match environment {
@@ -1050,7 +1053,7 @@ fn validate_verification_url(
     verification_url: &str,
     request_id: &str,
 ) -> Result<()> {
-    let allowed = reqwest::Url::parse(profile.base_url)?;
+    let allowed = reqwest::Url::parse(profile.web_url)?;
     let requested = reqwest::Url::parse(verification_url)
         .context("dashboard returned an invalid STOZN login URL")?;
     let same_origin = requested.scheme() == allowed.scheme()

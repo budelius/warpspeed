@@ -28,10 +28,7 @@ fn task_picker_search_is_encoded_on_the_fixed_dashboard_endpoint() {
 fn stozn_login_url_is_bound_to_the_compiled_dashboard_and_request() {
     let profile = profile(ManagedEnvironment::Staging);
     let request_id = "a".repeat(43);
-    let valid = format!(
-        "{}/warpspeed-auth?request_id={request_id}",
-        profile.base_url
-    );
+    let valid = format!("{}/warpspeed-auth?request_id={request_id}", profile.web_url);
     assert!(validate_verification_url(profile, &valid, &request_id).is_ok());
     assert!(
         validate_verification_url(
@@ -44,7 +41,18 @@ fn stozn_login_url_is_bound_to_the_compiled_dashboard_and_request() {
     assert!(
         validate_verification_url(
             profile,
-            &format!("{}/warpspeed-auth?request_id=wrong", profile.base_url),
+            &format!(
+                "{}/warpspeed-auth?request_id={request_id}",
+                profile.base_url
+            ),
+            &request_id,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_verification_url(
+            profile,
+            &format!("{}/warpspeed-auth?request_id=wrong", profile.web_url),
             &request_id,
         )
         .is_err()
@@ -115,6 +123,7 @@ fn fixture_profile(base_url: &'static str) -> EnvironmentProfile {
     EnvironmentProfile {
         alias: "staging",
         base_url,
+        web_url: STAGING_WEB_URL,
         fleet_id: STAGING_FLEET_ID,
     }
 }

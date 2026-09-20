@@ -90,6 +90,7 @@ use crate::settings::{
 };
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::settings_view::{OpenTeamsSettingsModalArgs, SettingsSection, flags};
+use crate::stozn_auth::StoznAuthManager;
 use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::general_settings::GeneralSettings;
 use crate::terminal::keys_settings::KeysSettings;
@@ -2220,6 +2221,7 @@ impl RootView {
         let server_api_provider = ServerApiProvider::as_ref(ctx);
         let server_api = server_api_provider.get();
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
+        let has_stozn_identity = managed_agent_sessions::stored_stozn_identity().is_some();
 
         ctx.subscribe_to_model(&AuthManager::handle(ctx), |me, _, event, ctx| {
             me.handle_auth_manager_event(event, ctx);
@@ -2251,7 +2253,7 @@ impl RootView {
             workspace_setting,
         };
 
-        let auth_onboarding_state = if auth_state.is_logged_in() {
+        let auth_onboarding_state = if auth_state.is_logged_in() || has_stozn_identity {
             AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
         } else {
             cfg_if! {
@@ -3232,12 +3234,6 @@ impl RootView {
                     .unwrap_or_else(|| "Dark".to_string());
                 let use_vertical_tabs = *TabSettings::as_ref(ctx).use_vertical_tabs;
 
-                // Open the sign-in URL in the browser for existing users.
-                AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                    let sign_in_url = auth_manager.sign_in_url();
-                    ctx.open_url(&sign_in_url);
-                });
-
                 let login_slide_view = ctx.add_typed_action_view(|ctx| {
                     LoginSlideView::new(
                         ai_enabled,
@@ -3256,12 +3252,14 @@ impl RootView {
                 ctx.subscribe_to_view(&login_slide_view, |me, _view, event, ctx| {
                     me.handle_login_slide_event(event, ctx);
                 });
-
                 self.auth_onboarding_state = AuthOnboardingState::LoginSlide {
                     login_slide_view,
                     onboarding_view,
                     target,
                 };
+                StoznAuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
+                    auth_manager.start_login(ctx);
+                });
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
                 self.focus(ctx);
                 ctx.notify();

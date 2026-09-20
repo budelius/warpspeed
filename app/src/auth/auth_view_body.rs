@@ -643,7 +643,7 @@ impl AuthViewBody {
         };
 
         ui_builder
-            .span(text)
+            .paragraph(text)
             .with_style(header_styles)
             .build()
             .finish()

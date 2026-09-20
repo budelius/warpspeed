@@ -10288,9 +10288,10 @@ impl Workspace {
             MenuItem::Separator,
         ]);
 
-        if self.auth_state.is_anonymous_or_logged_out() {
+        let has_stozn_identity = managed_agent_sessions::stored_stozn_identity().is_some();
+        if self.auth_state.is_anonymous_or_logged_out() && !has_stozn_identity {
             items.push(
-                MenuItemFields::new("Sign up")
+                MenuItemFields::new("Sign in with STOZN")
                     .with_on_select_action(WorkspaceAction::SignupAnonymousUser)
                     .into_item(),
             );
@@ -10324,9 +10325,9 @@ impl Workspace {
                 .into_item(),
         );
 
-        if !self.auth_state.is_anonymous_or_logged_out() {
+        if !self.auth_state.is_anonymous_or_logged_out() || has_stozn_identity {
             items.push(
-                MenuItemFields::new("Log out")
+                MenuItemFields::new("Log out of STOZN")
                     .with_on_select_action(WorkspaceAction::LogOut)
                     .into_item(),
             );

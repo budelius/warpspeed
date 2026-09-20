@@ -3,7 +3,6 @@ use pathfinder_geometry::vector::vec2f;
 use ui_components::{Component as _, Options as _, button};
 use warp_core::features::FeatureFlag;
 use warp_core::send_telemetry_from_ctx;
-use warp_core::ui::Icon;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::theme::color::internal_colors;
 use warpui_core::elements::shimmering_text::{
@@ -83,7 +82,7 @@ impl View for IntroSlide {
         let login_row = Flex::row()
             .with_child(
                 ui_builder
-                    .span("Already have an account? ")
+                    .span("Use your STOZN identity. ")
                     .with_style(disclaimer_styles)
                     .build()
                     .finish(),
@@ -91,7 +90,7 @@ impl View for IntroSlide {
             .with_child(
                 ui_builder
                     .link(
-                        "Log in".into(),
+                        "Sign in with STOZN".into(),
                         None,
                         Some(Box::new(|ctx| {
                             ctx.dispatch_typed_action(IntroSlideAction::LoginClicked);
@@ -153,16 +152,10 @@ impl IntroSlide {
     fn render_centered_content(&self, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
 
-        let logo_fill = internal_colors::fg_overlay_4(theme);
-        let logo = ConstrainedBox::new(Icon::WarpLogoLight.to_warpui_icon(logo_fill).finish())
-            .with_width(64.)
-            .with_height(64.)
-            .finish();
-
         let base_color: ColorU = internal_colors::fg_overlay_4(theme).into();
         let shimmer_color: ColorU = theme.foreground().into();
         let title = ShimmeringTextElement::new(
-            "Welcome to Warp",
+            "WarpSpeed by STOZN",
             appearance.ui_font_family(),
             32.,
             base_color,
@@ -174,7 +167,7 @@ impl IntroSlide {
 
         let subtitle_color = internal_colors::text_sub(theme, theme.background().into_solid());
         let subtitle = FormattedTextElement::from_str(
-            "A modern terminal with state of the art agents built in.",
+            "A secure terminal for STOZN managed-agent sessions.",
             appearance.ui_font_family(),
             16.,
         )
@@ -203,7 +196,6 @@ impl IntroSlide {
             .with_main_axis_size(MainAxisSize::Min)
             .with_main_axis_alignment(MainAxisAlignment::Center)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(logo)
             .with_child(title)
             .with_child(Container::new(subtitle).with_margin_top(12.).finish())
             .with_child(

@@ -10,15 +10,46 @@ fn open_framed_stozn_auth(verification_url: &str) -> bool {
 
     let mut candidates = Vec::new();
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let local_app_data = PathBuf::from(local_app_data);
         candidates.push(
-            PathBuf::from(local_app_data)
-                .join("Programs")
-                .join("Stozn")
-                .join("Stozn.exe"),
+            local_app_data
+                .join("Vivaldi")
+                .join("Application")
+                .join("vivaldi.exe"),
+        );
+        candidates.push(
+            local_app_data
+                .join("Google")
+                .join("Chrome")
+                .join("Application")
+                .join("chrome.exe"),
+        );
+        candidates.push(
+            local_app_data
+                .join("Microsoft")
+                .join("Edge")
+                .join("Application")
+                .join("msedge.exe"),
         );
     }
-    if let Some(program_files) = std::env::var_os("ProgramFiles") {
-        candidates.push(PathBuf::from(program_files).join("Stozn").join("Stozn.exe"));
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(program_files) = std::env::var_os(variable) {
+            let program_files = PathBuf::from(program_files);
+            candidates.push(
+                program_files
+                    .join("Google")
+                    .join("Chrome")
+                    .join("Application")
+                    .join("chrome.exe"),
+            );
+            candidates.push(
+                program_files
+                    .join("Microsoft")
+                    .join("Edge")
+                    .join("Application")
+                    .join("msedge.exe"),
+            );
+        }
     }
 
     candidates

@@ -25,6 +25,65 @@ fn task_picker_search_is_encoded_on_the_fixed_dashboard_endpoint() {
 }
 
 #[test]
+fn stozn_login_url_is_bound_to_the_compiled_dashboard_and_request() {
+    let profile = profile(ManagedEnvironment::Staging);
+    let request_id = "a".repeat(43);
+    let valid = format!(
+        "{}/warpspeed-auth?request_id={request_id}",
+        profile.base_url
+    );
+    assert!(validate_verification_url(profile, &valid, &request_id).is_ok());
+    assert!(
+        validate_verification_url(
+            profile,
+            &format!("https://attacker.invalid/warpspeed-auth?request_id={request_id}"),
+            &request_id,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_verification_url(
+            profile,
+            &format!("{}/warpspeed-auth?request_id=wrong", profile.base_url),
+            &request_id,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn stozn_confirmation_codes_are_strictly_formatted() {
+    assert!(valid_user_code("A1B2-C3D4"));
+    assert!(!valid_user_code("a1b2-c3d4"));
+    assert!(!valid_user_code("A1B2C3D4"));
+    assert!(!valid_user_code("A1B2-G3D4"));
+}
+
+#[test]
+fn stozn_desktop_credential_protection_round_trips_for_this_os_user() {
+    let plaintext = br#"{\"token\":\"sensitive-test-value\"}"#.to_vec();
+    let protected = protect_auth_bytes(plaintext.clone()).unwrap();
+    #[cfg(windows)]
+    assert_ne!(protected, plaintext);
+    assert_eq!(unprotect_auth_bytes(protected).unwrap(), plaintext);
+}
+
+#[test]
+fn stozn_login_state_requires_admin_and_visible_ascii_credentials() {
+    assert!(valid_dashboard_token("header.payload.signature"));
+    assert!(!valid_dashboard_token(""));
+    assert!(!valid_dashboard_token("token with spaces"));
+    let identity: StoznIdentity = serde_json::from_value(json!({
+        "sub": "@operator:stozn.ai",
+        "role": "admin",
+        "display_name": "Operator"
+    }))
+    .unwrap();
+    assert_eq!(identity.subject, "@operator:stozn.ai");
+    assert_eq!(identity.role, "admin");
+}
+
+#[test]
 fn waiting_input_remains_controllable_in_the_ui() {
     assert!(!session_is_finished("waiting_input"));
     assert!(!session_is_finished("running"));

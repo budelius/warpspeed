@@ -73,6 +73,7 @@ pub fn init(app: &mut AppContext) {
 ///
 /// Keep this derived from the channel's server root so local and non-production
 /// builds log out of the same web session they use for authentication.
+#[allow(dead_code)]
 pub fn web_logout_url() -> String {
     format!(
         "{}/logout",
@@ -261,9 +262,9 @@ pub fn maybe_log_out(app: &mut AppContext) {
 /// non-user-initiated auth recovery paths where opening a browser would be
 /// surprising.
 pub fn log_out_and_open_web(app: &mut AppContext) {
+    // WarpSpeed by STOZN uses a local dashboard bearer token. Logging out
+    // removes that credential without invoking Warp's hosted logout page.
     log_out(app);
-    let logout_url = web_logout_url();
-    app.open_url(&logout_url);
 }
 
 // Log out the user, clears workspace state, stops running processes, and deletes database.
@@ -282,6 +283,9 @@ pub fn log_out(app: &mut AppContext) {
 
     AuthManager::handle(app).update(app, |auth_manager, ctx| {
         auth_manager.log_out(ctx);
+    });
+    crate::stozn_auth::StoznAuthManager::handle(app).update(app, |auth_manager, ctx| {
+        auth_manager.logout(ctx);
     });
     // Detach built-in Warp-hosted MCP servers; they authenticate with the
     // credentials that were just cleared.

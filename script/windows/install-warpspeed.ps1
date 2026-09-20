@@ -288,10 +288,13 @@ Copy-Item -LiteralPath (Join-Path $version_dir 'icon.ico') -Destination $INSTALL
 $start_menu_dir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $wsh = New-Object -ComObject WScript.Shell
 $shortcuts = @{
-    'WarpSpeed.lnk' = $launcher_path
-    'WarpSpeed [a].lnk' = $profile_launchers['a']
-    'WarpSpeed [b].lnk' = $profile_launchers['b']
-    'WarpSpeed [c].lnk' = $profile_launchers['c']
+    'WarpSpeed by STOZN.lnk' = $launcher_path
+    'WarpSpeed by STOZN [a].lnk' = $profile_launchers['a']
+    'WarpSpeed by STOZN [b].lnk' = $profile_launchers['b']
+    'WarpSpeed by STOZN [c].lnk' = $profile_launchers['c']
+}
+@('WarpSpeed.lnk', 'WarpSpeed [a].lnk', 'WarpSpeed [b].lnk', 'WarpSpeed [c].lnk') | ForEach-Object {
+    Remove-Item -LiteralPath (Join-Path $start_menu_dir $_) -Force -ErrorAction SilentlyContinue
 }
 foreach ($entry in $shortcuts.GetEnumerator()) {
     $shortcut_path = Join-Path $start_menu_dir $entry.Key

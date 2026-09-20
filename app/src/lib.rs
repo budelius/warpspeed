@@ -145,6 +145,7 @@ pub mod root_view;
 pub mod search;
 pub mod settings;
 pub mod settings_view;
+mod stozn_auth;
 pub mod tab_configs;
 pub mod terminal;
 pub mod themes;
@@ -1627,6 +1628,7 @@ pub(crate) fn initialize_app(
             ctx,
         )
     });
+    ctx.add_singleton_model(|_ctx| stozn_auth::StoznAuthManager::new());
 
     ctx.add_singleton_model(|_ctx| GPUState::new());
 

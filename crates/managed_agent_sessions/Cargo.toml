@@ -10,9 +10,13 @@ publish.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
+instant.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 warp_cli.workspace = true
 warp_core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

@@ -14,6 +14,32 @@ use crate::secret::{CodexMethod, CreateProvider, SecretCommand};
 use crate::task::{MessageCommand, TaskCommand};
 
 #[test]
+fn managed_agent_start_requires_task_attachment() {
+    let missing = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "staging-pi-lander",
+        "--interactive",
+    ]);
+    assert!(missing.is_err());
+
+    let attached = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "staging-pi-lander",
+        "--task",
+        "64f111111111111111111111",
+        "--interactive",
+    ]);
+    assert!(attached.is_ok());
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "ui"]).is_ok());
+}
+
+#[test]
 fn identifies_worker_subcommands() {
     assert!(is_worker_invocation("minidump-server"));
     #[cfg(unix)]

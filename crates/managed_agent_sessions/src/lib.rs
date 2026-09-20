@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -71,16 +72,19 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
         ManagedSessionsCommand::List => list(args.json),
         ManagedSessionsCommand::Start {
             agent,
+            task,
             prompt,
             interactive,
             environment,
         } => start(
             *environment,
             agent,
+            task,
             prompt.as_deref(),
             *interactive,
             args.json,
         ),
+        ManagedSessionsCommand::Ui { environment } => ui(*environment),
         ManagedSessionsCommand::Attach {
             job_id,
             environment,
@@ -149,19 +153,43 @@ fn list(json_output: bool) -> Result<()> {
 fn start(
     environment: ManagedEnvironment,
     agent: &str,
+    task_id: &str,
     prompt: Option<&str>,
     interactive: bool,
     json_output: bool,
 ) -> Result<()> {
+    let result = launch_request(environment, agent, task_id, prompt, interactive)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if let Some(job_id) = result.get("job_id").and_then(Value::as_str) {
+        println!("Started {job_id}. Attach with: warpspeed agent-ctrl attach {job_id}");
+    } else {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    Ok(())
+}
+
+fn launch_request(
+    environment: ManagedEnvironment,
+    agent: &str,
+    task_id: &str,
+    prompt: Option<&str>,
+    interactive: bool,
+) -> Result<Value> {
     if agent.is_empty() || agent.len() > 128 {
         bail!("agent name must contain 1 to 128 characters");
     }
+    validate_task_id(task_id)?;
     if prompt.is_some_and(|value| value.is_empty() || value.chars().count() > 32_000) {
         bail!("prompt must contain 1 to 32000 characters");
     }
     let profile = profile(environment);
     let token = dashboard_token()?;
-    let mut body = json!({ "agent_name": agent, "interactive": interactive });
+    let mut body = json!({
+        "agent_name": agent,
+        "task_id": task_id,
+        "interactive": interactive
+    });
     if let Some(prompt) = prompt {
         body["prompt"] = Value::String(prompt.to_owned());
     }
@@ -179,14 +207,185 @@ fn start(
     )?;
     let result: Value = response.json().context("invalid launch response")?;
     ensure_command_accepted(&result)?;
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-    } else if let Some(job_id) = result.get("job_id").and_then(Value::as_str) {
-        println!("Started {job_id}. Attach with: warpspeed agent-ctrl attach {job_id}");
-    } else {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(result)
+}
+
+fn ui(environment: ManagedEnvironment) -> Result<()> {
+    let profile = profile(environment);
+    let token = dashboard_token()?;
+    let client = Client::new();
+    let tasks_page: Value = send(
+        profile,
+        client
+            .get(format!(
+                "{}/api/work-items/?open_only=true&limit=100",
+                profile.base_url
+            ))
+            .bearer_auth(&token)
+            .header("X-Stozn-Client", "warpspeed"),
+    )?
+    .json()
+    .context("invalid STOZN task response")?;
+    let overview: Value = send(
+        profile,
+        client
+            .get(format!("{}/api/agent-control/overview", profile.base_url))
+            .bearer_auth(&token)
+            .header("X-Stozn-Client", "warpspeed"),
+    )?
+    .json()
+    .context("invalid managed-agent overview")?;
+
+    let tasks = tasks_page
+        .get("items")
+        .and_then(Value::as_array)
+        .context("STOZN task response did not contain items")?
+        .iter()
+        .filter_map(|task| {
+            let id = task.get("id")?.as_str()?;
+            validate_task_id(id).ok()?;
+            let reference = terminal_label(task.get("ref").and_then(Value::as_str).unwrap_or(id));
+            let title = terminal_label(
+                task.get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled STOZN task"),
+            );
+            Some((id.to_owned(), format!("{reference} · {title}")))
+        })
+        .collect::<Vec<_>>();
+    let agents = overview
+        .get("agents")
+        .and_then(Value::as_array)
+        .context("managed-agent overview did not contain agents")?
+        .iter()
+        .filter(|agent| agent.get("launchable").and_then(Value::as_bool) == Some(true))
+        .filter_map(|agent| {
+            let name = agent.get("name")?.as_str()?;
+            let backend = terminal_label(
+                agent
+                    .get("backend")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent"),
+            );
+            Some((
+                name.to_owned(),
+                format!("{} ({backend})", terminal_label(name)),
+                agent
+                    .get("allow_interactive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ))
+        })
+        .collect::<Vec<_>>();
+    if tasks.is_empty() {
+        bail!("no open STOZN tasks are available; create or reopen a task in the dashboard first");
     }
-    Ok(())
+    if agents.is_empty() {
+        bail!("no operator-enabled managed agents are available");
+    }
+
+    println!("STOZN managed session · {}", profile.alias);
+    println!("Every session is attached to a STOZN task and uses normalized AgentCtrl events.\n");
+    let task_index = choose("Choose task", tasks.iter().map(|(_, label)| label.as_str()))?;
+    let agent_index = choose(
+        "Choose agent",
+        agents.iter().map(|(_, label, _)| label.as_str()),
+    )?;
+    let prompt = read_line("Optional initial instruction (Enter for profile default): ")?;
+    let interactive = if agents[agent_index].2 {
+        let answer = read_line("Keep open for audited follow-up turns? [Y/n]: ")?;
+        !matches!(answer.to_ascii_lowercase().as_str(), "n" | "no")
+    } else {
+        false
+    };
+    let result = launch_request(
+        environment,
+        &agents[agent_index].0,
+        &tasks[task_index].0,
+        (!prompt.is_empty()).then_some(prompt.as_str()),
+        interactive,
+    )?;
+    let job_id = result
+        .get("job_id")
+        .and_then(Value::as_str)
+        .context("accepted launch did not contain a job id")?
+        .to_owned();
+    println!("\nStarted {job_id} · {}", tasks[task_index].1);
+    ui_session(environment, &job_id)
+}
+
+fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
+    loop {
+        attach(environment, job_id, true, false)?;
+        let profile = profile(environment);
+        let token = dashboard_token()?;
+        let descriptor = fetch_descriptor(&Client::new(), profile, job_id, &token)?;
+        if session_is_finished(&descriptor.state) {
+            println!("Session finished with state {}.", descriptor.state);
+            return Ok(());
+        }
+        println!("\nCommands: Enter=refresh, send <text>, close, stop, detach");
+        let command = read_line("> ")?;
+        if command.is_empty() || command == "refresh" {
+            continue;
+        }
+        if command == "detach" || command == "quit" {
+            println!("Detached. The managed run was not stopped.");
+            return Ok(());
+        }
+        if command == "close" {
+            input(environment, job_id, None, false)?;
+            continue;
+        }
+        if command == "stop" {
+            stop(environment, job_id, false, false)?;
+            continue;
+        }
+        if let Some(text) = command.strip_prefix("send ") {
+            input(environment, job_id, Some(text.trim()), false)?;
+            continue;
+        }
+        println!("Unknown command. Use send <text>, close, stop, refresh, or detach.");
+    }
+}
+
+fn session_is_finished(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "stopped" | "interrupted")
+}
+
+fn choose<'a>(label: &str, choices: impl Iterator<Item = &'a str>) -> Result<usize> {
+    let choices = choices.collect::<Vec<_>>();
+    println!("{label}:");
+    for (index, choice) in choices.iter().enumerate() {
+        println!("  {}) {choice}", index + 1);
+    }
+    loop {
+        let answer = read_line("Selection: ")?;
+        if let Ok(selected) = answer.parse::<usize>()
+            && (1..=choices.len()).contains(&selected)
+        {
+            return Ok(selected - 1);
+        }
+        println!("Enter a number from 1 to {}.", choices.len());
+    }
+}
+
+fn read_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush().context("failed to flush prompt")?;
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line)? == 0 {
+        bail!("managed-session UI closed before a selection was made");
+    }
+    Ok(line.trim().to_owned())
+}
+
+fn terminal_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(160)
+        .collect()
 }
 
 fn input(
@@ -491,6 +690,18 @@ fn validate_descriptor(
         || descriptor.job_id != requested_job_id
     {
         bail!("managed-session identity does not match the selected environment");
+    }
+    Ok(())
+}
+
+fn validate_task_id(task_id: &str) -> Result<()> {
+    let valid = !task_id.is_empty()
+        && task_id.len() <= 128
+        && task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte));
+    if !valid {
+        bail!("invalid STOZN task id");
     }
     Ok(())
 }

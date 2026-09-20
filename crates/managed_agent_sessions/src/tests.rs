@@ -1,6 +1,14 @@
 use super::*;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::net::TcpListener;
+
+#[test]
+fn waiting_input_remains_controllable_in_the_ui() {
+    assert!(!session_is_finished("waiting_input"));
+    assert!(!session_is_finished("running"));
+    assert!(session_is_finished("completed"));
+    assert!(session_is_finished("interrupted"));
+}
 
 fn http_fixture(status: &str, body: serde_json::Value) -> &'static str {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -90,6 +98,14 @@ fn bookmark_serialization_contains_only_safe_fields() {
     ] {
         assert!(!object.contains_key(forbidden));
     }
+}
+
+#[test]
+fn task_ids_are_bounded_before_launch() {
+    assert!(validate_task_id("67d000000000000000000001").is_ok());
+    assert!(validate_task_id("task:staging-42").is_ok());
+    assert!(validate_task_id("").is_err());
+    assert!(validate_task_id("task/../../secret").is_err());
 }
 
 #[test]
@@ -231,6 +247,8 @@ fn full_managed_flow_has_dashboard_only_network_authority() {
     let client = Client::new();
     for (method, path) in [
         ("GET", "/api/agent-control/runs?limit=100"),
+        ("GET", "/api/work-items/?open_only=true&limit=100"),
+        ("GET", "/api/agent-control/overview"),
         ("POST", "/api/agent-control/runs"),
         ("GET", "/api/agent-control/runs/job-123/session"),
         ("GET", "/api/agent-control/runs/job-123/events"),

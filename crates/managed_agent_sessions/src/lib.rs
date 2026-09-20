@@ -214,13 +214,13 @@ fn ui(environment: ManagedEnvironment) -> Result<()> {
     let profile = profile(environment);
     let token = dashboard_token()?;
     let client = Client::new();
+    println!("STOZN managed session · {}", profile.alias);
+    println!("Every session is attached to a STOZN task and uses normalized AgentCtrl events.");
+    let task_search = read_line("Search open tasks (Enter for newest 100): ")?;
     let tasks_page: Value = send(
         profile,
         client
-            .get(format!(
-                "{}/api/work-items/?open_only=true&limit=100",
-                profile.base_url
-            ))
+            .get(task_list_url(profile, &task_search)?)
             .bearer_auth(&token)
             .header("X-Stozn-Client", "warpspeed"),
     )?
@@ -278,14 +278,18 @@ fn ui(environment: ManagedEnvironment) -> Result<()> {
         })
         .collect::<Vec<_>>();
     if tasks.is_empty() {
-        bail!("no open STOZN tasks are available; create or reopen a task in the dashboard first");
+        if task_search.is_empty() {
+            bail!(
+                "no open STOZN tasks are available; create or reopen a task in the dashboard first"
+            );
+        }
+        bail!("no open STOZN tasks matched that search");
     }
     if agents.is_empty() {
         bail!("no operator-enabled managed agents are available");
     }
 
-    println!("STOZN managed session · {}", profile.alias);
-    println!("Every session is attached to a STOZN task and uses normalized AgentCtrl events.\n");
+    println!();
     let task_index = choose("Choose task", tasks.iter().map(|(_, label)| label.as_str()))?;
     let agent_index = choose(
         "Choose agent",
@@ -351,6 +355,18 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
 
 fn session_is_finished(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "stopped" | "interrupted")
+}
+
+fn task_list_url(profile: &EnvironmentProfile, search: &str) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(&format!("{}/api/work-items/", profile.base_url))
+        .context("invalid compiled STOZN task endpoint")?;
+    url.query_pairs_mut()
+        .append_pair("open_only", "true")
+        .append_pair("limit", "100");
+    if !search.is_empty() {
+        url.query_pairs_mut().append_pair("q", search);
+    }
+    Ok(url)
 }
 
 fn choose<'a>(label: &str, choices: impl Iterator<Item = &'a str>) -> Result<usize> {

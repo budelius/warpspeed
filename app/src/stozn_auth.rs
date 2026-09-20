@@ -3,6 +3,43 @@ use managed_agent_sessions::{
 };
 use warpui::{Entity, ModelContext, SingletonEntity};
 
+#[cfg(windows)]
+fn open_framed_stozn_auth(verification_url: &str) -> bool {
+    use command::blocking::Command;
+    use std::path::PathBuf;
+
+    let mut candidates = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("Stozn")
+                .join("Stozn.exe"),
+        );
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        candidates.push(PathBuf::from(program_files).join("Stozn").join("Stozn.exe"));
+    }
+
+    candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .any(|browser| {
+            let mut command = Command::new(browser);
+            command
+                .arg(format!("--app={verification_url}"))
+                .arg("--new-window")
+                .env_remove("STOZN_TOKEN")
+                .env_remove("WARP_API_KEY");
+            command.spawn().is_ok()
+        })
+}
+
+#[cfg(not(windows))]
+fn open_framed_stozn_auth(_verification_url: &str) -> bool {
+    false
+}
+
 #[derive(Clone, Debug)]
 pub enum StoznAuthState {
     SignedOut,
@@ -57,7 +94,9 @@ impl StoznAuthManager {
             async move { blocking::unblock(begin_stozn_login).await },
             |me, result, ctx| match result {
                 Ok(flow) => {
-                    ctx.open_url(flow.verification_url());
+                    if !open_framed_stozn_auth(flow.verification_url()) {
+                        ctx.open_url(flow.verification_url());
+                    }
                     me.state = StoznAuthState::WaitingForBrowser {
                         user_code: flow.user_code().to_owned(),
                     };

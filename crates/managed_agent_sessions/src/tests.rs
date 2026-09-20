@@ -3,6 +3,28 @@ use std::io::Read as _;
 use std::net::TcpListener;
 
 #[test]
+fn task_picker_search_is_encoded_on_the_fixed_dashboard_endpoint() {
+    let url = task_list_url(profile(ManagedEnvironment::Staging), "#42 login & auth").unwrap();
+    assert_eq!(
+        url.origin().ascii_serialization(),
+        "https://dash-backend-dev.stozn.ai"
+    );
+    assert_eq!(url.path(), "/api/work-items/");
+    let pairs = url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        pairs.get("open_only").map(|value| value.as_ref()),
+        Some("true")
+    );
+    assert_eq!(pairs.get("limit").map(|value| value.as_ref()), Some("100"));
+    assert_eq!(
+        pairs.get("q").map(|value| value.as_ref()),
+        Some("#42 login & auth")
+    );
+}
+
+#[test]
 fn waiting_input_remains_controllable_in_the_ui() {
     assert!(!session_is_finished("waiting_input"));
     assert!(!session_is_finished("running"));

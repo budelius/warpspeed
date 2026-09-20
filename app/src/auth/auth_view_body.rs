@@ -25,7 +25,6 @@ use super::auth_view_modal::AuthViewVariant;
 use super::auth_view_shared_helpers::{
     PrivacySettingsActions, PrivacySettingsHandles, action_button_color_and_variant,
     render_offline_info_overlay_body, render_overlay, render_privacy_settings_overlay_body,
-    render_square_logo,
 };
 use crate::appearance::Appearance;
 use crate::auth::auth_view_shared_helpers::render_offline_contents;
@@ -37,10 +36,12 @@ use crate::modal::MODAL_CORNER_RADIUS;
 use crate::network::NetworkStatus;
 use crate::server::telemetry::{AnonymousUserSignupEntrypoint, LoginEventSource, TelemetryEvent};
 use crate::settings::{AISettings, PrivacySettings};
+use crate::stozn_auth::{StoznAuthEvent, StoznAuthManager, StoznAuthState};
 use crate::themes::theme::Fill as ThemeFill;
 use crate::util::color::{darken, lighten};
 use crate::{send_telemetry_from_ctx, send_telemetry_sync_from_ctx};
 
+#[allow(dead_code)]
 const TOS_URL: &str = "https://www.warp.dev/terms-of-service";
 
 const COMMON_BODY_UI_FONT_SIZE: f32 = 12.;
@@ -49,6 +50,7 @@ const AUTH_MODAL_GAP: f32 = 16.;
 const AUTH_TOKEN_INPUT_PLACEHOLDER_TEXT: &str = "Auth Token";
 const AUTH_TOKEN_INPUT_PLACEHOLDER_TEXT_EXPERIMENTAL: &str = "Browser auth token";
 
+#[allow(dead_code)]
 const AUTH_TOKEN_INPUT_BORDER_RADIUS: Radius = Radius::Pixels(4.);
 
 lazy_static! {
@@ -66,7 +68,7 @@ pub fn init(app: &mut AppContext) {
 
     app.register_fixed_bindings([FixedBinding::new(
         "enter",
-        AuthViewBodyAction::Signup,
+        AuthViewBodyAction::Login,
         id!("AuthViewBody"),
     )]);
     app.register_fixed_bindings([FixedBinding::new(
@@ -76,6 +78,7 @@ pub fn init(app: &mut AppContext) {
     )]);
 }
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct MouseStateHandles {
     login_link_mouse_state_handle: MouseStateHandle,
@@ -90,6 +93,7 @@ struct MouseStateHandles {
     close_button_mouse_state_handle: MouseStateHandle,
 }
 
+#[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub enum AuthViewOverlay {
     PrivacySettings,
@@ -106,7 +110,6 @@ pub struct AuthViewBody {
     auth_step: AuthStep,
     loginless_step: LoginlessStep,
     copy_url_click_count: u8,
-    allow_loginless: bool,
 }
 
 /// State for two-step loginless flow for anonymous users
@@ -122,6 +125,7 @@ pub enum AuthStep {
     BrowserOpen,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum AuthViewBodyAction {
     Login,
@@ -139,6 +143,7 @@ pub enum AuthViewBodyAction {
     Close,
 }
 
+#[allow(dead_code)]
 impl AuthViewBody {
     pub fn new(variant: AuthViewVariant, ctx: &mut ViewContext<Self>) -> Self {
         let experiment_group = AuthFlowInstructions::get_group(ctx);
@@ -182,10 +187,15 @@ impl AuthViewBody {
             ctx.notify();
         });
 
-        let allow_loginless = !FeatureFlag::ForceLogin.is_enabled();
-
         let network_status = NetworkStatus::handle(ctx);
         ctx.subscribe_to_model(&network_status, |_, _, _, ctx| {
+            ctx.notify();
+        });
+        let stozn_auth = StoznAuthManager::handle(ctx);
+        ctx.subscribe_to_model(&stozn_auth, |_, _, event, ctx| {
+            if matches!(event, StoznAuthEvent::LoginCompleted) {
+                ctx.emit(AuthViewBodyEvent::Close);
+            }
             ctx.notify();
         });
 
@@ -199,7 +209,6 @@ impl AuthViewBody {
             auth_step: AuthStep::SelectAuthPathway,
             loginless_step: LoginlessStep::Start,
             copy_url_click_count: 0,
-            allow_loginless,
         }
     }
 
@@ -454,17 +463,7 @@ impl AuthViewBody {
             ..hover_button_style
         };
 
-        let on_click_action = if is_anonymous
-            && matches!(
-                self.variant,
-                AuthViewVariant::RequireLoginCloseable
-                    | AuthViewVariant::HitDriveObjectLimitCloseable
-                    | AuthViewVariant::ShareRequirementCloseable
-            ) {
-            AuthViewBodyAction::SignupAnonymousUser
-        } else {
-            AuthViewBodyAction::Signup
-        };
+        let _ = is_anonymous;
 
         ui_builder
             .button_with_custom_styles(
@@ -475,10 +474,10 @@ impl AuthViewBody {
                 Some(click_button_style),
                 None,
             )
-            .with_centered_text_label("Sign up".into())
+            .with_centered_text_label("Sign in with STOZN".into())
             .build()
             .on_click(move |ctx, _, _| {
-                ctx.dispatch_typed_action(on_click_action);
+                ctx.dispatch_typed_action(AuthViewBodyAction::Login);
             })
             .finish()
     }
@@ -637,10 +636,10 @@ impl AuthViewBody {
         };
 
         let text = match self.variant {
-            AuthViewVariant::Initial => "Welcome to Warp!",
+            AuthViewVariant::Initial => "Welcome to WarpSpeed by STOZN",
             AuthViewVariant::RequireLoginCloseable
             | AuthViewVariant::HitDriveObjectLimitCloseable
-            | AuthViewVariant::ShareRequirementCloseable => "Sign up for Warp",
+            | AuthViewVariant::ShareRequirementCloseable => "Sign in to WarpSpeed by STOZN",
         };
 
         ui_builder
@@ -651,11 +650,20 @@ impl AuthViewBody {
     }
 
     fn render_logo_row(&self, appearance: &Appearance, ui_builder: &UiBuilder) -> Box<dyn Element> {
-        let logo = render_square_logo(appearance);
+        let brand = ui_builder
+            .span("STOZN")
+            .with_style(UiComponentStyles {
+                font_color: Some(appearance.theme().accent().into()),
+                font_size: Some(14.),
+                font_weight: Some(Weight::Bold),
+                ..Default::default()
+            })
+            .build()
+            .finish();
         let mut row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_child(logo);
+            .with_child(brand);
 
         if matches!(
             self.variant,
@@ -693,9 +701,14 @@ impl AuthViewBody {
             .with_margin_bottom(AUTH_MODAL_GAP)
             .finish();
         let sign_up_button = self.render_sign_up_button(is_anonymous, appearance, ui_builder);
-        let sign_in_row = Container::new(self.render_sign_in_row(ui_builder))
-            .with_margin_top(AUTH_MODAL_GAP)
-            .finish();
+        let sign_in_row = Container::new(
+            ui_builder
+                .paragraph("Your browser will open a one-time STOZN authorization page. Warp accounts and Warp cloud authentication are not used.")
+                .build()
+                .finish(),
+        )
+        .with_margin_top(AUTH_MODAL_GAP)
+        .finish();
         let force_login_disclaimer = self.render_force_login_disclaimer(appearance, ui_builder);
 
         match self.variant {
@@ -711,20 +724,7 @@ impl AuthViewBody {
                     );
                     vec![logo, header, offline_contents]
                 } else if self.active_overlay.is_none() {
-                    let mut contents = if self.allow_loginless {
-                        let sign_up_later_row = match self.loginless_step {
-                            LoginlessStep::Start => self.render_sign_up_later_row(ui_builder),
-                            LoginlessStep::Initiated => {
-                                self.render_sign_in_later_confirm_row(ui_builder)
-                            }
-                        };
-                        vec![logo, header, sign_up_button, sign_in_row, sign_up_later_row]
-                    } else {
-                        vec![logo, header, sign_up_button, sign_in_row]
-                    };
-
-                    contents.append(&mut self.render_privacy_information(appearance, ui_builder));
-                    contents
+                    vec![logo, header, sign_up_button, sign_in_row]
                 } else {
                     vec![]
                 }
@@ -741,6 +741,7 @@ impl AuthViewBody {
         &self,
         appearance: &Appearance,
         ui_builder: &UiBuilder,
+        app: &AppContext,
     ) -> Vec<Box<dyn Element>> {
         let logo = Container::new(self.render_logo_row(appearance, ui_builder))
             .with_margin_bottom(AUTH_MODAL_GAP)
@@ -756,7 +757,7 @@ impl AuthViewBody {
 
         let header = Container::new(
             ui_builder
-                .paragraph("Sign in on your browser \nto continue")
+                .paragraph("Authorize WarpSpeed by STOZN in your browser")
                 .with_style(header_styles)
                 .build()
                 .finish(),
@@ -764,57 +765,23 @@ impl AuthViewBody {
         .with_margin_bottom(AUTH_MODAL_GAP)
         .finish();
 
-        let hint = Container::new(
-            Flex::column()
-                .with_child(
-                    Flex::row()
-                        .with_child(
-                            ui_builder
-                                .span("If your browser hasn't launched, ")
-                                .build()
-                                .finish(),
-                        )
-                        .with_child(
-                            ui_builder
-                                .link(
-                                    "copy the URL".into(),
-                                    None,
-                                    Some(Box::new(|event_ctx| {
-                                        event_ctx.dispatch_typed_action(
-                                            AuthViewBodyAction::CopyLoginUrl,
-                                        );
-                                    })),
-                                    self.mouse_state_handles
-                                        .copy_browser_url_mouse_state_handle
-                                        .clone(),
-                                )
-                                .soft_wrap(false)
-                                .build()
-                                .finish(),
-                        )
-                        .finish(),
-                )
-                .with_child(
-                    ui_builder
-                        .span("and open the page manually.")
-                        .build()
-                        .finish(),
-                )
-                .finish(),
-        )
-        .finish();
-
-        let mut contents = vec![logo, header, hint];
-
-        let auth_token = Container::new(match self.render_auth_token_input(appearance) {
-            Some(auth_token_input) => auth_token_input,
-            _ => self.render_auth_token_suggest(ui_builder),
-        })
-        .with_margin_top(AUTH_MODAL_GAP)
-        .finish();
-
-        contents.push(auth_token);
-        contents
+        let status = match StoznAuthManager::as_ref(app).state() {
+            StoznAuthState::Starting => "Creating a secure STOZN login request…".to_owned(),
+            StoznAuthState::WaitingForBrowser { user_code } => {
+                format!("Confirm code {user_code} in your browser. Waiting for one-time approval…")
+            }
+            StoznAuthState::SignedIn(identity) => format!(
+                "Signed in to STOZN as {}.",
+                identity
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&identity.subject)
+            ),
+            StoznAuthState::Failed(error) => error.clone(),
+            StoznAuthState::SignedOut => "Select Sign in with STOZN to try again.".to_owned(),
+        };
+        let hint = Container::new(ui_builder.paragraph(status).build().finish()).finish();
+        vec![logo, header, hint]
     }
 
     pub fn set_auth_step(&mut self, step: AuthStep) {
@@ -839,17 +806,10 @@ impl TypedActionView for AuthViewBody {
     fn handle_action(&mut self, action: &AuthViewBodyAction, ctx: &mut ViewContext<Self>) {
         match action {
             AuthViewBodyAction::Login => {
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::LoginButtonClicked {
-                        source: LoginEventSource::AuthModal,
-                    },
-                    ctx
-                );
                 self.auth_step = AuthStep::BrowserOpen;
 
-                AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                    let sign_in_url = auth_manager.sign_in_url();
-                    ctx.open_url(&sign_in_url);
+                StoznAuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
+                    auth_manager.start_login(ctx);
                 });
             }
             AuthViewBodyAction::InitiateLoginLater => {
@@ -901,14 +861,9 @@ impl TypedActionView for AuthViewBody {
                 }
             }
             AuthViewBodyAction::Signup => {
-                // Send synchronously since this is an important event in the sign up funnel and we
-                // don't want to lose events if the user quits before the event queue is flushed.
-                send_telemetry_sync_from_ctx!(TelemetryEvent::SignUpButtonClicked, ctx);
                 self.auth_step = AuthStep::BrowserOpen;
-
-                AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                    let sign_up_url = auth_manager.sign_up_url();
-                    ctx.open_url(&sign_up_url);
+                StoznAuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
+                    auth_manager.start_login(ctx);
                 });
             }
             AuthViewBodyAction::SignupAnonymousUser => {
@@ -992,8 +947,8 @@ impl View for AuthViewBody {
 
     fn accessibility_contents(&self, _: &AppContext) -> Option<AccessibilityContent> {
         Some(AccessibilityContent::new(
-            "Welcome to Warp!",
-            "Press enter to open your browser to Sign Up or Sign In.",
+            "Welcome to WarpSpeed by STOZN",
+            "Press enter to open your browser and sign in with STOZN.",
             WarpA11yRole::HelpRole,
         ))
     }
@@ -1024,7 +979,7 @@ impl View for AuthViewBody {
             AuthStep::SelectAuthPathway => {
                 self.render_select_auth_pathway_content(is_anonymous, appearance, &ui_builder, app)
             }
-            AuthStep::BrowserOpen => self.render_browser_open_content(appearance, &ui_builder),
+            AuthStep::BrowserOpen => self.render_browser_open_content(appearance, &ui_builder, app),
         });
 
         let content = content.finish();

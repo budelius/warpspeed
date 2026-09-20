@@ -1,4 +1,4 @@
-# WarpSpeed
+# WarpSpeed by STOZN
 
 A fork of [warpdotdev/Warp](https://github.com/warpdotdev/Warp), used for work on
 terminal startup and session-restore behaviour.
@@ -42,7 +42,7 @@ File-backed session configs compose reusable tab configs into one persistent, la
 
 ## Self-hosted managed agents
 
-Authenticate with a dashboard bearer token in `STOZN_TOKEN` or `~/.stozn.json`, then use the compiled staging profile:
+Use the graphical **Sign in with STOZN** flow. WarpSpeed opens a one-time dashboard approval page, shows a confirmation code that must match the page, and stores the resulting expiring desktop credential in its own state directory (DPAPI-protected for the current OS user on Windows); no Warp account or prior `stozn auth` command is required. `STOZN_TOKEN` and the legacy `~/.stozn.json` remain non-graphical migration fallbacks.
 
 Choose **STOZN Managed Agent** from WarpSpeed's new-session UI to open the task/agent picker. It lists open STOZN tasks and operator-enabled profiles, launches the selected task-bound session, displays normalized events, and offers bounded `send`, `close`, `stop`, and `detach` controls.
 

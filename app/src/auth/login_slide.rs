@@ -12,18 +12,17 @@ use warp_core::features::FeatureFlag;
 use warp_core::safe_error;
 use warp_core::ui::Icon;
 use warp_core::ui::theme::color::internal_colors;
-use warpui::actions::StandardAction;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
     Align, Border, CacheOption, ChildAnchor, ClippedScrollStateHandle, ConstrainedBox, Container,
-    CornerRadius, CrossAxisAlignment, Dismiss, Fill, Flex, FormattedTextElement,
-    HighlightedHyperlink, Image, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack,
+    CornerRadius, CrossAxisAlignment, Dismiss, Flex, FormattedTextElement, HighlightedHyperlink,
+    Image, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor,
+    ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack,
 };
 use warpui::fonts::Weight;
 use warpui::keymap::{FixedBinding, Keystroke};
 use warpui::text_layout::TextAlignment;
-use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, FocusContext, SingletonEntity, TypedActionView, UpdateModel, View,
     ViewContext, ViewHandle,
@@ -39,11 +38,9 @@ use crate::auth::login_failure_notification::{self, LoginFailureReason};
 use crate::editor::{EditorView, SingleLineEditorOptions, TextColors, TextOptions};
 use crate::server::telemetry::{LoginEventSource, TelemetryEvent};
 use crate::settings::PrivacySettings;
+use crate::stozn_auth::{StoznAuthEvent, StoznAuthManager, StoznAuthState};
 use crate::themes::theme::Fill as ThemeFill;
-use crate::util::bindings::CustomAction;
 use crate::{send_telemetry_from_ctx, send_telemetry_sync_from_ctx};
-
-const TOS_URL: &str = "https://www.warp.dev/terms-of-service";
 
 // ---------------------------------------------------------------------------
 // Init (keybindings)
@@ -59,36 +56,14 @@ pub fn init(app: &mut AppContext) {
             id!(LoginSlideView::ui_name()),
         ),
         FixedBinding::new(
-            "cmdorctrl-enter",
-            LoginSlideAction::ShowSkipDialog,
-            id!(LoginSlideView::ui_name()),
-        ),
-        FixedBinding::new(
             "escape",
             LoginSlideAction::DismissOverlayOrBack,
             id!(LoginSlideView::ui_name()),
         ),
-        FixedBinding::custom(
-            CustomAction::Paste,
-            LoginSlideAction::PasteAuthUrl,
-            "Paste",
-            id!(LoginSlideView::ui_name()),
-        ),
-        FixedBinding::standard(
-            StandardAction::Paste,
-            LoginSlideAction::PasteAuthUrl,
-            id!(LoginSlideView::ui_name()),
-        ),
     ]);
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
-    app.register_fixed_bindings([FixedBinding::new(
-        "cmdorctrl-v",
-        LoginSlideAction::PasteAuthUrl,
-        id!(LoginSlideView::ui_name()),
-    )]);
 }
 
+#[allow(dead_code)]
 impl LoginPurpose {
     fn copy(self) -> (&'static str, &'static str) {
         match self {
@@ -123,6 +98,7 @@ impl LoginPurpose {
 // Actions & Events
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum LoginSlideAction {
     Enter,
@@ -201,8 +177,10 @@ enum LoginPurpose {
 // View
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 const AUTH_TOKEN_INPUT_BORDER_RADIUS: Radius = Radius::Pixels(4.);
 
+#[allow(dead_code)]
 pub struct LoginSlideView {
     /// Whether this path wants AI (agent intent) vs. not (terminal intention).
     /// Used to gate the cloud-conversation-storage toggle and AI wording in the
@@ -306,6 +284,7 @@ fn resolve_visual_path(
         .unwrap_or(&VISUAL_IMAGE_PATHS[0])
 }
 
+#[allow(dead_code)]
 impl LoginSlideView {
     /// Whether the auth token input editor is currently rendered and should be focusable.
     /// This is only true on the BrowserOpen step after the user clicks to paste their token.
@@ -329,6 +308,13 @@ impl LoginSlideView {
         let auth_manager = AuthManager::handle(ctx);
         ctx.subscribe_to_model(&auth_manager, |me, _, event, ctx| {
             me.handle_auth_manager_event(event, ctx);
+        });
+        let stozn_auth = StoznAuthManager::handle(ctx);
+        ctx.subscribe_to_model(&stozn_auth, |_, _, event, ctx| {
+            if matches!(event, StoznAuthEvent::LoginCompleted) {
+                ctx.emit(LoginSlideEvent::LoginLaterConfirmed);
+            }
+            ctx.notify();
         });
 
         let auth_token_input = ctx.add_typed_action_view(|ctx| {
@@ -509,12 +495,6 @@ impl LoginSlideView {
     /// skip dialog's cancel button.
     fn start_login(&mut self, ctx: &mut ViewContext<Self>) {
         self.send_account_first_action("create_account", "continue_signup", ctx);
-        send_telemetry_from_ctx!(
-            TelemetryEvent::LoginButtonClicked {
-                source: LoginEventSource::OnboardingSlide,
-            },
-            ctx
-        );
         self.last_login_failure_reason = None;
         self.step = LoginStep::BrowserOpen;
         if matches!(self.source, LoginSlideSource::AccountFirstOnboarding) {
@@ -525,9 +505,8 @@ impl LoginSlideView {
                 ctx
             );
         }
-        AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-            let sign_up_url = auth_manager.sign_up_url();
-            ctx.open_url(&sign_up_url);
+        StoznAuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
+            auth_manager.start_login(ctx);
         });
         ctx.notify();
     }
@@ -554,7 +533,7 @@ impl LoginSlideView {
                 )
             }
             LoginStep::BrowserOpen => {
-                let children = self.render_browser_open_content(appearance, editor_rendered);
+                let children = self.render_browser_open_content(appearance, app, editor_rendered);
                 let bottom_nav = self.render_browser_open_bottom_nav(appearance);
                 slide_content::onboarding_slide_content(
                     children,
@@ -613,7 +592,10 @@ impl LoginSlideView {
         let ui_builder = appearance.ui_builder();
 
         let login_purpose = self.login_purpose();
-        let (title_text, subtitle_text) = login_purpose.copy();
+        let (title_text, subtitle_text) = (
+            "WarpSpeed by STOZN",
+            "Sign in with your STOZN identity to launch and control audited managed-agent sessions.",
+        );
         let title = FormattedTextElement::from_str(title_text, appearance.ui_font_family(), 36.)
             .with_color(internal_colors::text_main(
                 theme,
@@ -631,92 +613,26 @@ impl LoginSlideView {
                 .with_line_height_ratio(1.0)
                 .finish();
 
-        // TOS and Privacy links
-        let disclaimer_styles = UiComponentStyles {
-            font_color: Some(sub_text_color),
-            font_size: Some(12.),
-            ..Default::default()
-        };
-
-        let tos_line = Flex::row()
-            .with_child(
-                ui_builder
-                    .span("By continuing, you agree to Warp's ")
-                    .with_style(disclaimer_styles)
-                    .build()
-                    .finish(),
-            )
-            .with_child(
-                ui_builder
-                    .link(
-                        "Terms of Service".into(),
-                        Some(TOS_URL.into()),
-                        None,
-                        self.tos_mouse_state.clone(),
-                    )
-                    .soft_wrap(false)
-                    .with_style(UiComponentStyles {
-                        font_size: Some(12.),
-                        ..Default::default()
-                    })
-                    .build()
-                    .finish(),
-            )
-            .finish();
-
-        let privacy_line = Flex::row()
-            .with_child(
-                ui_builder
-                    .span(self.privacy_disclaimer_prefix())
-                    .with_style(disclaimer_styles)
-                    .build()
-                    .finish(),
-            )
-            .with_child(
-                ui_builder
-                    .link(
-                        "Privacy Settings".into(),
-                        None,
-                        Some(Box::new(|ctx| {
-                            ctx.dispatch_typed_action(LoginSlideAction::ShowPrivacySettings);
-                        })),
-                        self.privacy_settings_mouse_state.clone(),
-                    )
-                    .soft_wrap(false)
-                    .with_style(UiComponentStyles {
-                        font_size: Some(12.),
-                        ..Default::default()
-                    })
-                    .build()
-                    .finish(),
-            )
-            .finish();
-
         let disclaimers = Container::new(
-            Flex::column()
-                .with_child(privacy_line)
-                .with_child(Container::new(tos_line).with_margin_top(8.).finish())
+            ui_builder
+                .paragraph("A one-time browser approval is used. Warp accounts, Warp cloud authentication, and Warp-hosted session services are not used.")
+                .with_style(UiComponentStyles {
+                    font_color: Some(sub_text_color),
+                    font_size: Some(12.),
+                    ..Default::default()
+                })
+                .build()
                 .finish(),
         )
         .with_margin_top(24.)
         .finish();
 
-        let mut header = Flex::column()
+        let header = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_child(title)
             .with_child(Container::new(subtitle).with_margin_top(16.).finish());
-        if let Some((callout_title, callout_body)) = login_purpose.work_email_callout_copy() {
-            header = header.with_child(
-                Container::new(Self::render_work_email_callout(
-                    appearance,
-                    callout_title,
-                    callout_body,
-                ))
-                .with_margin_top(28.)
-                .finish(),
-            );
-        }
+        let _ = login_purpose;
         let header = header.with_child(disclaimers).finish();
 
         vec![header]
@@ -794,38 +710,11 @@ impl LoginSlideView {
             },
         );
 
-        let cmd_enter = Keystroke::parse("cmdorctrl-enter").unwrap_or_default();
-        let skip_label = match self.login_purpose() {
-            LoginPurpose::WarpDrive => "Disable Warp Drive",
-            LoginPurpose::WarpAgent => "Skip for now",
-            LoginPurpose::ThirdParty => "Skip for now",
-            LoginPurpose::AccountFirst => "Skip",
-        };
-        let skip_keystroke = if matches!(self.login_purpose(), LoginPurpose::AccountFirst) {
-            None
-        } else {
-            Some(cmd_enter)
-        };
-        let skip_button = self.skip_button.render(
-            appearance,
-            button::Params {
-                content: button::Content::Label(skip_label.into()),
-                theme: &button::themes::Naked,
-                options: button::Options {
-                    keystroke: skip_keystroke,
-                    on_click: Some(Box::new(|ctx, _app, _pos| {
-                        ctx.dispatch_typed_action(LoginSlideAction::ShowSkipDialog);
-                    })),
-                    ..button::Options::default(appearance)
-                },
-            },
-        );
-
         let enter = Keystroke::parse("enter").unwrap_or_default();
         let login_button = self.login_button.render(
             appearance,
             button::Params {
-                content: button::Content::Label("Continue".into()),
+                content: button::Content::Label("Sign in with STOZN".into()),
                 theme: &button::themes::Primary,
                 options: button::Options {
                     keystroke: Some(enter),
@@ -839,8 +728,7 @@ impl LoginSlideView {
 
         let right_buttons = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(skip_button)
-            .with_child(Container::new(login_button).with_margin_left(4.).finish())
+            .with_child(login_button)
             .finish();
 
         if matches!(self.login_purpose(), LoginPurpose::AccountFirst) {
@@ -863,7 +751,8 @@ impl LoginSlideView {
     fn render_browser_open_content(
         &self,
         appearance: &Appearance,
-        editor_rendered: &Cell<bool>,
+        app: &AppContext,
+        _editor_rendered: &Cell<bool>,
     ) -> Vec<Box<dyn Element>> {
         let theme = appearance.theme();
         let sub_text_color = internal_colors::text_sub(theme, theme.background().into_solid());
@@ -875,7 +764,7 @@ impl LoginSlideView {
         };
 
         let title = FormattedTextElement::from_str(
-            "Sign in on your browser to continue",
+            "Authorize WarpSpeed by STOZN in your browser",
             appearance.ui_font_family(),
             36.,
         )
@@ -887,115 +776,34 @@ impl LoginSlideView {
         .with_alignment(TextAlignment::Left)
         .finish();
 
-        let hint = Flex::column()
-            .with_child(
-                Flex::row()
-                    .with_child(
-                        ui_builder
-                            .span("If your browser hasn't launched, ")
-                            .with_style(sub_text_styles)
-                            .build()
-                            .finish(),
-                    )
-                    .with_child(
-                        ui_builder
-                            .link(
-                                "copy the URL".into(),
-                                None,
-                                Some(Box::new(|ctx| {
-                                    ctx.dispatch_typed_action(LoginSlideAction::CopyLoginUrl);
-                                })),
-                                self.copy_url_mouse_state.clone(),
-                            )
-                            .soft_wrap(false)
-                            .build()
-                            .finish(),
-                    )
-                    .with_child(
-                        ui_builder
-                            .span(" and open")
-                            .with_style(sub_text_styles)
-                            .build()
-                            .finish(),
-                    )
-                    .finish(),
-            )
-            .with_child(
-                ui_builder
-                    .span("the page manually.")
-                    .with_style(sub_text_styles)
-                    .build()
-                    .finish(),
-            )
-            .finish();
-
-        // Auth token: show either the "Click here" link or the input box.
-        // When showing the input, we use `editor_rendered` (a Cell<bool> passed
-        // from render()) so the ChildView is only created on the FIRST call of
-        // this closure. static_left calls the left-content closure twice (for
-        // narrow and wide layouts); creating two ChildViews for the same editor
-        // breaks focus/event dispatch.
-        let auth_token: Box<dyn Element> = if self.show_auth_token_input {
-            if editor_rendered.get() {
-                // Second call (two-column layout, the default): render the real editor.
-                ui_builder
-                    .text_input(self.auth_token_input.clone())
-                    .with_style(UiComponentStyles {
-                        background: Some(Fill::Solid(ColorU::white())),
-                        border_width: Some(0.),
-                        border_radius: Some(CornerRadius::with_all(AUTH_TOKEN_INPUT_BORDER_RADIUS)),
-                        padding: Some(Coords {
-                            top: 12.,
-                            bottom: 12.,
-                            left: 16.,
-                            right: 16.,
-                        }),
-                        margin: Some(Coords {
-                            top: 8.,
-                            bottom: 0.,
-                            left: 0.,
-                            right: 0.,
-                        }),
-                        ..Default::default()
-                    })
-                    .build()
-                    .finish()
-            } else {
-                // First call (narrow layout fallback): placeholder.
-                editor_rendered.set(true);
-                Container::new(warpui::elements::Empty::new().finish())
-                    .with_padding_top(12.)
-                    .with_padding_bottom(12.)
-                    .with_padding_left(16.)
-                    .with_padding_right(16.)
-                    .with_margin_top(8.)
-                    .finish()
+        let status = match StoznAuthManager::as_ref(app).state() {
+            StoznAuthState::Starting => "Creating a secure STOZN login request…".to_owned(),
+            StoznAuthState::WaitingForBrowser { user_code } => {
+                format!("Confirm code {user_code} in your browser. Waiting for one-time approval…")
             }
-        } else {
-            Flex::row()
-                .with_child(
-                    ui_builder
-                        .link(
-                            "Click here to paste your token from the browser".into(),
-                            None,
-                            Some(Box::new(|ctx| {
-                                ctx.dispatch_typed_action(LoginSlideAction::EnterToken);
-                            })),
-                            self.enter_token_mouse_state.clone(),
-                        )
-                        .soft_wrap(false)
-                        .build()
-                        .finish(),
-                )
-                .finish()
+            StoznAuthState::SignedIn(identity) => format!(
+                "Signed in to STOZN as {}.",
+                identity
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&identity.subject)
+            ),
+            StoznAuthState::Failed(error) => error.clone(),
+            StoznAuthState::SignedOut => {
+                "Go back and select Sign in with STOZN to try again.".to_owned()
+            }
         };
+        let hint = ui_builder
+            .paragraph(status)
+            .with_style(sub_text_styles)
+            .build()
+            .finish();
 
         let header = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_child(title)
             .with_child(Container::new(hint).with_margin_top(16.).finish())
-            .with_child(Container::new(auth_token).with_margin_top(16.).finish())
             .finish();
 
         vec![header]

@@ -6,7 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use instant::Instant;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,62 @@ const STAGING_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
 const STAGING_FLEET_ID: &str = "stoz3n-agent-ctrl-staging";
 const SUPPORTED_PROTOCOL: u32 = 1;
 const BOOKMARK_FORMAT: u32 = 1;
+const STOZN_AUTH_FORMAT: u32 = 1;
+const STOZN_LOGIN_MAX_WAIT: Duration = Duration::from_secs(330);
+
+#[derive(Debug, Clone)]
+pub struct StoznLoginFlow {
+    request_id: String,
+    verifier: String,
+    verification_url: String,
+    user_code: String,
+    expires_at: DateTime<Utc>,
+    poll_interval: Duration,
+}
+
+impl StoznLoginFlow {
+    pub fn verification_url(&self) -> &str {
+        &self.verification_url
+    }
+
+    pub fn user_code(&self) -> &str {
+        &self.user_code
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoznIdentity {
+    #[serde(rename = "sub")]
+    pub subject: String,
+    pub role: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredStoznAuth {
+    format_version: u32,
+    environment_alias: String,
+    token: String,
+    expires_at: String,
+    user: StoznIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoznLoginStart {
+    request_id: String,
+    verification_url: String,
+    user_code: String,
+    expires_at: String,
+    poll_interval_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoznLoginPoll {
+    status: String,
+    token: Option<String>,
+    expires_at: Option<String>,
+    user: Option<StoznIdentity>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManagedSessionBookmark {
@@ -65,6 +122,115 @@ struct EventPage {
     terminal: bool,
     gap: bool,
     earliest_cursor: Option<String>,
+}
+
+pub fn begin_stozn_login() -> Result<StoznLoginFlow> {
+    let profile = profile(ManagedEnvironment::Staging);
+    let verifier = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let request = Client::new()
+        .post(format!("{}/api/auth/warpspeed/start", profile.base_url))
+        .header("X-Stozn-Client", "warpspeed")
+        .json(&json!({ "verifier": verifier }));
+    let started: StoznLoginStart = send(profile, request)?
+        .json()
+        .context("invalid STOZN login start response")?;
+    if started.request_id.len() != 43
+        || !started
+            .request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        bail!("dashboard returned an invalid STOZN login request ID");
+    }
+    let expires_at = DateTime::parse_from_rfc3339(&started.expires_at)
+        .context("dashboard returned an invalid STOZN login expiry")?
+        .with_timezone(&Utc);
+    if expires_at <= Utc::now() || started.poll_interval_seconds == 0 {
+        bail!("dashboard returned an expired STOZN login request");
+    }
+    validate_verification_url(profile, &started.verification_url, &started.request_id)?;
+    if !valid_user_code(&started.user_code) {
+        bail!("dashboard returned an invalid STOZN confirmation code");
+    }
+    Ok(StoznLoginFlow {
+        request_id: started.request_id,
+        verifier,
+        verification_url: started.verification_url,
+        user_code: started.user_code,
+        expires_at,
+        poll_interval: Duration::from_secs(started.poll_interval_seconds.clamp(1, 10)),
+    })
+}
+
+pub fn complete_stozn_login(flow: StoznLoginFlow) -> Result<StoznIdentity> {
+    let profile = profile(ManagedEnvironment::Staging);
+    let started = Instant::now();
+    loop {
+        if Utc::now() >= flow.expires_at || started.elapsed() >= STOZN_LOGIN_MAX_WAIT {
+            bail!("STOZN login request expired");
+        }
+        let request = Client::new()
+            .post(format!("{}/api/auth/warpspeed/poll", profile.base_url))
+            .header("X-Stozn-Client", "warpspeed")
+            .json(&json!({
+                "request_id": flow.request_id,
+                "verifier": flow.verifier,
+            }));
+        validate_request_destination(profile, &request)?;
+        let response = request.send().context("STOZN login polling failed")?;
+        if response.status() == StatusCode::ACCEPTED {
+            thread::sleep(flow.poll_interval);
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(http_error(response));
+        }
+        let approved: StoznLoginPoll = response
+            .json()
+            .context("invalid STOZN login approval response")?;
+        if approved.status != "approved" {
+            bail!("dashboard returned an invalid STOZN login status");
+        }
+        let token = approved
+            .token
+            .context("STOZN login response omitted its token")?;
+        let expires_at = approved
+            .expires_at
+            .context("STOZN login response omitted its expiry")?;
+        let identity = approved
+            .user
+            .context("STOZN login response omitted its user")?;
+        if !valid_dashboard_token(&token) || identity.role != "admin" {
+            bail!("dashboard returned invalid STOZN login credentials");
+        }
+        let parsed_expiry = DateTime::parse_from_rfc3339(&expires_at)
+            .context("dashboard returned an invalid STOZN token expiry")?
+            .with_timezone(&Utc);
+        if parsed_expiry <= Utc::now() {
+            bail!("dashboard returned expired STOZN login credentials");
+        }
+        save_stozn_auth(&StoredStoznAuth {
+            format_version: STOZN_AUTH_FORMAT,
+            environment_alias: profile.alias.to_owned(),
+            token,
+            expires_at,
+            user: identity.clone(),
+        })?;
+        return Ok(identity);
+    }
+}
+
+pub fn stored_stozn_identity() -> Option<StoznIdentity> {
+    load_stozn_auth().ok().map(|auth| auth.user)
+}
+
+pub fn logout_stozn() -> Result<()> {
+    let path = stozn_auth_path();
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
 }
 
 pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
@@ -710,6 +876,17 @@ fn validate_descriptor(
     Ok(())
 }
 
+fn valid_user_code(value: &str) -> bool {
+    value.len() == 9
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if index == 4 {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()
+            }
+        })
+}
+
 fn validate_task_id(task_id: &str) -> Result<()> {
     let valid = !task_id.is_empty()
         && task_id.len() <= 128
@@ -747,12 +924,15 @@ fn dashboard_token() -> Result<String> {
         }
         bail!("STOZN_TOKEN must contain 1 to 8192 visible ASCII bytes");
     }
+    if let Ok(auth) = load_stozn_auth() {
+        return Ok(auth.token);
+    }
     let path = dirs::home_dir()
         .context("home directory is unavailable")?
         .join(".stozn.json");
     let value: Value = serde_json::from_slice(&fs::read(&path).with_context(|| {
         format!(
-            "no dashboard token; set STOZN_TOKEN or authenticate with stozn ({})",
+            "not signed in to STOZN; use the WarpSpeed by STOZN login screen ({})",
             path.display()
         )
     })?)
@@ -762,6 +942,133 @@ fn dashboard_token() -> Result<String> {
         bail!("~/.stozn.json does not contain a valid visible-ASCII token");
     }
     Ok(token.to_owned())
+}
+
+fn stozn_auth_path() -> PathBuf {
+    warp_core::paths::state_dir().join("stozn-auth.bin")
+}
+
+fn load_stozn_auth() -> Result<StoredStoznAuth> {
+    let path = stozn_auth_path();
+    let protected =
+        fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let plaintext = unprotect_auth_bytes(protected)?;
+    let auth: StoredStoznAuth = serde_json::from_slice(&plaintext)
+        .context("invalid WarpSpeed STOZN authentication state")?;
+    let expires_at = DateTime::parse_from_rfc3339(&auth.expires_at)
+        .context("invalid WarpSpeed STOZN authentication expiry")?
+        .with_timezone(&Utc);
+    if auth.format_version != STOZN_AUTH_FORMAT
+        || auth.environment_alias != profile(ManagedEnvironment::Staging).alias
+        || auth.user.role != "admin"
+        || expires_at <= Utc::now()
+        || !valid_dashboard_token(&auth.token)
+    {
+        bail!("WarpSpeed STOZN authentication is invalid or expired");
+    }
+    Ok(auth)
+}
+
+fn save_stozn_auth(auth: &StoredStoznAuth) -> Result<()> {
+    let path = stozn_auth_path();
+    let parent = path.parent().context("STOZN auth path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let temp = path.with_extension("bin.tmp");
+    let plaintext = serde_json::to_vec(auth)?;
+    fs::write(&temp, protect_auth_bytes(plaintext)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
+    }
+    if cfg!(windows) && path.exists() {
+        fs::remove_file(&path)?;
+    }
+    fs::rename(&temp, &path)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn protect_auth_bytes(plaintext: Vec<u8>) -> Result<Vec<u8>> {
+    Ok(plaintext)
+}
+
+#[cfg(not(windows))]
+fn unprotect_auth_bytes(protected: Vec<u8>) -> Result<Vec<u8>> {
+    Ok(protected)
+}
+
+#[cfg(windows)]
+fn protect_auth_bytes(mut plaintext: Vec<u8>) -> Result<Vec<u8>> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
+    use windows::core::BSTR;
+
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: plaintext.len() as u32,
+        pbData: plaintext.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        CryptProtectData(
+            &input,
+            &BSTR::from("WarpSpeed by STOZN dashboard auth"),
+            None,
+            None,
+            None,
+            0,
+            &mut output,
+        )
+        .context("failed to protect the STOZN desktop credential")?;
+        let encrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        LocalFree(Some(HLOCAL(output.pbData.cast())));
+        Ok(encrypted)
+    }
+}
+
+#[cfg(windows)]
+fn unprotect_auth_bytes(mut protected: Vec<u8>) -> Result<Vec<u8>> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
+
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: protected.len() as u32,
+        pbData: protected.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        CryptUnprotectData(&input, None, None, None, None, 0, &mut output)
+            .context("failed to unlock the STOZN desktop credential for this OS user")?;
+        let plaintext = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        LocalFree(Some(HLOCAL(output.pbData.cast())));
+        Ok(plaintext)
+    }
+}
+
+fn validate_verification_url(
+    profile: &EnvironmentProfile,
+    verification_url: &str,
+    request_id: &str,
+) -> Result<()> {
+    let allowed = reqwest::Url::parse(profile.base_url)?;
+    let requested = reqwest::Url::parse(verification_url)
+        .context("dashboard returned an invalid STOZN login URL")?;
+    let same_origin = requested.scheme() == allowed.scheme()
+        && requested.host_str() == allowed.host_str()
+        && requested.port_or_known_default() == allowed.port_or_known_default();
+    let matching_request = requested.path() == "/warpspeed-auth"
+        && requested
+            .query_pairs()
+            .any(|(key, value)| key == "request_id" && value == request_id);
+    if !same_origin
+        || !matching_request
+        || !requested.username().is_empty()
+        || requested.password().is_some()
+        || requested.fragment().is_some()
+    {
+        bail!("dashboard returned an unsafe STOZN login URL");
+    }
+    Ok(())
 }
 
 fn ensure_command_accepted(result: &Value) -> Result<()> {

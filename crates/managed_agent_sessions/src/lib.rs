@@ -31,12 +31,12 @@ pub struct ManagedSessionDeepLink {
 }
 
 impl ManagedSessionDeepLink {
-    pub fn cli_command(&self) -> String {
+    pub fn cli_arguments(&self) -> String {
         let environment = match self.environment {
             ManagedEnvironment::Staging => "staging",
         };
         format!(
-            "warpspeed agent-ctrl open {} --environment {environment}",
+            "agent-ctrl open {} --environment {environment}",
             self.job_id
         )
     }

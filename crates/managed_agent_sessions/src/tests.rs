@@ -13,8 +13,8 @@ fn dashboard_deep_link_opens_only_the_fixed_managed_session() {
     assert_eq!(intent.environment, ManagedEnvironment::Staging);
     assert_eq!(intent.job_id, job_id);
     assert_eq!(
-        intent.cli_command(),
-        format!("warpspeed agent-ctrl open {job_id} --environment staging")
+        intent.cli_arguments(),
+        format!("agent-ctrl open {job_id} --environment staging")
     );
 }
 

@@ -18820,9 +18820,27 @@ impl Workspace {
         }
     }
 
-    /// Execute the fixed managed-session viewer command, or queue it until the
-    /// new terminal has completed shell bootstrap.
-    pub fn execute_managed_session_command(&mut self, command: &str, ctx: &mut ViewContext<Self>) {
+    /// Execute the fixed managed-session viewer arguments with this exact
+    /// WarpSpeed executable, or queue them until shell bootstrap completes.
+    pub fn execute_managed_session_command(
+        &mut self,
+        arguments: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let executable = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!("Cannot open managed session without the current executable: {error}");
+                return;
+            }
+        };
+        let Some(executable) = executable.to_str() else {
+            log::warn!("Cannot open managed session from a non-Unicode executable path");
+            return;
+        };
+        #[cfg(windows)]
+        let executable = executable.replace('\\', "/");
+
         self.active_tab_pane_group()
             .update(ctx, |pane_group_view, pane_group_ctx| {
                 pane_group_view
@@ -18831,8 +18849,14 @@ impl Workspace {
                         terminal_view_handle.update(
                             pane_group_ctx,
                             |terminal_view, terminal_view_ctx| {
+                                let command = format!(
+                                    "{} {arguments}",
+                                    terminal_view
+                                        .shell_family(terminal_view_ctx)
+                                        .shell_escape(&executable)
+                                );
                                 terminal_view
-                                    .execute_command_or_set_pending(command, terminal_view_ctx);
+                                    .execute_command_or_set_pending(&command, terminal_view_ctx);
                             },
                         )
                     })

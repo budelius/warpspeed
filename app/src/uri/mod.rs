@@ -267,7 +267,7 @@ impl UriHost {
                         ctx.dispatch_global_action(
                             "root_view:open_new_tab_execute_managed_session_command",
                             &SubshellCommandArg {
-                                command: intent.cli_command(),
+                                command: intent.cli_arguments(),
                                 shell_type: None,
                             },
                         );

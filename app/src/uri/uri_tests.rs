@@ -714,6 +714,27 @@ fn validate_custom_uri_errors_do_not_leak_query_string() {
 }
 
 #[test]
+fn warpspeed_managed_session_link_is_a_dedicated_allowlisted_intent() {
+    let valid = Url::parse(
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-ca9b590c-979c-4d46-b19f-f6f50fc852d3",
+    )
+    .unwrap();
+    assert_eq!(validate_custom_uri(&valid).unwrap(), UriHost::AgentCtrl);
+
+    for value in [
+        "warpspeed://settings",
+        "warpspeed://agent-ctrl/attach?environment=production&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe",
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=other&job_id=job-safe",
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe%26calc.exe",
+    ] {
+        assert!(
+            validate_custom_uri(&Url::parse(value).unwrap()).is_err(),
+            "unexpectedly accepted {value}"
+        );
+    }
+}
+
+#[test]
 fn test_parse_tab_path_expands_tilde() {
     let url = Url::parse("warp://action/new_tab?path=~/Projects").unwrap();
     let home = dirs::home_dir().expect("HOME must be set for this test");

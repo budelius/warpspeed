@@ -32,18 +32,6 @@ fn other_applications_keep_their_own_authored_config_base_dir() {
     );
 }
 
-#[test]
-fn stozn_managed_agent_ui_runs_only_the_fixed_picker_command() {
-    let template = include_str!("../../resources/tab_configs/stozn_managed_agent.toml");
-    let config: crate::tab_configs::TabConfig = toml::from_str(template).unwrap();
-    assert_eq!(config.name, "STOZN Managed Agent");
-    assert!(config.params.is_empty());
-    assert_eq!(
-        config.panes[0].commands.as_deref(),
-        Some(["warpspeed agent-ctrl ui".to_owned()].as_slice())
-    );
-}
-
 #[cfg(feature = "local_fs")]
 #[test]
 fn test_default_tab_configs_dir_uses_underscores() {

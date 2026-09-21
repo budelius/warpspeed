@@ -18820,6 +18820,25 @@ impl Workspace {
         }
     }
 
+    /// Execute the fixed managed-session viewer command, or queue it until the
+    /// new terminal has completed shell bootstrap.
+    pub fn execute_managed_session_command(&mut self, command: &str, ctx: &mut ViewContext<Self>) {
+        self.active_tab_pane_group()
+            .update(ctx, |pane_group_view, pane_group_ctx| {
+                pane_group_view
+                    .active_session_view(pane_group_ctx)
+                    .map(|terminal_view_handle| {
+                        terminal_view_handle.update(
+                            pane_group_ctx,
+                            |terminal_view, terminal_view_ctx| {
+                                terminal_view
+                                    .execute_command_or_set_pending(command, terminal_view_ctx);
+                            },
+                        )
+                    })
+            });
+    }
+
     /// Insert the given command that should open a subshell. And set a flag that we should
     /// automatically bootstrap AKA "warpify" that subshell if we support it. No-op if there is
     /// no active terminal session.

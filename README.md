@@ -44,12 +44,12 @@ File-backed session configs compose reusable tab configs into one persistent, la
 
 Use the graphical **Sign in with STOZN** flow. WarpSpeed opens a one-time dashboard approval page, shows a confirmation code that must match the page, and stores the resulting expiring desktop credential in its own state directory (DPAPI-protected for the current OS user on Windows); no Warp account or prior `stozn auth` command is required. `STOZN_TOKEN` and the legacy `~/.stozn.json` remain non-graphical migration fallbacks.
 
-Choose **STOZN Managed Agent** from WarpSpeed's new-session UI to open the task/agent picker. It lists open STOZN tasks and operator-enabled profiles, launches the selected task-bound session, displays normalized events, and offers bounded `send`, `close`, `stop`, and `detach` controls.
+Create or select the task in the STOZN Dashboard, choose the configured agent there, and start the managed session. After AgentCtrl accepts the launch, the dashboard opens a strict `warpspeed://agent-ctrl/attach?...` deep link. WarpSpeed validates the compiled staging environment, fleet, and job ID, then opens only that session's normalized event viewer with bounded `send`, `close`, `stop`, and `detach` controls. WarpSpeed deliberately has no duplicate task picker or task-creation UI.
 
-The equivalent CLI remains available for automation:
+The lower-level CLI remains available for automation and recovery:
 
 ```bash
-warpspeed agent-ctrl ui
+warpspeed agent-ctrl open <job-id>
 warpspeed agent-ctrl list
 warpspeed agent-ctrl start --agent staging-claude-interactive --task <stozn-task-id> --interactive
 warpspeed agent-ctrl attach <job-id>

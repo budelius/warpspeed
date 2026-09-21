@@ -1,8 +1,0 @@
-name = "STOZN Managed Agent"
-title = "STOZN Managed Agent"
-
-[[panes]]
-id = "managed-agent"
-type = "terminal"
-is_focused = true
-commands = ["warpspeed agent-ctrl ui"]

@@ -3,25 +3,42 @@ use std::io::Read as _;
 use std::net::TcpListener;
 
 #[test]
-fn task_picker_search_is_encoded_on_the_fixed_dashboard_endpoint() {
-    let url = task_list_url(profile(ManagedEnvironment::Staging), "#42 login & auth").unwrap();
+fn dashboard_deep_link_opens_only_the_fixed_managed_session() {
+    let job_id = "job-ca9b590c-979c-4d46-b19f-f6f50fc852d3";
+    let url = reqwest::Url::parse(&format!(
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id={STAGING_FLEET_ID}&job_id={job_id}"
+    ))
+    .unwrap();
+    let intent = parse_managed_session_deep_link(&url).unwrap();
+    assert_eq!(intent.environment, ManagedEnvironment::Staging);
+    assert_eq!(intent.job_id, job_id);
     assert_eq!(
-        url.origin().ascii_serialization(),
-        "https://dash-backend-dev.stozn.ai"
+        intent.cli_command(),
+        format!("warpspeed agent-ctrl open {job_id} --environment staging")
     );
-    assert_eq!(url.path(), "/api/work-items/");
-    let pairs = url
-        .query_pairs()
-        .collect::<std::collections::HashMap<_, _>>();
-    assert_eq!(
-        pairs.get("open_only").map(|value| value.as_ref()),
-        Some("true")
-    );
-    assert_eq!(pairs.get("limit").map(|value| value.as_ref()), Some("100"));
-    assert_eq!(
-        pairs.get("q").map(|value| value.as_ref()),
-        Some("#42 login & auth")
-    );
+}
+
+#[test]
+fn dashboard_deep_link_rejects_redirects_overrides_and_shell_content() {
+    let invalid = [
+        format!(
+            "https://agent-ctrl/attach?environment=staging&fleet_id={STAGING_FLEET_ID}&job_id=job-safe"
+        ),
+        "warpspeed://attacker.invalid/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/other?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=production&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=other&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe&job_id=job-other".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe%26calc.exe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe&controller=https%3A%2F%2Fattacker.invalid".to_owned(),
+    ];
+    for value in invalid {
+        let url = reqwest::Url::parse(&value).unwrap();
+        assert!(
+            parse_managed_session_deep_link(&url).is_err(),
+            "unexpectedly accepted {value}"
+        );
+    }
 }
 
 #[test]

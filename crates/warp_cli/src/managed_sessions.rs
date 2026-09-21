@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ManagedEnvironment {
     Staging,
 }
@@ -39,8 +39,10 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
     },
 
-    /// Open the interactive WarpSpeed task/agent picker and managed-session viewer.
-    Ui {
+    /// Open the managed-session viewer for a dashboard-launched run.
+    Open {
+        job_id: String,
+
         #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
         environment: ManagedEnvironment,
     },

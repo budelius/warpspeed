@@ -21,6 +21,64 @@ const SUPPORTED_PROTOCOL: u32 = 1;
 const BOOKMARK_FORMAT: u32 = 1;
 const STOZN_AUTH_FORMAT: u32 = 1;
 const STOZN_LOGIN_MAX_WAIT: Duration = Duration::from_secs(330);
+pub const MANAGED_SESSION_DEEP_LINK_SCHEME: &str = "warpspeed";
+pub const MANAGED_SESSION_DEEP_LINK_HOST: &str = "agent-ctrl";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedSessionDeepLink {
+    pub environment: ManagedEnvironment,
+    pub job_id: String,
+}
+
+impl ManagedSessionDeepLink {
+    pub fn cli_command(&self) -> String {
+        let environment = match self.environment {
+            ManagedEnvironment::Staging => "staging",
+        };
+        format!(
+            "warpspeed agent-ctrl open {} --environment {environment}",
+            self.job_id
+        )
+    }
+}
+
+pub fn parse_managed_session_deep_link(url: &reqwest::Url) -> Result<ManagedSessionDeepLink> {
+    if url.scheme() != MANAGED_SESSION_DEEP_LINK_SCHEME
+        || url.host_str() != Some(MANAGED_SESSION_DEEP_LINK_HOST)
+        || url.path() != "/attach"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("invalid WarpSpeed managed-session link");
+    }
+
+    let mut environment = None;
+    let mut fleet_id = None;
+    let mut job_id = None;
+    for (key, value) in url.query_pairs() {
+        let target = match key.as_ref() {
+            "environment" => &mut environment,
+            "fleet_id" => &mut fleet_id,
+            "job_id" => &mut job_id,
+            _ => bail!("invalid WarpSpeed managed-session link parameter"),
+        };
+        if target.replace(value.into_owned()).is_some() {
+            bail!("duplicate WarpSpeed managed-session link parameter");
+        }
+    }
+
+    if environment.as_deref() != Some("staging") || fleet_id.as_deref() != Some(STAGING_FLEET_ID) {
+        bail!("WarpSpeed managed-session link targets an unsupported environment");
+    }
+    let job_id = job_id.context("WarpSpeed managed-session link omitted its job id")?;
+    validate_job_id(&job_id)?;
+    Ok(ManagedSessionDeepLink {
+        environment: ManagedEnvironment::Staging,
+        job_id,
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct StoznLoginFlow {
@@ -251,7 +309,10 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             *interactive,
             args.json,
         ),
-        ManagedSessionsCommand::Ui { environment } => ui(*environment),
+        ManagedSessionsCommand::Open {
+            job_id,
+            environment,
+        } => ui_session(*environment, job_id),
         ManagedSessionsCommand::Attach {
             job_id,
             environment,
@@ -377,114 +438,6 @@ fn launch_request(
     Ok(result)
 }
 
-fn ui(environment: ManagedEnvironment) -> Result<()> {
-    let profile = profile(environment);
-    let token = dashboard_token()?;
-    let client = Client::new();
-    println!("STOZN managed session · {}", profile.alias);
-    println!("Every session is attached to a STOZN task and uses normalized AgentCtrl events.");
-    let task_search = read_line("Search open tasks (Enter for newest 100): ")?;
-    let tasks_page: Value = send(
-        profile,
-        client
-            .get(task_list_url(profile, &task_search)?)
-            .bearer_auth(&token)
-            .header("X-Stozn-Client", "warpspeed"),
-    )?
-    .json()
-    .context("invalid STOZN task response")?;
-    let overview: Value = send(
-        profile,
-        client
-            .get(format!("{}/api/agent-control/overview", profile.base_url))
-            .bearer_auth(&token)
-            .header("X-Stozn-Client", "warpspeed"),
-    )?
-    .json()
-    .context("invalid managed-agent overview")?;
-
-    let tasks = tasks_page
-        .get("items")
-        .and_then(Value::as_array)
-        .context("STOZN task response did not contain items")?
-        .iter()
-        .filter_map(|task| {
-            let id = task.get("id")?.as_str()?;
-            validate_task_id(id).ok()?;
-            let reference = terminal_label(task.get("ref").and_then(Value::as_str).unwrap_or(id));
-            let title = terminal_label(
-                task.get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Untitled STOZN task"),
-            );
-            Some((id.to_owned(), format!("{reference} · {title}")))
-        })
-        .collect::<Vec<_>>();
-    let agents = overview
-        .get("agents")
-        .and_then(Value::as_array)
-        .context("managed-agent overview did not contain agents")?
-        .iter()
-        .filter(|agent| agent.get("launchable").and_then(Value::as_bool) == Some(true))
-        .filter_map(|agent| {
-            let name = agent.get("name")?.as_str()?;
-            let backend = terminal_label(
-                agent
-                    .get("backend")
-                    .and_then(Value::as_str)
-                    .unwrap_or("agent"),
-            );
-            Some((
-                name.to_owned(),
-                format!("{} ({backend})", terminal_label(name)),
-                agent
-                    .get("allow_interactive")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            ))
-        })
-        .collect::<Vec<_>>();
-    if tasks.is_empty() {
-        if task_search.is_empty() {
-            bail!(
-                "no open STOZN tasks are available; create or reopen a task in the dashboard first"
-            );
-        }
-        bail!("no open STOZN tasks matched that search");
-    }
-    if agents.is_empty() {
-        bail!("no operator-enabled managed agents are available");
-    }
-
-    println!();
-    let task_index = choose("Choose task", tasks.iter().map(|(_, label)| label.as_str()))?;
-    let agent_index = choose(
-        "Choose agent",
-        agents.iter().map(|(_, label, _)| label.as_str()),
-    )?;
-    let prompt = read_line("Optional initial instruction (Enter for profile default): ")?;
-    let interactive = if agents[agent_index].2 {
-        let answer = read_line("Keep open for audited follow-up turns? [Y/n]: ")?;
-        !matches!(answer.to_ascii_lowercase().as_str(), "n" | "no")
-    } else {
-        false
-    };
-    let result = launch_request(
-        environment,
-        &agents[agent_index].0,
-        &tasks[task_index].0,
-        (!prompt.is_empty()).then_some(prompt.as_str()),
-        interactive,
-    )?;
-    let job_id = result
-        .get("job_id")
-        .and_then(Value::as_str)
-        .context("accepted launch did not contain a job id")?
-        .to_owned();
-    println!("\nStarted {job_id} · {}", tasks[task_index].1);
-    ui_session(environment, &job_id)
-}
-
 fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
     loop {
         attach(environment, job_id, true, false)?;
@@ -524,51 +477,14 @@ fn session_is_finished(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "stopped" | "interrupted")
 }
 
-fn task_list_url(profile: &EnvironmentProfile, search: &str) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(&format!("{}/api/work-items/", profile.base_url))
-        .context("invalid compiled STOZN task endpoint")?;
-    url.query_pairs_mut()
-        .append_pair("open_only", "true")
-        .append_pair("limit", "100");
-    if !search.is_empty() {
-        url.query_pairs_mut().append_pair("q", search);
-    }
-    Ok(url)
-}
-
-fn choose<'a>(label: &str, choices: impl Iterator<Item = &'a str>) -> Result<usize> {
-    let choices = choices.collect::<Vec<_>>();
-    println!("{label}:");
-    for (index, choice) in choices.iter().enumerate() {
-        println!("  {}) {choice}", index + 1);
-    }
-    loop {
-        let answer = read_line("Selection: ")?;
-        if let Ok(selected) = answer.parse::<usize>()
-            && (1..=choices.len()).contains(&selected)
-        {
-            return Ok(selected - 1);
-        }
-        println!("Enter a number from 1 to {}.", choices.len());
-    }
-}
-
 fn read_line(prompt: &str) -> Result<String> {
     print!("{prompt}");
     io::stdout().flush().context("failed to flush prompt")?;
     let mut line = String::new();
     if io::stdin().read_line(&mut line)? == 0 {
-        bail!("managed-session UI closed before a selection was made");
+        bail!("managed-session viewer input closed");
     }
     Ok(line.trim().to_owned())
-}
-
-fn terminal_label(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(160)
-        .collect()
 }
 
 fn input(

@@ -30,7 +30,7 @@ use crate::features::FeatureFlag;
 use crate::launch_configs::launch_config::LaunchConfig;
 use crate::linear::{LinearAction, LinearIssueWork};
 use crate::root_view::{
-    NewWorkspaceSource, OpenLaunchConfigArg, open_new_window_get_handles,
+    NewWorkspaceSource, OpenLaunchConfigArg, SubshellCommandArg, open_new_window_get_handles,
     open_new_with_workspace_source,
 };
 use crate::server::ids::ServerId;
@@ -124,6 +124,8 @@ pub enum UriHost {
     Linear,
     /// Opens a saved tab config in an existing window or a new one.
     TabConfig,
+    /// Opens a dashboard-launched AgentCtrl managed session.
+    AgentCtrl,
     /// Focuses a specific terminal pane by its persistent session UUID.
     Session,
 }
@@ -148,6 +150,7 @@ impl FromStr for UriHost {
             "codex" => Ok(Self::Codex),
             "linear" => Ok(Self::Linear),
             "tab_config" if FeatureFlag::TabConfigs.is_enabled() => Ok(Self::TabConfig),
+            "agent-ctrl" => Ok(Self::AgentCtrl),
             "session" => Ok(Self::Session),
             _ => Err(anyhow!("Received url with unexpected host: {}", s)),
         }
@@ -254,6 +257,23 @@ impl UriHost {
             }
             UriHost::TabConfig => {
                 handle_tab_config_uri(primary_window_id, url, ctx);
+            }
+            UriHost::AgentCtrl => {
+                match managed_agent_sessions::parse_managed_session_deep_link(url) {
+                    Ok(intent) => {
+                        // The parser accepts only the compiled staging fleet and a
+                        // shell-safe controller job id. No task text, prompt, URL,
+                        // environment override, or other caller content reaches the shell.
+                        ctx.dispatch_global_action(
+                            "root_view:open_new_tab_execute_managed_session_command",
+                            &SubshellCommandArg {
+                                command: intent.cli_command(),
+                                shell_type: None,
+                            },
+                        );
+                    }
+                    Err(error) => log::warn!("Rejected WarpSpeed managed-session link: {error:#}"),
+                }
             }
             UriHost::SharedSession => {
                 // We expect the uri to have the ID of the session to join as the last segment.
@@ -626,6 +646,9 @@ impl UriHost {
             Self::Linear => W::default(),
             // Handler picks the window itself based on `?new_window=true`.
             Self::TabConfig => W::Nothing,
+            Self::AgentCtrl => W::ShowPrimaryWindow(WindowActivationFallbackBehavior::NewWindow {
+                replace_existing: false,
+            }),
             Self::Session => W::Nothing,
         }
     }
@@ -1716,20 +1739,24 @@ fn settings_section_for_simple_subpage(subpage: &str) -> Option<SettingsSection>
 
 /// Validates an incoming custom URI for security and returns the host.
 fn validate_custom_uri(url: &Url) -> Result<UriHost> {
-    // For now the only scheme we support is `[scheme_name]://[host_str]/...
-    // Ignore all other urls that don't match this scheme for security purposes.
-    if url.scheme() != ChannelState::url_scheme() {
+    let host_str = url
+        .host_str()
+        .ok_or_else(|| anyhow!("Received url with no host str"))?;
+    let uses_channel_scheme = url.scheme() == ChannelState::url_scheme();
+    let uses_managed_session_scheme = url.scheme()
+        == managed_agent_sessions::MANAGED_SESSION_DEEP_LINK_SCHEME
+        && host_str == managed_agent_sessions::MANAGED_SESSION_DEEP_LINK_HOST;
+    if !uses_channel_scheme && !uses_managed_session_scheme {
         return Err(anyhow!(
             "Received url with unexpected scheme: {} ",
             url.scheme()
         ));
     }
 
-    let host_str = url
-        .host_str()
-        .ok_or_else(|| anyhow!("Received url with no host str"))?;
-
     let host = UriHost::from_str(host_str)?;
+    if matches!(host, UriHost::AgentCtrl) {
+        managed_agent_sessions::parse_managed_session_deep_link(url)?;
+    }
 
     // Check if this host is allowed to have arbitrary paths.
     let host_allows_arbitrary_path = match host {
@@ -1744,6 +1771,7 @@ fn validate_custom_uri(url: &Url) -> Result<UriHost> {
         | UriHost::Codex
         | UriHost::Linear
         | UriHost::TabConfig
+        | UriHost::AgentCtrl
         | UriHost::Session => true,
         // Auth and Home only allow the desktop redirect path
         UriHost::Auth | UriHost::Home => false,

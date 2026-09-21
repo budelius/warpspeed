@@ -288,6 +288,20 @@ $current_temp_path = Join-Path $INSTALL_ROOT 'current.txt.new'
 Move-Item -Force -LiteralPath $current_temp_path -Destination $current_path
 Copy-Item -LiteralPath (Join-Path $version_dir 'icon.ico') -Destination $INSTALL_ROOT -Force
 
+# Register the stable dashboard-to-WarpSpeed handoff. The dashboard sends only
+# environment, fleet and controller job identifiers; WarpSpeed validates all of
+# them again before opening its fixed managed-session viewer command.
+$protocol_root = 'HKCU:\Software\Classes\warpspeed'
+New-Item -Path $protocol_root -Force | Out-Null
+Set-Item -Path $protocol_root -Value 'URL:WarpSpeed by STOZN managed session'
+New-ItemProperty -Path $protocol_root -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
+$protocol_icon = Join-Path $protocol_root 'DefaultIcon'
+New-Item -Path $protocol_icon -Force | Out-Null
+Set-Item -Path $protocol_icon -Value "$(Join-Path $version_dir 'warpspeed.exe'),0"
+$protocol_command = Join-Path $protocol_root 'shell\open\command'
+New-Item -Path $protocol_command -Force | Out-Null
+Set-Item -Path $protocol_command -Value "`"$(Join-Path $version_dir 'warpspeed.exe')`" `"%1`""
+
 $start_menu_dir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $wsh = New-Object -ComObject WScript.Shell
 $shortcuts = @{

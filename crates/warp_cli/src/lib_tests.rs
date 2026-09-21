@@ -36,7 +36,16 @@ fn managed_agent_start_requires_task_attachment() {
         "--interactive",
     ]);
     assert!(attached.is_ok());
-    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "ui"]).is_ok());
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "ui"]).is_err());
+    assert!(
+        Args::try_parse_from([
+            "warpspeed",
+            "agent-ctrl",
+            "open",
+            "job-ca9b590c-979c-4d46-b19f-f6f50fc852d3",
+        ])
+        .is_ok()
+    );
 }
 
 #[test]

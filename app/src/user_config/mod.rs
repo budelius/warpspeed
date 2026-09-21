@@ -279,29 +279,22 @@ pub fn is_tab_config_toml(path: &Path) -> bool {
         .any(|dir| path.starts_with(dir))
 }
 
-/// Installs the fixed-command STOZN managed-agent picker for WarpSpeed only.
-/// Existing user customizations are never overwritten.
+/// Removes the retired WarpSpeed task picker. Task selection and launch are
+/// owned by the STOZN Dashboard; WarpSpeed opens only dashboard-issued session links.
 #[cfg(feature = "local_fs")]
-pub(crate) fn ensure_stozn_managed_agent_config() -> Option<PathBuf> {
+pub(crate) fn remove_stozn_managed_agent_config() {
     if !warp_core::channel::ChannelState::app_id()
         .application_name()
         .starts_with("WarpSpeed")
     {
-        return None;
+        return;
     }
-    let dir = tab_configs_dir();
-    let path = dir.join("stozn-managed-agent.toml");
-    if !path.exists() {
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            log::warn!("Failed to create tab_configs dir at {dir:?}: {error:?}");
-            return Some(path);
-        }
-        const TEMPLATE: &str = include_str!("../../resources/tab_configs/stozn_managed_agent.toml");
-        if let Err(error) = std::fs::write(&path, TEMPLATE) {
-            log::warn!("Failed to create STOZN managed-agent UI config at {path:?}: {error:?}");
-        }
+    let path = tab_configs_dir().join("stozn-managed-agent.toml");
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("Failed to remove retired STOZN managed-agent picker at {path:?}: {error:?}");
     }
-    Some(path)
 }
 
 /// Ensures `~/.warp/default_tab_configs/worktree.toml` exists, creating it

@@ -146,8 +146,9 @@ fn receive_within(
     transport: &mut impl warp_terminal::local_tty::supervisor::transport::Transport,
     timeout: std::time::Duration,
 ) -> Option<warp_terminal::local_tty::supervisor::message::Message> {
-    use instant::Instant;
     use std::time::Duration;
+
+    use instant::Instant;
 
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -397,8 +398,9 @@ fn survives_label(pane: &PaneSummary) -> &'static str {
 /// settled, "the supervisor says this session is in use, and a pane says it is
 /// holding it" is true only if the attach actually happened.
 fn attach(pid: Option<u32>, session_id: u64, json: bool) -> Result<()> {
-    use instant::Instant;
     use std::time::Duration;
+
+    use instant::Instant;
 
     /// How long to let the pane start its shell -- and fail, if it is going to
     /// -- before believing anything either side says.
@@ -500,8 +502,9 @@ const QUIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// loop ends on Windows. "Has it gone" is a question only the channel can
 /// answer.
 fn wait_until_gone(pid: u32) -> bool {
-    use instant::Instant;
     use std::time::Duration;
+
+    use instant::Instant;
 
     let deadline = Instant::now() + QUIT_TIMEOUT;
     while Instant::now() < deadline {

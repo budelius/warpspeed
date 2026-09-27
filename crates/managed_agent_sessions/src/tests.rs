@@ -1,6 +1,7 @@
-use super::*;
 use std::io::Read as _;
 use std::net::TcpListener;
+
+use super::*;
 
 #[test]
 fn dashboard_deep_link_opens_only_the_fixed_managed_session() {

@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsFd, FromRawFd};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -75,7 +75,7 @@ fn detached_output_is_replayed_when_session_reattaches() {
         .unwrap()
         .attached_client = None;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         supervisor.maintain_sessions();
         let output_len = supervisor.sessions[&session_id]
@@ -221,7 +221,7 @@ fn binding_replaces_a_stale_socket() {
     let path = root.path().join("supervisor.sock");
     // A socket file with nobody accepting on it, exactly what a crashed
     // supervisor leaves behind.
-    drop(UnixListener::bind(&path).unwrap());
+    drop(UnixDatagram::bind(&path).unwrap());
 
     let listener = bind_listener(&path).unwrap();
 

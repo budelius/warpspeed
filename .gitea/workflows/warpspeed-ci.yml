@@ -156,10 +156,12 @@ jobs:
     name: Build WarpSpeed
     needs: build_selection
     if: ${{ needs.build_selection.outputs.enabled == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-release
     timeout-minutes: 180
     container:
       image: harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0@sha256:007adbd65f1054905c436b9d50bc1e940619dd14f754331639352bf421c00c90
+    env:
+      CARGO_BUILD_JOBS: "1"
 
     steps:
       - name: Install pinned Actions checkout dependencies

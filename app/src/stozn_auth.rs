@@ -5,8 +5,9 @@ use warpui::{Entity, ModelContext, SingletonEntity};
 
 #[cfg(windows)]
 fn open_framed_stozn_auth(verification_url: &str) -> bool {
-    use command::blocking::Command;
     use std::path::PathBuf;
+
+    use command::blocking::Command;
 
     let mut candidates = Vec::new();
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {

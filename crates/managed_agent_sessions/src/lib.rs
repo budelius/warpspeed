@@ -1,9 +1,8 @@
 use std::collections::HashSet;
-use std::fs;
 use std::io::{self, Write as _};
 use std::path::PathBuf;
-use std::thread;
 use std::time::Duration;
+use std::{fs, thread};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};

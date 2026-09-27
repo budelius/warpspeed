@@ -1,27 +1,25 @@
-# Build image for the WarpSpeed fork's GitLab CI.
+# Build image for the WarpSpeed fork's Gitea Actions CI.
 #
 # Why this exists
 # ---------------
-# `clippy` and `build:warpspeed` used to install their system dependencies at
-# job time, via `script/linux/install_build_deps`. On the self-hosted
-# `obachan-staging-oss` runner that cannot work: the runner's containers are
-# not root and have no sudo, so every `apt-get install` fails and the job never
-# reaches `cargo`. Baking the dependencies into the image removes the apt step
-# from the job entirely -- nothing privileged happens at job time.
+# `clippy` and the WarpSpeed release build need the packages installed by
+# `script/linux/install_build_deps`. Baking them into the image keeps those
+# expensive, privileged package installs out of repository jobs and avoids
+# downloading protoc on every run.
 #
-# It also removes the repeated cost: the package installs and the protoc
-# download ran on every single job.
+# The image was introduced for the former non-root GitLab runner and remains
+# the reproducible build environment used by `.gitea/workflows/warpspeed-ci.yml`.
 #
 # Kept deliberately lean. `docker/linux-dev` is the interactive development
 # container (sshd, gcloud, gh, a `dev` user); none of that belongs in CI.
 #
 # Build and publish (from the repository root):
 #
-#   docker build -f docker/ci/Dockerfile -t registry.gitlab.com/martin-wieser/warpspeed/ci:1.92.0 .
-#   docker push registry.gitlab.com/martin-wieser/warpspeed/ci:1.92.0
+#   docker build -f docker/ci/Dockerfile -t harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0 .
+#   docker push harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0
 #
-# The tag tracks `rust-toolchain.toml`. Bump both together, and update the
-# `image:` in .gitlab-ci.yml to match.
+# The tag tracks `rust-toolchain.toml`. Bump both together, then update the
+# tag and pinned manifest digest in `.gitea/workflows/warpspeed-ci.yml`.
 
 FROM rust:1-bookworm
 

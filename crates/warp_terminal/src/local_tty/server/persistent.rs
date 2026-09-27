@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::Duration;
 
-use instant::Instant;
-
 use anyhow::{Context, Result, anyhow, bail};
+use instant::Instant;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use warp_core::SessionId;

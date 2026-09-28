@@ -19,7 +19,7 @@
 use super::Dimensions;
 use super::cell::{Cell, Flags};
 use super::grid_handler::GridHandler;
-use crate::model::Point;
+use crate::model::VisibleRow;
 use crate::model::ansi::{Color, NamedColor};
 use crate::model::char_or_str::CharOrStr;
 
@@ -178,7 +178,7 @@ pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
     out.extend_from_slice(b"\x1b[H");
 
     let columns = grid.columns();
-    let rows = grid.total_rows();
+    let rows = grid.visible_rows();
 
     // A scroll region set by a full-screen application decides where later
     // output lands, so it has to be restored before any of that output arrives.
@@ -216,7 +216,7 @@ pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
         let mut pending_blanks = 0usize;
 
         for column in 0..columns {
-            let cell = &grid.grid_storage()[Point::new(row, column)];
+            let cell = &grid.grid_storage()[VisibleRow(row)][column];
 
             // A wide character already occupies the spacer's column. Emitting
             // anything for the spacer would push the rest of the row right by
@@ -266,7 +266,8 @@ pub fn render_screen(grid: &GridHandler) -> Vec<u8> {
     // Put the cursor back where the session left it. Without this, output that
     // arrives after the snapshot is drawn in the wrong place.
     let cursor = grid.cursor_point();
-    out.extend_from_slice(format!("\x1b[{};{}H", cursor.row + 1, cursor.col + 1).as_bytes());
+    let cursor_row = cursor.row.saturating_sub(grid.history_size());
+    out.extend_from_slice(format!("\x1b[{};{}H", cursor_row + 1, cursor.col + 1).as_bytes());
 
     out
 }

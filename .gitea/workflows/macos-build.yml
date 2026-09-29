@@ -1,0 +1,60 @@
+name: macOS build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build macOS app
+    runs-on: macos-arm64
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "3"
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-C debuginfo=0 --cfg=web_sys_unstable_apis"
+      WARP_SKIP_SUDO_PROMPT: "1"
+
+    steps:
+      - name: Check out source and LFS assets
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: Build app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          ./script/bundle --channel oss --debug --nouniversal --selfsign --no-dmg
+          codesign --verify --deep --strict target/debug/bundle/osx/WarpOss.app
+
+      - name: Package app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          git rev-parse HEAD > ci-artifacts/source-commit.txt
+          ditto -c -k --sequesterRsrc --keepParent \
+            target/debug/bundle/osx/WarpOss.app ci-artifacts/WarpOss-macos-arm64.zip
+          shasum -a 256 ci-artifacts/WarpOss-macos-arm64.zip \
+            > ci-artifacts/WarpOss-macos-arm64.zip.sha256
+
+      - name: Upload downloadable macOS build
+        uses: actions/upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: WarpOss-macos-arm64-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: error
+          retention-days: 30

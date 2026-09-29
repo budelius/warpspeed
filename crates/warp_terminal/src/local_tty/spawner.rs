@@ -251,6 +251,8 @@ pub(super) struct PtySpawnInfo {
     pub child: PseudoConsoleChild,
 }
 
+type AttachedPty = (PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata);
+
 /// A global singleton that provides the ability to spawn ptys.
 ///
 /// This abstracts away from callers the manner in which the pty is spawned -
@@ -682,7 +684,7 @@ impl PtySpawner {
         session_id: SessionId,
         #[cfg_attr(unix, allow(unused_variables))] include_snapshot: bool,
         pane_size: (u16, u16),
-    ) -> Result<Option<(PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata)>> {
+    ) -> Result<Option<AttachedPty>> {
         #[cfg(unix)]
         if let Some(client) = self.supervisor.as_ref() {
             let attached = client.attach(session_id)?;

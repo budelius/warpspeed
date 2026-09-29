@@ -1,0 +1,88 @@
+#!/bin/bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+destination="/Applications/warpseed.app"
+source_bundle=""
+
+while (( $# )); do
+  case "$1" in
+    --from-bundle|--destination)
+      if (( $# < 2 )) || [[ -z "$2" ]]; then
+        echo "Missing value for $1" >&2
+        exit 1
+      fi
+      if [[ "$1" = --from-bundle ]]; then source_bundle="$2"; else destination="$2"; fi
+      shift 2
+      ;;
+    --help|-h)
+      echo "Usage: $0 [--from-bundle PATH] [--destination PATH]"
+      echo "Builds the native debug OSS app by default, signs it, and installs without a DMG."
+      echo "Quit the destination app first. Existing installations are moved to a backup directory."
+      exit 0
+      ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ "$(uname -s)" != Darwin ]]; then
+  echo "This installer requires macOS." >&2
+  exit 1
+fi
+if [[ "$destination" != /*.app || -L "$destination" ]]; then
+  echo "Destination must be an absolute .app path, not a symlink." >&2
+  exit 1
+fi
+if /bin/ps -axo comm= | grep -F -- "$destination/Contents/MacOS/" >/dev/null; then
+  echo "Quit $destination before installing; running sessions were left untouched." >&2
+  exit 1
+fi
+
+if [[ -z "$source_bundle" ]]; then
+  cd "$repo_root"
+  ./script/bundle --channel oss --debug --nouniversal --selfsign --no-dmg
+  source_bundle="$repo_root/target/debug/bundle/osx/WarpOss.app"
+fi
+
+if [[ ! -d "$source_bundle" || ! -x "$source_bundle/Contents/MacOS/warp-oss" ]]; then
+  echo "Not a Warp OSS app bundle: $source_bundle" >&2
+  exit 1
+fi
+bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$source_bundle/Contents/Info.plist")
+if [[ "$bundle_id" != dev.warp.WarpOss ]]; then
+  echo "Refusing unexpected bundle identifier: $bundle_id" >&2
+  exit 1
+fi
+codesign --verify --deep --strict "$source_bundle"
+
+parent="$(dirname "$destination")"
+mkdir -p "$parent"
+staging="$(mktemp -d "$parent/.warpseed-install.XXXXXX")"
+backup=""
+cleanup() {
+  if [[ -n "$backup" && ! -e "$destination" && -d "$backup/previous.app" ]]; then
+    mv "$backup/previous.app" "$destination"
+  fi
+  rm -rf "$staging"
+}
+trap cleanup EXIT
+
+ditto "$source_bundle" "$staging/app.app"
+codesign --verify --deep --strict "$staging/app.app"
+# Recheck after the build/copy, since the user may have launched the app in the meantime.
+if /bin/ps -axo comm= | grep -F -- "$destination/Contents/MacOS/" >/dev/null; then
+  echo "Quit $destination before installing; running sessions were left untouched." >&2
+  exit 1
+fi
+if [[ -L "$destination" || ( -e "$destination" && ! -d "$destination" ) ]]; then
+  echo "Destination is no longer an application directory; refusing to replace it." >&2
+  exit 1
+fi
+if [[ -d "$destination" ]]; then
+  backup="$(mktemp -d "$parent/.warpseed-backup.XXXXXX")"
+  mv "$destination" "$backup/previous.app"
+fi
+mv "$staging/app.app" "$destination"
+echo "Installed $destination"
+if [[ -n "$backup" ]]; then echo "Previous app: $backup/previous.app"; fi
+echo "Configuration directory: $HOME/.warp-oss"

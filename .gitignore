@@ -67,6 +67,9 @@ desired_behavior.md
 # Don't include the python cache for bundled skills.
 __pycache__/
 
+# Runtime hook captures may contain session data.
+/hook_outputs/
+
 # Project notes
 .note/
 .claude/scheduled_tasks.lock

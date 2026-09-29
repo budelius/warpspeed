@@ -143,6 +143,20 @@ trait LaunchConfigSearcher {
     fn refresh_search_index(&mut self, app: &AppContext);
 }
 
+/// Two configs can share a name — a YAML template and the session config
+/// derived from it commonly do — so the map has to key on where each one came
+/// from or the later one silently replaces the earlier.
+fn config_key(config: &LaunchConfig) -> String {
+    match &config.source {
+        Some(source) => format!(
+            "{}\u{1f}{}",
+            source.path.to_string_lossy(),
+            source.document_index
+        ),
+        None => config.name.to_lowercase(),
+    }
+}
+
 #[derive(Default)]
 struct FuzzyLaunchConfigSearcher {
     configs: HashMap<String, LaunchConfig>,
@@ -168,7 +182,7 @@ impl LaunchConfigSearcher for FuzzyLaunchConfigSearcher {
     fn refresh_search_index(&mut self, app: &AppContext) {
         self.configs = WarpConfig::as_ref(app)
             .launch_and_session_configs()
-            .map(|config| (config.name.to_lowercase(), config.clone()))
+            .map(|config| (config_key(config), config.clone()))
             .collect();
     }
 }
@@ -183,16 +197,16 @@ mod full_text_searcher {
     use warpui::r#async::executor::Background;
     use warpui::{AppContext, SingletonEntity};
 
+    use super::config_key;
     use crate::launch_configs::launch_config::LaunchConfig;
     use crate::search::command_palette::launch_config::data_source::LaunchConfigSearcher;
     use crate::search::command_palette::launch_config::search_item::SearchItem;
     use crate::search::searcher::{AsyncSearcher, DEFAULT_MEMORY_BUDGET, SCORE_CONVERSION_FACTOR};
     use crate::user_config::WarpConfig;
 
-    // The name of the launch configs are duplicated to ensure that the searcher
-    // hashes the name to uniquely identify the launch config.
-    // Also, it makes sense from a schema POV: the name is the identifying key.
-    // TODO: Add a proper Launch Config ID
+    // `name` is the only field matched on; `name_id` identifies which config a
+    // hit belongs to and carries `config_key`'s source key, not the name, so two
+    // configs sharing a name -- a YAML and a session config, say -- stay distinct.
     define_search_schema!(
         schema_name: LAUNCH_CONFIG_SCHEMA,
         config_name: ConfigSearcherConfig,
@@ -242,7 +256,7 @@ mod full_text_searcher {
         fn refresh_search_index(&mut self, app: &AppContext) {
             self.configs = WarpConfig::as_ref(app)
                 .launch_and_session_configs()
-                .map(|config| (config.name.to_lowercase(), config.clone()))
+                .map(|config| (config_key(config), config.clone()))
                 .collect();
             if self.rebuild_search_index().is_err() {
                 warp_errors::report_error!(
@@ -264,10 +278,13 @@ mod full_text_searcher {
         }
 
         fn rebuild_search_index(&mut self) -> Result<(), anyhow::Error> {
-            let documents = self.configs.keys().map(|name| LaunchConfigDocument {
-                name: name.clone(),
-                name_id: name.clone(),
-            });
+            let documents = self
+                .configs
+                .iter()
+                .map(|(id, config)| LaunchConfigDocument {
+                    name: config.name.to_lowercase(),
+                    name_id: id.clone(),
+                });
             self.searcher.rebuild_index_async(documents)
         }
 
@@ -280,3 +297,7 @@ mod full_text_searcher {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "data_source_tests.rs"]
+mod tests;

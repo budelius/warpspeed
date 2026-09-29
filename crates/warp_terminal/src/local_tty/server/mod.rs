@@ -232,7 +232,7 @@ impl TerminalServer {
     }
 
     fn new_persistent() -> Result<Self> {
-        let socket_path = persistent::socket_path();
+        let socket_path = persistent::socket_path()?;
         let client = Arc::new(TerminalServerClient::new_persistent(socket_path.clone()));
         if client.ping().is_ok() {
             log::info!("Connected to the terminal session supervisor");

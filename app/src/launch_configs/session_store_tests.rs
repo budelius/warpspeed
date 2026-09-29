@@ -1,12 +1,22 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
-use super::{group_summaries, load_from_dir, save_to_dir, save_windows_to_dir};
+use pathfinder_geometry::rect::RectF;
+use pathfinder_geometry::vector::vec2f;
+
+use super::{
+    NoCheckpointsToClone, clone_checkpoints_in_dir, group_summaries, load_from_dir, read_catalog,
+    save_to_dir, save_windows_to_dir,
+};
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::ambient_agents::AmbientAgentTaskId;
+use crate::ai::blocklist::SerializedBlockListItem;
 use crate::app_state::{
-    CliAgentResumeDescriptor, LeafContents, LeafSnapshot, PaneNodeSnapshot, PaneUuid, TabSnapshot,
-    TerminalPaneSnapshot, WindowSnapshot,
+    AmbientAgentPaneSnapshot, BranchSnapshot, CliAgentResumeDescriptor, LeafContents, LeafSnapshot,
+    PaneFlex, PaneNodeSnapshot, PaneUuid, SplitDirection, TabSnapshot, TerminalPaneSnapshot,
+    WindowSnapshot,
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::tab::SelectedTabColor;
@@ -273,4 +283,297 @@ fn closing_one_window_retains_the_complete_multi_window_session() {
     assert_eq!(restored.len(), 2);
     assert_eq!(restored[0].window, first);
     assert_eq!(restored[1].window, second);
+}
+
+fn session_source(path: &str, generation: usize, window_index: usize) -> LaunchConfigWindowSource {
+    LaunchConfigWindowSource {
+        path: PathBuf::from(path),
+        document_index: generation,
+        window_index,
+        config_name: "OBACHAN".to_owned(),
+    }
+}
+
+fn only_terminal(window: &WindowSnapshot) -> &TerminalPaneSnapshot {
+    let PaneNodeSnapshot::Leaf(leaf) = &window.tabs[0].root else {
+        panic!("fixture window has a single leaf pane");
+    };
+    let LeafContents::Terminal(terminal) = &leaf.contents else {
+        panic!("fixture leaf is a terminal");
+    };
+    terminal
+}
+
+fn seed_source_checkpoint(
+    dir: &Path,
+    block_lists: &HashMap<PaneUuid, Vec<SerializedBlockListItem>>,
+) -> LaunchConfigWindowSource {
+    let source = session_source("/cfg/OBACHAN.toml", 1, 0);
+    save_to_dir(
+        dir,
+        &source,
+        &window(source.clone()),
+        block_lists,
+        false,
+        1_767_225_600,
+    )
+    .expect("the source checkpoint should be written");
+    source
+}
+
+#[test]
+fn cloning_rewrites_the_source_and_keeps_the_layout() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = seed_source_checkpoint(dir.path(), &HashMap::new());
+
+    let cloned = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect("cloning should succeed");
+
+    assert_eq!(cloned.len(), 1);
+    assert_eq!(cloned[0].path, PathBuf::from("/cfg/OBACHAN-2.toml"));
+    assert_eq!(cloned[0].document_index, 1);
+    assert_eq!(cloned[0].window_index, 0);
+    assert_eq!(cloned[0].config_name, "OBACHAN (2)");
+
+    let restored = load_from_dir(dir.path(), &cloned[0])
+        .expect("the clone should load")
+        .expect("the clone should exist");
+    let original = load_from_dir(dir.path(), &source)
+        .expect("the original should load")
+        .expect("the original should exist");
+    assert_eq!(restored.window.tabs.len(), original.window.tabs.len());
+    assert_eq!(
+        only_terminal(&restored.window).cwd,
+        only_terminal(&original.window).cwd
+    );
+    assert_eq!(
+        only_terminal(&restored.window).shell_launch_data,
+        only_terminal(&original.window).shell_launch_data
+    );
+}
+
+#[test]
+fn cloning_releases_every_identity_owned_by_the_live_window() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let block_lists = HashMap::from([(
+        PaneUuid(vec![1, 2, 3]),
+        vec![SerializedBlock::default().into()],
+    )]);
+    let source = seed_source_checkpoint(dir.path(), &block_lists);
+
+    let cloned = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect("cloning should succeed");
+
+    let restored = load_from_dir(dir.path(), &cloned[0])
+        .expect("the clone should load")
+        .expect("the clone should exist");
+    let original = load_from_dir(dir.path(), &source)
+        .expect("the original should load")
+        .expect("the original should exist");
+    let clone_pane = only_terminal(&restored.window);
+    let original_pane = only_terminal(&original.window);
+
+    assert_ne!(clone_pane.uuid, original_pane.uuid);
+    assert!(!clone_pane.uuid.is_empty());
+    assert_eq!(clone_pane.persistent_session_id, None);
+    assert_eq!(clone_pane.cli_agent_resume_descriptor, None);
+    assert!(clone_pane.conversation_ids_to_restore.is_empty());
+    assert_eq!(clone_pane.active_conversation_id, None);
+    assert!(restored.block_lists.is_empty());
+
+    assert!(original_pane.persistent_session_id.is_some());
+    assert!(original_pane.cli_agent_resume_descriptor.is_some());
+    assert!(
+        !original.block_lists.is_empty(),
+        "cloning must not destroy the original's block lists"
+    );
+}
+
+#[test]
+fn cloning_registers_the_clone_in_the_catalog() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = seed_source_checkpoint(dir.path(), &HashMap::new());
+
+    clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect("cloning should succeed");
+
+    let catalog = read_catalog(dir.path()).expect("the catalog should be readable");
+    let names = catalog
+        .iter()
+        .map(|window| window.source.config_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"OBACHAN"));
+    assert!(names.contains(&"OBACHAN (2)"));
+    assert_eq!(catalog.len(), 2);
+}
+
+#[test]
+fn cloning_a_session_with_no_checkpoints_yet_fails_distinguishably() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = session_source("/cfg/OBACHAN.toml", 1, 0);
+    // `claim_session` creates the lease directory before any checkpoint is
+    // ever written, so this state -- present but empty -- is reachable, not
+    // hypothetical.
+    std::fs::create_dir_all(dir.path().join("obachan").join("1"))
+        .expect("the empty checkpoint directory should be created");
+
+    let error = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect_err("cloning a session with no checkpoints should fail");
+
+    assert!(
+        error.downcast_ref::<NoCheckpointsToClone>().is_some(),
+        "the failure must be distinguishable so the dialog can show an actionable message \
+         instead of a generic one"
+    );
+}
+
+#[test]
+fn cloning_clears_the_original_bounds_so_the_clone_is_not_placed_on_top_of_it() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = session_source("/cfg/OBACHAN.toml", 1, 0);
+    let mut original = window(source.clone());
+    original.bounds = Some(RectF::new(vec2f(100., 200.), vec2f(800., 600.)));
+    save_to_dir(
+        dir.path(),
+        &source,
+        &original,
+        &HashMap::new(),
+        false,
+        1_767_225_600,
+    )
+    .expect("the source checkpoint should be written");
+
+    let cloned = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect("cloning should succeed");
+
+    let restored = load_from_dir(dir.path(), &cloned[0])
+        .expect("the clone should load")
+        .expect("the clone should exist");
+    assert_eq!(
+        restored.window.bounds, None,
+        "a cloned window must get default placement, not sit on top of the original"
+    );
+}
+
+fn ambient_task_id() -> AmbientAgentTaskId {
+    AmbientAgentTaskId::from_str("2f2b0a5c-6f2f-4a3b-9a1b-0f8f8b1c2d3e")
+        .expect("the fixture task id should parse")
+}
+
+/// A window whose tab root is a split rather than a bare leaf, with one
+/// terminal pane and one ambient agent pane. Both the `Branch` recursion and a
+/// non-terminal leaf go unexercised by the single-leaf fixture.
+fn split_window(source: LaunchConfigWindowSource) -> WindowSnapshot {
+    let mut window = window(source);
+    let terminal = window.tabs[0].root.clone();
+    window.tabs[0].root = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            (PaneFlex(1.0), terminal),
+            (
+                PaneFlex(1.0),
+                PaneNodeSnapshot::Leaf(LeafSnapshot {
+                    is_focused: false,
+                    custom_vertical_tabs_title: None,
+                    contents: LeafContents::AmbientAgent(AmbientAgentPaneSnapshot {
+                        uuid: vec![4, 5, 6],
+                        task_id: Some(ambient_task_id()),
+                    }),
+                }),
+            ),
+        ],
+    });
+    window
+}
+
+fn split_panes(window: &WindowSnapshot) -> (&TerminalPaneSnapshot, &AmbientAgentPaneSnapshot) {
+    let PaneNodeSnapshot::Branch(branch) = &window.tabs[0].root else {
+        panic!("the split fixture window has a branch root");
+    };
+    let mut terminal = None;
+    let mut ambient = None;
+    for (_, child) in &branch.children {
+        let PaneNodeSnapshot::Leaf(leaf) = child else {
+            panic!("the split fixture branch holds only leaves");
+        };
+        match &leaf.contents {
+            LeafContents::Terminal(pane) => terminal = Some(pane),
+            LeafContents::AmbientAgent(pane) => ambient = Some(pane),
+            other => panic!("unexpected leaf contents in the split fixture: {other:?}"),
+        }
+    }
+    (
+        terminal.expect("the split fixture has a terminal pane"),
+        ambient.expect("the split fixture has an ambient agent pane"),
+    )
+}
+
+#[test]
+fn cloning_releases_identities_inside_a_split_including_the_ambient_agent_pane() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = session_source("/cfg/OBACHAN.toml", 1, 0);
+    save_to_dir(
+        dir.path(),
+        &source,
+        &split_window(source.clone()),
+        &HashMap::new(),
+        false,
+        1_767_225_600,
+    )
+    .expect("the source checkpoint should be written");
+
+    let cloned = clone_checkpoints_in_dir(
+        dir.path(),
+        &source,
+        Path::new("/cfg/OBACHAN-2.toml"),
+        "OBACHAN (2)",
+    )
+    .expect("cloning should succeed");
+
+    let restored = load_from_dir(dir.path(), &cloned[0])
+        .expect("the clone should load")
+        .expect("the clone should exist");
+    let original = load_from_dir(dir.path(), &source)
+        .expect("the original should load")
+        .expect("the original should exist");
+    let (clone_terminal, clone_ambient) = split_panes(&restored.window);
+    let (original_terminal, original_ambient) = split_panes(&original.window);
+
+    assert_ne!(clone_terminal.uuid, original_terminal.uuid);
+    assert!(!clone_terminal.uuid.is_empty());
+    assert_ne!(
+        clone_ambient.uuid, original_ambient.uuid,
+        "the clone must not share the original's ambient pane uuid: block lists are keyed by it"
+    );
+    assert!(!clone_ambient.uuid.is_empty());
+    assert_eq!(
+        clone_ambient.task_id, None,
+        "the clone must start its own ambient conversation, not join the original's"
+    );
+    assert_eq!(original_ambient.task_id, Some(ambient_task_id()));
 }

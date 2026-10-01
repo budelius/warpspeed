@@ -151,3 +151,17 @@ fn claude_installed_through_npm_is_found_as_node() {
 fn discoverable_agents_all_have_a_registry() {
     assert!(DISCOVERABLE_AGENTS.into_iter().all(supports));
 }
+
+#[test]
+fn a_shell_running_a_program_has_a_child_process_and_an_idle_one_does_not() {
+    let processes = [
+        process(100, 1, "bash.exe"),
+        process(101, 100, "claude.exe"),
+        process(200, 1, "bash.exe"),
+        process(4, 4, "System"),
+    ];
+
+    assert!(has_child_process_in(100, &processes));
+    assert!(!has_child_process_in(200, &processes));
+    assert!(!has_child_process_in(4, &processes));
+}

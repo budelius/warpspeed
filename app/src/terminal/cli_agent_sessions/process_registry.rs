@@ -95,6 +95,17 @@ pub(crate) fn resolve_in(
         .find_map(|pid| read_entry(&registry_directory.join(format!("{pid}.json"))))
 }
 
+/// Whether any process is running under `pid`.
+pub(crate) fn has_child_process(pid: u32) -> bool {
+    has_child_process_in(pid, &process_table())
+}
+
+pub(crate) fn has_child_process_in(pid: u32, processes: &[ProcessInfo]) -> bool {
+    processes
+        .iter()
+        .any(|process| process.parent == Some(pid) && process.pid != pid)
+}
+
 /// Every process below `root`, nearest first.
 pub(crate) fn descendants(root: u32, processes: &[ProcessInfo]) -> Vec<u32> {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();

@@ -1321,12 +1321,21 @@ fn on_shell_determined<S: TerminalSurface>(
     if let Some(metadata) = attached_metadata
         && let Some(bootstrap) = metadata.bootstrap
     {
+        // A pane that had itself adopted a shell mid-command, without knowing it, reported the
+        // shell as idle when it let go. A shell with a program running under it is not at its
+        // prompt, whatever it was reported as.
+        let input_editor_active = metadata.input_editor_active
+            && !attached_pty.as_ref().is_some_and(|pty| {
+                crate::terminal::cli_agent_sessions::process_registry::has_child_process(
+                    pty.get_pid(),
+                )
+            });
         // The event loop parses staged repaint bytes before live output. Some
         // repaint sequences reset block lifecycle state, so apply the shell's
         // saved announcement only after that deterministic replay boundary.
         manager.model().lock().prepare_attached_state(
             bootstrap,
-            metadata.input_editor_active,
+            input_editor_active,
             (!metadata.working_directory.is_empty()).then_some(metadata.working_directory),
         );
     }

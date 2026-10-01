@@ -335,7 +335,12 @@ impl PtySpawner {
         #[cfg(unix)]
         if let Some(supervisor) = self.supervisor.as_ref() {
             for handover in handovers {
-                supervisor.detach(handover.session_id, handover.snapshot, handover.metadata)?;
+                let session_id = handover.session_id;
+                if let Err(error) =
+                    supervisor.detach(session_id, handover.snapshot, handover.metadata)
+                {
+                    skip_ended_session(session_id, error, |id| supervisor.is_running(id))?;
+                }
             }
             return Ok(());
         }
@@ -352,7 +357,12 @@ impl PtySpawner {
         #[cfg(windows)]
         if let Some(supervisor) = self.supervisor.as_ref() {
             for handover in handovers {
-                supervisor.detach(handover.session_id, handover.snapshot, handover.metadata)?;
+                let session_id = handover.session_id;
+                if let Err(error) =
+                    supervisor.detach(session_id, handover.snapshot, handover.metadata)
+                {
+                    skip_ended_session(session_id, error, |id| supervisor.is_running(id))?;
+                }
             }
         }
         Ok(())
@@ -884,3 +894,28 @@ fn log_env_var_diagnostics(extra_env_vars: &HashMap<OsString, OsString>) {
         log::error!("Inherited process env entry key={key:?} bytes={size}");
     }
 }
+
+/// Decides what a failed handover means for the rest of the window.
+///
+/// A pane can outlive its shell, so a window may name sessions the supervisor has already let
+/// go. Those have nothing to hand over and must not hold back the ones that are still running;
+/// a session that is still running and could not be handed over is a real failure.
+pub(crate) fn skip_ended_session(
+    session_id: SessionId,
+    error: anyhow::Error,
+    is_running: impl FnOnce(SessionId) -> Result<bool>,
+) -> Result<()> {
+    match is_running(session_id) {
+        Ok(true) => Err(error),
+        Ok(false) | Err(_) => {
+            log::info!(
+                "Not handing over terminal session {session_id:?}, which has already ended: {error:#}"
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "spawner_tests.rs"]
+mod tests;

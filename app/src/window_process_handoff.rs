@@ -37,6 +37,7 @@ pub(crate) struct IncomingWindowHandoff {
     request_path: PathBuf,
     ready_path: PathBuf,
     release_path: PathBuf,
+    abort_path: PathBuf,
 }
 
 pub(crate) struct OutgoingWindowHandoff {
@@ -44,6 +45,7 @@ pub(crate) struct OutgoingWindowHandoff {
     request_path: PathBuf,
     ready_path: PathBuf,
     release_path: PathBuf,
+    abort_path: PathBuf,
 }
 
 impl IncomingWindowHandoff {
@@ -71,12 +73,14 @@ impl IncomingWindowHandoff {
         }
 
         let (ready_path, release_path) = marker_paths(&request_path);
+        let abort_path = abort_path(&request_path);
         let _ = fs::remove_file(&request_path);
         Ok(Self {
             payload,
             request_path,
             ready_path,
             release_path,
+            abort_path,
         })
     }
 
@@ -92,14 +96,32 @@ impl IncomingWindowHandoff {
         write_marker(&self.ready_path).context("Failed to acknowledge window process handoff")
     }
 
+    /// Whether the original process released the window. `false` when it aborted the handoff
+    /// or never answered.
     pub(crate) async fn wait_for_release(self) -> bool {
-        let released = wait_for_path(&self.release_path, RELEASE_TIMEOUT).await;
+        let started = Instant::now();
+        let mut released = false;
+        while started.elapsed() < RELEASE_TIMEOUT {
+            if self.release_path.is_file() {
+                released = true;
+                break;
+            }
+            if self.abort_path.is_file() {
+                break;
+            }
+            Timer::after(POLL_INTERVAL).await;
+        }
         self.cleanup();
         released
     }
 
     fn cleanup(&self) {
-        for path in [&self.request_path, &self.ready_path, &self.release_path] {
+        for path in [
+            &self.request_path,
+            &self.ready_path,
+            &self.release_path,
+            &self.abort_path,
+        ] {
             let _ = fs::remove_file(path);
         }
     }
@@ -115,8 +137,17 @@ impl OutgoingWindowHandoff {
         write_marker(&self.release_path).context("Failed to release window process handoff")
     }
 
+    /// Calls the handoff off and leaves the window with this process.
+    ///
+    /// A replacement that acknowledged the handoff is told through a marker and exits on its own.
+    /// Killing it instead would look like a crash to its crash-recovery standby, which then
+    /// launches a regular restore that fights this process for the window's sessions. One that
+    /// never acknowledged is presumed stuck and killed.
     pub(crate) fn abort(mut self) {
-        let _ = self.child.kill();
+        let _ = write_marker(&self.abort_path);
+        if !self.ready_path.is_file() {
+            let _ = self.child.kill();
+        }
         self.cleanup();
     }
 
@@ -156,6 +187,7 @@ pub(crate) fn launch(
     match child {
         Ok(child) => Ok(OutgoingWindowHandoff {
             child,
+            abort_path: abort_path(&request_path),
             request_path,
             ready_path,
             release_path,
@@ -200,6 +232,10 @@ fn marker_paths(request_path: &Path) -> (PathBuf, PathBuf) {
         request_path.with_extension("ready"),
         request_path.with_extension("release"),
     )
+}
+
+fn abort_path(request_path: &Path) -> PathBuf {
+    request_path.with_extension("abort")
 }
 
 async fn wait_for_path(path: &Path, timeout: Duration) -> bool {

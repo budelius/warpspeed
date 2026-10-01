@@ -146,3 +146,8 @@ fn claude_installed_through_npm_is_found_as_node() {
 
     assert_eq!(session.session_id, "npm-claude");
 }
+
+#[test]
+fn discoverable_agents_all_have_a_registry() {
+    assert!(DISCOVERABLE_AGENTS.into_iter().all(supports));
+}

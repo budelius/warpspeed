@@ -63,6 +63,18 @@ pub(crate) fn resolve(agent: CLIAgent, shell_pid: u32) -> Option<AgentProcessSes
     resolve_in(agent, shell_pid, &process_table(), &directory)
 }
 
+/// The agent running under `shell_pid`, for a pane that is already running one it did not see
+/// start -- a session reattached from the supervisor, say.
+pub(crate) fn discover(shell_pid: u32) -> Option<(CLIAgent, AgentProcessSession)> {
+    let processes = process_table();
+    DISCOVERABLE_AGENTS.into_iter().find_map(|agent| {
+        let directory = registry_directory(agent)?;
+        resolve_in(agent, shell_pid, &processes, &directory).map(|session| (agent, session))
+    })
+}
+
+const DISCOVERABLE_AGENTS: [CLIAgent; 2] = [CLIAgent::Claude, CLIAgent::Pi];
+
 pub(crate) fn resolve_in(
     agent: CLIAgent,
     shell_pid: u32,

@@ -2497,6 +2497,10 @@ pub struct TerminalView {
     shell_pid: Option<u32>,
     #[cfg(feature = "local_tty")]
     agent_session_refresh_scheduled: bool,
+    /// Whether this view's agent session was found under its shell rather than seen starting,
+    /// which makes it this view's to forget once the agent exits.
+    #[cfg(feature = "local_tty")]
+    agent_session_discovered: bool,
 
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
@@ -4406,6 +4410,8 @@ impl TerminalView {
             shell_pid: None,
             #[cfg(feature = "local_tty")]
             agent_session_refresh_scheduled: false,
+            #[cfg(feature = "local_tty")]
+            agent_session_discovered: false,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,
@@ -26615,47 +26621,129 @@ impl TerminalView {
 
     /// Reads the session the agent running in this pane is writing to, so a snapshot can record
     /// what to resume.
+    ///
+    /// A pane that took over a running session from the supervisor never saw its agent start,
+    /// so the agent is looked for under the shell too, and forgotten again once it exits.
     fn refresh_agent_session(&mut self, ctx: &mut ViewContext<Self>) {
         use crate::terminal::cli_agent_sessions::process_registry;
 
         let Some(shell_pid) = self.shell_pid else {
             return;
         };
-        let Some(session) = CLIAgentSessionsModel::as_ref(ctx).session(self.view_id) else {
-            return;
+        let session = CLIAgentSessionsModel::as_ref(ctx).session(self.view_id);
+        let tracked_agent = match session {
+            Some(session)
+                if session.is_remote()
+                    || session.received_rich_notification
+                    || !process_registry::supports(session.agent) =>
+            {
+                return;
+            }
+            Some(session) => Some(session.agent),
+            None => None,
         };
-        if session.is_remote()
-            || session.received_rich_notification
-            || !process_registry::supports(session.agent)
-        {
+        if let (Some(agent), false) = (tracked_agent, self.agent_session_discovered) {
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            ctx.background_executor()
+                .spawn(async move {
+                    let _ = sender.send(process_registry::resolve(agent, shell_pid));
+                })
+                .detach();
+            let view_id = self.view_id;
+            ctx.spawn(receiver, move |_, resolved, ctx| {
+                let Ok(Some(resolved)) = resolved else {
+                    return;
+                };
+                CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                    if sessions
+                        .session(view_id)
+                        .is_some_and(|session| session.agent == agent)
+                    {
+                        sessions.set_process_registry_session(
+                            view_id,
+                            resolved.session_id,
+                            resolved.cwd,
+                            ctx,
+                        );
+                    }
+                });
+            });
             return;
         }
-        let agent = session.agent;
+
         let (sender, receiver) = futures::channel::oneshot::channel();
         ctx.background_executor()
             .spawn(async move {
-                let _ = sender.send(process_registry::resolve(agent, shell_pid));
+                let _ = sender.send(process_registry::discover(shell_pid));
             })
             .detach();
-        let view_id = self.view_id;
-        ctx.spawn(receiver, move |_, resolved, ctx| {
-            let Ok(Some(resolved)) = resolved else {
+        ctx.spawn(receiver, move |me, discovered, ctx| {
+            let Ok(discovered) = discovered else {
                 return;
             };
-            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
-                if sessions
-                    .session(view_id)
-                    .is_some_and(|session| session.agent == agent)
+            me.apply_discovered_agent(discovered, ctx);
+        });
+    }
+
+    fn apply_discovered_agent(
+        &mut self,
+        discovered: Option<(
+            CLIAgent,
+            crate::terminal::cli_agent_sessions::process_registry::AgentProcessSession,
+        )>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let view_id = self.view_id;
+        let tracked_agent = CLIAgentSessionsModel::as_ref(ctx)
+            .session(view_id)
+            .map(|session| session.agent);
+        match (discovered, tracked_agent) {
+            (Some((agent, resolved)), tracked) => {
+                // Only a session this pane discovered itself may be replaced; one that command
+                // detection or a plugin started is theirs to manage.
+                if tracked.is_some_and(|tracked| tracked != agent) && !self.agent_session_discovered
                 {
+                    return;
+                }
+                let should_auto_toggle_input = agent.supports_cli_agent_footer()
+                    && *AISettings::as_ref(ctx).auto_open_rich_input_on_cli_agent_start;
+                CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                    if tracked != Some(agent) {
+                        sessions.set_session(
+                            view_id,
+                            CLIAgentSession {
+                                agent,
+                                status: CLIAgentSessionStatus::InProgress,
+                                session_context: CLIAgentSessionContext::default(),
+                                input_state: CLIAgentInputState::Closed,
+                                should_auto_toggle_input,
+                                listener: None,
+                                plugin_version: None,
+                                remote_host: None,
+                                draft_text: None,
+                                custom_command_prefix: None,
+                                received_rich_notification: false,
+                            },
+                            ctx,
+                        );
+                    }
                     sessions.set_process_registry_session(
                         view_id,
                         resolved.session_id,
                         resolved.cwd,
                         ctx,
                     );
-                }
-            });
-        });
+                });
+                self.agent_session_discovered = true;
+            }
+            (None, Some(_)) if self.agent_session_discovered => {
+                self.agent_session_discovered = false;
+                CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                    sessions.remove_session(view_id, ctx);
+                });
+            }
+            (None, _) => {}
+        }
     }
 }
 

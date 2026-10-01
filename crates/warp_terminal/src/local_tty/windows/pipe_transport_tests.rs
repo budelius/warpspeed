@@ -90,6 +90,41 @@ fn a_listener_can_still_serve_client_after_client() {
     }
 }
 
+#[test]
+fn waiting_for_an_absent_supervisor_reports_that_none_is_listening() {
+    let name = test_pipe_name("absent");
+
+    let transport = PipeTransport::connect_waiting(&name, std::time::Duration::from_secs(5))
+        .expect("an absent supervisor is not an error");
+
+    assert!(transport.is_none());
+}
+
+/// A supervisor that is busy with another client is still running. Mistaking it for an absent
+/// one makes every waiting client start its own supervisor, which is how hundreds of losing
+/// `--terminal-session-supervisor` processes ended up cycling against one live daemon.
+#[test]
+fn a_busy_supervisor_is_waited_for_rather_than_reported_absent() {
+    let name = test_pipe_name("busy");
+    let mut listener = PipeListener::bind(name.clone()).expect("bind must succeed");
+    let _occupant = PipeTransport::connect(&name).expect("the first client must connect");
+    assert!(
+        PipeTransport::connect(&name).is_err(),
+        "with its only instance taken, the pipe must be busy for this test to mean anything"
+    );
+
+    let waiter = std::thread::spawn(move || {
+        PipeTransport::connect_waiting(&name, std::time::Duration::from_secs(5))
+            .expect("a busy supervisor must be waited for")
+            .is_some()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Accepting the occupant stands up the next instance, which frees the waiter.
+    let _occupant_server_end = listener.accept().expect("accept must succeed");
+
+    assert!(waiter.join().expect("the waiting client must not panic"));
+}
+
 /// A name whose supervisor has gone is free to take, so a restart is not locked
 /// out by its own predecessor.
 #[test]

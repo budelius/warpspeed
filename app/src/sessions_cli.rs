@@ -91,7 +91,9 @@ fn supervisor_channel() -> String {
 fn supervisor_reachable() -> bool {
     use warp_terminal::local_tty::windows::pipe_transport::{PipeTransport, supervisor_pipe_name};
 
-    let Ok(mut transport) = PipeTransport::connect(&supervisor_pipe_name()) else {
+    let Ok(Some(mut transport)) =
+        PipeTransport::connect_waiting(&supervisor_pipe_name(), std::time::Duration::from_secs(15))
+    else {
         return false;
     };
     finish_probe(&mut transport)

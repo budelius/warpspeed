@@ -14,8 +14,8 @@ use anyhow::{Context, Result, bail};
 use instant::Instant;
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
@@ -23,7 +23,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
-    PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
+    PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
 };
 use windows::core::PCWSTR;
 
@@ -216,6 +216,42 @@ impl PipeTransport {
             handle,
             pending: Vec::new(),
         })
+    }
+
+    /// Connects to a supervisor listening on `name`, waiting up to `timeout` while every instance
+    /// of the pipe is serving another client.
+    ///
+    /// Returns `Ok(None)` when nothing is listening on `name`.
+    pub fn connect_waiting(name: &str, timeout: std::time::Duration) -> Result<Option<Self>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let error = match Self::connect(name) {
+                Ok(transport) => return Ok(Some(transport)),
+                Err(error) => error,
+            };
+            let code = error
+                .downcast_ref::<windows::core::Error>()
+                .map(windows::core::Error::code);
+            if code == Some(ERROR_FILE_NOT_FOUND.to_hresult()) {
+                return Ok(None);
+            }
+            if code != Some(ERROR_PIPE_BUSY.to_hresult()) {
+                return Err(error);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(error).context("Timed out waiting for the busy supervisor pipe");
+            }
+            // Whatever this returns, the next connect attempt classifies the pipe's state: an
+            // instance freed, the supervisor exited, or the wait ran out.
+            let wide_name = wide(name);
+            let _ = unsafe {
+                WaitNamedPipeW(
+                    PCWSTR(wide_name.as_ptr()),
+                    remaining.as_millis().clamp(1, u32::MAX as u128) as u32,
+                )
+            };
+        }
     }
 
     /// Returns the process ID connected to the client side of an accepted pipe.

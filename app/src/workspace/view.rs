@@ -13453,11 +13453,11 @@ impl Workspace {
         });
     }
 
-    /// Looks up the tracked CLI agent session for `terminal_view_id` and, if it names a
-    /// resumable Claude session, forks that session's transcript at its last complete turn.
-    /// Returns `None` (logging why, except for the two silent/expected cases) whenever
-    /// resuming isn't possible:
-    /// - no tracked session, or a tracked session for an agent other than Claude
+    /// Looks up the tracked CLI agent session for `terminal_view_id` and returns the command that
+    /// reopens it. A Claude session's transcript is first forked at its last complete turn; a Pi
+    /// session is reopened as it stands. Returns `None` (logging why, except for the two
+    /// silent/expected cases) whenever resuming isn't possible:
+    /// - no tracked session, or a tracked session for an agent other than Claude or Pi
     ///   (untracked/unsupported -- silent, by decision)
     /// - no session id (untracked -- silent, by decision)
     /// - no cwd on record for the session
@@ -13469,8 +13469,30 @@ impl Workspace {
         ctx: &AppContext,
     ) -> Option<String> {
         let session = CLIAgentSessionsModel::as_ref(ctx).session(terminal_view_id)?;
-        if session.agent != crate::terminal::CLIAgent::Claude {
-            return None;
+        match session.agent {
+            crate::terminal::CLIAgent::Claude => {}
+            crate::terminal::CLIAgent::Pi => {
+                return session
+                    .session_context
+                    .session_id
+                    .as_deref()
+                    .map(|session_id| format!("pi --session {session_id}"));
+            }
+            crate::terminal::CLIAgent::Gemini
+            | crate::terminal::CLIAgent::Codex
+            | crate::terminal::CLIAgent::Amp
+            | crate::terminal::CLIAgent::Droid
+            | crate::terminal::CLIAgent::OpenCode
+            | crate::terminal::CLIAgent::Copilot
+            | crate::terminal::CLIAgent::OhMyPi
+            | crate::terminal::CLIAgent::Auggie
+            | crate::terminal::CLIAgent::CursorCli
+            | crate::terminal::CLIAgent::Goose
+            | crate::terminal::CLIAgent::Hermes
+            | crate::terminal::CLIAgent::Vibe
+            | crate::terminal::CLIAgent::Antigravity
+            | crate::terminal::CLIAgent::WarpTui
+            | crate::terminal::CLIAgent::Unknown => return None,
         }
         let session_context = session.session_context.clone();
 

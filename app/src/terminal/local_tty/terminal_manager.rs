@@ -1387,7 +1387,6 @@ fn on_shell_determined<S: TerminalSurface>(
         .lock()
         .register_session_id(active_session_id);
 
-    #[cfg(feature = "integration_tests")]
     let pid = pty.get_pid();
     #[cfg(unix)]
     let fd = pty.get_fd();
@@ -1411,6 +1410,7 @@ fn on_shell_determined<S: TerminalSurface>(
     }
 
     manager.view.update(ctx, |surface, ctx| {
+        surface.on_shell_pid_determined(pid, ctx);
         surface.on_shell_determined(ctx);
         surface.on_active_shell_launch_data_updated(Some(shell_launch_data), ctx);
     });

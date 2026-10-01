@@ -2,6 +2,8 @@ pub mod event;
 pub mod listener;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod plugin_manager;
+#[cfg(not(target_family = "wasm"))]
+pub(crate) mod process_registry;
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -757,6 +759,39 @@ impl CLIAgentSessionsModel {
         ctx.emit(CLIAgentSessionsModelEvent::Started {
             terminal_view_id,
             agent,
+        });
+    }
+
+    /// Records the session an agent process reported in its own process registry.
+    ///
+    /// A plugin-backed session already reports its session through events, which stay the
+    /// source of truth for it.
+    pub fn set_process_registry_session(
+        &mut self,
+        terminal_view_id: EntityId,
+        session_id: String,
+        cwd: Option<String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(session) = self.sessions.get_mut(&terminal_view_id) else {
+            return;
+        };
+        if session.received_rich_notification {
+            return;
+        }
+        let context = &mut session.session_context;
+        let changed = context.session_id.as_deref() != Some(session_id.as_str())
+            || (cwd.is_some() && context.cwd != cwd);
+        if !changed {
+            return;
+        }
+        context.session_id = Some(session_id);
+        if cwd.is_some() {
+            context.cwd = cwd;
+        }
+        ctx.emit(CLIAgentSessionsModelEvent::SessionUpdated {
+            terminal_view_id,
+            agent: session.agent,
         });
     }
 

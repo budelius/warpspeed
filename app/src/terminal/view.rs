@@ -635,6 +635,11 @@ const BRACKETED_PASTE_SUFFIX: &str = "\x1b[201~";
 
 /// Duration before we consider a session to have failed bootstrapping.
 const BOOTSTRAP_FAILED_DURATION: Duration = Duration::from_secs(7);
+
+/// How often a running agent's session is re-read from its process registry. The session can
+/// change under a running agent, through `/resume` or `/new`.
+#[cfg(feature = "local_tty")]
+const AGENT_SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// Duration before we consider a session invoked from an env vars object to
 /// have failed bootstrapping. The longer duration is meant to account for
 /// a user needing to type in one or many secret manager passwords
@@ -2486,6 +2491,12 @@ struct LocalSessionCanonicalPwdCache {
 pub struct TerminalView {
     pub model: Arc<FairMutex<TerminalModel>>,
     view_handle: WeakViewHandle<Self>,
+
+    /// The process ID of the shell this view's PTY is running, once it has started.
+    #[cfg(feature = "local_tty")]
+    shell_pid: Option<u32>,
+    #[cfg(feature = "local_tty")]
+    agent_session_refresh_scheduled: bool,
 
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
@@ -4391,6 +4402,10 @@ impl TerminalView {
             privacy_settings_snapshot: privacy_settings_handle.as_ref(ctx).get_snapshot(ctx),
             was_ever_visible: false,
             view_id: ctx.view_id(),
+            #[cfg(feature = "local_tty")]
+            shell_pid: None,
+            #[cfg(feature = "local_tty")]
+            agent_session_refresh_scheduled: false,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,
@@ -12249,6 +12264,9 @@ impl TerminalView {
                                             _ => {}
                                         },
                                     );
+
+                                    #[cfg(feature = "local_tty")]
+                                    me.refresh_agent_session(ctx);
 
                                     // Codex doesn't use the sentinel-based plugin protocol,
                                     // so create the listener proactively on command detection
@@ -26583,7 +26601,74 @@ impl PtyIntentEvent for Event {
     }
 }
 
+#[cfg(feature = "local_tty")]
+impl TerminalView {
+    fn schedule_agent_session_refresh(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.spawn(
+            Timer::after(AGENT_SESSION_REFRESH_INTERVAL),
+            |me, _, ctx| {
+                me.refresh_agent_session(ctx);
+                me.schedule_agent_session_refresh(ctx);
+            },
+        );
+    }
+
+    /// Reads the session the agent running in this pane is writing to, so a snapshot can record
+    /// what to resume.
+    fn refresh_agent_session(&mut self, ctx: &mut ViewContext<Self>) {
+        use crate::terminal::cli_agent_sessions::process_registry;
+
+        let Some(shell_pid) = self.shell_pid else {
+            return;
+        };
+        let Some(session) = CLIAgentSessionsModel::as_ref(ctx).session(self.view_id) else {
+            return;
+        };
+        if session.is_remote()
+            || session.received_rich_notification
+            || !process_registry::supports(session.agent)
+        {
+            return;
+        }
+        let agent = session.agent;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        ctx.background_executor()
+            .spawn(async move {
+                let _ = sender.send(process_registry::resolve(agent, shell_pid));
+            })
+            .detach();
+        let view_id = self.view_id;
+        ctx.spawn(receiver, move |_, resolved, ctx| {
+            let Ok(Some(resolved)) = resolved else {
+                return;
+            };
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                if sessions
+                    .session(view_id)
+                    .is_some_and(|session| session.agent == agent)
+                {
+                    sessions.set_process_registry_session(
+                        view_id,
+                        resolved.session_id,
+                        resolved.cwd,
+                        ctx,
+                    );
+                }
+            });
+        });
+    }
+}
+
 impl TerminalSurface for TerminalView {
+    #[cfg(feature = "local_tty")]
+    fn on_shell_pid_determined(&mut self, pid: u32, ctx: &mut ViewContext<Self>) {
+        self.shell_pid = Some(pid);
+        if !self.agent_session_refresh_scheduled {
+            self.agent_session_refresh_scheduled = true;
+            self.schedule_agent_session_refresh(ctx);
+        }
+    }
+
     #[cfg(feature = "local_tty")]
     fn on_shell_determined(&mut self, ctx: &mut ViewContext<Self>) {
         if !self.model.lock().shared_session_status().is_viewer() {

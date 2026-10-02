@@ -2418,6 +2418,35 @@ fn a_pane_adopting_a_running_shell_is_bootstrapped_by_what_it_is_told() {
     );
 }
 
+/// A shell handed over while a program was running in it -- an agent, typically -- is not at its
+/// prompt. If the adopting pane treats it as idle, keystrokes go to Warp's own input editor,
+/// which is hidden behind the program's screen, and the program can never be typed into.
+#[test]
+fn a_pane_adopting_a_shell_mid_command_sends_input_to_the_command() {
+    let announced = TerminalModel::mock(None, None);
+    let captured = announced
+        .captured_bootstrap()
+        .cloned()
+        .expect("a model that saw a shell start must have captured the announcement");
+
+    let mut adopting = TerminalModel::mock_before_bootstrap();
+    adopting.prepare_attached_state(captured, false, Some("/workspace".to_owned()));
+    adopting.restore_attached_state();
+
+    assert!(adopting.is_active_block_bootstrapped());
+    assert!(
+        adopting.block_list().active_block().is_executing(),
+        "the program the shell was running must be the pane's executing command"
+    );
+    assert!(
+        !matches!(
+            adopting.terminal_input_state(),
+            TerminalInputState::NotBootstrapped
+        ),
+        "an adopted shell must accept input"
+    );
+}
+
 /// The announcement has to survive the supervisor, which is the only thing that
 /// outlives the app -- and it crosses it as bincode, which is not
 /// self-describing and so unforgiving of a type that does not round trip.

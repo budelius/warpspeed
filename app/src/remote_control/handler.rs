@@ -7,7 +7,7 @@
 
 use warpui::AppContext;
 
-use super::protocol::{PaneSummary, Request, Response};
+use super::protocol::{PaneSummary, Request, Response, StoredSessionInfo};
 
 /// Carries out one request.
 pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
@@ -19,8 +19,52 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
         Request::ListPanes => list_panes(ctx),
         Request::DetachSession { session_id } => detach(session_id.into(), ctx),
         Request::AttachSession { session_id } => attach(session_id.into(), ctx),
+        Request::ListStoredSessions => list_stored_sessions(),
+        Request::OpenStoredSession { name } => open_stored_session(&name, ctx),
         Request::Quit { close_windows } => quit(close_windows, ctx),
     }
+}
+
+fn list_stored_sessions() -> Response {
+    let sessions = crate::launch_configs::session_store::list_summaries()
+        .iter()
+        .map(|summary| StoredSessionInfo {
+            name: summary.name().to_owned(),
+            autosaved: summary.is_current(),
+            saved_at_unix_seconds: summary.saved_at_unix_seconds(),
+            tabs: summary.tabs().count(),
+            panes: summary.pane_count(),
+            agents: summary.agent_count(),
+        })
+        .collect();
+    Response::StoredSessions { sessions }
+}
+
+/// Opens the newest autosave of the session called `name`, or its newest stored snapshot when
+/// it has no autosave.
+fn open_stored_session(name: &str, ctx: &mut AppContext) -> Response {
+    let summaries = crate::launch_configs::session_store::list_summaries();
+    let named = || {
+        summaries
+            .iter()
+            .filter(|summary| summary.name().eq_ignore_ascii_case(name))
+    };
+    let Some(summary) = named()
+        .find(|summary| summary.is_current())
+        .or_else(|| named().next())
+    else {
+        return Response::Failed {
+            error: format!("No saved session is called {name:?}"),
+        };
+    };
+    ctx.dispatch_global_action(
+        "root_view:open_stored_session",
+        &crate::root_view::OpenStoredSessionArg {
+            summary: std::sync::Arc::new(summary.clone()),
+            ui_location: crate::server::telemetry::LaunchConfigUiLocation::Uri,
+        },
+    );
+    Response::Done
 }
 
 #[cfg(feature = "local_tty")]

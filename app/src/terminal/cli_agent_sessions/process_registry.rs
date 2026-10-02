@@ -1,0 +1,286 @@
+//! Finds the session a CLI agent running in a pane is using, by asking the agent's own process
+//! registry rather than guessing from transcripts.
+//!
+//! Claude Code writes `<config dir>/sessions/<pid>.json` for every running instance, holding the
+//! exact session ID it is writing to. Pi has no such file, so Warp installs a Pi extension that
+//! writes the equivalent under `<agent dir>/warp-sessions/<pid>.json`. Both are keyed by the
+//! agent's process ID, so the pane's shell is walked down to the agent process and its entry
+//! read. A transcript-based guess -- the newest conversation in the pane's directory -- swaps
+//! sessions as soon as two agents share a directory, which is the common case.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::{Context as _, Result};
+use instant::Instant;
+use serde::Deserialize;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+use crate::terminal::CLIAgent;
+
+/// How long one process table read is reused. Every pane with an agent asks on its own
+/// schedule, and walking every process on the machine once per pane would be wasted work.
+const PROCESS_TABLE_TTL: Duration = Duration::from_secs(5);
+
+const PI_REGISTRY_DIRECTORY: &str = "warp-sessions";
+const PI_EXTENSION_FILE_NAME: &str = "warp-session-registry.ts";
+const PI_EXTENSION_SOURCE: &str = include_str!("process_registry/warp-session-registry.ts");
+
+/// The session an agent process reported, and the directory it is running in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentProcessSession {
+    pub session_id: String,
+    pub cwd: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProcessInfo {
+    pub pid: u32,
+    pub parent: Option<u32>,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryEntry {
+    session_id: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// Agents whose session can be read from a process registry.
+pub(crate) fn supports(agent: CLIAgent) -> bool {
+    registry_directory(agent).is_some()
+}
+
+/// The session of the `agent` process running under `shell_pid`, if it can be found.
+///
+/// Blocks on process enumeration and file reads, so callers run it off the main thread.
+pub(crate) fn resolve(agent: CLIAgent, shell_pid: u32) -> Option<AgentProcessSession> {
+    let directory = registry_directory(agent)?;
+    resolve_in(agent, shell_pid, &process_table(), &directory)
+}
+
+/// The agent running under `shell_pid`, for a pane that is already running one it did not see
+/// start -- a session reattached from the supervisor, say.
+pub(crate) fn discover(shell_pid: u32) -> Option<(CLIAgent, AgentProcessSession)> {
+    let processes = process_table();
+    DISCOVERABLE_AGENTS.into_iter().find_map(|agent| {
+        let directory = registry_directory(agent)?;
+        resolve_in(agent, shell_pid, &processes, &directory).map(|session| (agent, session))
+    })
+}
+
+const DISCOVERABLE_AGENTS: [CLIAgent; 2] = [CLIAgent::Claude, CLIAgent::Pi];
+
+pub(crate) fn resolve_in(
+    agent: CLIAgent,
+    shell_pid: u32,
+    processes: &[ProcessInfo],
+    registry_directory: &Path,
+) -> Option<AgentProcessSession> {
+    let names: HashMap<u32, &str> = processes
+        .iter()
+        .map(|process| (process.pid, process.name.as_str()))
+        .collect();
+    descendants(shell_pid, processes)
+        .into_iter()
+        .filter(|pid| {
+            names
+                .get(pid)
+                .is_some_and(|name| is_agent_process(agent, name))
+        })
+        .find_map(|pid| read_entry(&registry_directory.join(format!("{pid}.json"))))
+}
+
+/// The sessions agents on this machine are running right now, whichever pane or terminal they
+/// are in.
+pub(crate) fn running_session_ids() -> std::collections::HashSet<String> {
+    let processes = process_table();
+    DISCOVERABLE_AGENTS
+        .into_iter()
+        .filter_map(|agent| Some((agent, registry_directory(agent)?)))
+        .flat_map(|(agent, directory)| {
+            processes
+                .iter()
+                .filter(move |process| is_agent_process(agent, &process.name))
+                .filter_map(move |process| {
+                    read_entry(&directory.join(format!("{}.json", process.pid)))
+                })
+                .map(|session| session.session_id)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Whether any process is running under `pid`.
+pub(crate) fn has_child_process(pid: u32) -> bool {
+    has_child_process_in(pid, &process_table())
+}
+
+pub(crate) fn has_child_process_in(pid: u32, processes: &[ProcessInfo]) -> bool {
+    processes
+        .iter()
+        .any(|process| process.parent == Some(pid) && process.pid != pid)
+}
+
+/// Every process below `root`, nearest first.
+pub(crate) fn descendants(root: u32, processes: &[ProcessInfo]) -> Vec<u32> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for process in processes {
+        if let Some(parent) = process.parent
+            && parent != process.pid
+        {
+            children.entry(parent).or_default().push(process.pid);
+        }
+    }
+    let mut found = Vec::new();
+    let mut queue = VecDeque::from([root]);
+    while let Some(pid) = queue.pop_front() {
+        for &child in children.get(&pid).into_iter().flatten() {
+            if !found.contains(&child) && child != root {
+                found.push(child);
+                queue.push_back(child);
+            }
+        }
+    }
+    found
+}
+
+/// Whether a process with this executable name can be the agent itself. A registry entry left
+/// behind by an agent that crashed must not be credited to an unrelated process that later
+/// received the same ID.
+fn is_agent_process(agent: CLIAgent, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    match agent {
+        // Native installs run as `claude`; npm installs run on Node.
+        CLIAgent::Claude => name.starts_with("claude") || is_script_runtime(&name),
+        CLIAgent::Pi => name.starts_with("pi") || is_script_runtime(&name),
+        CLIAgent::Gemini
+        | CLIAgent::Codex
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Vibe
+        | CLIAgent::Antigravity
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => false,
+    }
+}
+
+fn is_script_runtime(name: &str) -> bool {
+    name.starts_with("node") || name.starts_with("bun")
+}
+
+fn read_entry(path: &Path) -> Option<AgentProcessSession> {
+    let contents = std::fs::read(path).ok()?;
+    let entry: RegistryEntry = serde_json::from_slice(&contents).ok()?;
+    is_safe_session_id(&entry.session_id).then_some(AgentProcessSession {
+        session_id: entry.session_id,
+        cwd: entry.cwd.filter(|cwd| !cwd.is_empty()),
+    })
+}
+
+/// The ID becomes an argument of a command typed into a shell, so it is held to the characters
+/// real IDs use.
+fn is_safe_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn registry_directory(agent: CLIAgent) -> Option<PathBuf> {
+    match agent {
+        CLIAgent::Claude => {
+            crate::ai::agent_sdk::driver::harness::claude_transcript::claude_config_dir()
+                .ok()
+                .map(|dir| dir.join("sessions"))
+        }
+        CLIAgent::Pi => pi_agent_dir().map(|dir| dir.join(PI_REGISTRY_DIRECTORY)),
+        CLIAgent::Gemini
+        | CLIAgent::Codex
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Vibe
+        | CLIAgent::Antigravity
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => None,
+    }
+}
+
+fn pi_agent_dir() -> Option<PathBuf> {
+    match std::env::var_os("PI_CODING_AGENT_DIR") {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => dirs::home_dir().map(|home| home.join(".pi").join("agent")),
+    }
+}
+
+fn process_table() -> Arc<Vec<ProcessInfo>> {
+    static CACHE: Mutex<Option<(Instant, Arc<Vec<ProcessInfo>>)>> = Mutex::new(None);
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((read_at, table)) = cache.as_ref()
+        && read_at.elapsed() < PROCESS_TABLE_TTL
+    {
+        return table.clone();
+    }
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let table: Arc<Vec<ProcessInfo>> = Arc::new(
+        system
+            .processes()
+            .values()
+            .map(|process| ProcessInfo {
+                pid: process.pid().as_u32(),
+                parent: process.parent().map(|parent| parent.as_u32()),
+                name: process.name().to_string_lossy().into_owned(),
+            })
+            .collect(),
+    );
+    *cache = Some((Instant::now(), table.clone()));
+    table
+}
+
+/// Installs or updates the Pi extension that writes Pi's process registry, when Pi is set up on
+/// this machine. Returns whether the file was written.
+pub(crate) fn install_pi_extension() -> Result<bool> {
+    match pi_agent_dir() {
+        Some(dir) if dir.is_dir() => install_pi_extension_in(&dir),
+        _ => Ok(false),
+    }
+}
+
+pub(crate) fn install_pi_extension_in(pi_agent_dir: &Path) -> Result<bool> {
+    let extensions = pi_agent_dir.join("extensions");
+    let path = extensions.join(PI_EXTENSION_FILE_NAME);
+    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == PI_EXTENSION_SOURCE) {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(&extensions)
+        .with_context(|| format!("Failed to create Pi extensions directory {extensions:?}"))?;
+    std::fs::write(&path, PI_EXTENSION_SOURCE)
+        .with_context(|| format!("Failed to write Pi extension {path:?}"))?;
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "process_registry_tests.rs"]
+mod tests;

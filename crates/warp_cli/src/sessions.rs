@@ -104,6 +104,25 @@ pub enum SessionsCommand {
         instance: InstanceArg,
     },
 
+    /// List the saved sessions a running Warp instance can reopen, newest first.
+    Stored {
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// Reopen a saved session in a running Warp instance, as picking it in the session picker
+    /// would.
+    ///
+    /// Opens the session's newest autosave. Shells it was running that are still alive are
+    /// taken over; agents whose process has ended resume from their recorded session.
+    Open {
+        /// The saved session's name, as `stored` lists it. Case does not matter.
+        name: String,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
     /// End a session the supervisor is holding, killing its shell.
     ///
     /// Only reaches detached sessions. A session a window is using belongs to

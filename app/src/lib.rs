@@ -2303,6 +2303,19 @@ pub(crate) fn initialize_app(
     // loads metadata.
     ctx.add_singleton_model(|_| RestoredAgentConversations::new());
     ctx.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    #[cfg(not(target_family = "wasm"))]
+    ctx.background_executor()
+        .spawn(async {
+            use crate::terminal::cli_agent_sessions::process_registry;
+            match process_registry::install_pi_extension() {
+                Ok(true) => log::info!("Installed the Pi session registry extension"),
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("Failed to install the Pi session registry extension: {error:#}")
+                }
+            }
+        })
+        .detach();
     // ActiveAgentViewsModel is used to track active agent conversations and notify listeners when they change.
     ctx.add_singleton_model(|_| ActiveAgentViewsModel::new());
     ctx.add_singleton_model(AgentNotificationsModel::new);
@@ -3270,15 +3283,6 @@ fn launch(
                     })
                 });
             }
-            if !should_skip_restore
-                && !force_restore
-                && let Some(app_state) = app_state.as_mut()
-            {
-                crate::launch_configs::session_store::recover_missing_agent_session_ids(
-                    &mut app_state.windows,
-                );
-            }
-
             if app_state
                 .as_ref()
                 .is_some_and(|app_state| !app_state.windows.is_empty())

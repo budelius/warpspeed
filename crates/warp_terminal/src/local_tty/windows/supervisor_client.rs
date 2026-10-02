@@ -157,13 +157,14 @@ impl WindowsTerminalSupervisorClient {
     }
 
     fn request(&self, message: Message) -> Result<Message> {
-        let mut transport = match PipeTransport::connect(&supervisor_pipe_name()) {
-            Ok(transport) => transport,
-            Err(_) => {
-                self.start_supervisor()?;
-                self.connect_after_start()?
-            }
-        };
+        let mut transport =
+            match PipeTransport::connect_waiting(&supervisor_pipe_name(), CONTROL_TIMEOUT)? {
+                Some(transport) => transport,
+                None => {
+                    self.start_supervisor()?;
+                    self.connect_after_start()?
+                }
+            };
         transport.send(&message)?;
         let response = transport.receive_timeout(CONTROL_TIMEOUT)?;
         transport.send(&Message::ResponseReceived)?;
@@ -178,16 +179,16 @@ impl WindowsTerminalSupervisorClient {
     fn connect_after_start(&self) -> Result<PipeTransport> {
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
-            match PipeTransport::connect(&supervisor_pipe_name()) {
-                Ok(transport) => return Ok(transport),
-                Err(error) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(25));
-                    let _ = error;
-                }
-                Err(error) => {
-                    return Err(error).context("Timed out connecting to the terminal supervisor");
-                }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if let Some(transport) =
+                PipeTransport::connect_waiting(&supervisor_pipe_name(), remaining)?
+            {
+                return Ok(transport);
             }
+            if remaining.is_zero() {
+                bail!("Timed out connecting to the terminal supervisor");
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 }

@@ -1274,3 +1274,79 @@ fn second_ctrl_c_while_armed_reuses_the_existing_window() {
         });
     });
 }
+
+#[test]
+fn a_command_detected_session_takes_the_id_its_process_registry_reports() {
+    App::test((), |mut app| async move {
+        let model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        let view_id = EntityId::new();
+        model.update(&mut app, |m, ctx| {
+            m.set_session(
+                view_id,
+                cli_agent_session(CLIAgentSessionStatus::InProgress, false),
+                ctx,
+            );
+            m.set_process_registry_session(
+                view_id,
+                "first-session".to_owned(),
+                Some(r"T:\projects\obachan".to_owned()),
+                ctx,
+            );
+        });
+
+        model.read(&app, |m, _| {
+            let context = &m.session(view_id).unwrap().session_context;
+            assert_eq!(context.session_id.as_deref(), Some("first-session"));
+            assert_eq!(context.cwd.as_deref(), Some(r"T:\projects\obachan"));
+        });
+
+        // `/resume` inside the agent switches the session it writes to.
+        model.update(&mut app, |m, ctx| {
+            m.set_process_registry_session(view_id, "second-session".to_owned(), None, ctx);
+        });
+
+        model.read(&app, |m, _| {
+            let context = &m.session(view_id).unwrap().session_context;
+            assert_eq!(context.session_id.as_deref(), Some("second-session"));
+            assert_eq!(context.cwd.as_deref(), Some(r"T:\projects\obachan"));
+        });
+    });
+}
+
+#[test]
+fn a_plugin_backed_session_keeps_the_id_its_plugin_reported() {
+    App::test((), |mut app| async move {
+        let model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        let view_id = EntityId::new();
+        model.update(&mut app, |m, ctx| {
+            let mut session = cli_agent_session(CLIAgentSessionStatus::InProgress, true);
+            session.session_context.session_id = Some("from-plugin".to_owned());
+            m.set_session(view_id, session, ctx);
+            m.set_process_registry_session(view_id, "from-registry".to_owned(), None, ctx);
+        });
+
+        model.read(&app, |m, _| {
+            assert_eq!(
+                m.session(view_id)
+                    .unwrap()
+                    .session_context
+                    .session_id
+                    .as_deref(),
+                Some("from-plugin")
+            );
+        });
+    });
+}
+
+#[test]
+fn a_registry_session_for_a_pane_without_an_agent_is_ignored() {
+    App::test((), |mut app| async move {
+        let model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        let view_id = EntityId::new();
+        model.update(&mut app, |m, ctx| {
+            m.set_process_registry_session(view_id, "orphan".to_owned(), None, ctx);
+        });
+
+        model.read(&app, |m, _| assert!(m.session(view_id).is_none()));
+    });
+}

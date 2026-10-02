@@ -1,15 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::vec2f;
 
 use super::{
     NoCheckpointsToClone, clone_checkpoints_in_dir, group_summaries, load_from_dir, read_catalog,
-    recover_agent_session_ids, save_to_dir, save_windows_to_dir,
+    save_to_dir, save_windows_to_dir,
 };
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -22,7 +21,6 @@ use crate::app_state::{
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
-use crate::terminal::agent_session_history::PastAgentSession;
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::model::block::SerializedBlock;
 use crate::terminal::shell::ShellType;
@@ -126,68 +124,6 @@ fn window_session_round_trip_preserves_shell_and_agent_state() {
     assert!(dir.path().join("devops/2/window-0.json").is_file());
     assert_eq!(restored.window, expected);
     assert_eq!(restored.block_lists, Arc::new(block_lists));
-}
-
-#[test]
-fn missing_agent_ids_recover_distinct_transcripts_for_each_pane() {
-    let source = LaunchConfigWindowSource {
-        path: PathBuf::from("/home/warp/.warp/session_configurations/devops.toml"),
-        document_index: 2,
-        window_index: 0,
-        config_name: "DEVOPS".to_string(),
-    };
-    let mut first = window(source).tabs.remove(0).root;
-    let PaneNodeSnapshot::Leaf(first_leaf) = &mut first else {
-        panic!("test pane should be a leaf");
-    };
-    let LeafContents::Terminal(first_terminal) = &mut first_leaf.contents else {
-        panic!("test pane should be a terminal");
-    };
-    first_terminal
-        .cli_agent_resume_descriptor
-        .as_mut()
-        .expect("agent descriptor should exist")
-        .session_id = None;
-    let mut second = first.clone();
-    let now = SystemTime::now();
-    let mut candidates = HashMap::from([(
-        CLIAgent::Claude,
-        vec![
-            PastAgentSession {
-                agent: CLIAgent::Claude,
-                session_id: "newer-session".to_owned(),
-                cwd: PathBuf::from("/workspace/devops"),
-                title: Some("newer".to_owned()),
-                modified: now,
-            },
-            PastAgentSession {
-                agent: CLIAgent::Claude,
-                session_id: "older-session".to_owned(),
-                cwd: PathBuf::from("/workspace/devops"),
-                title: Some("older".to_owned()),
-                modified: now - Duration::from_secs(1),
-            },
-        ],
-    )]);
-    let mut used_ids = HashSet::new();
-
-    recover_agent_session_ids(&mut first, &mut used_ids, &mut candidates);
-    recover_agent_session_ids(&mut second, &mut used_ids, &mut candidates);
-
-    let session_id = |node: &PaneNodeSnapshot| {
-        let PaneNodeSnapshot::Leaf(leaf) = node else {
-            panic!("test pane should be a leaf");
-        };
-        let LeafContents::Terminal(terminal) = &leaf.contents else {
-            panic!("test pane should be a terminal");
-        };
-        terminal
-            .cli_agent_resume_descriptor
-            .as_ref()
-            .and_then(|descriptor| descriptor.session_id.clone())
-    };
-    assert_eq!(session_id(&first).as_deref(), Some("newer-session"));
-    assert_eq!(session_id(&second).as_deref(), Some("older-session"));
 }
 
 #[test]

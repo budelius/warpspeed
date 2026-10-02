@@ -104,6 +104,41 @@ fn add_window_with_cloud_mode_terminal(app: &mut App) -> ViewHandle<TerminalView
     terminal
 }
 
+#[test]
+fn updating_active_shell_launch_data_requests_an_app_state_save() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let app_state_changed = Rc::new(RefCell::new(false));
+
+        app.update({
+            let app_state_changed = app_state_changed.clone();
+            |ctx| {
+                ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                    if matches!(event, Event::AppStateChanged) {
+                        *app_state_changed.borrow_mut() = true;
+                    }
+                });
+            }
+        });
+
+        terminal.update(&mut app, |terminal, ctx| {
+            <TerminalView as TerminalSurface>::on_active_shell_launch_data_updated(
+                terminal,
+                Some(ShellLaunchData::WSL {
+                    distro: "Ubuntu".to_owned(),
+                }),
+                ctx,
+            );
+        });
+
+        assert!(
+            *app_state_changed.borrow(),
+            "changing a pane's shell must update its persisted snapshot"
+        );
+    });
+}
+
 /// Builds a resumable, owned (created by the current test user) Oz cloud task so
 /// `resolve_ai_query_routing` classifies a pane bound to it as a `NewCloudVm` follow-up target.
 fn owned_resumable_oz_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
@@ -10283,6 +10318,60 @@ fn up_and_down_navigate_blocks_when_no_command_is_running() {
             pty_writes.borrow()
         );
     })
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn retry_removes_an_unbootstrapped_shells_terminated_banner() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |view, ctx| {
+            let initial_rich_content_count = view.rich_content_views.len();
+            view.insert_shell_process_terminated_banner(
+                shell_terminated_banner::TerminationType::Normal,
+                ctx,
+            );
+
+            let banner_id = view
+                .rich_content_views
+                .iter()
+                .find(|rich_content| rich_content.is_shell_process_terminated_banner())
+                .expect("an unbootstrapped shell exit should insert a rich-content banner")
+                .view_id();
+            assert_eq!(
+                view.rich_content_views.len(),
+                initial_rich_content_count + 1
+            );
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .rich_content_row_range(banner_id)
+                    .is_some(),
+                "the banner must also be present in the block list"
+            );
+
+            view.on_session_restart_started(ctx);
+
+            assert_eq!(view.rich_content_views.len(), initial_rich_content_count);
+            assert!(
+                view.rich_content_views
+                    .iter()
+                    .all(|rich_content| !rich_content.is_shell_process_terminated_banner()),
+                "restart must discard the failed shell's banner view"
+            );
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .rich_content_row_range(banner_id)
+                    .is_none(),
+                "restart must discard the failed shell's banner block-list entry"
+            );
+        });
+    });
 }
 
 /// `ModelEvent::Exit` is written for a shell that died: it inserts the "process

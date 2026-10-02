@@ -6625,50 +6625,193 @@ fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_vie
     });
 }
 
-/// Choosing a shell must close the picker.
-///
-/// Selecting an item dispatches `ChangeShell` and, independently, has the menu
-/// emit its own `MenuEvent::Close` -- so without the subscription in
-/// `build_change_shell_menu_modal` the picker lingers open on top of the pane
-/// it just restarted. That subscription is the whole of commit `21273eee` and
-/// nothing referenced it.
 #[test]
-fn selecting_a_shell_closes_the_change_shell_picker() {
+fn terminal_pane_header_button_maximizes_and_restores_the_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let _header = FeatureFlag::ContextWindowUsageV2.override_enabled(true);
+
+        let workspace = mock_workspace(&mut app);
+        let window_id = workspace.update(&mut app, |_, ctx| ctx.window_id());
+        let (pane_group, terminal, focused_header_id, render_ids) =
+            workspace.update(&mut app, |workspace, ctx| {
+                let pane_group = workspace.active_tab_pane_group().clone();
+                pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.add_loading_conversation_pane(Direction::Right, None, ctx);
+                });
+
+                let terminal = workspace
+                    .focused_terminal_view(ctx)
+                    .expect("the new split has a focused terminal pane");
+                let mut focused_header_id = None;
+                let mut render_ids = vec![pane_group.id()];
+                for index in 0..2 {
+                    let pane_view = pane_group
+                        .read(ctx, |pane_group, _| {
+                            pane_group.terminal_pane_view_at_pane_index(index)
+                        })
+                        .expect("both split panes are terminal panes");
+                    let header_id = pane_view.read(ctx, |pane_view, _| pane_view.header().id());
+                    let child_id = pane_view.read(ctx, |pane_view, ctx| pane_view.child(ctx).id());
+                    if child_id == terminal.id() {
+                        focused_header_id = Some(header_id);
+                    }
+                    render_ids.extend([pane_view.id(), header_id, child_id]);
+                }
+                (
+                    pane_group,
+                    terminal,
+                    focused_header_id.expect("the focused terminal has a pane header"),
+                    render_ids,
+                )
+            });
+        let button_position_id = terminal.read(&app, |terminal, _| {
+            terminal.pane_maximize_button_position_id()
+        });
+        let presenter =
+            std::rc::Rc::new(std::cell::RefCell::new(warpui::Presenter::new(window_id)));
+
+        let render = |ctx: &mut AppContext| {
+            let mut updated = warpui::EntityIdSet::default();
+            updated.insert(workspace.id());
+            updated.extend(render_ids.iter().copied());
+            presenter.borrow_mut().invalidate(
+                warpui::WindowInvalidation {
+                    updated,
+                    ..Default::default()
+                },
+                ctx,
+            );
+            presenter
+                .borrow_mut()
+                .build_scene(vec2f(1200., 800.), 1., None, ctx);
+        };
+        app.update(render);
+        assert!(
+            app.read(|ctx| ctx
+                .element_position_by_id_at_last_frame(window_id, &button_position_id)
+                .is_some()),
+            "the split terminal header must render a maximize button"
+        );
+
+        let toggle_action = crate::pane_group::pane::view::PaneHeaderAction::<
+            TerminalAction,
+            TerminalAction,
+        >::CustomAction(TerminalAction::ToggleMaximizePane);
+        app.update(|ctx| {
+            ctx.dispatch_typed_action_for_view(window_id, focused_header_id, &toggle_action);
+        });
+        assert!(
+            pane_group.read(&app, |pane_group, ctx| pane_group
+                .is_focused_pane_maximized(ctx)),
+            "the direct pane-header button must maximize its pane"
+        );
+
+        app.update(render);
+        assert!(
+            app.read(|ctx| ctx
+                .element_position_by_id_at_last_frame(window_id, &button_position_id)
+                .is_some()),
+            "the maximized terminal header must render a restore button"
+        );
+        app.update(|ctx| {
+            ctx.dispatch_typed_action_for_view(window_id, focused_header_id, &toggle_action);
+        });
+        assert!(
+            !pane_group.read(&app, |pane_group, ctx| pane_group
+                .is_focused_pane_maximized(ctx)),
+            "the same pane-header button must restore a maximized pane"
+        );
+    });
+}
+
+#[test]
+fn selecting_a_shell_restarts_the_session_before_closing_the_picker() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
         let workspace = mock_workspace(&mut app);
-
-        let menu = workspace.update(&mut app, |workspace, ctx| {
+        let window_id = workspace.update(&mut app, |_, ctx| ctx.window_id());
+        let (modal, menu, established_before) = workspace.update(&mut app, |workspace, ctx| {
             workspace.handle_action(&WorkspaceAction::ToggleChangeShellMenu, ctx);
-            workspace
-                .change_shell_menu_modal
-                .view
-                .read(ctx, |modal, _| modal.body().clone())
-        });
-        assert!(
-            app.read(|ctx| workspace.read(ctx, |workspace, _| workspace
-                .change_shell_menu_modal
-                .is_open())),
-            "precondition: the picker must be open before a selection can close it"
-        );
-
-        // What `Menu` emits after an item is chosen (`MenuAction::Close` in
-        // menu.rs), rather than calling the workspace's close helper directly.
-        app.update(|ctx| {
-            menu.update(ctx, |_, ctx| {
-                ctx.emit(MenuEvent::Close {
-                    via_select_item: true,
+            let modal = workspace.change_shell_menu_modal.view.clone();
+            let menu = modal.read(ctx, |modal, _| modal.body().clone());
+            let established = workspace
+                .focused_terminal_manager(ctx)
+                .expect("mock workspace has a focused terminal pane")
+                .read(ctx, |manager, _| {
+                    manager
+                        .as_any()
+                        .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                        .expect("mock workspace panes use the local-tty manager")
+                        .established_session_count()
                 });
-            });
+            (modal, menu, established)
+        });
+        let change_shell_action = menu
+            .read(&app, |menu, _| {
+                menu.items().iter().find_map(|item| {
+                    item.fields()
+                        .and_then(|fields| fields.on_select_action())
+                        .cloned()
+                })
+            })
+            .expect("the shell picker has at least one launchable shell");
+
+        let presenter =
+            std::rc::Rc::new(std::cell::RefCell::new(warpui::Presenter::new(window_id)));
+        let invalidation = || {
+            let mut updated = warpui::EntityIdSet::default();
+            updated.insert(workspace.id());
+            updated.insert(modal.id());
+            updated.insert(menu.id());
+            warpui::WindowInvalidation {
+                updated,
+                ..Default::default()
+            }
+        };
+        app.update(|ctx| {
+            presenter.borrow_mut().invalidate(invalidation(), ctx);
+            presenter
+                .borrow_mut()
+                .build_scene(vec2f(1200., 800.), 1., None, ctx);
         });
 
+        app.update(|ctx| {
+            ctx.dispatch_typed_action_for_view(
+                window_id,
+                menu.id(),
+                &crate::menu::MenuAction::Close(true),
+            );
+
+            presenter.borrow_mut().invalidate(invalidation(), ctx);
+            presenter
+                .borrow_mut()
+                .build_scene(vec2f(1200., 800.), 1., None, ctx);
+
+            ctx.dispatch_typed_action_for_view(window_id, menu.id(), &change_shell_action);
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(10) => workspace.update(&mut app, |workspace, ctx| {
+                workspace
+                    .focused_terminal_manager(ctx)
+                    .expect("mock workspace has a focused terminal pane")
+                    .read(ctx, |manager, _| {
+                        manager
+                            .as_any()
+                            .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                            .expect("mock workspace panes use the local-tty manager")
+                            .established_session_count()
+                    })
+            }) == established_before + 1,
+            "the selected shell action must reach the workspace before the picker disappears"
+        );
         assert_eventually_within!(
             std::time::Duration::from_secs(5) => app.read(|ctx| {
                 workspace.read(ctx, |workspace, _| !workspace.change_shell_menu_modal.is_open())
             }),
-            "choosing a shell must close the picker; without the menu's `Close` subscription \
-             it lingers open over the pane it just restarted (waited 5s)"
+            "choosing a shell must close the picker"
         );
     });
 }

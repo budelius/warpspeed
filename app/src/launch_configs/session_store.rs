@@ -270,6 +270,87 @@ fn collect_panes(node: &PaneNodeSnapshot, panes: &mut Vec<StoredPaneSummary>) {
     }
 }
 
+fn collect_agent_session_ids(node: &PaneNodeSnapshot, ids: &mut HashSet<String>) {
+    match node {
+        PaneNodeSnapshot::Branch(branch) => {
+            for (_, child) in &branch.children {
+                collect_agent_session_ids(child, ids);
+            }
+        }
+        PaneNodeSnapshot::Leaf(leaf) => {
+            if let LeafContents::Terminal(terminal) = &leaf.contents
+                && let Some(session_id) = terminal
+                    .cli_agent_resume_descriptor
+                    .as_ref()
+                    .and_then(|descriptor| descriptor.session_id.as_ref())
+            {
+                ids.insert(session_id.clone());
+            }
+        }
+    }
+}
+
+fn normalized_cwd(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+fn recover_agent_session_ids(
+    node: &mut PaneNodeSnapshot,
+    used_ids: &mut HashSet<String>,
+    candidates: &mut HashMap<
+        CLIAgent,
+        Vec<crate::terminal::agent_session_history::PastAgentSession>,
+    >,
+) {
+    match node {
+        PaneNodeSnapshot::Branch(branch) => {
+            for (_, child) in &mut branch.children {
+                recover_agent_session_ids(child, used_ids, candidates);
+            }
+        }
+        PaneNodeSnapshot::Leaf(leaf) => {
+            let LeafContents::Terminal(terminal) = &mut leaf.contents else {
+                return;
+            };
+            let Some(descriptor) = terminal.cli_agent_resume_descriptor.as_mut() else {
+                return;
+            };
+            if descriptor.session_id.is_some() {
+                return;
+            }
+            let cwd_key = normalized_cwd(&descriptor.cwd);
+            let sessions = candidates.entry(descriptor.agent).or_insert_with(|| {
+                crate::terminal::agent_session_history::find_all(descriptor.agent)
+            });
+            let Some(session) = sessions.iter().find(|session| {
+                normalized_cwd(&session.cwd) == cwd_key && !used_ids.contains(&session.session_id)
+            }) else {
+                return;
+            };
+            descriptor.session_id = Some(session.session_id.clone());
+            if descriptor.title.is_none() {
+                descriptor.title = session.title.clone();
+            }
+            used_ids.insert(session.session_id.clone());
+        }
+    }
+}
+
+pub(crate) fn recover_missing_agent_session_ids(windows: &mut [WindowSnapshot]) {
+    let mut used_ids = HashSet::new();
+    for window in windows.iter() {
+        for tab in &window.tabs {
+            collect_agent_session_ids(&tab.root, &mut used_ids);
+        }
+    }
+    let mut candidates = HashMap::new();
+    for window in windows {
+        for tab in &mut window.tabs {
+            recover_agent_session_ids(&mut tab.root, &mut used_ids, &mut candidates);
+        }
+    }
+}
+
 fn pane_summary(pane_number: usize, terminal: &TerminalPaneSnapshot) -> StoredPaneSummary {
     let descriptor = terminal.cli_agent_resume_descriptor.as_ref();
     StoredPaneSummary {
@@ -769,6 +850,18 @@ pub(crate) fn list_summaries() -> Vec<StoredSessionSummary> {
     }
 }
 
+pub(crate) fn list_interrupted_summaries() -> Vec<StoredSessionSummary> {
+    list_summaries()
+        .into_iter()
+        .filter(|summary| summary.is_current())
+        .filter(|summary| {
+            summary
+                .first_source()
+                .is_some_and(crate::session_configs::was_open_when_process_ended)
+        })
+        .collect()
+}
+
 fn is_safe_relative_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && path
@@ -777,13 +870,21 @@ fn is_safe_relative_path(path: &Path) -> bool {
 }
 
 #[cfg(feature = "local_fs")]
-fn load_from_path(path: &Path, source: &LaunchConfigWindowSource) -> Result<RestoredWindowSession> {
+fn load_from_path(
+    path: &Path,
+    source: &LaunchConfigWindowSource,
+    recover_missing_agent_ids: bool,
+) -> Result<RestoredWindowSession> {
     let stored = read_stored_window(path)?;
     if !sources_match(&stored.source, source) {
         bail!("Session config snapshot source does not match {path:?}");
     }
+    let mut window = stored.window;
+    if recover_missing_agent_ids {
+        recover_missing_agent_session_ids(std::slice::from_mut(&mut window));
+    }
     Ok(RestoredWindowSession {
-        window: stored.window,
+        window,
         block_lists: Arc::new(
             stored
                 .block_lists
@@ -800,7 +901,7 @@ fn load_from_dir(
     source: &LaunchConfigWindowSource,
 ) -> Result<Option<RestoredWindowSession>> {
     let path = session_path(dir, source);
-    match load_from_path(&path, source) {
+    match load_from_path(&path, source, true) {
         Ok(session) => Ok(Some(session)),
         Err(error)
             if error
@@ -837,7 +938,11 @@ fn load_stored_session_from_dir(
             if !is_safe_relative_path(&window.checkpoint_path) {
                 bail!("Stored session checkpoint path is invalid");
             }
-            load_from_path(&dir.join(&window.checkpoint_path), &window.source)
+            load_from_path(
+                &dir.join(&window.checkpoint_path),
+                &window.source,
+                summary.is_current(),
+            )
         })
         .collect()
 }

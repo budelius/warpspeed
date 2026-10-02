@@ -30,6 +30,8 @@ struct HandoffPayload {
     protocol_version: u32,
     window: WindowSnapshot,
     agent_resume_commands: Vec<AgentResumeCommand>,
+    #[serde(default)]
+    transfers_session_lease: bool,
 }
 
 pub(crate) struct IncomingWindowHandoff {
@@ -88,6 +90,10 @@ impl IncomingWindowHandoff {
         &self.payload.agent_resume_commands
     }
 
+    pub(crate) fn transfers_session_lease(&self) -> bool {
+        self.payload.transfers_session_lease
+    }
+
     pub(crate) fn mark_ready(&self) -> Result<()> {
         write_marker(&self.ready_path).context("Failed to acknowledge window process handoff")
     }
@@ -137,10 +143,15 @@ pub(crate) fn launch(
 
     let request_path = handoff_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
     let (ready_path, release_path) = marker_paths(&request_path);
+    let transfers_session_lease = window
+        .launch_config_source
+        .as_ref()
+        .is_some_and(|source| source.is_session_config());
     let payload = HandoffPayload {
         protocol_version: PROTOCOL_VERSION,
         window,
         agent_resume_commands,
+        transfers_session_lease,
     };
     write_request(&request_path, &payload)?;
 

@@ -576,6 +576,21 @@ fn active_workspace(ctx: &mut AppContext) -> Option<ViewHandle<Workspace>> {
     WorkspaceRegistry::as_ref(ctx).get(window_id, ctx)
 }
 
+fn display_session_owned_error(ctx: &mut AppContext) {
+    let Some(window_id) = ctx.windows().active_window() else {
+        return;
+    };
+    crate::workspace::ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+        toast_stack.add_ephemeral_toast(
+            DismissibleToast::error(
+                "This session is already open in another WarpSpeed process.".to_owned(),
+            ),
+            window_id,
+            ctx,
+        );
+    });
+}
+
 fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
     let first_source = arg.launch_config.window_source(0);
     let session_source = first_source
@@ -607,6 +622,7 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
                     true,
                     ctx,
                 );
+                display_session_owned_error(ctx);
                 return;
             }
             Err(error) => {
@@ -735,6 +751,7 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
                     arg.summary.is_current(),
                     ctx,
                 );
+                display_session_owned_error(ctx);
                 return;
             }
             Err(error) => {
@@ -751,9 +768,16 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
                 safe: ("Failed to open autosaved terminal session"),
                 full: ("Failed to open autosaved terminal session: {error:#}")
             );
+            #[cfg(feature = "local_fs")]
+            crate::session_configs::release_session(source);
             return;
         }
     };
+    if sessions.is_empty() {
+        #[cfg(feature = "local_fs")]
+        crate::session_configs::release_session(source);
+        return;
+    }
     crate::launch_configs::session_store::begin_run(source);
     for session in sessions {
         open_new_with_workspace_source(restored_launch_config_workspace_source(session, ctx), ctx);

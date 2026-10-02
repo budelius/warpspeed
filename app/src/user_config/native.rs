@@ -463,7 +463,7 @@ fn overwrite_launch_config_window_in_dir(
     let config = configs
         .get_mut(source.document_index)
         .ok_or_else(|| anyhow!("Launch configuration document no longer exists"))?;
-    if config.name != source.config_name {
+    if !config.name.eq_ignore_ascii_case(&source.config_name) {
         return Err(anyhow!("Launch configuration document has changed"));
     }
     let target = config

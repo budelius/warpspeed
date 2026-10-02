@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use fs4::fs_std::FileExt as _;
@@ -17,7 +18,14 @@ use crate::tab_configs::TabConfig;
 
 const SESSION_CONFIG_VERSION: u32 = 1;
 
-static SESSION_LEASES: LazyLock<Mutex<HashMap<(String, u64), File>>> =
+static PRESERVE_OWNERS_FOR_RESTART: AtomicBool = AtomicBool::new(false);
+
+struct SessionLease {
+    _file: File,
+    claim_count: usize,
+}
+
+static SESSION_LEASES: LazyLock<Mutex<HashMap<(String, u64), SessionLease>>> =
     LazyLock::new(Default::default);
 
 #[derive(Clone, Debug)]
@@ -96,10 +104,11 @@ fn claim_in_dir(
     dir: &Path,
     session_id: &str,
     generation: u64,
-    leases: &mut HashMap<(String, u64), File>,
+    leases: &mut HashMap<(String, u64), SessionLease>,
 ) -> anyhow::Result<SessionClaim> {
     let key = (session_id.to_owned(), generation);
-    if leases.contains_key(&key) {
+    if let Some(lease) = leases.get_mut(&key) {
+        lease.claim_count += 1;
         return Ok(SessionClaim::Claimed);
     }
 
@@ -125,7 +134,13 @@ fn claim_in_dir(
                     full: ("Failed to write session owner record: {error:#}")
                 );
             }
-            leases.insert(key, lease);
+            leases.insert(
+                key,
+                SessionLease {
+                    _file: lease,
+                    claim_count: 1,
+                },
+            );
             Ok(SessionClaim::Claimed)
         }
         Ok(false) => Ok(SessionClaim::HeldBy(read_owner(
@@ -154,6 +169,62 @@ fn write_owner(lease_dir: &Path) -> anyhow::Result<()> {
 fn read_owner(dir: &Path, session_id: &str, generation: u64) -> Option<SessionOwner> {
     let path = lease_dir(dir, session_id, generation).join(OWNER_FILE_NAME);
     serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+pub fn release_session(source: &LaunchConfigWindowSource) {
+    let (Some(session_id), Some(generation)) = (source.session_id(), source.session_generation())
+    else {
+        return;
+    };
+    let key = (session_id.clone(), generation);
+    let mut leases = SESSION_LEASES.lock();
+    match leases.get_mut(&key) {
+        Some(lease) if lease.claim_count > 1 => lease.claim_count -= 1,
+        Some(_) => {
+            if !PRESERVE_OWNERS_FOR_RESTART.load(Ordering::Relaxed) {
+                let path =
+                    lease_dir(&sessions_state_dir(), &session_id, generation).join(OWNER_FILE_NAME);
+                if let Err(error) = fs::remove_file(&path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    safe_warn!(
+                        safe: ("Failed to remove session owner record"),
+                        full: ("Failed to remove session owner record {path:?}: {error}")
+                    );
+                }
+            }
+            leases.remove(&key);
+        }
+        None => {}
+    }
+}
+
+pub(crate) fn preserve_open_sessions_for_restart() {
+    PRESERVE_OWNERS_FOR_RESTART.store(true, Ordering::Relaxed);
+}
+
+fn was_open_when_process_ended_in_dir(dir: &Path, session_id: &str, generation: u64) -> bool {
+    let lease_dir = lease_dir(dir, session_id, generation);
+    if !lease_dir.join(OWNER_FILE_NAME).is_file() {
+        return false;
+    }
+    let Ok(lease) = File::options()
+        .read(true)
+        .write(true)
+        .create(false)
+        .open(lease_dir.join("owner.lock"))
+    else {
+        return false;
+    };
+    matches!(lease.try_lock_exclusive(), Ok(true))
+}
+
+pub(crate) fn was_open_when_process_ended(source: &LaunchConfigWindowSource) -> bool {
+    let (Some(session_id), Some(generation)) = (source.session_id(), source.session_generation())
+    else {
+        return false;
+    };
+    was_open_when_process_ended_in_dir(&sessions_state_dir(), &session_id, generation)
 }
 
 fn normalized_existing_path(path: &Path) -> PathBuf {

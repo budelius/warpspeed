@@ -634,8 +634,10 @@ impl PaneContent for TerminalPane {
             let persistent_session_id = self
                 .terminal_manager(app)
                 .read(app, |manager, _| manager.persistent_session_id());
-            let cli_agent_resume_descriptor = CLIAgentSessionsModel::as_ref(app)
-                .session(self.terminal_view(app).id())
+            let terminal_view_id = self.terminal_view(app).id();
+            let cli_agent_sessions = CLIAgentSessionsModel::as_ref(app);
+            let cli_agent_resume_descriptor = cli_agent_sessions
+                .session(terminal_view_id)
                 .filter(|session| !session.is_remote())
                 .and_then(|session| {
                     let session_cwd = session
@@ -645,7 +647,9 @@ impl PaneContent for TerminalPane {
                         .or_else(|| cwd.clone())?;
                     Some(CliAgentResumeDescriptor {
                         agent: session.agent,
-                        session_id: session.session_context.session_id.clone(),
+                        session_id: cli_agent_sessions
+                            .session_id(terminal_view_id)
+                            .map(str::to_owned),
                         cwd: session_cwd.into(),
                         title: session.session_context.display_title(),
                         captured_unix_seconds: Some(Utc::now().timestamp()),

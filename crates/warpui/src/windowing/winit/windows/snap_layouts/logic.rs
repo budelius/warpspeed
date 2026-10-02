@@ -74,13 +74,23 @@ pub struct SyntheticMouseMessage {
 /// Once the hit test answers `HTMAXBUTTON`, Windows delivers non-client mouse messages for that
 /// rectangle and no client-area ones, which would leave the app-drawn button unable to see its own
 /// hover and clicks. `hit` is the hit code Windows passes in `wParam`; `WM_NCMOUSELEAVE` carries no
-/// hit code and is always translated.
-pub fn synthetic_message(message: u32, hit: u32) -> Option<SyntheticMouseMessage> {
+/// hit code.
+///
+/// Moves are withheld while the synthetic press is active. winit classifies every move before its
+/// matching release as a drag, including a fabricated hover-leave position outside the button. That
+/// both leaks a drag into the UI behind the button and makes the release miss the button.
+pub fn synthetic_message(
+    message: u32,
+    hit: u32,
+    maximize_button_pressed: bool,
+) -> Option<SyntheticMouseMessage> {
     match message {
-        WM_NCMOUSEMOVE if hit == HTMAXBUTTON => Some(SyntheticMouseMessage {
-            message: WM_MOUSEMOVE,
-            wparam: 0,
-        }),
+        WM_NCMOUSEMOVE if hit == HTMAXBUTTON && !maximize_button_pressed => {
+            Some(SyntheticMouseMessage {
+                message: WM_MOUSEMOVE,
+                wparam: 0,
+            })
+        }
         // A double-click is replayed as another press, which is exactly what the app saw before
         // Windows started routing these through the non-client area: a fast double-click used to be
         // two plain `WM_LBUTTONDOWN`s and two clean toggles. Left untranslated it would reach
@@ -96,7 +106,7 @@ pub fn synthetic_message(message: u32, hit: u32) -> Option<SyntheticMouseMessage
             message: WM_LBUTTONUP,
             wparam: 0,
         }),
-        WM_NCMOUSELEAVE => Some(SyntheticMouseMessage {
+        WM_NCMOUSELEAVE if !maximize_button_pressed => Some(SyntheticMouseMessage {
             message: WM_MOUSEMOVE,
             wparam: 0,
         }),
@@ -203,21 +213,21 @@ mod tests {
     #[test]
     fn non_client_mouse_messages_become_client_ones() {
         assert_eq!(
-            synthetic_message(WM_NCMOUSEMOVE, HTMAXBUTTON),
+            synthetic_message(WM_NCMOUSEMOVE, HTMAXBUTTON, false),
             Some(SyntheticMouseMessage {
                 message: WM_MOUSEMOVE,
                 wparam: 0,
             })
         );
         assert_eq!(
-            synthetic_message(WM_NCLBUTTONDOWN, HTMAXBUTTON),
+            synthetic_message(WM_NCLBUTTONDOWN, HTMAXBUTTON, false),
             Some(SyntheticMouseMessage {
                 message: WM_LBUTTONDOWN,
                 wparam: MK_LBUTTON.0 as usize,
             })
         );
         assert_eq!(
-            synthetic_message(WM_NCLBUTTONUP, HTMAXBUTTON),
+            synthetic_message(WM_NCLBUTTONUP, HTMAXBUTTON, true),
             Some(SyntheticMouseMessage {
                 message: WM_LBUTTONUP,
                 wparam: 0,
@@ -230,20 +240,23 @@ mod tests {
         // Without this the message reaches `DefWindowProc`, which runs its own caption-button
         // tracking loop and maximizes the window while the app-drawn button shows no feedback.
         assert_eq!(
-            synthetic_message(WM_NCLBUTTONDBLCLK, HTMAXBUTTON),
+            synthetic_message(WM_NCLBUTTONDBLCLK, HTMAXBUTTON, false),
             Some(SyntheticMouseMessage {
                 message: WM_LBUTTONDOWN,
                 wparam: MK_LBUTTON.0 as usize,
             })
         );
-        assert_eq!(synthetic_message(WM_NCLBUTTONDBLCLK, HTCAPTION), None);
+        assert_eq!(
+            synthetic_message(WM_NCLBUTTONDBLCLK, HTCAPTION, false),
+            None
+        );
     }
 
     #[test]
     fn leaving_the_non_client_area_ends_the_hover() {
         // WM_NCMOUSELEAVE carries no hit code, so it is translated regardless of wParam.
         assert_eq!(
-            synthetic_message(WM_NCMOUSELEAVE, 0),
+            synthetic_message(WM_NCMOUSELEAVE, 0, false),
             Some(SyntheticMouseMessage {
                 message: WM_MOUSEMOVE,
                 wparam: 0,
@@ -253,9 +266,18 @@ mod tests {
 
     #[test]
     fn messages_outside_the_button_are_not_translated() {
-        assert_eq!(synthetic_message(WM_NCMOUSEMOVE, HTCAPTION), None);
-        assert_eq!(synthetic_message(WM_NCLBUTTONDOWN, HTCAPTION), None);
-        assert_eq!(synthetic_message(WM_NCRBUTTONDOWN, HTMAXBUTTON), None);
+        assert_eq!(synthetic_message(WM_NCMOUSEMOVE, HTCAPTION, false), None);
+        assert_eq!(synthetic_message(WM_NCLBUTTONDOWN, HTCAPTION, false), None);
+        assert_eq!(
+            synthetic_message(WM_NCRBUTTONDOWN, HTMAXBUTTON, false),
+            None
+        );
+    }
+
+    #[test]
+    fn non_client_moves_are_withheld_during_a_synthetic_press() {
+        assert_eq!(synthetic_message(WM_NCMOUSEMOVE, HTMAXBUTTON, true), None);
+        assert_eq!(synthetic_message(WM_NCMOUSELEAVE, 0, true), None);
     }
 
     #[test]

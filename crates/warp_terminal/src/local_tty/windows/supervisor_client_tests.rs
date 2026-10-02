@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::os::windows::io::FromRawHandle;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use instant::Instant;
+use mio::windows::NamedPipe;
+use mio::{Interest, Poll, Token};
 use serial_test::serial;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
@@ -115,7 +118,6 @@ fn client_reattaches_same_process_through_daemon() {
     assert_eq!(endpoint.pid, first.pid, "reattach must preserve the child");
     assert_eq!(attached.snapshot, snapshot);
     assert_eq!(attached.metadata, metadata);
-    let _ = unsafe { CloseHandle(HANDLE(endpoint.raw as usize as *mut _)) };
 
     assert!(client.is_running(session_id).unwrap());
     let still_held = client
@@ -127,5 +129,13 @@ fn client_reattaches_same_process_through_daemon() {
     assert!(still_held.attached);
     assert_eq!(still_held.metadata, metadata);
 
+    let mut pipe = unsafe { NamedPipe::from_raw_handle(endpoint.raw as usize as *mut _) };
+    let poll = Poll::new().expect("a completion port should be creatable");
+    poll.registry()
+        .register(&mut pipe, Token(0), Interest::READABLE)
+        .expect("a reattached endpoint must use a fresh IOCP-compatible pipe");
+
+    assert!(client.is_running(session_id).unwrap());
+    drop(pipe);
     client.kill(session_id).unwrap();
 }

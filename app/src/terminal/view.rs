@@ -2905,6 +2905,8 @@ pub struct TerminalView {
     conversation_details_panel_toggle_mouse_state: warpui::elements::MouseStateHandle,
     /// Mouse state handle for the ambient agent cancel button in the pane header.
     ambient_agent_cancel_mouse_state: warpui::elements::MouseStateHandle,
+    /// Mouse state handle for the maximize/restore button in the pane header.
+    pane_maximize_mouse_state: MouseStateHandle,
 
     /// First-time cloud agent setup view (full-screen overlay for creating initial environment).
     first_time_cloud_agent_setup_view: ViewHandle<ambient_agent::FirstTimeCloudAgentSetupView>,
@@ -4471,6 +4473,7 @@ impl TerminalView {
             orchestration_child_live_unavailable: false,
             conversation_details_panel_toggle_mouse_state: Default::default(),
             ambient_agent_cancel_mouse_state: Default::default(),
+            pane_maximize_mouse_state: Default::default(),
             active_init_project_model: None,
             is_pending_aws_login: false,
             manual_pty_shutdown_requested: false,
@@ -11058,7 +11061,7 @@ impl TerminalView {
             self.insert_rich_content(
                 None,
                 banner,
-                None,
+                Some(RichContentMetadata::ShellProcessTerminatedBanner),
                 RichContentInsertionPosition::Append {
                     insert_below_long_running_block: true,
                 },
@@ -12207,9 +12210,15 @@ impl TerminalView {
                                     // Detect CLI agent and create session before
                                     // showing the footer, so the session drives
                                     // the footer rather than the other way around.
-                                    let detection = {
+                                    let (detection, command) = {
                                         let model = me.model.lock();
-                                        me.detect_cli_agent_from_model(&model, ctx)
+                                        (
+                                            me.detect_cli_agent_from_model(&model, ctx),
+                                            model
+                                                .block_list()
+                                                .active_block()
+                                                .command_with_secrets_obfuscated(false),
+                                        )
                                     };
                                     let view_id = me.view_id;
                                     CLIAgentSessionsModel::handle(ctx).update(
@@ -12222,6 +12231,15 @@ impl TerminalView {
                                             {
                                                 let remote_host =
                                                     me.active_session_remote_host(ctx);
+                                                let cwd = remote_host
+                                                    .is_none()
+                                                    .then(|| me.pwd_if_local(ctx))
+                                                    .flatten();
+                                                let session_id = crate::terminal::agent_session_history::session_id_from_command(
+                                                    agent,
+                                                    &command,
+                                                );
+                                                let should_recover_session_id = session_id.is_none();
                                                 let should_auto_toggle_input = agent
                                                     .supports_cli_agent_footer()
                                                     && *AISettings::as_ref(ctx)
@@ -12231,8 +12249,11 @@ impl TerminalView {
                                                     CLIAgentSession {
                                                         agent,
                                                         status: CLIAgentSessionStatus::InProgress,
-                                                        session_context:
-                                                            CLIAgentSessionContext::default(),
+                                                        session_context: CLIAgentSessionContext {
+                                                            cwd,
+                                                            session_id,
+                                                            ..Default::default()
+                                                        },
                                                         input_state: CLIAgentInputState::Closed,
                                                         should_auto_toggle_input,
                                                         listener: None,
@@ -12245,6 +12266,12 @@ impl TerminalView {
                                                     },
                                                     ctx,
                                                 );
+                                                if should_recover_session_id {
+                                                    sessions_model
+                                                        .recover_session_id_from_history(
+                                                            view_id, ctx,
+                                                        );
+                                                }
                                             }
                                             _ => {}
                                         },
@@ -26595,7 +26622,7 @@ impl TerminalSurface for TerminalView {
 
     #[cfg(feature = "local_tty")]
     fn set_pending_restore_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
-        self.set_pending_command_queue(vec![command], ctx);
+        self.execute_command_or_set_pending(&command, ctx);
     }
 
     fn on_active_shell_launch_data_updated(
@@ -26603,44 +26630,28 @@ impl TerminalSurface for TerminalView {
         shell_launch_data: Option<ShellLaunchData>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !cfg!(windows) {
-            return;
+        if cfg!(windows) {
+            let shell_indicator_type = shell_launch_data
+                .as_ref()
+                .and_then(|data| ShellIndicatorType::try_from(data).ok());
+            self.shell_indicator_type = shell_indicator_type;
+            self.shell_detail = shell_launch_data.map(|launch_data| launch_data.shell_detail());
+
+            self.pane_configuration.update(ctx, |config, ctx| {
+                config.notify_header_content_changed(ctx);
+            });
         }
 
-        let shell_indicator_type = shell_launch_data
-            .as_ref()
-            .and_then(|data| ShellIndicatorType::try_from(data).ok());
-        self.shell_indicator_type = shell_indicator_type;
-        self.shell_detail = shell_launch_data.map(|launch_data| launch_data.shell_detail());
-
-        // Notify pane header to re-render with updated shell indicator.
-        self.pane_configuration.update(ctx, |config, ctx| {
-            config.notify_header_content_changed(ctx);
-        });
+        ctx.emit(Event::AppStateChanged);
     }
 
     #[cfg(feature = "local_tty")]
     fn on_session_restart_started(&mut self, ctx: &mut ViewContext<Self>) {
         self.begin_restart();
 
-        // The dead shell's post-mortem must not outlive it. Both of these are
-        // written once and never cleared, so a pane that restarts out of a
-        // broken shell config -- the case the whole feature exists for -- keeps
-        // "Shell process exited prematurely!" and the initialization block
-        // pinned above the healthy new prompt, permanently, describing a
-        // process that no longer exists. `insert_shell_process_terminated_banner`
-        // and `show_initialization_block` re-add both if the replacement dies
-        // the same way.
-        //
-        // Both halves of the banner have to go. `insert_shell_process_terminated_banner`
-        // writes the state *and* inserts a blocklist entry, and only the state
-        // drives rendering: dropping the state alone leaves the entry behind as
-        // a `is_hidden: false` item of `INLINE_BANNER_HEIGHT`, so the pane grows
-        // a blank 2.5-line band above the new prompt and the layout logs
-        // "Missing banner element for ID" on every pass. Every other dismissal
-        // in this file pairs the two for exactly that reason -- see
-        // `dismiss_alias_expansion_banner`, and the "leaving empty space"
-        // comment in `insert_notifications_discovery_banner`.
+        // A restarted shell must not retain either banner representation from the process it
+        // replaced. Remove each banner from both its view state and block-list entry; clearing
+        // only one leaves stale content or reserved blank space above the replacement prompt.
         if let Some(banner) = self
             .inline_banners_state
             .shell_process_terminated_banner
@@ -26651,6 +26662,23 @@ impl TerminalSurface for TerminalView {
                 .block_list_mut()
                 .remove_inline_banner(banner.banner_id);
         }
+
+        let rich_banner_ids = self
+            .rich_content_views
+            .iter()
+            .filter(|rich_content| rich_content.is_shell_process_terminated_banner())
+            .map(|rich_content| rich_content.view_id())
+            .collect_vec();
+        if !rich_banner_ids.is_empty() {
+            let mut model = self.model.lock();
+            for view_id in &rich_banner_ids {
+                model.block_list_mut().remove_rich_content(*view_id);
+            }
+            drop(model);
+            self.rich_content_views
+                .retain(|rich_content| !rich_banner_ids.contains(&rich_content.view_id()));
+        }
+
         // Back to what the *setting* says rather than a flat `false`:
         // `show_initialization_block` forces the block on regardless of the
         // user's preference, and undoing that force is what this is for. A user

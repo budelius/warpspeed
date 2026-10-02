@@ -4,7 +4,7 @@ use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warpui::elements::{
     ConstrainedBox, CrossAxisAlignment, Empty, Flex, MainAxisAlignment, MainAxisSize,
-    ParentElement, Shrinkable,
+    ParentElement, SavePosition, Shrinkable,
 };
 use warpui::prelude::{ChildView, Container};
 use warpui::text_layout::ClipConfig;
@@ -66,6 +66,10 @@ impl TerminalView {
     /// Returns a reference to the focus handle if one has been set.
     pub fn focus_handle(&self) -> Option<&PaneFocusHandle> {
         self.focus_handle.as_ref()
+    }
+
+    pub(crate) fn pane_maximize_button_position_id(&self) -> String {
+        format!("terminal_pane_maximize_button:{}", self.view_id)
     }
 
     fn handle_focus_state_event(
@@ -462,10 +466,41 @@ impl TerminalView {
         if let Some(sharing) = sharing_element {
             right_row.add_child(sharing);
         }
-        let show_close_button = self
-            .focus_handle
-            .as_ref()
-            .is_some_and(|h| h.is_in_split_pane(app));
+
+        let split_pane_state = self.split_pane_state(app);
+        if split_pane_state.is_in_split_pane() {
+            let (icon, tooltip) = if split_pane_state.is_maximized() {
+                (icons::Icon::Minimize, "Restore pane")
+            } else {
+                (icons::Icon::Maximize, "Maximize pane")
+            };
+            let ui_builder = appearance.ui_builder().clone();
+            let button = icon_button_with_color(
+                appearance,
+                icon,
+                false,
+                self.pane_maximize_mouse_state.clone(),
+                appearance
+                    .theme()
+                    .sub_text_color(appearance.theme().background()),
+            )
+            .with_tooltip(move || ui_builder.tool_tip(tooltip.to_string()).build().finish())
+            .build()
+            .on_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(
+                    PaneHeaderAction::<TerminalAction, TerminalAction>::CustomAction(
+                        TerminalAction::ToggleMaximizePane,
+                    ),
+                );
+            })
+            .finish();
+            right_row.add_child(
+                SavePosition::new(button, &self.pane_maximize_button_position_id()).finish(),
+            );
+            icon_button_count += 1;
+        }
+
+        let show_close_button = split_pane_state.is_in_split_pane();
         right_row.add_child(
             render_pane_header_buttons::<TerminalAction, TerminalAction>(
                 header_ctx,

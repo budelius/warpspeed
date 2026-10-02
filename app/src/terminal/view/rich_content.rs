@@ -175,6 +175,13 @@ impl RichContent {
         matches!(self.metadata, Some(RichContentMetadata::AgentViewZeroState))
     }
 
+    pub fn is_shell_process_terminated_banner(&self) -> bool {
+        matches!(
+            self.metadata,
+            Some(RichContentMetadata::ShellProcessTerminatedBanner)
+        )
+    }
+
     pub fn is_pending_user_query(&self) -> bool {
         matches!(
             self.metadata,
@@ -262,6 +269,7 @@ pub enum RichContentMetadata {
     InlineAgentViewHeader,
     AgentViewZeroState,
     TerminalViewZeroState,
+    ShellProcessTerminatedBanner,
     PluginInstructionsBlock,
     PendingUserQuery {
         pending_user_query_block_handle: ViewHandle<PendingUserQueryBlock>,

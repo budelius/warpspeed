@@ -165,7 +165,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
                 .is_supported_on_current_platform(),
         ),
         ToggleSettingActionPair::new(
-            "restore windows, tabs, and panes on startup",
+            "saving windows, tabs, and panes for reopening",
             builder(SettingsAction::FeaturesPageToggle(
                 FeaturesPageAction::ToggleRestoreSession,
             )),
@@ -4593,7 +4593,7 @@ impl SettingsWidget for SessionRestorationWidget {
     type View = FeaturesPageView;
 
     fn search_terms(&self) -> &str {
-        "restore session window tab pane startup"
+        "restore save session window tab pane startup reopen"
     }
 
     fn render(
@@ -4614,7 +4614,7 @@ impl SettingsWidget for SessionRestorationWidget {
             .finish();
 
         let labeled_switch = render_body_item::<FeaturesPageAction>(
-            "Restore windows, tabs, and panes on startup".into(),
+            "Save windows, tabs, and panes so they can be reopened".into(),
             Some(AdditionalInfo {
                 mouse_state: self.additional_info_link.clone(),
                 on_click_action: Some(FeaturesPageAction::OpenUrl(

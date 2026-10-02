@@ -92,7 +92,6 @@ use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::settings_view::{OpenTeamsSettingsModalArgs, SettingsSection, flags};
 use crate::stozn_auth::StoznAuthManager;
 use crate::terminal::available_shells::AvailableShell;
-use crate::terminal::general_settings::GeneralSettings;
 use crate::terminal::keys_settings::KeysSettings;
 use crate::terminal::shell::ShellType;
 use crate::terminal::view::{TerminalAction, cell_size_and_padding};
@@ -781,10 +780,12 @@ fn launch_config_workspace_source(
             .into_iter()
             .any(|(_, workspace)| workspace.as_ref(ctx).launch_config_source() == Some(source))
     });
+    // Opening a launch config that has an autosave reopens it: running shells are taken over
+    // and agents whose process has ended are resumed, rather than starting over from the
+    // template.
     if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
         && !source_is_open
         && let Some(source) = launch_config_source.as_ref()
-        && source.is_session_config()
     {
         match crate::launch_configs::session_store::load(source) {
             Ok(Some(session)) => return restored_launch_config_workspace_source(session, ctx),
@@ -992,8 +993,9 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
             )
         };
 
-        // Check whether user has enabled session restoration.
-        if arg.force_restore || *GeneralSettings::as_ref(ctx).restore_session {
+        // Saved windows are reopened by choice, from the session picker. Only a window handed
+        // over by another process is restored without being asked for.
+        if arg.force_restore {
             let mut active_index = None;
             let mut normal_window_count = 0;
             for (idx, window) in app_state.windows.iter().enumerate() {

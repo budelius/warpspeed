@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -352,29 +353,23 @@ fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession
     sessions
 }
 
-fn find_matching(
-    agent: CLIAgent,
-    cwd: &Path,
-    not_before: Option<SystemTime>,
-) -> Vec<PastAgentSession> {
-    scan(agent, not_before)
-        .into_iter()
-        .filter(|session| same_directory(&session.cwd, cwd))
-        .collect()
+pub(crate) fn find_all(agent: CLIAgent) -> Vec<PastAgentSession> {
+    scan(agent, None)
 }
 
+/// The sessions `agent` recorded in `cwd` since `not_before`.
 pub(crate) fn find_recent(
     agent: CLIAgent,
     cwd: &Path,
     not_before: SystemTime,
 ) -> Vec<PastAgentSession> {
-    find_matching(agent, cwd, Some(not_before))
+    scan(agent, Some(not_before))
+        .into_iter()
+        .filter(|session| same_directory(&session.cwd, cwd))
+        .collect()
 }
 
-pub(crate) fn find_all(agent: CLIAgent) -> Vec<PastAgentSession> {
-    scan(agent, None)
-}
-
+/// The session a command explicitly resumes, e.g. `claude --resume <id>`.
 pub(crate) fn session_id_from_command(agent: CLIAgent, command: &str) -> Option<String> {
     let words = command
         .split_whitespace()
@@ -409,6 +404,79 @@ pub(crate) fn session_id_from_command(agent: CLIAgent, command: &str) -> Option<
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }
+}
+
+/// How long before a snapshot an agent's conversation may have last been written to and still
+/// be the one that pane was running. Agents sit idle for days between turns.
+const RESTORE_LOOKBACK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How long after a snapshot its agents may have kept writing: the snapshot is taken while they
+/// run, and they run on until the window closes.
+const RESTORE_GRACE: Duration = Duration::from_secs(60 * 60);
+
+/// A pane whose snapshot records which agent it ran, but not which session.
+pub(crate) struct UnidentifiedAgent {
+    pub agent: CLIAgent,
+    pub cwd: PathBuf,
+    pub title: Option<String>,
+}
+
+/// Picks, for each unidentified agent, the past session it most plausibly was: same agent, same
+/// directory, written to around when the snapshot was saved, and not `excluded` -- sessions
+/// other panes already hold, or that an agent is still running. A session whose title matches
+/// the pane's is preferred, then the most recently written one. No session is given to two
+/// panes.
+pub(crate) fn match_for_restore(
+    agents: &[UnidentifiedAgent],
+    saved_at: SystemTime,
+    candidates: &[PastAgentSession],
+    excluded: &HashSet<String>,
+) -> Vec<Option<String>> {
+    let earliest = saved_at
+        .checked_sub(RESTORE_LOOKBACK)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let latest = saved_at + RESTORE_GRACE;
+    let mut eligible = candidates
+        .iter()
+        .filter(|session| {
+            session.modified >= earliest
+                && session.modified <= latest
+                && !excluded.contains(&session.session_id)
+        })
+        .collect::<Vec<_>>();
+    eligible.sort_by(|left, right| right.modified.cmp(&left.modified));
+
+    let mut used = HashSet::new();
+    let mut matches = vec![None; agents.len()];
+    for (index, wanted) in agents.iter().enumerate() {
+        if let Some(title) = wanted.title.as_deref() {
+            matches[index] = take_match(wanted, &eligible, &mut used, |session| {
+                session.title.as_deref() == Some(title)
+            });
+        }
+    }
+    for (index, wanted) in agents.iter().enumerate() {
+        if matches[index].is_none() {
+            matches[index] = take_match(wanted, &eligible, &mut used, |_| true);
+        }
+    }
+    matches
+}
+
+fn take_match(
+    wanted: &UnidentifiedAgent,
+    eligible: &[&PastAgentSession],
+    used: &mut HashSet<String>,
+    accept: impl Fn(&PastAgentSession) -> bool,
+) -> Option<String> {
+    let session = eligible.iter().find(|session| {
+        session.agent == wanted.agent
+            && same_directory(&session.cwd, &wanted.cwd)
+            && !used.contains(&session.session_id)
+            && accept(session)
+    })?;
+    used.insert(session.session_id.clone());
+    Some(session.session_id.clone())
 }
 
 #[cfg(test)]

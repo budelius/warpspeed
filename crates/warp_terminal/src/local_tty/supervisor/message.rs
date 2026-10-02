@@ -8,6 +8,7 @@ use warp_core::SessionId;
 
 use super::transport::Endpoint;
 use crate::local_tty::screen::ScreenSnapshot;
+use crate::shell::ShellLaunchData;
 
 /// The protocol version, carried in the socket and pipe name so a client never
 /// speaks one version of this protocol to a supervisor speaking another.
@@ -265,3 +266,38 @@ pub struct SessionSummary {
     /// but cannot be attached, because a second client would read the same PTY.
     pub attached: bool,
 }
+
+impl SessionBootstrap {
+    /// The announcement of a local shell supervised under `session_id`, rebuilt for a session
+    /// whose client vanished without handing it over.
+    ///
+    /// Only what a pane needs to accept the shell can be recovered. A supervised shell stamps its
+    /// hooks with the id it was spawned under, which is its supervisor session id, and a local
+    /// shell reports this machine's hostname, which is what makes the pane treat it as local.
+    /// Everything else the shell announced -- aliases, history file, `PATH` -- is unknown and left
+    /// empty. `None` for shells whose identity cannot be inferred this way, such as those inside
+    /// WSL or a container.
+    pub fn for_orphaned_local_shell(
+        session_id: SessionId,
+        launch: &ShellLaunchData,
+        user: String,
+        hostname: String,
+    ) -> Option<Self> {
+        let shell_type = match launch {
+            ShellLaunchData::Executable { shell_type, .. }
+            | ShellLaunchData::MSYS2 { shell_type, .. } => *shell_type,
+            ShellLaunchData::WSL { .. } | ShellLaunchData::DockerSandbox { .. } => return None,
+        };
+        Some(Self {
+            hook_session_id: session_id.as_u64(),
+            shell: shell_type.name().to_owned(),
+            user,
+            hostname,
+            ..Self::default()
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "message_tests.rs"]
+mod tests;

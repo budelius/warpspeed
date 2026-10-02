@@ -67,6 +67,11 @@ where
         false
     }
 
+    /// Called with the process ID of the shell once its PTY has started, and again whenever a
+    /// restarted session replaces it.
+    #[cfg(feature = "local_tty")]
+    fn on_shell_pid_determined(&mut self, _pid: u32, _ctx: &mut ViewContext<Self>) {}
+
     /// Called once the shell starter has been determined and the PTY event loop
     /// has started, so the surface can react to shell launch metadata.
     #[cfg(feature = "local_tty")]

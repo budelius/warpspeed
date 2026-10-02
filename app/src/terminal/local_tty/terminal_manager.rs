@@ -1319,14 +1319,38 @@ fn on_shell_determined<S: TerminalSurface>(
     let attached_metadata = attached.as_ref().map(|(_, metadata)| metadata.clone());
     let attached_pty = attached.map(|(pty, _metadata)| pty);
     if let Some(metadata) = attached_metadata
-        && let Some(bootstrap) = metadata.bootstrap
+        && let Some(bootstrap) = metadata.bootstrap.or_else(|| {
+            // The supervisor keeps the session of a client that died without handing it over,
+            // but not what the shell announced to that client, and the shell will not announce
+            // itself again. Without a rebuilt announcement the pane refuses every keystroke.
+            let session_id = manager.persistent_session_id?;
+            let hostname = crate::terminal::model::session::get_local_hostname().ok()?;
+            let user = std::env::var("USERNAME")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_default();
+            warp_terminal::local_tty::supervisor::message::SessionBootstrap::for_orphaned_local_shell(
+                session_id,
+                &shell_launch_data,
+                user,
+                hostname,
+            )
+        })
     {
+        // A pane that had itself adopted a shell mid-command, without knowing it, reported the
+        // shell as idle when it let go. A shell with a program running under it is not at its
+        // prompt, whatever it was reported as.
+        let input_editor_active = metadata.input_editor_active
+            && !attached_pty.as_ref().is_some_and(|pty| {
+                crate::terminal::cli_agent_sessions::process_registry::has_child_process(
+                    pty.get_pid(),
+                )
+            });
         // The event loop parses staged repaint bytes before live output. Some
         // repaint sequences reset block lifecycle state, so apply the shell's
         // saved announcement only after that deterministic replay boundary.
         manager.model().lock().prepare_attached_state(
             bootstrap,
-            metadata.input_editor_active,
+            input_editor_active,
             (!metadata.working_directory.is_empty()).then_some(metadata.working_directory),
         );
     }
@@ -1387,7 +1411,6 @@ fn on_shell_determined<S: TerminalSurface>(
         .lock()
         .register_session_id(active_session_id);
 
-    #[cfg(feature = "integration_tests")]
     let pid = pty.get_pid();
     #[cfg(unix)]
     let fd = pty.get_fd();
@@ -1411,6 +1434,7 @@ fn on_shell_determined<S: TerminalSurface>(
     }
 
     manager.view.update(ctx, |surface, ctx| {
+        surface.on_shell_pid_determined(pid, ctx);
         surface.on_shell_determined(ctx);
         surface.on_active_shell_launch_data_updated(Some(shell_launch_data), ctx);
     });

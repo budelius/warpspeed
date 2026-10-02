@@ -12,7 +12,7 @@ use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::menu::MenuItemFields;
 use crate::pane_group::focus_state::PaneFocusHandle;
-use crate::pane_group::{BackingView, PaneConfiguration, PaneId, PaneView};
+use crate::pane_group::{BackingView, PaneConfiguration, PaneId, PaneView, TabBarHoverIndex};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
@@ -198,4 +198,47 @@ fn test_handle_close() {
             assert!(view.child(ctx).as_ref(ctx).close_invoked);
         });
     })
+}
+
+/// A vertical tab row as laid out in the vertical tabs panel: 80px tall starting at y=420.
+const ROW_NEAR: f32 = 420.;
+const ROW_FAR: f32 = 500.;
+
+#[test]
+fn dropping_anywhere_on_a_tab_moves_the_pane_into_it() {
+    for drag in [ROW_NEAR + 12., ROW_NEAR + 40., ROW_FAR - 12.] {
+        assert_eq!(
+            super::tab_hover_index_along_axis(drag, ROW_NEAR, ROW_FAR, 5),
+            TabBarHoverIndex::OverTab(5),
+            "a drag centered {}px into the tab should merge into it, not open a new tab",
+            drag - ROW_NEAR
+        );
+    }
+}
+
+#[test]
+fn only_the_edges_of_a_tab_insert_a_new_tab() {
+    assert_eq!(
+        super::tab_hover_index_along_axis(ROW_NEAR + 2., ROW_NEAR, ROW_FAR, 5),
+        TabBarHoverIndex::BeforeTab {
+            index: 5,
+            group: None
+        }
+    );
+    assert_eq!(
+        super::tab_hover_index_along_axis(ROW_FAR - 2., ROW_NEAR, ROW_FAR, 5),
+        TabBarHoverIndex::BeforeTab {
+            index: 6,
+            group: None
+        }
+    );
+}
+
+#[test]
+fn a_narrow_tab_keeps_a_merge_zone() {
+    // The insert edges never take more than a quarter of the tab each.
+    assert_eq!(
+        super::tab_hover_index_along_axis(110., 100., 120., 2),
+        TabBarHoverIndex::OverTab(2)
+    );
 }

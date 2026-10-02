@@ -67,6 +67,17 @@ fn primary_info_change_does_not_save_workspace_state() {
 }
 
 #[test]
+fn new_tab_actions_save_workspace_state() {
+    assert!(WorkspaceAction::AddDefaultTab.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::AddTerminalTab {
+            hide_homepage: false,
+        }
+        .should_save_app_state_on_action()
+    );
+}
+
+#[test]
 fn pane_name_actions_save_workspace_state() {
     let locator = PaneViewLocator {
         pane_group_id: EntityId::new(),

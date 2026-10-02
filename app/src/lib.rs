@@ -306,7 +306,8 @@ use crate::persistence::PersistenceWriter;
 use crate::persistence::model::AgentConversationData;
 use crate::projects::ProjectManagementModel;
 use crate::root_view::{
-    OpenFromRestoredArg, OpenPath, quake_mode_window_id, quake_mode_window_is_open,
+    OpenFromRestoredArg, OpenPath, OpenStoredSessionArg, quake_mode_window_id,
+    quake_mode_window_is_open,
 };
 use crate::server::cloud_objects::listener::Listener;
 use crate::server::cloud_objects::update_manager::UpdateManager;
@@ -317,7 +318,9 @@ use crate::server::sync_queue::{QueueItem, SyncQueue};
 pub use crate::server::telemetry::{
     AgentModeEntrypoint, AgentModeEntrypointSelectionType, TelemetryEvent,
 };
-use crate::server::telemetry::{AppStartupInfo, CloseTarget, PaletteSource, TelemetryCollector};
+use crate::server::telemetry::{
+    AppStartupInfo, CloseTarget, LaunchConfigUiLocation, PaletteSource, TelemetryCollector,
+};
 use crate::session_management::{RunningSessionSummary, SessionNavigationData};
 use crate::settings::cloud_preferences_syncer::initialize_cloud_preferences_syncer;
 use crate::settings::manager::SettingsManager;
@@ -2735,6 +2738,8 @@ pub(crate) fn app_callbacks(
             );
         })),
         on_will_terminate: Some(Box::new(move |ctx| {
+            crate::session_configs::preserve_open_sessions_for_restart();
+
             NotebookManager::handle(ctx).update(ctx, |manager, ctx| {
                 // Notebooks are only saved periodically, so ensure that any pending changes have
                 // been sent to the writer thread before terminating.
@@ -2909,6 +2914,7 @@ pub(crate) fn app_callbacks(
             // update check re-detects it (autoupdate state isn't persisted
             // across restarts, so the artifact may be re-downloaded).
             if source == TerminationRequestSource::System {
+                crate::session_configs::preserve_open_sessions_for_restart();
                 return ApproveTerminateResult::Terminate;
             }
 
@@ -3217,6 +3223,17 @@ fn launch(
                 .iter()
                 .any(is_cloud_agent_web_home_launch_url);
             let force_restore = incoming_window_handoff.is_some();
+            let interrupted_sessions = if matches!(launch_mode, LaunchMode::App { .. })
+                && !should_skip_restore
+                && !force_restore
+                && launch_mode.args().urls.is_empty()
+                && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+                && *GeneralSettings::as_ref(ctx).restore_session
+            {
+                crate::launch_configs::session_store::list_interrupted_summaries()
+            } else {
+                Vec::new()
+            };
             if let Some(handoff) = incoming_window_handoff.as_ref() {
                 let conversation_ids = handoff.window().conversation_ids_to_restore();
                 BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
@@ -3226,7 +3243,7 @@ fn launch(
                     conversations.release_conversations(&conversation_ids)
                 });
             }
-            let app_state = match incoming_window_handoff.as_ref() {
+            let mut app_state = match incoming_window_handoff.as_ref() {
                 Some(handoff) => {
                     let (block_lists, running_mcp_servers) = app_state
                         .map(|state| (state.block_lists, state.running_mcp_servers))
@@ -3241,13 +3258,48 @@ fn launch(
                 None if should_skip_restore => None,
                 None => app_state,
             };
-            // Attempt to restore windows from the persisted application state.
-            let arg = OpenFromRestoredArg {
-                app_state,
-                force_restore,
-                defer_shell_start: force_restore,
-            };
-            ctx.dispatch_global_action("root_view:open_from_restored", &arg);
+            if !interrupted_sessions.is_empty()
+                && let Some(app_state) = app_state.as_mut()
+            {
+                app_state.windows.retain(|window| {
+                    window.launch_config_source.as_ref().is_none_or(|source| {
+                        !interrupted_sessions
+                            .iter()
+                            .any(|summary| summary.contains_source(source))
+                    })
+                });
+            }
+            if !should_skip_restore
+                && !force_restore
+                && let Some(app_state) = app_state.as_mut()
+            {
+                crate::launch_configs::session_store::recover_missing_agent_session_ids(
+                    &mut app_state.windows,
+                );
+            }
+
+            if app_state
+                .as_ref()
+                .is_some_and(|app_state| !app_state.windows.is_empty())
+                || interrupted_sessions.is_empty()
+            {
+                let arg = OpenFromRestoredArg {
+                    app_state,
+                    force_restore,
+                    defer_shell_start: force_restore,
+                };
+                ctx.dispatch_global_action("root_view:open_from_restored", &arg);
+            }
+
+            for summary in interrupted_sessions {
+                ctx.dispatch_global_action(
+                    "root_view:open_stored_session",
+                    &OpenStoredSessionArg {
+                        summary: Arc::new(summary),
+                        ui_location: LaunchConfigUiLocation::Uri,
+                    },
+                );
+            }
 
             if let Some(handoff) = incoming_window_handoff {
                 let workspace = ctx

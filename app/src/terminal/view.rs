@@ -2905,6 +2905,8 @@ pub struct TerminalView {
     conversation_details_panel_toggle_mouse_state: warpui::elements::MouseStateHandle,
     /// Mouse state handle for the ambient agent cancel button in the pane header.
     ambient_agent_cancel_mouse_state: warpui::elements::MouseStateHandle,
+    /// Mouse state handle for the maximize/restore button in the pane header.
+    pane_maximize_mouse_state: MouseStateHandle,
 
     /// First-time cloud agent setup view (full-screen overlay for creating initial environment).
     first_time_cloud_agent_setup_view: ViewHandle<ambient_agent::FirstTimeCloudAgentSetupView>,
@@ -4471,6 +4473,7 @@ impl TerminalView {
             orchestration_child_live_unavailable: false,
             conversation_details_panel_toggle_mouse_state: Default::default(),
             ambient_agent_cancel_mouse_state: Default::default(),
+            pane_maximize_mouse_state: Default::default(),
             active_init_project_model: None,
             is_pending_aws_login: false,
             manual_pty_shutdown_requested: false,
@@ -12207,9 +12210,15 @@ impl TerminalView {
                                     // Detect CLI agent and create session before
                                     // showing the footer, so the session drives
                                     // the footer rather than the other way around.
-                                    let detection = {
+                                    let (detection, command) = {
                                         let model = me.model.lock();
-                                        me.detect_cli_agent_from_model(&model, ctx)
+                                        (
+                                            me.detect_cli_agent_from_model(&model, ctx),
+                                            model
+                                                .block_list()
+                                                .active_block()
+                                                .command_with_secrets_obfuscated(false),
+                                        )
                                     };
                                     let view_id = me.view_id;
                                     CLIAgentSessionsModel::handle(ctx).update(
@@ -12222,6 +12231,15 @@ impl TerminalView {
                                             {
                                                 let remote_host =
                                                     me.active_session_remote_host(ctx);
+                                                let cwd = remote_host
+                                                    .is_none()
+                                                    .then(|| me.pwd_if_local(ctx))
+                                                    .flatten();
+                                                let session_id = crate::terminal::agent_session_history::session_id_from_command(
+                                                    agent,
+                                                    &command,
+                                                );
+                                                let should_recover_session_id = session_id.is_none();
                                                 let should_auto_toggle_input = agent
                                                     .supports_cli_agent_footer()
                                                     && *AISettings::as_ref(ctx)
@@ -12231,8 +12249,11 @@ impl TerminalView {
                                                     CLIAgentSession {
                                                         agent,
                                                         status: CLIAgentSessionStatus::InProgress,
-                                                        session_context:
-                                                            CLIAgentSessionContext::default(),
+                                                        session_context: CLIAgentSessionContext {
+                                                            cwd,
+                                                            session_id,
+                                                            ..Default::default()
+                                                        },
                                                         input_state: CLIAgentInputState::Closed,
                                                         should_auto_toggle_input,
                                                         listener: None,
@@ -12245,6 +12266,12 @@ impl TerminalView {
                                                     },
                                                     ctx,
                                                 );
+                                                if should_recover_session_id {
+                                                    sessions_model
+                                                        .recover_session_id_from_history(
+                                                            view_id, ctx,
+                                                        );
+                                                }
                                             }
                                             _ => {}
                                         },
@@ -26594,7 +26621,7 @@ impl TerminalSurface for TerminalView {
 
     #[cfg(feature = "local_tty")]
     fn set_pending_restore_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
-        self.set_pending_command_queue(vec![command], ctx);
+        self.execute_command_or_set_pending(&command, ctx);
     }
 
     fn on_active_shell_launch_data_updated(
@@ -26602,20 +26629,19 @@ impl TerminalSurface for TerminalView {
         shell_launch_data: Option<ShellLaunchData>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !cfg!(windows) {
-            return;
+        if cfg!(windows) {
+            let shell_indicator_type = shell_launch_data
+                .as_ref()
+                .and_then(|data| ShellIndicatorType::try_from(data).ok());
+            self.shell_indicator_type = shell_indicator_type;
+            self.shell_detail = shell_launch_data.map(|launch_data| launch_data.shell_detail());
+
+            self.pane_configuration.update(ctx, |config, ctx| {
+                config.notify_header_content_changed(ctx);
+            });
         }
 
-        let shell_indicator_type = shell_launch_data
-            .as_ref()
-            .and_then(|data| ShellIndicatorType::try_from(data).ok());
-        self.shell_indicator_type = shell_indicator_type;
-        self.shell_detail = shell_launch_data.map(|launch_data| launch_data.shell_detail());
-
-        // Notify pane header to re-render with updated shell indicator.
-        self.pane_configuration.update(ctx, |config, ctx| {
-            config.notify_header_content_changed(ctx);
-        });
+        ctx.emit(Event::AppStateChanged);
     }
 
     #[cfg(feature = "local_tty")]

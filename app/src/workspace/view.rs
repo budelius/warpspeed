@@ -2280,20 +2280,18 @@ impl Workspace {
     /// generic `Menu` component -- the same one the new-tab dropdown uses to
     /// list individual shells -- wrapped in a `Modal` for centered
     /// presentation and Escape-to-close. Selecting an entry dispatches
-    /// `WorkspaceAction::ChangeShell`, which bubbles up to `Workspace`
-    /// unimpeded, since `Modal<Menu<WorkspaceAction>>` only intercepts its
-    /// own `ModalAction`.
+    /// `WorkspaceAction::ChangeShell` through the modal's responder chain.
     fn build_change_shell_menu_modal(
         ctx: &mut ViewContext<Self>,
     ) -> ModalViewState<Modal<Menu<WorkspaceAction>>> {
         let menu = ctx.add_typed_action_view(|_| Menu::new().with_drop_shadow());
-        // Selecting an item dispatches `ChangeShell` and then, independently,
-        // has the menu emit its own `Close` (see `MenuAction::Close` in
-        // menu.rs) -- without this subscription the picker would linger open
-        // after a shell was chosen.
-        ctx.subscribe_to_view(&menu, |me, _, event, ctx| {
+        ctx.subscribe_to_view(&menu, |_, _, event, ctx| {
             if matches!(event, MenuEvent::Close { .. }) {
-                me.close_change_shell_menu(ctx);
+                // Click actions are processed in reverse, so keep the modal in the responder chain
+                // until the selected `WorkspaceAction::ChangeShell` has reached this view.
+                ctx.spawn(async {}, |me, _, ctx| {
+                    me.close_change_shell_menu(ctx);
+                });
             }
         });
         let modal = ctx.add_typed_action_view(|ctx| {

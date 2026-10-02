@@ -104,6 +104,41 @@ fn add_window_with_cloud_mode_terminal(app: &mut App) -> ViewHandle<TerminalView
     terminal
 }
 
+#[test]
+fn updating_active_shell_launch_data_requests_an_app_state_save() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let app_state_changed = Rc::new(RefCell::new(false));
+
+        app.update({
+            let app_state_changed = app_state_changed.clone();
+            |ctx| {
+                ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                    if matches!(event, Event::AppStateChanged) {
+                        *app_state_changed.borrow_mut() = true;
+                    }
+                });
+            }
+        });
+
+        terminal.update(&mut app, |terminal, ctx| {
+            <TerminalView as TerminalSurface>::on_active_shell_launch_data_updated(
+                terminal,
+                Some(ShellLaunchData::WSL {
+                    distro: "Ubuntu".to_owned(),
+                }),
+                ctx,
+            );
+        });
+
+        assert!(
+            *app_state_changed.borrow(),
+            "changing a pane's shell must update its persisted snapshot"
+        );
+    });
+}
+
 /// Builds a resumable, owned (created by the current test user) Oz cloud task so
 /// `resolve_ai_query_routing` classifies a pane bound to it as a `NewCloudVm` follow-up target.
 fn owned_resumable_oz_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {

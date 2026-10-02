@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
@@ -61,6 +63,7 @@ use crate::ai::outline::RepoOutlines;
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::ai::restored_conversations::RestoredAgentConversations;
 use crate::ai::skills::SkillManager;
+use crate::app_state::{BranchSnapshot, PaneFlex, SplitDirection};
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::user::TEST_USER_UID;
 use crate::changelog_model::ChangelogModel;
@@ -773,6 +776,32 @@ fn test_pane_focus_on_close() {
             panes.close_pane(third_pane_id, ctx);
             assert_eq!(second_pane_id, panes.focused_pane_id(ctx));
         })
+    });
+}
+
+#[test]
+fn test_adding_terminal_pane_emits_app_state_changed() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        let app_state_changed = Rc::new(Cell::new(false));
+
+        app.update({
+            let app_state_changed = app_state_changed.clone();
+            |ctx| {
+                ctx.subscribe_to_view(&pane_group, move |_, event, _| {
+                    if matches!(event, Event::AppStateChanged) {
+                        app_state_changed.set(true);
+                    }
+                });
+            }
+        });
+
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.add_terminal_pane(Direction::Right, None, ctx);
+        });
+
+        assert!(app_state_changed.get());
     });
 }
 
@@ -3839,6 +3868,17 @@ fn test_focused_pane_is_synchronized_with_application_focus() {
                 FocusDetectionView::new(pane_group, ctx)
             });
         let pane_group = root_view.read(&app, |root_view, _ctx| root_view.pane_group.clone());
+        let app_state_changed = Rc::new(Cell::new(false));
+        app.update({
+            let app_state_changed = app_state_changed.clone();
+            |ctx| {
+                ctx.subscribe_to_view(&pane_group, move |_, event, _| {
+                    if matches!(event, Event::AppStateChanged) {
+                        app_state_changed.set(true);
+                    }
+                });
+            }
+        });
 
         let (focused_pane_id, active_session_id) = pane_group.read(&app, |pane_group, ctx| {
             (
@@ -3888,6 +3928,8 @@ fn test_focused_pane_is_synchronized_with_application_focus() {
             // enqueue this event on the effect queue.
             ctx.emit(Event::OpenPromptEditor);
         });
+
+        assert!(app_state_changed.get());
     });
 }
 
@@ -4599,6 +4641,74 @@ fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
             Some(shell_launch_data),
             "a parked pane must re-save the shell it was restored with"
         );
+    });
+}
+
+#[test]
+fn test_parked_restored_mixed_shells_round_trip_per_pane() {
+    let _lazy_shell_startup = FeatureFlag::LazyShellStartup.override_enabled(true);
+    let _persistent_sessions = FeatureFlag::PersistentLaunchConfigSessions.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let git_bash = ShellLaunchData::Executable {
+            executable_path: PathBuf::from("C:/Program Files/Git/bin/bash.exe"),
+            shell_type: ShellType::Bash,
+        };
+        let powershell = ShellLaunchData::Executable {
+            executable_path: PathBuf::from("C:/Program Files/PowerShell/7/pwsh.exe"),
+            shell_type: ShellType::PowerShell,
+        };
+        let snapshot = PaneNodeSnapshot::Branch(BranchSnapshot {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                (
+                    PaneFlex(1.0),
+                    terminal_leaf_snapshot(Some(cwd.clone()), Some(git_bash.clone())),
+                ),
+                (
+                    PaneFlex(1.0),
+                    terminal_leaf_snapshot(Some(cwd), Some(powershell.clone())),
+                ),
+            ],
+        });
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Branch(branch) = saved else {
+            panic!("expected the restored tab to remain split");
+        };
+        let [(_, git_bash_leaf), (_, powershell_leaf)] = branch.children.as_slice() else {
+            panic!("expected exactly two restored panes");
+        };
+        let PaneNodeSnapshot::Leaf(git_bash_leaf) = git_bash_leaf else {
+            panic!("expected the first pane to be a leaf");
+        };
+        let LeafContents::Terminal(git_bash_terminal) = &git_bash_leaf.contents else {
+            panic!("expected the first pane to be a terminal");
+        };
+        let PaneNodeSnapshot::Leaf(powershell_leaf) = powershell_leaf else {
+            panic!("expected the second pane to be a leaf");
+        };
+        let LeafContents::Terminal(powershell_terminal) = &powershell_leaf.contents else {
+            panic!("expected the second pane to be a terminal");
+        };
+
+        assert_eq!(git_bash_terminal.shell_launch_data, Some(git_bash));
+        assert_eq!(powershell_terminal.shell_launch_data, Some(powershell));
     });
 }
 

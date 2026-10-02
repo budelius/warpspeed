@@ -2,12 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use fs4::fs_std::FileExt as _;
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
+use warp_core::safe_warn;
 
 use crate::launch_configs::launch_config::{
     LaunchConfig, LaunchConfigSource, TabTemplate, WindowTemplate,
@@ -15,6 +17,16 @@ use crate::launch_configs::launch_config::{
 use crate::tab_configs::TabConfig;
 
 const SESSION_CONFIG_VERSION: u32 = 1;
+pub(crate) const OWNER_FILE_NAME: &str = "owner.json";
+
+static PRESERVE_OWNERS_FOR_RESTART: AtomicBool = AtomicBool::new(false);
+
+#[derive(Serialize)]
+struct SessionOwner {
+    pid: u32,
+    claimed_at_unix_seconds: i64,
+    app_id: String,
+}
 
 struct SessionLease {
     _file: File,
@@ -56,6 +68,28 @@ fn default_generation() -> u64 {
     1
 }
 
+fn sessions_state_dir() -> PathBuf {
+    warp_core::paths::state_dir().join("session_config_sessions")
+}
+
+fn lease_dir(dir: &Path, session_id: &str, generation: u64) -> PathBuf {
+    dir.join(session_id).join(generation.to_string())
+}
+
+fn write_owner(lease_dir: &Path) -> anyhow::Result<()> {
+    let owner = SessionOwner {
+        pid: std::process::id(),
+        claimed_at_unix_seconds: chrono::Utc::now().timestamp(),
+        app_id: warp_core::channel::ChannelState::app_id()
+            .application_name()
+            .to_owned(),
+    };
+    let path = lease_dir.join(OWNER_FILE_NAME);
+    let contents = serde_json::to_vec(&owner).context("Failed to serialize session owner")?;
+    fs::write(&path, contents)
+        .with_context(|| format!("Failed to write session owner record {path:?}"))
+}
+
 pub fn claim_session(
     source: &crate::launch_configs::launch_config::LaunchConfigWindowSource,
 ) -> anyhow::Result<bool> {
@@ -72,10 +106,7 @@ pub fn claim_session(
         return Ok(true);
     }
 
-    let lease_dir = warp_core::paths::state_dir()
-        .join("session_config_sessions")
-        .join(session_id)
-        .join(generation.to_string());
+    let lease_dir = lease_dir(&sessions_state_dir(), &session_id, generation);
     fs::create_dir_all(&lease_dir)
         .with_context(|| format!("Failed to create session lease directory {lease_dir:?}"))?;
     let lease_path = lease_dir.join("owner.lock");
@@ -88,6 +119,12 @@ pub fn claim_session(
         .with_context(|| format!("Failed to open session lease {lease_path:?}"))?;
     match lease.try_lock_exclusive() {
         Ok(true) => {
+            if let Err(error) = write_owner(&lease_dir) {
+                safe_warn!(
+                    safe: ("Failed to write session owner record"),
+                    full: ("Failed to write session owner record: {error:#}")
+                );
+            }
             leases.insert(
                 key,
                 SessionLease {
@@ -109,15 +146,57 @@ pub fn release_session(source: &crate::launch_configs::launch_config::LaunchConf
     else {
         return;
     };
-    let key = (session_id, generation);
+    let key = (session_id.clone(), generation);
     let mut leases = SESSION_LEASES.lock();
     match leases.get_mut(&key) {
         Some(lease) if lease.claim_count > 1 => lease.claim_count -= 1,
         Some(_) => {
+            if !PRESERVE_OWNERS_FOR_RESTART.load(Ordering::Relaxed) {
+                let path =
+                    lease_dir(&sessions_state_dir(), &session_id, generation).join(OWNER_FILE_NAME);
+                if let Err(error) = fs::remove_file(&path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    safe_warn!(
+                        safe: ("Failed to remove session owner record"),
+                        full: ("Failed to remove session owner record {path:?}: {error}")
+                    );
+                }
+            }
             leases.remove(&key);
         }
         None => {}
     }
+}
+
+pub(crate) fn preserve_open_sessions_for_restart() {
+    PRESERVE_OWNERS_FOR_RESTART.store(true, Ordering::Relaxed);
+}
+
+fn was_open_when_process_ended_in_dir(dir: &Path, session_id: &str, generation: u64) -> bool {
+    let lease_dir = lease_dir(dir, session_id, generation);
+    if !lease_dir.join(OWNER_FILE_NAME).is_file() {
+        return false;
+    }
+    let Ok(lease) = File::options()
+        .read(true)
+        .write(true)
+        .create(false)
+        .open(lease_dir.join("owner.lock"))
+    else {
+        return false;
+    };
+    matches!(lease.try_lock_exclusive(), Ok(true))
+}
+
+pub(crate) fn was_open_when_process_ended(
+    source: &crate::launch_configs::launch_config::LaunchConfigWindowSource,
+) -> bool {
+    let (Some(session_id), Some(generation)) = (source.session_id(), source.session_generation())
+    else {
+        return false;
+    };
+    was_open_when_process_ended_in_dir(&sessions_state_dir(), &session_id, generation)
 }
 
 fn normalized_existing_path(path: &Path) -> PathBuf {

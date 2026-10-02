@@ -1,7 +1,8 @@
 # CI build image
 
-The image used by the `clippy` and `build:warpspeed` jobs in `.gitlab-ci.yml`.
-It is `rust:1-bookworm` with Warp's Linux build dependencies already installed.
+The image used by the `fmt`, `clippy`, and `build` jobs in
+`.gitea/workflows/warpspeed-ci.yml`. It is `rust:1-bookworm` with Warp's Linux
+build dependencies already installed.
 
 ## Why it exists
 
@@ -13,29 +14,30 @@ before_script:
   - ./script/linux/install_build_deps
 ```
 
-That cannot work on the self-hosted `obachan-staging-oss` runner. Its containers
-do not run as root and have no sudo, so every `apt-get install` fails and the job
-never reaches `cargo`. The dependencies have to be present before the job starts,
-which means they have to be in the image.
-
-It is also simply cheaper: the package installs and the protoc download ran on
-every job, on a runner shared with granny, locke and ojiichan.
+That could not work on the former non-root GitLab runner. Baking the dependencies
+into the image also remains the right fit for the shared Gitea Actions runner pool:
+it keeps privileged package setup out of build steps and avoids downloading the
+same packages and protoc on every job.
 
 ## Building and publishing
 
 From the repository root:
 
 ```sh
-docker build -f docker/ci/Dockerfile -t registry.gitlab.com/martin-wieser/warpspeed/ci:1.92.0 .
-docker login registry.gitlab.com
-docker push registry.gitlab.com/martin-wieser/warpspeed/ci:1.92.0
+docker build -f docker/ci/Dockerfile -t harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0 .
+docker login harbor.pseekoo.io
+docker push harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0
 ```
 
-The tag tracks the `channel` in `rust-toolchain.toml`. When that is bumped:
-rebuild, republish under the new tag, and update `image:` in `.gitlab-ci.yml`.
-Publishing needs a GitLab account with write access to the project's container
-registry; a personal access token with the `write_registry` scope works as the
-password for `docker login`.
+The tag tracks the `channel` in `rust-toolchain.toml`. When that is bumped,
+rebuild and republish under the new tag, then update both the tag and manifest
+digest in `.gitea/workflows/warpspeed-ci.yml`. Publishing requires a Harbor robot
+with push and pull access to the `stozn-warpspeed` project.
+
+The workflow pins the Linux/amd64 manifest digest, so republishing a tag cannot
+silently change the CI environment. The project is publicly readable because the
+CI image was already anonymous upstream and must be pulled before a job can access
+repository secrets; publishing remains authenticated.
 
 Nothing rebuilds this image automatically. It changes only when the toolchain
 or `script/linux/install_build_deps` changes, both of which are rare and both of
@@ -55,7 +57,13 @@ which want a human deciding when CI switches over.
   and `COPY` carries those bytes in, after which Linux reads the shebang as
   `bash\r` and the script dies with exit 127. On a Linux checkout the step does
   nothing.
-* `fmt` deliberately stays on the stock `rust:1-bookworm`. rustfmt only parses
-  source, so pulling this larger image for it would cost more than the job.
+* All jobs use the same Harbor image, removing runtime pulls from Docker Hub and
+  the legacy GitLab registry.
+* The Actions workflow installs only its checkout integration dependencies at
+  job time: Node.js for the pinned Actions and Git LFS for the release checkout.
+  Warp's compiler and native build dependencies remain pre-baked.
+* Release jobs fetch LFS payloads from Gitea. The repository's complete LFS set
+  was migrated and independently fetched from Gitea before the compatibility
+  mirror override was removed.
 * `/etc/warpspeed-ci-image` records the protoc and rustc versions; the jobs
   `cat` it so a log identifies the image it ran on.

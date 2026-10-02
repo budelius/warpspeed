@@ -1,6 +1,11 @@
 use std::fs;
 
-use super::{SESSION_LEASES, SessionLease, claim_session, load_session_configs, release_session};
+use fs4::fs_std::FileExt as _;
+
+use super::{
+    OWNER_FILE_NAME, SESSION_LEASES, SessionLease, claim_session, load_session_configs,
+    release_session, was_open_when_process_ended_in_dir,
+};
 use crate::launch_configs::launch_config::{LaunchConfigWindowSource, PaneTemplateType};
 
 fn write_tab_config(dir: &std::path::Path, file_name: &str, name: &str, directory: &str) {
@@ -39,6 +44,38 @@ fn session_lease_is_released_after_the_last_local_claim() {
 
     release_session(&source);
     assert!(!SESSION_LEASES.lock().contains_key(&key));
+}
+
+#[test]
+fn owner_marker_with_unlocked_lease_is_interrupted() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let lease_dir = dir.path().join("workspace").join("3");
+    fs::create_dir_all(&lease_dir).expect("lease directory should be writable");
+    fs::write(lease_dir.join(OWNER_FILE_NAME), "{}").expect("owner marker should be writable");
+    fs::File::create(lease_dir.join("owner.lock")).expect("lease file should be writable");
+
+    assert!(was_open_when_process_ended_in_dir(
+        dir.path(),
+        "workspace",
+        3
+    ));
+}
+
+#[test]
+fn owner_marker_with_locked_lease_is_still_running() {
+    let dir = tempfile::tempdir().expect("lease directory should be created");
+    let lease_dir = dir.path().join("workspace").join("3");
+    fs::create_dir_all(&lease_dir).expect("lease directory should be writable");
+    fs::write(lease_dir.join(OWNER_FILE_NAME), "{}").expect("owner marker should be writable");
+    let lease =
+        fs::File::create(lease_dir.join("owner.lock")).expect("lease file should be writable");
+    assert!(lease.try_lock_exclusive().expect("lease should lock"));
+
+    assert!(!was_open_when_process_ended_in_dir(
+        dir.path(),
+        "workspace",
+        3
+    ));
 }
 
 #[test]

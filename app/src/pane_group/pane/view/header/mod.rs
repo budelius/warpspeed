@@ -326,10 +326,8 @@ impl<P: BackingView> PaneHeader<P> {
     }
 
     /// Based on the drag position and tab bar location, returns whether the drag
-    /// is over a tab or between two tabs, by splitting the hovered tab into
-    /// quarters along the active axis (X for the horizontal bar, Y for the
-    /// vertical panel): the leading quarter inserts before, the middle half
-    /// merges onto the tab, and the trailing quarter inserts after.
+    /// is over a tab or between two tabs, measured along the active axis (X for
+    /// the horizontal bar, Y for the vertical panel).
     fn calculate_tab_focus_hover_index(
         drag_position: &RectF,
         tab_bar_location: &TabBarLocation,
@@ -353,41 +351,49 @@ impl<P: BackingView> PaneHeader<P> {
                     };
                 };
                 // Project the tab rect and drag cursor onto the active axis.
-                let (drag, center, near, far) = if is_vertical {
+                let (drag, near, far) = if is_vertical {
                     (
                         drag_position.center().y(),
-                        tab_rect.center().y(),
                         tab_rect.min_y(),
                         tab_rect.max_y(),
                     )
                 } else {
                     (
                         drag_position.center().x(),
-                        tab_rect.center().x(),
                         tab_rect.min_x(),
                         tab_rect.max_x(),
                     )
                 };
-                let tab_quarter = (center + near) / 2.;
-                let tab_three_quarters = (center + far) / 2.;
-                if drag < tab_quarter {
-                    TabBarHoverIndex::BeforeTab {
-                        index: *idx,
-                        group: None,
-                    }
-                } else if drag < tab_three_quarters {
-                    TabBarHoverIndex::OverTab(*idx)
-                } else {
-                    TabBarHoverIndex::BeforeTab {
-                        index: *idx + 1,
-                        group: None,
-                    }
-                }
+                tab_hover_index_along_axis(drag, near, far, *idx)
             }
             TabBarLocation::AfterTabIndex(tab_count) => TabBarHoverIndex::BeforeTab {
                 index: *tab_count,
                 group: None,
             },
+        }
+    }
+}
+
+/// How far into a tab, from either edge along the tab bar's axis, a pane drop still inserts a new
+/// tab instead of moving the pane into that tab.
+const TAB_INSERT_EDGE_WIDTH: f32 = 8.;
+
+/// Classifies a drag positioned at `drag` over the tab spanning `near..far` on the tab bar's axis.
+/// Dropping a pane onto a tab is overwhelmingly meant as "move it into that tab", so only a thin
+/// band at each edge (at most a quarter of the tab) inserts a new tab beside it.
+fn tab_hover_index_along_axis(drag: f32, near: f32, far: f32, idx: usize) -> TabBarHoverIndex {
+    let edge = TAB_INSERT_EDGE_WIDTH.min((far - near) / 4.);
+    if drag < near + edge {
+        TabBarHoverIndex::BeforeTab {
+            index: idx,
+            group: None,
+        }
+    } else if drag < far - edge {
+        TabBarHoverIndex::OverTab(idx)
+    } else {
+        TabBarHoverIndex::BeforeTab {
+            index: idx + 1,
+            group: None,
         }
     }
 }

@@ -61,7 +61,7 @@ fn powershell_options() -> PtyOptions {
 #[test]
 #[serial]
 fn client_reattaches_same_process_through_daemon() {
-    std::thread::spawn(|| super::super::supervisor_daemon::run().unwrap());
+    std::thread::spawn(|| super::super::supervisor_daemon::run(|| {}).unwrap());
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(mut transport) = PipeTransport::connect(&supervisor_pipe_name()) {

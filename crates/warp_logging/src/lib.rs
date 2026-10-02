@@ -17,6 +17,8 @@ pub enum LogFrontend {
     Tui,
     /// CLI and remote server processes.
     Cli,
+    /// The terminal session supervisor, which outlives the app processes it serves.
+    TerminalSupervisor,
 }
 
 /// Configuration for initializing the logger.

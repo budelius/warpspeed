@@ -124,6 +124,7 @@ use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::shell_indicator::ShellIndicatorType;
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 #[cfg(not(target_family = "wasm"))]
+use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::cli_agent_sessions::plugin_manager::PluginModalKind;
 use crate::terminal::general_settings::{GeneralSettings, GeneralSettingsChangedEvent};
 #[cfg(feature = "local_tty")]
@@ -590,6 +591,12 @@ pub enum Event {
     InvokeEnvVarCollection {
         env_var_collection: Arc<EnvVarCollectionType>,
         in_subshell: bool,
+    },
+    /// A pane whose supervised shell is running an agent or a long-running command is being
+    /// closed. Closing it hands the shell to the supervisor, which keeps it running, rather than
+    /// ending it.
+    DetachPaneOnCloseRequested {
+        pane_id: PaneId,
     },
     CloseSharedSessionPaneRequested {
         pane_id: PaneId,
@@ -4610,6 +4617,29 @@ impl PaneGroup {
 
     /// Emits an event for the workspace to show a confirmation dialog if necessary, or closes immediately if not.
     /// If a dialog is opened, the workspace may call back into pane group to close the pane after the user confirms.
+    /// Whether closing this pane should leave its shell running in the supervisor: the shell is
+    /// supervised and an agent or a long-running command is running in it.
+    fn pane_keeps_running_when_closed(&self, pane_id: PaneId, ctx: &AppContext) -> bool {
+        let Some(session) = self.terminal_session_by_id(pane_id) else {
+            return false;
+        };
+        let manager = session.terminal_manager(ctx);
+        let manager = manager.as_ref(ctx);
+        if manager.persistent_session_id().is_none() {
+            return false;
+        }
+        let terminal_view_id = session.terminal_view(ctx).id();
+        CLIAgentSessionsModel::as_ref(ctx)
+            .session(terminal_view_id)
+            .is_some()
+            || manager
+                .model()
+                .lock()
+                .block_list()
+                .active_block()
+                .is_active_and_long_running()
+    }
+
     pub fn close_pane_with_confirmation(&mut self, pane_id: PaneId, ctx: &mut ViewContext<Self>) {
         // Child agent panes are just hidden when closed, so skip the
         // "process running" warning—it doesn't apply.
@@ -4630,6 +4660,11 @@ impl PaneGroup {
             })
         {
             ctx.emit(Event::CloseSharedSessionPaneRequested { pane_id });
+            return;
+        }
+
+        if self.pane_keeps_running_when_closed(pane_id, ctx) {
+            ctx.emit(Event::DetachPaneOnCloseRequested { pane_id });
             return;
         }
 

@@ -12522,16 +12522,18 @@ impl Workspace {
             detach_panes_for_close && self.try_re_adopt_split_off_child_agent_tab(index, ctx);
 
         if !re_adopted && detach_panes_for_close {
+            let kept_running = self.keep_tab_sessions_running(&pane_group, ctx);
             let working_directories_model = self.working_directories_model.clone();
             pane_group.update(ctx, |pane_group, ctx| {
                 pane_group.for_all_terminal_panes(
                     |terminal_view, ctx| {
-                        if terminal_view
-                            .model
-                            .lock()
-                            .block_list()
-                            .active_block()
-                            .is_active_and_long_running()
+                        if !kept_running.contains(&terminal_view.id())
+                            && terminal_view
+                                .model
+                                .lock()
+                                .block_list()
+                                .active_block()
+                                .is_active_and_long_running()
                         {
                             terminal_view.shutdown_pty(ctx);
                         }
@@ -13716,6 +13718,78 @@ impl Workspace {
                     toast_stack.add_ephemeral_toast(
                         DismissibleToast::error(
                             "This session could not be detached, so the pane was left open."
+                                .to_owned(),
+                        ),
+                        ctx,
+                    );
+                });
+            }
+        }
+    }
+
+    /// Hands the supervised shells of a closing tab that are running an agent or a long-running
+    /// command to the supervisor, which keeps them running. Returns the terminal views whose
+    /// shells it took.
+    #[cfg(feature = "local_tty")]
+    fn keep_tab_sessions_running(
+        &mut self,
+        pane_group: &ViewHandle<PaneGroup>,
+        ctx: &mut ViewContext<Self>,
+    ) -> HashSet<EntityId> {
+        let pane_group_id = pane_group.id();
+        let panes = self
+            .terminal_panes(ctx)
+            .into_iter()
+            .filter(|pane| {
+                pane.pane_group_id == pane_group_id
+                    && pane.session_id.is_some()
+                    && (pane.has_running_agent || pane.is_busy)
+            })
+            .collect::<Vec<_>>();
+        let mut kept = HashSet::new();
+        for pane in panes {
+            match self.hand_session_to_supervisor(pane_group_id, pane.pane_id, ctx) {
+                Ok(()) => {
+                    if let Some(terminal_view) = pane_group
+                        .as_ref(ctx)
+                        .terminal_view_from_pane_id(pane.pane_id, ctx)
+                    {
+                        kept.insert(terminal_view.id());
+                    }
+                }
+                Err(error) => {
+                    report_error!(error.context("Failed to keep a closed tab's session running"));
+                }
+            }
+        }
+        kept
+    }
+
+    #[cfg(not(feature = "local_tty"))]
+    fn keep_tab_sessions_running(
+        &mut self,
+        _pane_group: &ViewHandle<PaneGroup>,
+        _ctx: &mut ViewContext<Self>,
+    ) -> HashSet<EntityId> {
+        HashSet::new()
+    }
+
+    /// Closes a pane whose shell must keep running, handing the shell to the supervisor first.
+    /// If the handover fails the pane stays open: closing it would end what it was running.
+    fn detach_pane_for_close(
+        &mut self,
+        pane_group_id: EntityId,
+        pane_id: PaneId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match self.hand_session_to_supervisor(pane_group_id, pane_id, ctx) {
+            Ok(()) => self.close_pane(pane_group_id, pane_id, ctx),
+            Err(error) => {
+                report_error!(error.context("Failed to keep a closed pane's session running"));
+                self.toast_stack.update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::error(
+                            "This pane's session could not be kept running, so the pane was left                              open. Exit what is running in it to close it."
                                 .to_owned(),
                         ),
                         ctx,
@@ -17784,6 +17858,9 @@ impl Workspace {
                 *in_subshell,
                 ctx,
             ),
+            pane_group::Event::DetachPaneOnCloseRequested { pane_id } => {
+                self.detach_pane_for_close(pane_group.id(), *pane_id, ctx);
+            }
             pane_group::Event::CloseSharedSessionPaneRequested { pane_id } => {
                 if *SessionSettings::as_ref(ctx).should_confirm_close_session {
                     self.show_close_session_confirmation_dialog(

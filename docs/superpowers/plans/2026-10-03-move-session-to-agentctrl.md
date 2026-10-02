@@ -294,7 +294,7 @@ fn moved_session_is_placed_in_the_project_dir_for_the_new_cwd() {
     assert_eq!(std::fs::read(placed).unwrap(), b"{\"x\":1}\n");
 }
 ```
-Claude's project slug replaces every non-alphanumeric char with `-` (that is what WarpSpeed's `encode_cwd` in `app/src/ai/agent_sdk/driver/harness/claude_transcript.rs:89` does; copy its exact rule into `fn claude_project_slug(cwd: &Path) -> String`).
+Claude's project slug replaces every non-ASCII-alphanumeric char with `-` (observed: `C:\Users\budel\AppData\Local\Programs\WarpSpeed` -> `C--Users-budel-AppData-Local-Programs-WarpSpeed`). WarpSpeed's `encode_cwd` only replaces `/` and `.` and is wrong for this; implement `fn claude_project_slug(cwd: &Path) -> String` with the full rule.
 
 `pi.rs`:
 ```rust
@@ -651,7 +651,7 @@ Worktree: `T:/projects/dev-ops/warp-move-to-agentctrl` (branch `feat/move-sessio
 
 - [ ] **Step 1: Failing tests** (tempdir repos with `std::process::Command::new("git")`):
   - `moved_agent_names`: Claude → `staging-claude-moved`, Pi → `staging-pi-moved`, Codex → `staging-codex-moved`, Gemini → None.
-  - `claude_session_path_uses_encoded_cwd`: `home/.claude/projects/<encode_cwd(cwd)>/<id>.jsonl` (create the file; assert found). Respect `CLAUDE_CONFIG_DIR` the same way `claude_config_dir()` does — pass the resolved config dir in rather than reading env inside the test.
+  - `claude_session_path_uses_project_slug`: `home/.claude/projects/<slug>/<id>.jsonl` where slug replaces EVERY non-ASCII-alphanumeric char with `-` (observed on this machine: `C:\Users\budel\AppData\Local\Programs\WarpSpeed` -> `C--Users-budel-AppData-Local-Programs-WarpSpeed`; `T:\projects\SOTZ3N\stoz3n-agent-dash\.claude\worktrees\x` -> `T--projects-SOTZ3N-stoz3n-agent-dash--claude-worktrees-x`). Do NOT use the existing `encode_cwd` (it only replaces `/` and `.`, wrong on Windows); add `claude_project_slug` in the handoff module. Test with a Windows-style path string and a Unix one (create the file; assert found). Respect `CLAUDE_CONFIG_DIR` the same way `claude_config_dir()` does — pass the resolved config dir in rather than reading env inside the test.
   - `pi_session_path_matches_id_in_project_dir`: create `home/.pi/agent/sessions/<pi slug>/2026-10-03T10-00-00-000Z_<id>.jsonl`; pi slug = `"--" + cwd with every '/', '\\' and ':' replaced by '-' + "--"` (matches the observed `--T--projects-dev-ops--`; verify against the real dir listing on this machine before finalizing). Assert found; a missing id → error contains `no pi session file`.
   - `codex_session_path_found_by_id_anywhere_under_sessions`: create `home/.codex/sessions/2026/06/30/rollout-2026-06-30T12-53-51-<id>.jsonl`; assert found.
   - `handoff_branch_name_shape`: `handoff/20261003-1200-0b6c1234` for session id `0b6c1234-ffff-…` (first 8 chars), matches the server regex.

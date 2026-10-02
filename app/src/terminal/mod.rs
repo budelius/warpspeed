@@ -15,6 +15,7 @@ use warpui::units::Lines;
 use warpui::{AppContext, SingletonEntity, WindowId};
 mod block_list_settings;
 
+pub(crate) mod agent_session_history;
 mod alias;
 pub(crate) mod alt_screen;
 pub mod alt_screen_reporting;

@@ -8397,8 +8397,11 @@ impl PaneGroup {
                     // codepath should only be invoked when focus has
                     // already changed, so we only want to update our own
                     // state, and not manipulate application focus.
-                    self.focus_pane(pane_id, false, ctx);
+                    let focus_changed = self.focus_pane(pane_id, false, ctx);
                     self.update_pane_history(pane_id);
+                    if focus_changed {
+                        ctx.emit(Event::AppStateChanged);
+                    }
                     ctx.emit(Event::PaneFocused);
                 };
                 break;

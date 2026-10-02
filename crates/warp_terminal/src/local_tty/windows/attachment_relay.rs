@@ -194,28 +194,5 @@ impl Drop for Event {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn relay_moves_output_and_input_in_both_directions() {
-        let pty = pipes::create_async_anonymous_pipe().unwrap();
-        let (relay, client) = AttachmentRelay::start(pty.server).unwrap();
-        let write_event = Event::new().unwrap();
-        let read_event = Event::new().unwrap();
-        let mut buffer = [0u8; 32];
-
-        write_with_timeout(pty.client, write_event.0, b"output", 500).unwrap();
-        let read = read_with_timeout(client, read_event.0, &mut buffer, 500).unwrap();
-        assert_eq!(&buffer[..read], b"output");
-
-        write_with_timeout(client, write_event.0, b"input", 500).unwrap();
-        let read = read_with_timeout(pty.client, read_event.0, &mut buffer, 500).unwrap();
-        assert_eq!(&buffer[..read], b"input");
-
-        let _ = unsafe { CloseHandle(client) };
-        drop(relay);
-        let _ = unsafe { CloseHandle(pty.server) };
-        let _ = unsafe { CloseHandle(pty.client) };
-    }
-}
+#[path = "attachment_relay_tests.rs"]
+mod tests;

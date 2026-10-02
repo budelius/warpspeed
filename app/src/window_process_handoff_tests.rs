@@ -34,6 +34,7 @@ fn handoff_payload_round_trip_preserves_window_and_agent_commands() {
             pane_uuid: vec![1, 2, 3],
             command: "claude --resume test".to_owned(),
         }],
+        transfers_session_lease: true,
     };
 
     write_request(&path, &payload).unwrap();
@@ -45,6 +46,26 @@ fn handoff_payload_round_trip_preserves_window_and_agent_commands() {
         restored.agent_resume_commands,
         payload.agent_resume_commands
     );
+    assert!(restored.transfers_session_lease);
+}
+
+#[test]
+fn legacy_handoff_payload_does_not_transfer_a_session_lease() {
+    let payload = HandoffPayload {
+        protocol_version: PROTOCOL_VERSION,
+        window: window_snapshot(),
+        agent_resume_commands: Vec::new(),
+        transfers_session_lease: false,
+    };
+    let mut encoded = serde_json::to_value(payload).unwrap();
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("transfers_session_lease");
+
+    let restored: HandoffPayload = serde_json::from_value(encoded).unwrap();
+
+    assert!(!restored.transfers_session_lease);
 }
 
 #[test]
@@ -55,6 +76,7 @@ fn ready_and_release_handshake_cleans_up_its_markers() {
         protocol_version: PROTOCOL_VERSION,
         window: window_snapshot(),
         agent_resume_commands: Vec::new(),
+        transfers_session_lease: false,
     };
     write_request(&request_path, &payload).unwrap();
 

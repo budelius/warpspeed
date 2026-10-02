@@ -227,7 +227,8 @@ For Claude, transcript forking remains a last-resort handoff operation. It must 
 Only one process may own a session ID and generation at a time.
 
 - Acquire an OS-backed lease under `state_dir()/session_config_sessions/<id>/<generation>/owner.lock` before restoring or materializing.
-- Hold the lease for the workspace lifetime.
+- Hold the lease for the workspace lifetime, releasing it only after the final close snapshot has been written.
+- Transfer the lease when restarting a window in a new process: the old process releases it immediately before the handoff, and the replacement claims it before starting deferred shells.
 - If the same process already owns it, focus the existing window.
 - If another process owns it, focus that process through local control when available; otherwise show an explicit **Session is open in another WarpSpeed process** error.
 - Never open an untracked duplicate and never let two processes race to overwrite the snapshot.
@@ -283,6 +284,7 @@ The window indicates that it belongs to a persistent session. Saving a launch co
 - Built-in agent conversations and active conversation state round-trip.
 - CLI-agent descriptors prefer PTY attach and fall back to lazy resume.
 - A second in-process open focuses the owner; a second process cannot acquire the lease.
+- Closing a session releases its lease after persistence, and window process handoff transfers ownership to the replacement process.
 - Corrupt state falls back to the session seed without modifying the corrupt file.
 
 ## Rollout order

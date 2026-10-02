@@ -1108,9 +1108,9 @@ impl WorkspaceAction {
             | ToggleTabConfigsMenu
             | ToggleNewSessionMenu { .. }
             | SelectNewSessionMenuItem(_)
-            // Restarting or changing a pane's shell mutates session content, not
-            // the persisted tab/pane layout, and the picker toggle is a plain
-            // menu open/close -- none of these need a save.
+            // Changing shells saves when the terminal reports its new active launch data;
+            // saving at action dispatch could capture the old shell. Restart and picker actions
+            // do not change persisted state.
             | RestartShell
             | RestartShellForTerminalView { .. }
             | ToggleAttachSessionMenu

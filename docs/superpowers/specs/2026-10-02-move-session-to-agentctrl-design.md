@@ -1,7 +1,7 @@
 # Move a Local Agent Session to AgentCtrl — Design
 
 Date: 2026-10-02
-Status: approved design, pending spec review
+Status: approved; revised 2026-10-03 after mapping the code (see Revisions)
 Repos: `warp` (WarpSpeed client), `stoz3n-agent-ctrl` (controller, node, adapters), dashboard backend
 (`dash-backend-dev.stozn.ai`, `/api/agent-control/*`)
 
@@ -139,3 +139,20 @@ AgentCtrl:
 - Node per-run worktree leaves the persistent checkout unchanged.
 - Staging end-to-end per agent: move a real session, then ask it about an earlier turn and get
   the right answer.
+
+## Revisions (2026-10-03)
+
+Mapping the three codebases changed these points; the implementation plan
+(`docs/superpowers/plans/2026-10-03-move-session-to-agentctrl.md`) follows the revised form.
+
+1. Repositories are known only to the AgentCtrl node (`AGENT_CTRL_WORKSPACES_FILE`), so there is no
+   `GET /repos`. WarpSpeed sends the push remote URL as `repo_url`; the node rejects unknown repos.
+2. The dashboard reaches the controller over gRPC; a new `ImportSession` RPC carries the file, and
+   decode limits are raised to 40 MiB where it travels. The controller does not persist the file.
+3. The viewer already exists: after cut-over the pane runs `agent-ctrl open <job>`. No new pane type.
+4. No `warpspeed agent-ctrl move` CLI; only the GUI action can address a pane.
+5. Import needs no `task_id`. Moved runs use dedicated agents `staging-{claude,pi,codex}-moved`
+   with `workspace-write`, and staging gains the `warpspeed` workspace repository.
+6. The `6c985252` prerequisite is moot: `dev` has `crates/managed_agent_sessions`.
+7. Codex resume verified: `thread/resume {threadId}` loads a rollout copied into any date folder of
+   a fresh `CODEX_HOME` (codex-cli 0.144.4).

@@ -94,6 +94,7 @@ pub mod wsl;
 
 pub mod cli_agent;
 pub use cli_agent::CLIAgent;
+pub(crate) mod agent_session_history;
 pub(crate) mod cli_agent_sessions;
 
 pub use block_list_settings::*;

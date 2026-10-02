@@ -31,6 +31,14 @@ pub enum Request {
     /// Opens a tab attached to a session the supervisor is holding.
     AttachSession { session_id: u64 },
 
+    /// The saved sessions this instance can reopen, newest first.
+    ListStoredSessions,
+
+    /// Reopens the newest autosave of the saved session called `name`, exactly as picking it in
+    /// the session picker would: running shells are taken over and agents whose process has
+    /// ended are resumed.
+    OpenStoredSession { name: String },
+
     /// Quits, running the same teardown a user quitting the app would.
     Quit {
         /// Close every window rather than asking the app to terminate.
@@ -62,6 +70,9 @@ pub enum Response {
 
     /// The answer to [`Request::ListPanes`].
     Panes { panes: Vec<PaneSummary> },
+
+    /// The answer to [`Request::ListStoredSessions`].
+    StoredSessions { sessions: Vec<StoredSessionInfo> },
 
     /// The request was carried out.
     ///
@@ -113,4 +124,16 @@ pub struct PaneSummary {
     /// Answered by the same predicate the exit path itself uses, so this is not
     /// a second opinion about the rule -- it is the rule, asked ahead of time.
     pub survives_quit: bool,
+}
+
+/// One saved session that can be reopened.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredSessionInfo {
+    pub name: String,
+    /// Whether this is the session's running autosave rather than a stored snapshot of it.
+    pub autosaved: bool,
+    pub saved_at_unix_seconds: i64,
+    pub tabs: usize,
+    pub panes: usize,
+    pub agents: usize,
 }

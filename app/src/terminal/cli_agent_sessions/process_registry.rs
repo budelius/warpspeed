@@ -95,6 +95,26 @@ pub(crate) fn resolve_in(
         .find_map(|pid| read_entry(&registry_directory.join(format!("{pid}.json"))))
 }
 
+/// The sessions agents on this machine are running right now, whichever pane or terminal they
+/// are in.
+pub(crate) fn running_session_ids() -> std::collections::HashSet<String> {
+    let processes = process_table();
+    DISCOVERABLE_AGENTS
+        .into_iter()
+        .filter_map(|agent| Some((agent, registry_directory(agent)?)))
+        .flat_map(|(agent, directory)| {
+            processes
+                .iter()
+                .filter(move |process| is_agent_process(agent, &process.name))
+                .filter_map(move |process| {
+                    read_entry(&directory.join(format!("{}.json", process.pid)))
+                })
+                .map(|session| session.session_id)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Whether any process is running under `pid`.
 pub(crate) fn has_child_process(pid: u32) -> bool {
     has_child_process_in(pid, &process_table())

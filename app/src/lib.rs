@@ -3246,8 +3246,15 @@ fn launch(
                 .iter()
                 .any(is_cloud_agent_web_home_launch_url);
             let force_restore = incoming_window_handoff.is_some();
+            #[cfg(not(target_family = "wasm"))]
+            let starts_empty = matches!(launch_mode, LaunchMode::App { .. })
+                && !force_restore
+                && !remote_control::should_restore_at_startup();
+            #[cfg(target_family = "wasm")]
+            let starts_empty = false;
             let interrupted_sessions = if matches!(launch_mode, LaunchMode::App { .. })
                 && !should_skip_restore
+                && !starts_empty
                 && !force_restore
                 && launch_mode.args().urls.is_empty()
                 && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
@@ -3278,7 +3285,7 @@ fn launch(
                         running_mcp_servers,
                     })
                 }
-                None if should_skip_restore => None,
+                None if should_skip_restore || starts_empty => None,
                 None => app_state,
             };
             if !interrupted_sessions.is_empty()

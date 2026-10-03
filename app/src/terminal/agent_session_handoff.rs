@@ -1,8 +1,3 @@
-#![expect(
-    dead_code,
-    reason = "the move-to-AgentCtrl action that calls this is not wired yet"
-)]
-
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,7 +23,9 @@ pub(crate) struct HandoffSource {
 }
 
 /// Everything the import request needs once the handoff branch has been pushed.
-#[derive(Clone, Debug)]
+///
+/// Deliberately not `Debug`: it holds the whole session file and a remote URL that may carry
+/// credentials.
 pub(crate) struct PreparedHandoff {
     pub agent_name: &'static str,
     pub session_file: Vec<u8>,
@@ -342,6 +339,109 @@ fn prepare_handoff_with_roots(
         branch,
         commit,
     })
+}
+
+/// How far a move to AgentCtrl has got. The local agent is only touched from `CuttingOver` on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MoveStep {
+    Preparing,
+    Importing,
+    WaitingForResume {
+        job_id: String,
+    },
+    CuttingOver {
+        job_id: String,
+    },
+    Done {
+        job_id: String,
+    },
+    Failed {
+        reason: String,
+        pushed_branch: Option<String>,
+    },
+}
+
+/// The message shown when a move fails after reaching `step_reached`. `pushed_branch` is the
+/// handoff branch as `<remote>/<branch>`, when it was pushed.
+pub(crate) fn move_failure_message(
+    step_reached: &MoveStep,
+    error: &str,
+    pushed_branch: Option<&str>,
+) -> String {
+    let error = redact_url_credentials(error);
+    let leftover_branch = pushed_branch
+        .map(|branch| format!(" The handoff branch {branch} was pushed and can be deleted."))
+        .unwrap_or_default();
+    let before_cut_over = |stage: &str| {
+        format!(
+            "Could not move the session to AgentCtrl while {stage}: {error}. The local session \
+             is still running.{leftover_branch}"
+        )
+    };
+    match step_reached {
+        MoveStep::Preparing => before_cut_over("preparing the handoff"),
+        MoveStep::Importing => before_cut_over("importing it"),
+        MoveStep::WaitingForResume { job_id } => {
+            before_cut_over(&format!("waiting for {job_id} to resume"))
+        }
+        MoveStep::CuttingOver { job_id } | MoveStep::Done { job_id } => format!(
+            "Moved to AgentCtrl as {job_id}, but the local agent did not exit; close it manually."
+        ),
+        MoveStep::Failed { reason, .. } => reason.clone(),
+    }
+}
+
+/// Removes `user[:password]@` from every URL in `text`, since git and HTTP errors can echo a
+/// remote URL that embeds a token.
+fn redact_url_credentials(text: &str) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + 3;
+        redacted.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let authority_end = rest
+            .find(|c: char| c == '/' || c == '\'' || c == '"' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            rest = &rest[at + 1..];
+        }
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+/// The `Idempotency-Key` for importing `session_id` at handoff `commit`, kept within the server's
+/// `[A-Za-z0-9._:-]{16,128}`.
+pub(crate) fn move_idempotency_key(session_id: &str, commit: &str) -> String {
+    let session_id = session_id
+        .char_indices()
+        .nth(100)
+        .map_or(session_id, |(end, _)| &session_id[..end]);
+    let commit = commit.get(..12).unwrap_or(commit);
+    format!("move-{session_id}-{commit}")
+}
+
+/// What to type into a moved agent to make it exit.
+pub(crate) fn agent_exit_command(agent: CLIAgent) -> Option<&'static str> {
+    match agent {
+        CLIAgent::Claude | CLIAgent::Codex => Some("/exit"),
+        CLIAgent::Pi => Some("/quit"),
+        CLIAgent::Gemini
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Vibe
+        | CLIAgent::Antigravity
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => None,
+    }
 }
 
 #[cfg(test)]

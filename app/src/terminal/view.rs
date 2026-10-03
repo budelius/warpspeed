@@ -7911,6 +7911,41 @@ impl TerminalView {
             .map(|s| s.shell().shell_type())
     }
 
+    /// Makes this pane's active block a bootstrapped local session at `cwd`, as if the shell had
+    /// reported it.
+    #[cfg(test)]
+    pub(crate) fn set_active_local_session_for_test(
+        &mut self,
+        cwd: &Path,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::model::session::{SessionId, SessionInfo};
+        use crate::terminal::shell::ShellType;
+
+        let session_id = SessionId::from(7);
+        #[cfg(unix)]
+        let launch_data = ShellLaunchData::Executable {
+            executable_path: PathBuf::from("/bin/bash"),
+            shell_type: ShellType::Bash,
+        };
+        #[cfg(windows)]
+        let launch_data = ShellLaunchData::Executable {
+            executable_path: PathBuf::from(
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            ),
+            shell_type: ShellType::PowerShell,
+        };
+        self.sessions.update(ctx, |sessions, _| {
+            let mut session_info = SessionInfo::new_for_test().with_id(session_id);
+            session_info.launch_data = Some(launch_data);
+            sessions.register_session_for_test(session_info);
+        });
+        self.active_block_metadata = Some(BlockMetadata::new(
+            Some(session_id),
+            Some(cwd.display().to_string()),
+        ));
+    }
+
     pub fn active_session_path_if_local<C: ModelAsRef>(&self, ctx: &C) -> Option<PathBuf> {
         if self.active_session_is_local(ctx) == Some(true) {
             self.active_block_metadata
@@ -27074,6 +27109,7 @@ impl TypedActionView for TerminalView {
             | RestartShell
             | ChangeShell
             | DetachSession
+            | MoveSessionToAgentCtrl
             | PromptContextMenu { .. }
             | OpenInputContextMenu { .. }
             | InputContextMenuItem(_)
@@ -27416,6 +27452,13 @@ impl TypedActionView for TerminalView {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::DetachSessionForTerminalView {
                     terminal_view_id: self.view_id,
                 });
+            }
+            MoveSessionToAgentCtrl => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::MoveSessionToAgentCtrlForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
             }
             PromptContextMenu {
                 position_offset_from_prompt,

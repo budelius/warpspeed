@@ -1026,6 +1026,16 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(id!("Workspace")),
     ]);
 
+    // Offered only on panes running a local agent session that can be moved, for the same reason
+    // as `Workspace_PaneCanDetachSession`.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:move_session_to_agent_ctrl",
+        "Move session to AgentCtrl",
+        WorkspaceAction::MoveSessionToAgentCtrl,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanMoveSessionToAgentCtrl"))]);
+
     app.register_editable_bindings([EditableBinding::new(
         "workspace:restart_window_in_new_process",
         "Restart window in new process",

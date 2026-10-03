@@ -286,6 +286,17 @@ pub enum WorkspaceAction {
     DetachSessionForTerminalView {
         terminal_view_id: EntityId,
     },
+    /// Asks to move the focused pane's local claude, pi, or codex session into an AgentCtrl
+    /// managed run on staging. Nothing happens until `ConfirmMoveSessionToAgentCtrl`.
+    MoveSessionToAgentCtrl,
+    MoveSessionToAgentCtrlForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Starts the move asked for by `MoveSessionToAgentCtrlForTerminalView`. The local agent is
+    /// told to exit only once the managed run has resumed, and the pane then shows that run.
+    ConfirmMoveSessionToAgentCtrl {
+        terminal_view_id: EntityId,
+    },
     /// Opens (or closes, if already open) the picker listing the sessions the
     /// supervisor is holding with no pane attached. Selecting an entry there
     /// dispatches `AttachDetachedSession`.
@@ -1065,6 +1076,9 @@ impl WorkspaceAction {
             // adds a tab.
             | DetachSession
             | DetachSessionForTerminalView { .. }
+            | MoveSessionToAgentCtrl
+            | MoveSessionToAgentCtrlForTerminalView { .. }
+            | ConfirmMoveSessionToAgentCtrl { .. }
             | AttachDetachedSession { .. }
             | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets

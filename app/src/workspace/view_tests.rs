@@ -6815,3 +6815,223 @@ fn selecting_a_shell_restarts_the_session_before_closing_the_picker() {
         );
     });
 }
+
+/// `initialize_app` plus the STOZN auth singleton the workspace reads, which `initialize_app`
+/// does not register yet.
+fn initialize_app_for_move_session(app: &mut App) {
+    initialize_app(app);
+    if !app.read(|ctx| ctx.has_singleton_model::<crate::stozn_auth::StoznAuthManager>()) {
+        app.add_singleton_model(|_| crate::stozn_auth::StoznAuthManager::new());
+    }
+}
+
+fn seed_agent_session(
+    terminal_view_id: EntityId,
+    agent: crate::terminal::CLIAgent,
+    session_id: Option<&str>,
+    remote_host: Option<&str>,
+    cwd: &std::path::Path,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+        model.set_session(
+            terminal_view_id,
+            crate::terminal::cli_agent_sessions::CLIAgentSession {
+                agent,
+                status: crate::terminal::cli_agent_sessions::CLIAgentSessionStatus::InProgress,
+                session_context: crate::terminal::cli_agent_sessions::CLIAgentSessionContext {
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    session_id: session_id.map(str::to_owned),
+                    ..Default::default()
+                },
+                input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+                should_auto_toggle_input: false,
+                listener: None,
+                plugin_version: None,
+                remote_host: remote_host.map(str::to_owned),
+                draft_text: None,
+                custom_command_prefix: None,
+                received_rich_notification: false,
+            },
+            ctx,
+        );
+    });
+}
+
+/// Whether the focused pane offers the move, in its header menu and through the keymap flag the
+/// palette binding is predicated on. Both must always agree.
+fn move_session_is_offered(workspace: &ViewHandle<Workspace>, app: &mut App) -> bool {
+    let in_menu = workspace.update(app, |workspace, ctx| {
+        let terminal_view = workspace
+            .focused_terminal_view(ctx)
+            .expect("mock workspace has a focused terminal pane");
+        let items = terminal_view
+            .as_ref(ctx)
+            .pane_header_overflow_menu_items(ctx);
+        let labelled = items.iter().any(|item| {
+            item.fields()
+                .is_some_and(|fields| fields.label() == "Move session to AgentCtrl")
+        });
+        let mapped = items.iter().any(|item| {
+            matches!(
+                item.fields().and_then(|fields| fields.on_select_action()),
+                Some(crate::terminal::view::TerminalAction::MoveSessionToAgentCtrl)
+            )
+        });
+        assert_eq!(labelled, mapped, "the menu label and its action must agree");
+        labelled
+    });
+    let in_keymap = app.read(|ctx| {
+        workspace
+            .read(ctx, |workspace, ctx| workspace.keymap_context(ctx))
+            .set
+            .contains("Workspace_PaneCanMoveSessionToAgentCtrl")
+    });
+    assert_eq!(
+        in_menu, in_keymap,
+        "the pane menu and the palette's keymap flag must agree"
+    );
+    in_menu
+}
+
+const MOVE_SESSION_ID: &str = "0b6c1234-ffff-4a4a-8b8b-0123456789ab";
+
+#[test]
+fn move_session_is_offered_for_a_local_claude_session() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let cwd = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+
+        assert!(
+            !move_session_is_offered(&workspace, &mut app),
+            "a pane with no agent session must not offer the move"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(cwd.path(), ctx)
+            });
+            seed_agent_session(
+                terminal_view.id(),
+                crate::terminal::CLIAgent::Claude,
+                Some(MOVE_SESSION_ID),
+                None,
+                cwd.path(),
+                ctx,
+            );
+        });
+
+        assert!(move_session_is_offered(&workspace, &mut app));
+    });
+}
+
+#[test]
+fn move_session_is_not_offered_for_unsupported_remote_or_unidentified_sessions() {
+    type Case = (
+        crate::terminal::CLIAgent,
+        Option<&'static str>,
+        Option<&'static str>,
+    );
+    let cases: [(&str, Case); 3] = [
+        (
+            "an agent with no moved-session profile",
+            (
+                crate::terminal::CLIAgent::Gemini,
+                Some(MOVE_SESSION_ID),
+                None,
+            ),
+        ),
+        (
+            "a session whose id is unknown",
+            (crate::terminal::CLIAgent::Claude, None, None),
+        ),
+        (
+            "a session on a remote host",
+            (
+                crate::terminal::CLIAgent::Claude,
+                Some(MOVE_SESSION_ID),
+                Some("user@host"),
+            ),
+        ),
+    ];
+    for (description, (agent, session_id, remote_host)) in cases {
+        App::test((), |mut app| async move {
+            initialize_app_for_move_session(&mut app);
+            let cwd = TempDir::new().unwrap();
+            let workspace = mock_workspace(&mut app);
+
+            workspace.update(&mut app, |workspace, ctx| {
+                let terminal_view = workspace
+                    .focused_terminal_view(ctx)
+                    .expect("mock workspace has a focused terminal pane");
+                terminal_view.update(ctx, |view, ctx| {
+                    view.set_active_local_session_for_test(cwd.path(), ctx)
+                });
+                seed_agent_session(
+                    terminal_view.id(),
+                    agent,
+                    session_id,
+                    remote_host,
+                    cwd.path(),
+                    ctx,
+                );
+            });
+
+            assert!(
+                !move_session_is_offered(&workspace, &mut app),
+                "{description} must not offer the move"
+            );
+        });
+    }
+}
+
+#[test]
+fn move_session_is_not_offered_without_a_local_shell_directory() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let cwd = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            seed_agent_session(
+                terminal_view.id(),
+                crate::terminal::CLIAgent::Claude,
+                Some(MOVE_SESSION_ID),
+                None,
+                cwd.path(),
+                ctx,
+            );
+        });
+
+        assert!(!move_session_is_offered(&workspace, &mut app));
+    });
+}
+
+#[test]
+fn move_session_binding_is_registered_for_the_palette() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:move_session_to_agent_ctrl")
+                .expect("the move binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::MoveSessionToAgentCtrl)
+            ));
+        });
+    });
+}

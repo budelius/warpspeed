@@ -354,7 +354,9 @@ fn prepare_handoff_refuses_oversized_file_before_any_git_work() {
     let roots = AgentSessionRoots::under_home(home.path());
     let now = Local.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
 
-    let error = prepare_handoff_with_roots(&source, &roots, now).unwrap_err();
+    let Err(error) = prepare_handoff_with_roots(&source, &roots, now) else {
+        panic!("prepare_handoff must fail");
+    };
 
     assert!(format!("{error:#}").contains("too large"), "{error:#}");
     let refs = git(&remotes.path().join("gitea.git"), &["for-each-ref"]);
@@ -371,10 +373,101 @@ fn prepare_handoff_without_remote_fails() {
     let roots = AgentSessionRoots::under_home(home.path());
     let now = Local.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
 
-    let error = prepare_handoff_with_roots(&source, &roots, now).unwrap_err();
+    let Err(error) = prepare_handoff_with_roots(&source, &roots, now) else {
+        panic!("prepare_handoff must fail");
+    };
 
     assert!(
         format!("{error:#}").contains("no `gitea` or `origin` remote"),
         "{error:#}"
     );
+}
+
+#[test]
+fn move_session_failure_before_cut_over_says_the_local_session_is_still_running() {
+    let steps = [
+        MoveStep::Preparing,
+        MoveStep::Importing,
+        MoveStep::WaitingForResume {
+            job_id: "job-1".to_owned(),
+        },
+    ];
+    for step in &steps {
+        let message = move_failure_message(step, "boom", None);
+        assert!(
+            message.contains("local session is still running"),
+            "{step:?}: {message}"
+        );
+        assert!(message.contains("boom"), "{step:?}: {message}");
+        assert!(!message.contains("handoff/"), "{step:?}: {message}");
+
+        let message =
+            move_failure_message(step, "boom", Some("gitea/handoff/20261003-1200-0b6c1234"));
+        assert!(
+            message.contains("local session is still running"),
+            "{step:?}: {message}"
+        );
+        assert!(
+            message.contains("gitea/handoff/20261003-1200-0b6c1234"),
+            "{step:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn move_session_failure_during_cut_over_asks_to_close_the_agent_manually() {
+    let message = move_failure_message(
+        &MoveStep::CuttingOver {
+            job_id: "job-1".to_owned(),
+        },
+        "timed out",
+        Some("gitea/handoff/x"),
+    );
+    assert!(
+        message.contains("local agent did not exit; close it manually"),
+        "{message}"
+    );
+    assert!(message.contains("job-1"), "{message}");
+    assert!(!message.contains("still running"), "{message}");
+}
+
+#[test]
+fn move_session_failure_message_strips_credentials_from_urls() {
+    let message = move_failure_message(
+        &MoveStep::Preparing,
+        "git push failed: fatal: unable to access 'https://bob:s3cret@git.example.com/a/b.git/': 403",
+        None,
+    );
+    assert!(!message.contains("s3cret"), "{message}");
+    assert!(!message.contains("bob"), "{message}");
+    assert!(
+        message.contains("https://git.example.com/a/b.git/"),
+        "{message}"
+    );
+}
+
+#[test]
+fn move_session_idempotency_key_matches_the_server_pattern() {
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let key = move_idempotency_key(SESSION_ID, commit);
+    assert_eq!(key, format!("move-{SESSION_ID}-0123456789ab"));
+
+    let long_id = "a".repeat(128);
+    let key = move_idempotency_key(&long_id, commit);
+    assert!(key.len() <= 128, "{}", key.len());
+    assert!(key.len() >= 16);
+    assert!(
+        key.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-')),
+        "{key}"
+    );
+    assert_eq!(key, format!("move-{}-0123456789ab", "a".repeat(100)));
+}
+
+#[test]
+fn move_session_exit_command_matches_each_agent() {
+    assert_eq!(agent_exit_command(CLIAgent::Claude), Some("/exit"));
+    assert_eq!(agent_exit_command(CLIAgent::Codex), Some("/exit"));
+    assert_eq!(agent_exit_command(CLIAgent::Pi), Some("/quit"));
+    assert_eq!(agent_exit_command(CLIAgent::Gemini), None);
 }

@@ -6929,6 +6929,65 @@ fn move_session_is_offered_for_a_local_claude_session() {
     });
 }
 
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn move_session_source_uses_the_shell_cwd_and_the_reported_transcript() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let shell_cwd = TempDir::new().unwrap();
+        let agent_cwd = TempDir::new().unwrap();
+        let transcript = std::path::PathBuf::from(format!(
+            "/home/ben/.claude/projects/-srv-app/{MOVE_SESSION_ID}.jsonl"
+        ));
+        let workspace = mock_workspace(&mut app);
+
+        let source = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(shell_cwd.path(), ctx)
+            });
+            let terminal_view_id = terminal_view.id();
+            let transcript = transcript.clone();
+            let agent_cwd = agent_cwd.path().to_string_lossy().into_owned();
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(
+                    terminal_view_id,
+                    crate::terminal::cli_agent_sessions::CLIAgentSession {
+                        agent: crate::terminal::CLIAgent::Claude,
+                        status:
+                            crate::terminal::cli_agent_sessions::CLIAgentSessionStatus::InProgress,
+                        session_context:
+                            crate::terminal::cli_agent_sessions::CLIAgentSessionContext {
+                                cwd: Some(agent_cwd),
+                                session_id: Some(MOVE_SESSION_ID.to_owned()),
+                                transcript_path: Some(transcript),
+                                ..Default::default()
+                            },
+                        input_state:
+                            crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        remote_host: None,
+                        draft_text: None,
+                        custom_command_prefix: None,
+                        received_rich_notification: false,
+                    },
+                    ctx,
+                );
+            });
+            workspace
+                .agent_ctrl_move_source(terminal_view_id, ctx)
+                .expect("a local Claude session can be moved")
+        });
+
+        assert_eq!(source.cwd, shell_cwd.path());
+        assert_eq!(source.transcript_path, Some(transcript));
+    });
+}
+
 #[test]
 fn move_session_is_not_offered_for_unsupported_remote_or_unidentified_sessions() {
     type Case = (

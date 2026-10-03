@@ -684,20 +684,14 @@ impl TerminalView {
         }
         moved_agent_name(session.agent)?;
         let session_id = sessions.session_id(self.view_id)?.to_owned();
-        let shell_cwd = self.active_session_path_if_local(ctx)?;
-        // The agent may have changed directory after it started, and its session file is keyed
-        // by the directory the agent reports, not the shell's.
-        let cwd = session
-            .session_context
-            .cwd
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .filter(|cwd| cwd.is_dir())
-            .unwrap_or(shell_cwd);
+        // Not the agent-reported cwd: it follows the agent's own `cd`s, while the session file
+        // stays keyed by the directory the agent was launched from.
+        let cwd = self.active_session_path_if_local(ctx)?;
         Some(HandoffSource {
             agent: session.agent,
             session_id,
             cwd,
+            transcript_path: session.session_context.transcript_path.clone(),
         })
     }
 

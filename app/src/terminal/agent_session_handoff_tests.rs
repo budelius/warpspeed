@@ -283,6 +283,7 @@ fn claude_source(home: &Path, repo: &Path, content: &[u8]) -> HandoffSource {
         agent: CLIAgent::Claude,
         session_id: SESSION_ID.to_owned(),
         cwd: repo.to_path_buf(),
+        transcript_path: None,
     }
 }
 
@@ -595,4 +596,106 @@ fn move_session_exit_command_matches_each_agent() {
     assert_eq!(agent_exit_command(CLIAgent::Codex), Some("/exit"));
     assert_eq!(agent_exit_command(CLIAgent::Pi), Some("/quit"));
     assert_eq!(agent_exit_command(CLIAgent::Gemini), None);
+}
+
+#[test]
+fn move_session_file_prefers_the_reported_transcript_path() {
+    let home = TempDir::new().unwrap();
+    let roots = AgentSessionRoots::under_home(home.path());
+    let launch_dir = Path::new("/home/ben/src/app");
+    let by_launch_dir = roots
+        .claude_config
+        .join("projects")
+        .join(claude_project_slug(launch_dir))
+        .join(format!("{SESSION_ID}.jsonl"));
+    write_file(
+        &by_launch_dir,
+        b"{}
+",
+    );
+    let reported = roots
+        .claude_config
+        .join("projects")
+        .join("-home-ben-src-app-reported")
+        .join(format!("{SESSION_ID}.jsonl"));
+    let source = |transcript_path: Option<PathBuf>| HandoffSource {
+        agent: CLIAgent::Claude,
+        session_id: SESSION_ID.to_owned(),
+        cwd: launch_dir.to_path_buf(),
+        transcript_path,
+    };
+
+    // Reported, but the file does not exist: fall back to the shell-cwd lookup.
+    assert_eq!(
+        resolve_session_file(&source(Some(reported.clone())), &roots).unwrap(),
+        by_launch_dir
+    );
+
+    write_file(
+        &reported, b"{}
+",
+    );
+    assert_eq!(
+        resolve_session_file(&source(Some(reported.clone())), &roots).unwrap(),
+        reported
+    );
+
+    assert_eq!(
+        resolve_session_file(&source(None), &roots).unwrap(),
+        by_launch_dir
+    );
+}
+
+#[test]
+fn move_session_file_ignores_a_reported_path_that_is_not_this_session() {
+    let home = TempDir::new().unwrap();
+    let roots = AgentSessionRoots::under_home(home.path());
+    let launch_dir = Path::new("/srv/app");
+    let by_launch_dir = roots
+        .claude_config
+        .join("projects")
+        .join(claude_project_slug(launch_dir))
+        .join(format!("{SESSION_ID}.jsonl"));
+    write_file(
+        &by_launch_dir,
+        b"{}
+",
+    );
+    let other_session = roots
+        .claude_config
+        .join("projects")
+        .join("-srv-app")
+        .join("another-session.jsonl");
+    write_file(
+        &other_session,
+        b"{}
+",
+    );
+    let outside_roots = home.path().join(format!("{SESSION_ID}.jsonl"));
+    write_file(
+        &outside_roots,
+        b"secret
+",
+    );
+    let escaping = roots
+        .claude_config
+        .join("projects")
+        .join("..")
+        .join("..")
+        .join(format!("{SESSION_ID}.jsonl"));
+
+    for reported in [other_session, outside_roots, escaping] {
+        let source = HandoffSource {
+            agent: CLIAgent::Claude,
+            session_id: SESSION_ID.to_owned(),
+            cwd: launch_dir.to_path_buf(),
+            transcript_path: Some(reported.clone()),
+        };
+        assert_eq!(
+            resolve_session_file(&source, &roots).unwrap(),
+            by_launch_dir,
+            "{}",
+            reported.display()
+        );
+    }
 }

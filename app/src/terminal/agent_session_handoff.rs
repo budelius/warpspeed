@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, Local};
@@ -19,7 +19,11 @@ const PREFERRED_REMOTES: [&str; 2] = ["gitea", "origin"];
 pub(crate) struct HandoffSource {
     pub agent: CLIAgent,
     pub session_id: String,
+    /// The shell's working directory: the repo that is handed off, and where the agent was
+    /// launched from.
     pub cwd: PathBuf,
+    /// The session file the agent last reported through its hooks.
+    pub transcript_path: Option<PathBuf>,
 }
 
 /// Everything the import request needs once the handoff branch has been pushed.
@@ -217,6 +221,71 @@ pub(crate) fn session_file_path(
     }
 }
 
+/// The directory under which `agent` keeps its session files.
+fn agent_session_root(agent: CLIAgent, roots: &AgentSessionRoots) -> Option<PathBuf> {
+    match agent {
+        CLIAgent::Claude => Some(roots.claude_config.join("projects")),
+        CLIAgent::Pi => Some(
+            roots
+                .pi_session_dir
+                .clone()
+                .unwrap_or_else(|| roots.pi_agent_dir.join("sessions")),
+        ),
+        CLIAgent::Codex => Some(roots.codex_home.join("sessions")),
+        CLIAgent::Gemini
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Vibe
+        | CLIAgent::Antigravity
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => None,
+    }
+}
+
+/// Whether `path`, as reported by the agent's hooks, is this session's file. The path arrives
+/// through terminal output, so it is trusted only for a file named after the session under the
+/// agent's own session directory; anything else could make the move upload an unrelated file.
+fn is_reported_session_file(
+    path: &Path,
+    source: &HandoffSource,
+    roots: &AgentSessionRoots,
+) -> bool {
+    is_valid_session_id(&source.session_id)
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        && agent_session_root(source.agent, roots).is_some_and(|root| path.starts_with(root))
+        && path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.ends_with(&format!("{}.jsonl", source.session_id)))
+        && path.is_file()
+}
+
+/// The session file to upload for `source`. The reported transcript wins because the agent may
+/// have changed directory since launch, while its session file stays keyed by the launch
+/// directory.
+pub(crate) fn resolve_session_file(
+    source: &HandoffSource,
+    roots: &AgentSessionRoots,
+) -> Result<PathBuf> {
+    match source
+        .transcript_path
+        .as_deref()
+        .filter(|path| is_reported_session_file(path, source, roots))
+    {
+        Some(path) => Ok(path.to_path_buf()),
+        None => session_file_path(source.agent, &source.session_id, &source.cwd, roots),
+    }
+}
+
 pub(crate) fn handoff_branch_name(now: DateTime<Local>, session_id: &str) -> String {
     let short_id = session_id
         .char_indices()
@@ -325,7 +394,7 @@ fn prepare_handoff_with_roots(
 ) -> Result<PreparedHandoff> {
     let agent_name = moved_agent_name(source.agent)
         .ok_or_else(|| anyhow!("{:?} sessions cannot be moved", source.agent))?;
-    let path = session_file_path(source.agent, &source.session_id, &source.cwd, roots)?;
+    let path = resolve_session_file(source, roots)?;
     let session_file = read_session_file(&path)?;
 
     let repo = source.cwd.as_path();

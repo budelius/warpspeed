@@ -533,8 +533,29 @@ fn stop(
     json_output: bool,
 ) -> Result<()> {
     validate_job_id(job_id)?;
-    let profile = profile(environment);
     let token = dashboard_token()?;
+    let result = stop_run_with(profile(environment), &token, job_id, force)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Stop request accepted for {job_id}.");
+    }
+    Ok(())
+}
+
+/// Asks the dashboard to stop a managed run.
+pub fn stop_run(environment: ManagedEnvironment, job_id: &str, force: bool) -> Result<()> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    stop_run_with(profile(environment), &token, job_id, force).map(drop)
+}
+
+fn stop_run_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    job_id: &str,
+    force: bool,
+) -> Result<Value> {
     let response = send(
         profile,
         Client::new()
@@ -542,7 +563,7 @@ fn stop(
                 "{}/api/agent-control/runs/{job_id}/stop",
                 profile.base_url
             ))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .header("X-Stozn-Client", "warpspeed")
             .header(
                 "Idempotency-Key",
@@ -552,12 +573,7 @@ fn stop(
     )?;
     let result: Value = response.json().context("invalid stop response")?;
     ensure_command_accepted(&result)?;
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
-        println!("Stop request accepted for {job_id}.");
-    }
-    Ok(())
+    Ok(result)
 }
 
 fn attach(
@@ -745,23 +761,43 @@ fn wait_until_resumed_with(
     let started = Instant::now();
     let mut cursor: Option<String> = None;
     loop {
-        let (page, _) =
-            fetch_event_page(client, profile, job_id, token, cursor.as_deref(), 15_000)?;
-        if page
-            .items
-            .iter()
-            .any(|event| event.event_type == "status" && event.content == "resumed")
-        {
-            return Ok(());
-        }
-        if page.terminal {
-            bail!("managed run {job_id} ended before resuming");
-        }
+        let (idle, last_error) =
+            match fetch_event_page(client, profile, job_id, token, cursor.as_deref(), 15_000) {
+                Ok((page, history_gap)) => {
+                    if page
+                        .items
+                        .iter()
+                        .any(|event| event.event_type == "status" && event.content == "resumed")
+                    {
+                        return Ok(());
+                    }
+                    if page.terminal {
+                        bail!("managed run {job_id} ended before resuming");
+                    }
+                    // The cursor fell out of retained history; replaying from the start still
+                    // includes the `resumed` event if it was emitted.
+                    cursor = if history_gap {
+                        None
+                    } else {
+                        page.next_cursor.or(cursor)
+                    };
+                    (page.items.is_empty() && cursor.is_none(), None)
+                }
+                // The run is already importing; a dashboard blip must not abandon it early.
+                Err(error) => (true, Some(error)),
+            };
         if Instant::now() >= deadline {
             let secs = started.elapsed().as_secs();
-            bail!("managed run {job_id} did not resume within {secs}s");
+            match last_error {
+                Some(error) => {
+                    bail!("managed run {job_id} did not resume within {secs}s: {error:#}")
+                }
+                None => bail!("managed run {job_id} did not resume within {secs}s"),
+            }
         }
-        cursor = page.next_cursor.or(cursor);
+        if idle {
+            thread::sleep(Duration::from_millis(500));
+        }
     }
 }
 

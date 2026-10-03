@@ -554,3 +554,138 @@ fn resume_wait_fails_on_terminal_page() {
         "{error}"
     );
 }
+
+type RequestLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Serves `responses` in order, one per connection, repeating the last one; logs request lines.
+fn sequence_fixture(
+    responses: Vec<(&'static str, serde_json::Value)>,
+) -> (&'static str, RequestLog) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let log = RequestLog::default();
+    let served = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut request = [0_u8; 8192];
+            let read = stream.read(&mut request).unwrap();
+            let line = String::from_utf8_lossy(&request[..read])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let index = {
+                let mut served = served.lock().unwrap();
+                served.push(line);
+                served.len() - 1
+            };
+            let (status, body) = &responses[index.min(responses.len() - 1)];
+            let body = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (Box::leak(format!("http://{address}").into_boxed_str()), log)
+}
+
+fn empty_page() -> serde_json::Value {
+    json!({
+        "items": [],
+        "next_cursor": null,
+        "terminal": false,
+        "gap": false,
+        "earliest_cursor": null
+    })
+}
+
+#[test]
+fn resume_wait_retries_a_transient_error() {
+    let (base, log) = sequence_fixture(vec![
+        ("503 Service Unavailable", json!({ "error": "busy" })),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(log.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn resume_wait_gives_up_at_the_deadline_without_spinning() {
+    let (base, log) = sequence_fixture(vec![("200 OK", empty_page())]);
+    let profile = fixture_profile(base);
+    let error = wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_millis(1200),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("did not resume within"),
+        "{error}"
+    );
+    let requests = log.lock().unwrap().len();
+    assert!(requests <= 5, "polled {requests} times in 1.2s");
+}
+
+#[test]
+fn resume_wait_restarts_without_a_cursor_after_a_history_gap() {
+    let gap_page = json!({
+        "items": [],
+        "next_cursor": "c9",
+        "terminal": false,
+        "gap": true,
+        "earliest_cursor": "c5"
+    });
+    let (base, log) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [], "next_cursor": "c1", "terminal": false, "gap": false,
+                "earliest_cursor": null
+            }),
+        ),
+        ("410 Gone", gap_page),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    assert!(log[1].contains("after=c1"), "{}", log[1]);
+    assert!(!log[2].contains("after="), "{}", log[2]);
+}
+
+#[test]
+fn stop_run_posts_a_stop_request() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
+    let profile = fixture_profile(base);
+    stop_run_with(&profile, "token", "job-1", true).unwrap();
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(
+        raw.starts_with("POST /api/agent-control/runs/job-1/stop "),
+        "{raw}"
+    );
+    assert!(raw.contains("\"force\":true"), "{raw}");
+}

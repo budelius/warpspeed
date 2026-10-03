@@ -594,7 +594,7 @@ where
                             "yes"
                         };
                         log::warn!(
-                            "Ending the PTY after {shutdown_cause} (supervised: {supervised},                              shell still running: {shell_running})"
+                            "Ending the PTY after {shutdown_cause} (supervised: {supervised}, shell still running: {shell_running})"
                         );
                     }
                     let res = self.pty.kill();

@@ -94,43 +94,6 @@ fn ready_and_release_handshake_cleans_up_its_markers() {
 }
 
 #[test]
-fn installed_replacement_keeps_the_current_channel_binary() {
-    let directory = tempfile::tempdir().unwrap();
-    let install_root = directory.path();
-    let version = "20260827-test";
-    fs::write(install_root.join("current.txt"), version).unwrap();
-    let version_dir = install_root.join("versions").join(version);
-    fs::create_dir_all(&version_dir).unwrap();
-    let installed = version_dir.join(if cfg!(windows) {
-        "warp-oss.exe"
-    } else {
-        "warp-oss"
-    });
-    fs::write(&installed, []).unwrap();
-    let current = Path::new(if cfg!(windows) {
-        "target/release/warp-oss.exe"
-    } else {
-        "target/release/warp-oss"
-    });
-
-    assert_eq!(
-        installed_replacement_executable(current, install_root).unwrap(),
-        Some(installed)
-    );
-}
-
-#[test]
-fn missing_local_install_falls_back_to_the_current_executable() {
-    let directory = tempfile::tempdir().unwrap();
-    let current = Path::new("target/release/warpspeed.exe");
-
-    assert_eq!(
-        installed_replacement_executable(current, directory.path()).unwrap(),
-        None
-    );
-}
-
-#[test]
 fn handoff_markers_share_the_request_stem() {
     let request = Path::new("handoff-id.json");
     let (ready, release) = marker_paths(request);

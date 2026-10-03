@@ -252,7 +252,7 @@ impl<H: SessionHost> Supervisor<H> {
                     .err()
                     .map(|error| error.to_string());
                 info!(
-                    "Client {client_pid} killed terminal session {session_id:?} (shell was running:                      {was_running}): {}",
+                    "Client {client_pid} killed terminal session {session_id:?} (shell was running: {was_running}): {}",
                     error.as_deref().unwrap_or("ok")
                 );
                 Some(Message::KillResponse { error })

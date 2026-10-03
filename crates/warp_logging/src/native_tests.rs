@@ -35,6 +35,7 @@ fn frontend_resolves_directory_and_rotation_policy() {
     let gui = log_state(&base, LogFrontend::Gui, "warp_dev.log");
     let tui = log_state(&base, LogFrontend::Tui, "warp_dev.log");
     let cli = log_state(&base, LogFrontend::Cli, "warp_dev.log");
+    let supervisor = log_state(&base, LogFrontend::TerminalSupervisor, "warp_dev.log");
 
     assert_eq!(gui.log_directory, base);
     assert_eq!(gui.max_rotation, MAX_FILES_IN_GUI_ROTATION);
@@ -42,6 +43,11 @@ fn frontend_resolves_directory_and_rotation_policy() {
     assert_eq!(tui.max_rotation, MAX_FILES_IN_CLI_ROTATION);
     assert_eq!(cli.log_directory, PathBuf::from("/tmp/warp-logs/oz"));
     assert_eq!(cli.max_rotation, MAX_FILES_IN_CLI_ROTATION);
+    assert_eq!(
+        supervisor.log_directory,
+        PathBuf::from("/tmp/warp-logs/terminal-supervisor")
+    );
+    assert_eq!(supervisor.max_rotation, MAX_FILES_IN_CLI_ROTATION);
 }
 
 #[test]

@@ -19,6 +19,7 @@ const MAX_FILES_IN_GUI_ROTATION: usize = 5;
 const MAX_FILES_IN_CLI_ROTATION: usize = 10;
 const CLI_LOG_SUBDIRECTORY: &str = "oz";
 const TUI_LOG_SUBDIRECTORY: &str = "warp-cli";
+const TERMINAL_SUPERVISOR_LOG_SUBDIRECTORY: &str = "terminal-supervisor";
 const TEMP_LOG_FILE_SUFFIX: &str = "old.temp";
 
 /// Runtime logging state, computed from `LogConfig` during initialization.
@@ -43,13 +44,18 @@ impl LogFrontend {
             LogFrontend::Gui => base_directory,
             LogFrontend::Tui => base_directory.join(TUI_LOG_SUBDIRECTORY),
             LogFrontend::Cli => base_directory.join(CLI_LOG_SUBDIRECTORY),
+            LogFrontend::TerminalSupervisor => {
+                base_directory.join(TERMINAL_SUPERVISOR_LOG_SUBDIRECTORY)
+            }
         }
     }
 
     fn max_rotation(self) -> usize {
         match self {
             LogFrontend::Gui => MAX_FILES_IN_GUI_ROTATION,
-            LogFrontend::Tui | LogFrontend::Cli => MAX_FILES_IN_CLI_ROTATION,
+            LogFrontend::Tui | LogFrontend::Cli | LogFrontend::TerminalSupervisor => {
+                MAX_FILES_IN_CLI_ROTATION
+            }
         }
     }
 }

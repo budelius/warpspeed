@@ -155,6 +155,33 @@ pub fn read_markers() -> Vec<InstanceMarker> {
     markers
 }
 
+/// Pids of other instances whose processes are still running.
+///
+/// Checks the process table rather than pinging, so it is cheap enough to call on every save. A
+/// reused pid can make a dead instance look alive, which only errs towards caution.
+pub fn other_running_instance_pids() -> Vec<u32> {
+    let own_pid = std::process::id();
+    let pids: Vec<sysinfo::Pid> = read_markers()
+        .into_iter()
+        .map(|marker| marker.pid)
+        .filter(|pid| *pid != own_pid)
+        .map(sysinfo::Pid::from_u32)
+        .collect();
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&pids),
+        false, /* refresh_dead_processes */
+        sysinfo::ProcessRefreshKind::nothing(),
+    );
+    pids.into_iter()
+        .filter(|pid| system.process(*pid).is_some())
+        .map(|pid| pid.as_u32())
+        .collect()
+}
+
 /// Deletes the marker for a pid that did not answer.
 pub fn forget(pid: u32) {
     let _ = std::fs::remove_file(marker_path(pid));

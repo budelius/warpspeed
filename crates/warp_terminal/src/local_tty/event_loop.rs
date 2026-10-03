@@ -429,6 +429,7 @@ where
                 // True if the child exiting caused the event loop to wind down
                 // (e.g. CTRL D or `exit`) rather than the inverse.
                 let mut child_exited = false;
+                let mut shutdown_cause = "a shutdown request";
                 let child_poll_interval = std::time::Duration::from_millis(250);
                 let mut next_child_poll = Instant::now() + child_poll_interval;
 
@@ -553,6 +554,7 @@ where
                                     }
 
                                     error!("Error reading from PTY in event loop: {err}");
+                                    shutdown_cause = "a PTY read error";
                                     break 'event_loop;
                                 }
                             }
@@ -563,6 +565,7 @@ where
                             && let Err(err) = self.pty_write(&mut state, &mut can_write)
                         {
                             error!("Error writing to PTY in event loop: {err}");
+                            shutdown_cause = "a PTY write error";
                             break 'event_loop;
                         }
                     }
@@ -576,6 +579,24 @@ where
                 // operating system. A supervisor-owned child still needs an explicit Kill request
                 // to remove its durable session entry, even when the process itself is already dead.
                 if should_kill_on_shutdown(child_exited, self.pty.requires_exit_polling()) {
+                    if !child_exited {
+                        // A shell that is still running here is about to be ended by this pane
+                        // rather than having exited on its own. Only a supervised shell can be
+                        // polled for that.
+                        let supervised = self.pty.requires_exit_polling();
+                        let shell_running = if !supervised {
+                            "unknown"
+                        } else if let Some(local_tty::ChildEvent::Exited) =
+                            self.pty.next_child_event()
+                        {
+                            "no"
+                        } else {
+                            "yes"
+                        };
+                        log::warn!(
+                            "Ending the PTY after {shutdown_cause} (supervised: {supervised}, shell still running: {shell_running})"
+                        );
+                    }
                     let res = self.pty.kill();
                     if let Err(err) = res {
                         log::warn!("Failed to kill PTY process: {err:#}");

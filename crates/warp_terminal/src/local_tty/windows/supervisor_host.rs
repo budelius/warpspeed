@@ -14,13 +14,17 @@ use crate::local_tty::supervisor::transport::Endpoint;
 
 struct AttachedClient {
     process: HANDLE,
+    process_id: u32,
 }
 
 impl AttachedClient {
     fn open(process_id: u32) -> Result<Self> {
         let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, process_id) }
             .with_context(|| format!("Failed to track terminal client process {process_id}"))?;
-        Ok(Self { process })
+        Ok(Self {
+            process,
+            process_id,
+        })
     }
 
     fn is_running(&self) -> bool {
@@ -148,6 +152,16 @@ impl SessionHost for WindowsSessionHost {
             .sessions
             .get_mut(&session_id)
             .with_context(|| format!("Terminal session {session_id:?} was not found"))?;
+        // Replacing the relay closes the pipe the previous client is still writing to.
+        if let Some(previous) = session.attached_client.as_ref()
+            && previous.is_running()
+        {
+            log::warn!(
+                "Terminal session {session_id:?} is being lent to client {client_pid} while \
+                 client {} is still attached; its relay is being closed",
+                previous.process_id
+            );
+        }
         let attached_client = AttachedClient::open(client_pid)?;
         let (endpoint, relay) = fresh_endpoint(&session.pty, client_pid)?;
         session.attached_client = Some(attached_client);

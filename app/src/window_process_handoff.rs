@@ -1,11 +1,10 @@
-use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use instant::Instant;
 use serde::{Deserialize, Serialize};
 use warpui::r#async::Timer;
@@ -13,7 +12,6 @@ use warpui::r#async::Timer;
 use crate::app_state::WindowSnapshot;
 
 const HANDOFF_ENV: &str = "WARP_WINDOW_PROCESS_HANDOFF";
-const INSTALL_ROOT_ENV: &str = "WARPSPEED_INSTALL_ROOT";
 const PROTOCOL_VERSION: u32 = 1;
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,6 +37,7 @@ pub(crate) struct IncomingWindowHandoff {
     request_path: PathBuf,
     ready_path: PathBuf,
     release_path: PathBuf,
+    abort_path: PathBuf,
 }
 
 pub(crate) struct OutgoingWindowHandoff {
@@ -46,6 +45,7 @@ pub(crate) struct OutgoingWindowHandoff {
     request_path: PathBuf,
     ready_path: PathBuf,
     release_path: PathBuf,
+    abort_path: PathBuf,
 }
 
 impl IncomingWindowHandoff {
@@ -73,12 +73,14 @@ impl IncomingWindowHandoff {
         }
 
         let (ready_path, release_path) = marker_paths(&request_path);
+        let abort_path = abort_path(&request_path);
         let _ = fs::remove_file(&request_path);
         Ok(Self {
             payload,
             request_path,
             ready_path,
             release_path,
+            abort_path,
         })
     }
 
@@ -98,14 +100,32 @@ impl IncomingWindowHandoff {
         write_marker(&self.ready_path).context("Failed to acknowledge window process handoff")
     }
 
+    /// Whether the original process released the window. `false` when it aborted the handoff
+    /// or never answered.
     pub(crate) async fn wait_for_release(self) -> bool {
-        let released = wait_for_path(&self.release_path, RELEASE_TIMEOUT).await;
+        let started = Instant::now();
+        let mut released = false;
+        while started.elapsed() < RELEASE_TIMEOUT {
+            if self.release_path.is_file() {
+                released = true;
+                break;
+            }
+            if self.abort_path.is_file() {
+                break;
+            }
+            Timer::after(POLL_INTERVAL).await;
+        }
         self.cleanup();
         released
     }
 
     fn cleanup(&self) {
-        for path in [&self.request_path, &self.ready_path, &self.release_path] {
+        for path in [
+            &self.request_path,
+            &self.ready_path,
+            &self.release_path,
+            &self.abort_path,
+        ] {
             let _ = fs::remove_file(path);
         }
     }
@@ -121,8 +141,17 @@ impl OutgoingWindowHandoff {
         write_marker(&self.release_path).context("Failed to release window process handoff")
     }
 
+    /// Calls the handoff off and leaves the window with this process.
+    ///
+    /// A replacement that acknowledged the handoff is told through a marker and exits on its own.
+    /// Killing it instead would look like a crash to its crash-recovery standby, which then
+    /// launches a regular restore that fights this process for the window's sessions. One that
+    /// never acknowledged is presumed stuck and killed.
     pub(crate) fn abort(mut self) {
-        let _ = self.child.kill();
+        let _ = write_marker(&self.abort_path);
+        if !self.ready_path.is_file() {
+            let _ = self.child.kill();
+        }
         self.cleanup();
     }
 
@@ -167,6 +196,7 @@ pub(crate) fn launch(
     match child {
         Ok(child) => Ok(OutgoingWindowHandoff {
             child,
+            abort_path: abort_path(&request_path),
             request_path,
             ready_path,
             release_path,
@@ -213,6 +243,10 @@ fn marker_paths(request_path: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
+fn abort_path(request_path: &Path) -> PathBuf {
+    request_path.with_extension("abort")
+}
+
 async fn wait_for_path(path: &Path, timeout: Duration) -> bool {
     let started = Instant::now();
     while started.elapsed() < timeout {
@@ -224,63 +258,13 @@ async fn wait_for_path(path: &Path, timeout: Duration) -> bool {
     false
 }
 
+/// The executable the replacement process runs: this one.
+///
+/// Each build runs its own terminal supervisor, and a window's shells live in the supervisor of the
+/// build it runs. A replacement on any other build would find none of them, so a restart stays on
+/// this build; a newer build is reached by starting a new instance.
 fn replacement_executable() -> Result<PathBuf> {
-    let current_executable = std::env::current_exe()
-        .context("Failed to resolve the current executable for window restart")?;
-    let Some(install_root) = install_root() else {
-        return Ok(current_executable);
-    };
-
-    Ok(
-        installed_replacement_executable(&current_executable, &install_root)?
-            .unwrap_or(current_executable),
-    )
-}
-
-fn installed_replacement_executable(
-    current_executable: &Path,
-    install_root: &Path,
-) -> Result<Option<PathBuf>> {
-    let Ok(version) = fs::read_to_string(install_root.join("current.txt")) else {
-        return Ok(None);
-    };
-    let version = version.trim();
-    if version.is_empty()
-        || !version
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        return Err(anyhow!("The installed WarpSpeed version is invalid"));
-    }
-
-    let executable_name = match current_executable.file_name().and_then(OsStr::to_str) {
-        Some("warp-oss.exe" | "warp-oss") => current_executable
-            .file_name()
-            .expect("the matched executable has a file name"),
-        _ if cfg!(windows) => OsStr::new("warpspeed.exe"),
-        _ => OsStr::new("warpspeed"),
-    };
-    let installed_executable = install_root
-        .join("versions")
-        .join(version)
-        .join(executable_name);
-    Ok(installed_executable
-        .is_file()
-        .then_some(installed_executable))
-}
-
-fn install_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os(INSTALL_ROOT_ENV) {
-        return Some(PathBuf::from(root));
-    }
-
-    #[cfg(windows)]
-    return std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join("Programs").join("WarpSpeed"));
-
-    #[cfg(not(windows))]
-    None
+    std::env::current_exe().context("Failed to resolve the current executable for window restart")
 }
 
 #[cfg(test)]

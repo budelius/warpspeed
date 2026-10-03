@@ -94,47 +94,44 @@ fn ready_and_release_handshake_cleans_up_its_markers() {
 }
 
 #[test]
-fn installed_replacement_keeps_the_current_channel_binary() {
-    let directory = tempfile::tempdir().unwrap();
-    let install_root = directory.path();
-    let version = "20260827-test";
-    fs::write(install_root.join("current.txt"), version).unwrap();
-    let version_dir = install_root.join("versions").join(version);
-    fs::create_dir_all(&version_dir).unwrap();
-    let installed = version_dir.join(if cfg!(windows) {
-        "warp-oss.exe"
-    } else {
-        "warp-oss"
-    });
-    fs::write(&installed, []).unwrap();
-    let current = Path::new(if cfg!(windows) {
-        "target/release/warp-oss.exe"
-    } else {
-        "target/release/warp-oss"
-    });
-
-    assert_eq!(
-        installed_replacement_executable(current, install_root).unwrap(),
-        Some(installed)
-    );
-}
-
-#[test]
-fn missing_local_install_falls_back_to_the_current_executable() {
-    let directory = tempfile::tempdir().unwrap();
-    let current = Path::new("target/release/warpspeed.exe");
-
-    assert_eq!(
-        installed_replacement_executable(current, directory.path()).unwrap(),
-        None
-    );
-}
-
-#[test]
 fn handoff_markers_share_the_request_stem() {
     let request = Path::new("handoff-id.json");
     let (ready, release) = marker_paths(request);
 
     assert_eq!(ready, Path::new("handoff-id.ready"));
     assert_eq!(release, Path::new("handoff-id.release"));
+}
+
+/// The original process kills only the process it launched, which on Windows is a crash-recovery
+/// wrapper around the real app. The replacement has to learn about an abort some other way, or it
+/// carries on as if handed the window and starts fresh shells next to the original's.
+#[test]
+fn an_aborted_handoff_is_not_mistaken_for_a_release() {
+    let directory = tempfile::tempdir().unwrap();
+    let request_path = directory.path().join("handoff.json");
+    let payload = HandoffPayload {
+        protocol_version: PROTOCOL_VERSION,
+        window: window_snapshot(),
+        agent_resume_commands: Vec::new(),
+        transfers_session_lease: false,
+    };
+    write_request(&request_path, &payload).unwrap();
+    let incoming = IncomingWindowHandoff::from_path(request_path.clone()).unwrap();
+    incoming.mark_ready().unwrap();
+
+    write_marker(&abort_path(&request_path)).unwrap();
+    let started = Instant::now();
+    let released = warpui::r#async::block_on(incoming.wait_for_release());
+
+    assert!(!released);
+    assert!(started.elapsed() < RELEASE_TIMEOUT);
+    assert!(!abort_path(&request_path).exists());
+}
+
+#[test]
+fn the_abort_marker_shares_the_request_stem() {
+    assert_eq!(
+        abort_path(Path::new("handoff-id.json")),
+        Path::new("handoff-id.abort")
+    );
 }

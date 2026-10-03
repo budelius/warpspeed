@@ -635,6 +635,11 @@ const BRACKETED_PASTE_SUFFIX: &str = "\x1b[201~";
 
 /// Duration before we consider a session to have failed bootstrapping.
 const BOOTSTRAP_FAILED_DURATION: Duration = Duration::from_secs(7);
+
+/// How often a running agent's session is re-read from its process registry. The session can
+/// change under a running agent, through `/resume` or `/new`.
+#[cfg(feature = "local_tty")]
+const AGENT_SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// Duration before we consider a session invoked from an env vars object to
 /// have failed bootstrapping. The longer duration is meant to account for
 /// a user needing to type in one or many secret manager passwords
@@ -2487,6 +2492,16 @@ pub struct TerminalView {
     pub model: Arc<FairMutex<TerminalModel>>,
     view_handle: WeakViewHandle<Self>,
 
+    /// The process ID of the shell this view's PTY is running, once it has started.
+    #[cfg(feature = "local_tty")]
+    shell_pid: Option<u32>,
+    #[cfg(feature = "local_tty")]
+    agent_session_refresh_scheduled: bool,
+    /// Whether this view's agent session was found under its shell rather than seen starting,
+    /// which makes it this view's to forget once the agent exits.
+    #[cfg(feature = "local_tty")]
+    agent_session_discovered: bool,
+
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
     /// size info changes.
@@ -2941,6 +2956,11 @@ pub struct TerminalView {
     /// suppresses `AgentExitedShellProcess` telemetry so manual shutdown paths
     /// (tab close, update relaunch, etc.) are not attributed to agent commands.
     manual_pty_shutdown_requested: bool,
+
+    /// Set when the user sends EOF, cleared when they run a command. A shell that ends while
+    /// this is set ended because the user asked it to, not because it crashed. Not cleared by a
+    /// completed block: ending the shell completes its active block before the exit arrives.
+    eof_sent_since_last_command: bool,
 
     /// `true` while this view's shell is being deliberately restarted.
     ///
@@ -4393,6 +4413,12 @@ impl TerminalView {
             privacy_settings_snapshot: privacy_settings_handle.as_ref(ctx).get_snapshot(ctx),
             was_ever_visible: false,
             view_id: ctx.view_id(),
+            #[cfg(feature = "local_tty")]
+            shell_pid: None,
+            #[cfg(feature = "local_tty")]
+            agent_session_refresh_scheduled: false,
+            #[cfg(feature = "local_tty")]
+            agent_session_discovered: false,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,
@@ -4477,6 +4503,7 @@ impl TerminalView {
             active_init_project_model: None,
             is_pending_aws_login: false,
             manual_pty_shutdown_requested: false,
+            eof_sent_since_last_command: false,
             restart_in_progress: false,
             first_time_cloud_agent_setup_view,
             environment_setup_mode_selector,
@@ -9255,6 +9282,7 @@ impl TerminalView {
     }
 
     fn ctrl_d(&mut self, ctx: &mut ViewContext<Self>) {
+        self.eof_sent_since_last_command = true;
         let arc = self.model.clone();
         let mut model = arc.lock();
 
@@ -12311,6 +12339,9 @@ impl TerminalView {
                                             _ => {}
                                         },
                                     );
+
+                                    #[cfg(feature = "local_tty")]
+                                    me.refresh_agent_session(ctx);
 
                                     // Codex doesn't use the sentinel-based plugin protocol,
                                     // so create the listener proactively on command detection
@@ -16277,6 +16308,27 @@ impl TerminalView {
 
     pub fn is_login_shell_bootstrapped(&self) -> bool {
         self.is_login_shell_bootstrapped
+    }
+
+    /// Test-only: records that the user sent EOF, as Ctrl-D does.
+    #[cfg(test)]
+    pub(crate) fn set_eof_sent_for_test(&mut self) {
+        self.eof_sent_since_last_command = true;
+    }
+
+    /// Whether this view's shell, if it has ended, ended because it was asked to: the user ran
+    /// `exit` or `logout`, sent EOF, or Warp shut the PTY down. Anything else is a crash.
+    pub fn shell_exit_was_requested(&self) -> bool {
+        if self.manual_pty_shutdown_requested || self.eof_sent_since_last_command {
+            return true;
+        }
+        let command = self
+            .model
+            .lock()
+            .block_list()
+            .active_block()
+            .command_to_string();
+        matches!(command.split_whitespace().next(), Some("exit" | "logout"))
     }
 
     /// Test-only: marks this view as having completed the login-shell bootstrap
@@ -21942,6 +21994,7 @@ impl TerminalView {
                     self.focus_terminal(ctx);
                 }
 
+                self.eof_sent_since_last_command = false;
                 ctx.emit(Event::ExecuteCommand(event.as_ref().clone()));
 
                 if self.block_onboarding_active {
@@ -22252,6 +22305,7 @@ impl TerminalView {
                 ctx.emit(Event::ShowCommandSearch(options.clone()));
             }
             InputEvent::CtrlD => {
+                self.eof_sent_since_last_command = true;
                 ctx.emit(Event::CtrlD);
             }
             InputEvent::CtrlC { cleared_buffer_len } => {
@@ -26645,7 +26699,156 @@ impl PtyIntentEvent for Event {
     }
 }
 
+#[cfg(feature = "local_tty")]
+impl TerminalView {
+    fn schedule_agent_session_refresh(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.spawn(
+            Timer::after(AGENT_SESSION_REFRESH_INTERVAL),
+            |me, _, ctx| {
+                me.refresh_agent_session(ctx);
+                me.schedule_agent_session_refresh(ctx);
+            },
+        );
+    }
+
+    /// Reads the session the agent running in this pane is writing to, so a snapshot can record
+    /// what to resume.
+    ///
+    /// A pane that took over a running session from the supervisor never saw its agent start,
+    /// so the agent is looked for under the shell too, and forgotten again once it exits.
+    fn refresh_agent_session(&mut self, ctx: &mut ViewContext<Self>) {
+        use crate::terminal::cli_agent_sessions::process_registry;
+
+        let Some(shell_pid) = self.shell_pid else {
+            return;
+        };
+        let session = CLIAgentSessionsModel::as_ref(ctx).session(self.view_id);
+        let tracked_agent = match session {
+            Some(session)
+                if session.is_remote()
+                    || session.received_rich_notification
+                    || !process_registry::supports(session.agent) =>
+            {
+                return;
+            }
+            Some(session) => Some(session.agent),
+            None => None,
+        };
+        if let (Some(agent), false) = (tracked_agent, self.agent_session_discovered) {
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            ctx.background_executor()
+                .spawn(async move {
+                    let _ = sender.send(process_registry::resolve(agent, shell_pid));
+                })
+                .detach();
+            let view_id = self.view_id;
+            ctx.spawn(receiver, move |_, resolved, ctx| {
+                let Ok(Some(resolved)) = resolved else {
+                    return;
+                };
+                CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                    if sessions
+                        .session(view_id)
+                        .is_some_and(|session| session.agent == agent)
+                    {
+                        sessions.set_process_registry_session(
+                            view_id,
+                            resolved.session_id,
+                            resolved.cwd,
+                            ctx,
+                        );
+                    }
+                });
+            });
+            return;
+        }
+
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        ctx.background_executor()
+            .spawn(async move {
+                let _ = sender.send(process_registry::discover(shell_pid));
+            })
+            .detach();
+        ctx.spawn(receiver, move |me, discovered, ctx| {
+            let Ok(discovered) = discovered else {
+                return;
+            };
+            me.apply_discovered_agent(discovered, ctx);
+        });
+    }
+
+    fn apply_discovered_agent(
+        &mut self,
+        discovered: Option<(
+            CLIAgent,
+            crate::terminal::cli_agent_sessions::process_registry::AgentProcessSession,
+        )>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let view_id = self.view_id;
+        let tracked_agent = CLIAgentSessionsModel::as_ref(ctx)
+            .session(view_id)
+            .map(|session| session.agent);
+        match (discovered, tracked_agent) {
+            (Some((agent, resolved)), tracked) => {
+                // Only a session this pane discovered itself may be replaced; one that command
+                // detection or a plugin started is theirs to manage.
+                if tracked.is_some_and(|tracked| tracked != agent) && !self.agent_session_discovered
+                {
+                    return;
+                }
+                let should_auto_toggle_input = agent.supports_cli_agent_footer()
+                    && *AISettings::as_ref(ctx).auto_open_rich_input_on_cli_agent_start;
+                CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                    if tracked != Some(agent) {
+                        sessions.set_session(
+                            view_id,
+                            CLIAgentSession {
+                                agent,
+                                status: CLIAgentSessionStatus::InProgress,
+                                session_context: CLIAgentSessionContext::default(),
+                                input_state: CLIAgentInputState::Closed,
+                                should_auto_toggle_input,
+                                listener: None,
+                                plugin_version: None,
+                                remote_host: None,
+                                draft_text: None,
+                                custom_command_prefix: None,
+                                received_rich_notification: false,
+                            },
+                            ctx,
+                        );
+                    }
+                    sessions.set_process_registry_session(
+                        view_id,
+                        resolved.session_id,
+                        resolved.cwd,
+                        ctx,
+                    );
+                });
+                self.agent_session_discovered = true;
+            }
+            (None, Some(_)) if self.agent_session_discovered => {
+                self.agent_session_discovered = false;
+                CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                    sessions.remove_session(view_id, ctx);
+                });
+            }
+            (None, _) => {}
+        }
+    }
+}
+
 impl TerminalSurface for TerminalView {
+    #[cfg(feature = "local_tty")]
+    fn on_shell_pid_determined(&mut self, pid: u32, ctx: &mut ViewContext<Self>) {
+        self.shell_pid = Some(pid);
+        if !self.agent_session_refresh_scheduled {
+            self.agent_session_refresh_scheduled = true;
+            self.schedule_agent_session_refresh(ctx);
+        }
+    }
+
     #[cfg(feature = "local_tty")]
     fn on_shell_determined(&mut self, ctx: &mut ViewContext<Self>) {
         if !self.model.lock().shared_session_status().is_viewer() {

@@ -17,7 +17,8 @@ use crate::ai::blocklist::SerializedBlockListItem;
 #[cfg(feature = "local_fs")]
 use crate::app_state::LeafSnapshot;
 use crate::app_state::{
-    LeafContents, PaneNodeSnapshot, PaneUuid, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+    CliAgentResumeDescriptor, LeafContents, PaneNodeSnapshot, PaneUuid, TabSnapshot,
+    TerminalPaneSnapshot, WindowSnapshot,
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::terminal::CLIAgent;
@@ -270,11 +271,32 @@ fn collect_panes(node: &PaneNodeSnapshot, panes: &mut Vec<StoredPaneSummary>) {
     }
 }
 
-fn collect_agent_session_ids(node: &PaneNodeSnapshot, ids: &mut HashSet<String>) {
+#[cfg(feature = "local_fs")]
+fn unidentified_agents(node: &mut PaneNodeSnapshot) -> Vec<&mut CliAgentResumeDescriptor> {
+    match node {
+        PaneNodeSnapshot::Branch(branch) => branch
+            .children
+            .iter_mut()
+            .flat_map(|(_, child)| unidentified_agents(child))
+            .collect(),
+        PaneNodeSnapshot::Leaf(leaf) => match &mut leaf.contents {
+            LeafContents::Terminal(terminal) => terminal
+                .cli_agent_resume_descriptor
+                .as_mut()
+                .filter(|descriptor| descriptor.session_id.is_none())
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        },
+    }
+}
+
+#[cfg(feature = "local_fs")]
+fn identified_agent_session_ids(node: &PaneNodeSnapshot, ids: &mut HashSet<String>) {
     match node {
         PaneNodeSnapshot::Branch(branch) => {
             for (_, child) in &branch.children {
-                collect_agent_session_ids(child, ids);
+                identified_agent_session_ids(child, ids);
             }
         }
         PaneNodeSnapshot::Leaf(leaf) => {
@@ -282,71 +304,58 @@ fn collect_agent_session_ids(node: &PaneNodeSnapshot, ids: &mut HashSet<String>)
                 && let Some(session_id) = terminal
                     .cli_agent_resume_descriptor
                     .as_ref()
-                    .and_then(|descriptor| descriptor.session_id.as_ref())
+                    .and_then(|descriptor| descriptor.session_id.clone())
             {
-                ids.insert(session_id.clone());
+                ids.insert(session_id);
             }
         }
     }
 }
 
-fn normalized_cwd(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/").to_lowercase()
-}
+/// Fills in the session of each agent pane whose snapshot predates session IDs being recorded,
+/// from the agents' own conversation history, so that reopening the window resumes them.
+#[cfg(feature = "local_fs")]
+fn identify_agent_sessions(window: &mut WindowSnapshot, saved_at_unix_seconds: i64) {
+    use crate::terminal::agent_session_history::{UnidentifiedAgent, find_all, match_for_restore};
 
-fn recover_agent_session_ids(
-    node: &mut PaneNodeSnapshot,
-    used_ids: &mut HashSet<String>,
-    candidates: &mut HashMap<
-        CLIAgent,
-        Vec<crate::terminal::agent_session_history::PastAgentSession>,
-    >,
-) {
-    match node {
-        PaneNodeSnapshot::Branch(branch) => {
-            for (_, child) in &mut branch.children {
-                recover_agent_session_ids(child, used_ids, candidates);
-            }
-        }
-        PaneNodeSnapshot::Leaf(leaf) => {
-            let LeafContents::Terminal(terminal) = &mut leaf.contents else {
-                return;
-            };
-            let Some(descriptor) = terminal.cli_agent_resume_descriptor.as_mut() else {
-                return;
-            };
-            if descriptor.session_id.is_some() {
-                return;
-            }
-            let cwd_key = normalized_cwd(&descriptor.cwd);
-            let sessions = candidates.entry(descriptor.agent).or_insert_with(|| {
-                crate::terminal::agent_session_history::find_all(descriptor.agent)
-            });
-            let Some(session) = sessions.iter().find(|session| {
-                normalized_cwd(&session.cwd) == cwd_key && !used_ids.contains(&session.session_id)
-            }) else {
-                return;
-            };
-            descriptor.session_id = Some(session.session_id.clone());
-            if descriptor.title.is_none() {
-                descriptor.title = session.title.clone();
-            }
-            used_ids.insert(session.session_id.clone());
-        }
+    let mut excluded = crate::terminal::cli_agent_sessions::process_registry::running_session_ids();
+    for tab in &window.tabs {
+        identified_agent_session_ids(&tab.root, &mut excluded);
     }
-}
-
-pub(crate) fn recover_missing_agent_session_ids(windows: &mut [WindowSnapshot]) {
-    let mut used_ids = HashSet::new();
-    for window in windows.iter() {
-        for tab in &window.tabs {
-            collect_agent_session_ids(&tab.root, &mut used_ids);
-        }
+    let mut descriptors = window
+        .tabs
+        .iter_mut()
+        .flat_map(|tab| unidentified_agents(&mut tab.root))
+        .collect::<Vec<_>>();
+    if descriptors.is_empty() {
+        return;
     }
-    let mut candidates = HashMap::new();
-    for window in windows {
-        for tab in &mut window.tabs {
-            recover_agent_session_ids(&mut tab.root, &mut used_ids, &mut candidates);
+    let wanted = descriptors
+        .iter()
+        .map(|descriptor| UnidentifiedAgent {
+            agent: descriptor.agent,
+            cwd: descriptor.cwd.clone(),
+            title: descriptor.title.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut agents = wanted.iter().map(|wanted| wanted.agent).collect::<Vec<_>>();
+    agents.sort_by_key(|agent| agent.display_name());
+    agents.dedup();
+    let candidates = agents.into_iter().flat_map(find_all).collect::<Vec<_>>();
+    let saved_at = SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_secs(u64::try_from(saved_at_unix_seconds).unwrap_or(0));
+    for (descriptor, session_id) in
+        descriptors
+            .iter_mut()
+            .zip(match_for_restore(&wanted, saved_at, &candidates, &excluded))
+    {
+        if let Some(session_id) = session_id {
+            log::info!(
+                "Resuming {} in {} as session {session_id}, matched from its history",
+                descriptor.agent.display_name(),
+                descriptor.cwd.display()
+            );
+            descriptor.session_id = Some(session_id);
         }
     }
 }
@@ -870,21 +879,14 @@ fn is_safe_relative_path(path: &Path) -> bool {
 }
 
 #[cfg(feature = "local_fs")]
-fn load_from_path(
-    path: &Path,
-    source: &LaunchConfigWindowSource,
-    recover_missing_agent_ids: bool,
-) -> Result<RestoredWindowSession> {
-    let stored = read_stored_window(path)?;
+fn load_from_path(path: &Path, source: &LaunchConfigWindowSource) -> Result<RestoredWindowSession> {
+    let mut stored = read_stored_window(path)?;
     if !sources_match(&stored.source, source) {
         bail!("Session config snapshot source does not match {path:?}");
     }
-    let mut window = stored.window;
-    if recover_missing_agent_ids {
-        recover_missing_agent_session_ids(std::slice::from_mut(&mut window));
-    }
+    identify_agent_sessions(&mut stored.window, stored.saved_at_unix_seconds);
     Ok(RestoredWindowSession {
-        window,
+        window: stored.window,
         block_lists: Arc::new(
             stored
                 .block_lists
@@ -901,7 +903,7 @@ fn load_from_dir(
     source: &LaunchConfigWindowSource,
 ) -> Result<Option<RestoredWindowSession>> {
     let path = session_path(dir, source);
-    match load_from_path(&path, source, true) {
+    match load_from_path(&path, source) {
         Ok(session) => Ok(Some(session)),
         Err(error)
             if error
@@ -938,11 +940,7 @@ fn load_stored_session_from_dir(
             if !is_safe_relative_path(&window.checkpoint_path) {
                 bail!("Stored session checkpoint path is invalid");
             }
-            load_from_path(
-                &dir.join(&window.checkpoint_path),
-                &window.source,
-                summary.is_current(),
-            )
+            load_from_path(&dir.join(&window.checkpoint_path), &window.source)
         })
         .collect()
 }

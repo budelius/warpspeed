@@ -12544,16 +12544,18 @@ impl Workspace {
             detach_panes_for_close && self.try_re_adopt_split_off_child_agent_tab(index, ctx);
 
         if !re_adopted && detach_panes_for_close {
+            let kept_running = self.keep_tab_sessions_running(&pane_group, ctx);
             let working_directories_model = self.working_directories_model.clone();
             pane_group.update(ctx, |pane_group, ctx| {
                 pane_group.for_all_terminal_panes(
                     |terminal_view, ctx| {
-                        if terminal_view
-                            .model
-                            .lock()
-                            .block_list()
-                            .active_block()
-                            .is_active_and_long_running()
+                        if !kept_running.contains(&terminal_view.id())
+                            && terminal_view
+                                .model
+                                .lock()
+                                .block_list()
+                                .active_block()
+                                .is_active_and_long_running()
                         {
                             terminal_view.shutdown_pty(ctx);
                         }
@@ -13438,7 +13440,17 @@ impl Workspace {
             .block_list()
             .active_block()
             .is_active_and_long_running();
-        let cwd = view.as_ref(ctx).pwd_if_local(ctx).map(PathBuf::from);
+        // A shell that died before bootstrapping never reported a directory, so fall back to the
+        // one the pane was started or restored in rather than the process's own.
+        let cwd = view
+            .as_ref(ctx)
+            .pwd_if_local(ctx)
+            .or_else(|| {
+                self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
+                    pane_group.terminal_working_directory(pane_group.focused_pane_id(ctx), ctx)
+                })
+            })
+            .map(PathBuf::from);
 
         if is_busy {
             let running_command = manager
@@ -13526,11 +13538,11 @@ impl Workspace {
         });
     }
 
-    /// Looks up the tracked CLI agent session for `terminal_view_id` and, if it names a
-    /// resumable Claude session, forks that session's transcript at its last complete turn.
-    /// Returns `None` (logging why, except for the two silent/expected cases) whenever
-    /// resuming isn't possible:
-    /// - no tracked session, or a tracked session for an agent other than Claude
+    /// Looks up the tracked CLI agent session for `terminal_view_id` and returns the command that
+    /// reopens it. A Claude session's transcript is first forked at its last complete turn; a Pi
+    /// session is reopened as it stands. Returns `None` (logging why, except for the two
+    /// silent/expected cases) whenever resuming isn't possible:
+    /// - no tracked session, or a tracked session for an agent other than Claude or Pi
     ///   (untracked/unsupported -- silent, by decision)
     /// - no session id (untracked -- silent, by decision)
     /// - no cwd on record for the session
@@ -13542,8 +13554,30 @@ impl Workspace {
         ctx: &AppContext,
     ) -> Option<String> {
         let session = CLIAgentSessionsModel::as_ref(ctx).session(terminal_view_id)?;
-        if session.agent != crate::terminal::CLIAgent::Claude {
-            return None;
+        match session.agent {
+            crate::terminal::CLIAgent::Claude => {}
+            crate::terminal::CLIAgent::Pi => {
+                return session
+                    .session_context
+                    .session_id
+                    .as_deref()
+                    .map(|session_id| format!("pi --session {session_id}"));
+            }
+            crate::terminal::CLIAgent::Gemini
+            | crate::terminal::CLIAgent::Codex
+            | crate::terminal::CLIAgent::Amp
+            | crate::terminal::CLIAgent::Droid
+            | crate::terminal::CLIAgent::OpenCode
+            | crate::terminal::CLIAgent::Copilot
+            | crate::terminal::CLIAgent::OhMyPi
+            | crate::terminal::CLIAgent::Auggie
+            | crate::terminal::CLIAgent::CursorCli
+            | crate::terminal::CLIAgent::Goose
+            | crate::terminal::CLIAgent::Hermes
+            | crate::terminal::CLIAgent::Vibe
+            | crate::terminal::CLIAgent::Antigravity
+            | crate::terminal::CLIAgent::WarpTui
+            | crate::terminal::CLIAgent::Unknown => return None,
         }
         let session_context = session.session_context.clone();
 
@@ -14334,6 +14368,78 @@ impl Workspace {
             | MoveStep::WaitingForResume { .. }
             | MoveStep::CuttingOver { .. } => {
                 log::error!("A move to AgentCtrl finished in a non-final step: {outcome:?}");
+            }
+        }
+    }
+
+    /// Hands the supervised shells of a closing tab that are running an agent or a long-running
+    /// command to the supervisor, which keeps them running. Returns the terminal views whose
+    /// shells it took.
+    #[cfg(feature = "local_tty")]
+    fn keep_tab_sessions_running(
+        &mut self,
+        pane_group: &ViewHandle<PaneGroup>,
+        ctx: &mut ViewContext<Self>,
+    ) -> HashSet<EntityId> {
+        let pane_group_id = pane_group.id();
+        let panes = self
+            .terminal_panes(ctx)
+            .into_iter()
+            .filter(|pane| {
+                pane.pane_group_id == pane_group_id
+                    && pane.session_id.is_some()
+                    && (pane.has_running_agent || pane.is_busy)
+            })
+            .collect::<Vec<_>>();
+        let mut kept = HashSet::new();
+        for pane in panes {
+            match self.hand_session_to_supervisor(pane_group_id, pane.pane_id, ctx) {
+                Ok(()) => {
+                    if let Some(terminal_view) = pane_group
+                        .as_ref(ctx)
+                        .terminal_view_from_pane_id(pane.pane_id, ctx)
+                    {
+                        kept.insert(terminal_view.id());
+                    }
+                }
+                Err(error) => {
+                    report_error!(error.context("Failed to keep a closed tab's session running"));
+                }
+            }
+        }
+        kept
+    }
+
+    #[cfg(not(feature = "local_tty"))]
+    fn keep_tab_sessions_running(
+        &mut self,
+        _pane_group: &ViewHandle<PaneGroup>,
+        _ctx: &mut ViewContext<Self>,
+    ) -> HashSet<EntityId> {
+        HashSet::new()
+    }
+
+    /// Closes a pane whose shell must keep running, handing the shell to the supervisor first.
+    /// If the handover fails the pane stays open: closing it would end what it was running.
+    fn detach_pane_for_close(
+        &mut self,
+        pane_group_id: EntityId,
+        pane_id: PaneId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match self.hand_session_to_supervisor(pane_group_id, pane_id, ctx) {
+            Ok(()) => self.close_pane(pane_group_id, pane_id, ctx),
+            Err(error) => {
+                report_error!(error.context("Failed to keep a closed pane's session running"));
+                self.toast_stack.update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::error(
+                            "This pane's session could not be kept running, so the pane was left                              open. Exit what is running in it to close it."
+                                .to_owned(),
+                        ),
+                        ctx,
+                    );
+                });
             }
         }
     }
@@ -18397,6 +18503,9 @@ impl Workspace {
                 *in_subshell,
                 ctx,
             ),
+            pane_group::Event::DetachPaneOnCloseRequested { pane_id } => {
+                self.detach_pane_for_close(pane_group.id(), *pane_id, ctx);
+            }
             pane_group::Event::CloseSharedSessionPaneRequested { pane_id } => {
                 if *SessionSettings::as_ref(ctx).should_confirm_close_session {
                     self.show_close_session_confirmation_dialog(

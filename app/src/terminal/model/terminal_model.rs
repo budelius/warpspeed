@@ -2750,24 +2750,32 @@ impl TerminalModel {
             return;
         };
         self.restore_bootstrap(&bootstrap);
-        if input_editor_active {
-            // The shell emitted its completion and `Precmd` hooks before the
-            // old pane detached and will not emit another until it runs a
-            // command. Replaying that lifecycle evidence reactivates the
-            // editor without re-sourcing bootstrap. The completion first moves
-            // the coordinator from `Unknown` to `AwaitingPrecmd`; only then is
-            // a prompt-only marker valid.
-            self.command_finished(CommandFinishedValue {
-                completion_metadata: CompletionMetadata {
-                    next_block_id: BlockId::new(),
-                    ..CompletionMetadata::default()
-                },
+        // The shell emitted its completion and `Precmd` hooks before the old
+        // pane detached and will not emit another until it runs a command.
+        // Replaying that lifecycle evidence reactivates the editor without
+        // re-sourcing bootstrap. The completion first moves the coordinator
+        // from `Unknown` to `AwaitingPrecmd`; only then is a prompt-only marker
+        // valid.
+        self.command_finished(CommandFinishedValue {
+            completion_metadata: CompletionMetadata {
+                next_block_id: BlockId::new(),
+                ..CompletionMetadata::default()
+            },
+            session_id: Some(bootstrap.hook_session_id),
+        });
+        self.prompt_only_precmd(PromptMetadata {
+            pwd: working_directory,
+            session_id: Some(bootstrap.hook_session_id),
+            ..PromptMetadata::default()
+        });
+        if !input_editor_active {
+            // A program was running when the old pane let go, and keystrokes
+            // reach a program only while it is the executing command. Its
+            // command line is not part of the handover, so the block starts
+            // unnamed.
+            self.preexec(PreexecValue {
+                command: String::new(),
                 session_id: Some(bootstrap.hook_session_id),
-            });
-            self.prompt_only_precmd(PromptMetadata {
-                pwd: working_directory,
-                session_id: Some(bootstrap.hook_session_id),
-                ..PromptMetadata::default()
             });
         }
     }

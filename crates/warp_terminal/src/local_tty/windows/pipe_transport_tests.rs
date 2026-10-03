@@ -47,6 +47,43 @@ fn connected_pair(label: &str) -> (PipeTransport, PipeTransport) {
     (client, supervisor)
 }
 
+#[test]
+fn each_build_gets_its_own_supervisor_pipe() {
+    let state = Path::new(r"C:\Users\someone\AppData\Local\warp\WarpSpeed\data");
+    let old_build = Path::new(r"C:\WarpSpeed\versions\20261002-a\warpspeed.exe");
+    let new_build = Path::new(r"C:\WarpSpeed\versions\20261003-b\warpspeed.exe");
+
+    assert_ne!(
+        supervisor_pipe_name_for(state, old_build),
+        supervisor_pipe_name_for(state, new_build)
+    );
+    assert_eq!(
+        supervisor_pipe_name_for(state, new_build),
+        supervisor_pipe_name_for(state, new_build),
+        "a window and the supervisor it started must agree on the name"
+    );
+}
+
+#[test]
+fn the_supervisor_pipe_ignores_the_executable_path_case() {
+    let state = Path::new(r"C:\data");
+
+    assert_eq!(
+        supervisor_pipe_name_for(state, Path::new(r"C:\WarpSpeed\warpspeed.exe")),
+        supervisor_pipe_name_for(state, Path::new(r"c:\warpspeed\WARPSPEED.EXE"))
+    );
+}
+
+#[test]
+fn separate_state_directories_keep_separate_supervisors() {
+    let executable = Path::new(r"C:\WarpSpeed\warpspeed.exe");
+
+    assert_ne!(
+        supervisor_pipe_name_for(Path::new(r"C:\one"), executable),
+        supervisor_pipe_name_for(Path::new(r"C:\two"), executable)
+    );
+}
+
 /// Two supervisors must not end up serving one name.
 ///
 /// `CreateNamedPipeW` is happy to add a second *server* instance to an existing
@@ -88,6 +125,41 @@ fn a_listener_can_still_serve_client_after_client() {
             Some(Message::Ping)
         );
     }
+}
+
+#[test]
+fn waiting_for_an_absent_supervisor_reports_that_none_is_listening() {
+    let name = test_pipe_name("absent");
+
+    let transport = PipeTransport::connect_waiting(&name, std::time::Duration::from_secs(5))
+        .expect("an absent supervisor is not an error");
+
+    assert!(transport.is_none());
+}
+
+/// A supervisor that is busy with another client is still running. Mistaking it for an absent
+/// one makes every waiting client start its own supervisor, which is how hundreds of losing
+/// `--terminal-session-supervisor` processes ended up cycling against one live daemon.
+#[test]
+fn a_busy_supervisor_is_waited_for_rather_than_reported_absent() {
+    let name = test_pipe_name("busy");
+    let mut listener = PipeListener::bind(name.clone()).expect("bind must succeed");
+    let _occupant = PipeTransport::connect(&name).expect("the first client must connect");
+    assert!(
+        PipeTransport::connect(&name).is_err(),
+        "with its only instance taken, the pipe must be busy for this test to mean anything"
+    );
+
+    let waiter = std::thread::spawn(move || {
+        PipeTransport::connect_waiting(&name, std::time::Duration::from_secs(5))
+            .expect("a busy supervisor must be waited for")
+            .is_some()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Accepting the occupant stands up the next instance, which frees the waiter.
+    let _occupant_server_end = listener.accept().expect("accept must succeed");
+
+    assert!(waiter.join().expect("the waiting client must not panic"));
 }
 
 /// A name whose supervisor has gone is free to take, so a restart is not locked

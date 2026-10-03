@@ -407,3 +407,329 @@ fn http_descriptor_fixtures_reject_protocol_fleet_environment_and_job_mismatch()
         );
     }
 }
+
+fn capturing_fixture(
+    body: serde_json::Value,
+) -> (&'static str, std::sync::mpsc::Receiver<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = body.to_string();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            request.extend_from_slice(&chunk[..read]);
+            let text = String::from_utf8_lossy(&request);
+            if let Some(header_end) = text.find("\r\n\r\n") {
+                let length = text[..header_end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + length || read == 0 {
+                    break;
+                }
+            } else if read == 0 {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        sender.send(request).unwrap();
+    });
+    (
+        Box::leak(format!("http://{address}").into_boxed_str()),
+        receiver,
+    )
+}
+
+fn moved_import(session_file: Vec<u8>) -> MovedSessionImport<'static> {
+    MovedSessionImport {
+        agent_name: "staging-claude-moved",
+        session_id: "abc-123",
+        session_file,
+        repo_url: "https://git.example.com/org/repo.git",
+        handoff_branch: "handoff/abc-123",
+        source_cwd: "/home/user/project",
+        idempotency_key: "warpspeed-key-1".to_owned(),
+    }
+}
+
+#[test]
+fn import_sends_multipart_and_returns_job_id() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted", "job_id": "job-1" }));
+    let profile = fixture_profile(base);
+    let job_id =
+        import_moved_session_with(&profile, "token", moved_import(b"{\"a\":1}\n".to_vec()))
+            .unwrap();
+    assert_eq!(job_id, "job-1");
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    let lower = raw.to_ascii_lowercase();
+    assert!(raw.starts_with("POST /api/agent-control/runs/import "));
+    assert!(lower.contains("content-type: multipart/form-data"));
+    assert!(lower.contains("idempotency-key: warpspeed-key-1"));
+    assert!(lower.contains("x-stozn-client: warpspeed"));
+    assert!(lower.contains("authorization: bearer token"));
+    for part in [
+        "agent_name",
+        "session_id",
+        "repo_url",
+        "handoff_branch",
+        "source_cwd",
+        "session_file",
+    ] {
+        assert!(
+            raw.contains(&format!("name=\"{part}\"")),
+            "missing part {part}"
+        );
+    }
+    assert!(raw.contains("filename=\"session.jsonl\""));
+    assert!(raw.contains("handoff/abc-123"));
+}
+
+#[test]
+fn import_refuses_oversized_file_before_sending() {
+    let profile = fixture_profile("http://127.0.0.1:1");
+    let error = import_moved_session_with(
+        &profile,
+        "token",
+        moved_import(vec![0; MAX_SESSION_FILE_BYTES + 1]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("32 MiB"), "{error}");
+}
+
+fn resumed_page(content: &str, terminal: bool) -> serde_json::Value {
+    json!({
+        "items": [{
+            "event_id": "e1", "job_id": "job-1", "sequence": 1, "timestamp": "t",
+            "type": "status", "content": content, "redacted": false, "truncated": false
+        }],
+        "next_cursor": "c1",
+        "terminal": terminal,
+        "gap": false,
+        "earliest_cursor": null
+    })
+}
+
+#[test]
+fn resume_wait_succeeds_on_resumed_status() {
+    let profile = fixture_profile(http_fixture("200 OK", resumed_page("resumed", false)));
+    let client = Client::new();
+    wait_until_resumed_with(
+        &client,
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+}
+
+#[test]
+fn resume_wait_fails_on_terminal_page() {
+    let profile = fixture_profile(http_fixture("200 OK", resumed_page("started", true)));
+    let client = Client::new();
+    let error = wait_until_resumed_with(
+        &client,
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("ended before resuming"),
+        "{error}"
+    );
+}
+
+type RequestLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Serves `responses` in order, one per connection, repeating the last one; logs request lines.
+fn sequence_fixture(
+    responses: Vec<(&'static str, serde_json::Value)>,
+) -> (&'static str, RequestLog) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let log = RequestLog::default();
+    let served = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut request = [0_u8; 8192];
+            let read = stream.read(&mut request).unwrap();
+            let line = String::from_utf8_lossy(&request[..read])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let index = {
+                let mut served = served.lock().unwrap();
+                served.push(line);
+                served.len() - 1
+            };
+            let (status, body) = &responses[index.min(responses.len() - 1)];
+            let body = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (Box::leak(format!("http://{address}").into_boxed_str()), log)
+}
+
+fn empty_page() -> serde_json::Value {
+    json!({
+        "items": [],
+        "next_cursor": null,
+        "terminal": false,
+        "gap": false,
+        "earliest_cursor": null
+    })
+}
+
+#[test]
+fn resume_wait_retries_a_transient_error() {
+    let (base, log) = sequence_fixture(vec![
+        ("503 Service Unavailable", json!({ "error": "busy" })),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(log.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn resume_wait_gives_up_at_the_deadline_without_spinning() {
+    let (base, log) = sequence_fixture(vec![("200 OK", empty_page())]);
+    let profile = fixture_profile(base);
+    let error = wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_millis(1200),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("did not resume within"),
+        "{error}"
+    );
+    let requests = log.lock().unwrap().len();
+    assert!(requests <= 5, "polled {requests} times in 1.2s");
+}
+
+#[test]
+fn resume_wait_fails_fast_on_a_client_error() {
+    for status in [
+        "401 Unauthorized",
+        "403 Forbidden",
+        "404 Not Found",
+        "422 Unprocessable Entity",
+    ] {
+        let (base, log) = sequence_fixture(vec![(status, json!({ "error": "denied" }))]);
+        let profile = fixture_profile(base);
+        let started = Instant::now();
+        let error = wait_until_resumed_with(
+            &Client::new(),
+            &profile,
+            "token",
+            "job-1",
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap_err();
+        let code = &status[..3];
+        assert!(format!("{error:#}").contains(code), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{status}");
+        assert_eq!(log.lock().unwrap().len(), 1, "{status}");
+    }
+}
+
+#[test]
+fn resume_wait_retries_rate_limiting() {
+    let (base, log) = sequence_fixture(vec![
+        ("429 Too Many Requests", json!({ "error": "slow down" })),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(log.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn resume_wait_restarts_without_a_cursor_after_a_history_gap() {
+    let gap_page = json!({
+        "items": [],
+        "next_cursor": "c9",
+        "terminal": false,
+        "gap": true,
+        "earliest_cursor": "c5"
+    });
+    let (base, log) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [], "next_cursor": "c1", "terminal": false, "gap": false,
+                "earliest_cursor": null
+            }),
+        ),
+        ("410 Gone", gap_page),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    assert!(log[1].contains("after=c1"), "{}", log[1]);
+    assert!(!log[2].contains("after="), "{}", log[2]);
+}
+
+#[test]
+fn stop_run_posts_a_stop_request() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
+    let profile = fixture_profile(base);
+    stop_run_with(&profile, "token", "job-1", true).unwrap();
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(
+        raw.starts_with("POST /api/agent-control/runs/job-1/stop "),
+        "{raw}"
+    );
+    assert!(raw.contains("\"force\":true"), "{raw}");
+}

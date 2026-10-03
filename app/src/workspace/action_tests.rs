@@ -91,3 +91,17 @@ fn pane_name_actions_save_workspace_state() {
     // `rename_pane` which mutates `pane_configuration`.
     assert!(WorkspaceAction::RenameActivePane.should_save_app_state_on_action());
 }
+
+#[test]
+fn move_session_actions_save_workspace_state() {
+    let terminal_view_id = EntityId::new();
+    assert!(WorkspaceAction::MoveSessionToAgentCtrl.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::MoveSessionToAgentCtrlForTerminalView { terminal_view_id }
+            .should_save_app_state_on_action()
+    );
+    assert!(
+        WorkspaceAction::ConfirmMoveSessionToAgentCtrl { terminal_view_id }
+            .should_save_app_state_on_action()
+    );
+}

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use instant::Instant;
 use reqwest::StatusCode;
+use reqwest::blocking::multipart::{Form, Part};
 use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -532,8 +533,29 @@ fn stop(
     json_output: bool,
 ) -> Result<()> {
     validate_job_id(job_id)?;
-    let profile = profile(environment);
     let token = dashboard_token()?;
+    let result = stop_run_with(profile(environment), &token, job_id, force)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Stop request accepted for {job_id}.");
+    }
+    Ok(())
+}
+
+/// Asks the dashboard to stop a managed run.
+pub fn stop_run(environment: ManagedEnvironment, job_id: &str, force: bool) -> Result<()> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    stop_run_with(profile(environment), &token, job_id, force).map(drop)
+}
+
+fn stop_run_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    job_id: &str,
+    force: bool,
+) -> Result<Value> {
     let response = send(
         profile,
         Client::new()
@@ -541,7 +563,7 @@ fn stop(
                 "{}/api/agent-control/runs/{job_id}/stop",
                 profile.base_url
             ))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .header("X-Stozn-Client", "warpspeed")
             .header(
                 "Idempotency-Key",
@@ -551,12 +573,7 @@ fn stop(
     )?;
     let result: Value = response.json().context("invalid stop response")?;
     ensure_command_accepted(&result)?;
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
-        println!("Stop request accepted for {job_id}.");
-    }
-    Ok(())
+    Ok(result)
 }
 
 fn attach(
@@ -642,6 +659,149 @@ fn attach(
         }
     }
     Ok(())
+}
+
+pub const MAX_SESSION_FILE_BYTES: usize = 33_554_432;
+
+pub struct MovedSessionImport<'a> {
+    pub agent_name: &'a str,
+    pub session_id: &'a str,
+    pub session_file: Vec<u8>,
+    pub repo_url: &'a str,
+    pub handoff_branch: &'a str,
+    pub source_cwd: &'a str,
+    pub idempotency_key: String,
+}
+
+/// Uploads a local session file to the dashboard and returns the new run's job id.
+pub fn import_moved_session(
+    environment: ManagedEnvironment,
+    import: MovedSessionImport<'_>,
+) -> Result<String> {
+    let token = dashboard_token()?;
+    import_moved_session_with(profile(environment), &token, import)
+}
+
+fn import_moved_session_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    import: MovedSessionImport<'_>,
+) -> Result<String> {
+    if import.session_file.len() > MAX_SESSION_FILE_BYTES {
+        bail!("session file is larger than the 32 MiB import limit");
+    }
+    let form = Form::new()
+        .text("agent_name", import.agent_name.to_owned())
+        .text("session_id", import.session_id.to_owned())
+        .text("repo_url", import.repo_url.to_owned())
+        .text("handoff_branch", import.handoff_branch.to_owned())
+        .text("source_cwd", import.source_cwd.to_owned())
+        .part(
+            "session_file",
+            Part::bytes(import.session_file).file_name("session.jsonl"),
+        );
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()?;
+    // Multipart bodies cannot be cloned, so validate the built request rather than using `send`.
+    let request = client
+        .post(format!(
+            "{}/api/agent-control/runs/import",
+            profile.base_url
+        ))
+        .bearer_auth(token)
+        .header("X-Stozn-Client", "warpspeed")
+        .header("Idempotency-Key", import.idempotency_key)
+        .multipart(form)
+        .build()
+        .context("invalid managed-session import request")?;
+    validate_destination_url(profile, request.url())?;
+    let response = client
+        .execute(request)
+        .context("dashboard request failed")?;
+    let response = if response.status().is_success() {
+        response
+    } else {
+        return Err(http_error(response));
+    };
+    let result: Value = response.json().context("invalid import response")?;
+    ensure_command_accepted(&result)?;
+    result
+        .get("job_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context("import response did not include a job id")
+}
+
+/// Blocks until the imported run reports that its session has resumed.
+pub fn wait_until_resumed(
+    environment: ManagedEnvironment,
+    job_id: &str,
+    timeout: Duration,
+) -> Result<()> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
+    wait_until_resumed_with(
+        &client,
+        profile(environment),
+        &token,
+        job_id,
+        Instant::now() + timeout,
+    )
+}
+
+fn wait_until_resumed_with(
+    client: &Client,
+    profile: &EnvironmentProfile,
+    token: &str,
+    job_id: &str,
+    deadline: Instant,
+) -> Result<()> {
+    let started = Instant::now();
+    let mut cursor: Option<String> = None;
+    loop {
+        let (idle, last_error) =
+            match fetch_event_page(client, profile, job_id, token, cursor.as_deref(), 15_000) {
+                Ok((page, history_gap)) => {
+                    if page
+                        .items
+                        .iter()
+                        .any(|event| event.event_type == "status" && event.content == "resumed")
+                    {
+                        return Ok(());
+                    }
+                    if page.terminal {
+                        bail!("managed run {job_id} ended before resuming");
+                    }
+                    // The cursor fell out of retained history; replaying from the start still
+                    // includes the `resumed` event if it was emitted.
+                    cursor = if history_gap {
+                        None
+                    } else {
+                        page.next_cursor.or(cursor)
+                    };
+                    (page.items.is_empty() && cursor.is_none(), None)
+                }
+                Err(error) if is_rejection(&error) => {
+                    return Err(error.context(format!("could not watch managed run {job_id}")));
+                }
+                // The run is already importing; a dashboard blip must not abandon it early.
+                Err(error) => (true, Some(error)),
+            };
+        if Instant::now() >= deadline {
+            let secs = started.elapsed().as_secs();
+            match last_error {
+                Some(error) => {
+                    bail!("managed run {job_id} did not resume within {secs}s: {error:#}")
+                }
+                None => bail!("managed run {job_id} did not resume within {secs}s"),
+            }
+        }
+        if idle {
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
 }
 
 fn fetch_descriptor(
@@ -1009,9 +1169,12 @@ fn validate_request_destination(
         .context("managed-session request cannot be safely inspected")?
         .build()
         .context("invalid managed-session request")?;
+    validate_destination_url(profile, request.url())
+}
+
+fn validate_destination_url(profile: &EnvironmentProfile, requested: &reqwest::Url) -> Result<()> {
     let allowed = reqwest::Url::parse(profile.base_url)
         .context("invalid compiled managed-session dashboard URL")?;
-    let requested = request.url();
     let same_origin = requested.scheme() == allowed.scheme()
         && requested.host_str() == allowed.host_str()
         && requested.port_or_known_default() == allowed.port_or_known_default()
@@ -1036,10 +1199,37 @@ fn send(
     }
 }
 
+/// A non-success dashboard response, kept typed so callers can tell rejections from blips.
+#[derive(Debug)]
+struct HttpStatusError {
+    status: StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "dashboard returned {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
 fn http_error(response: Response) -> anyhow::Error {
     let status = response.status();
     let body = response.text().unwrap_or_default();
-    anyhow::anyhow!("dashboard returned {status}: {body}")
+    HttpStatusError { status, body }.into()
+}
+
+/// Whether retrying cannot help: the dashboard rejected the request itself (auth, a missing run,
+/// a bad request), as opposed to being briefly unavailable or rate limiting us.
+fn is_rejection(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HttpStatusError>()
+        .is_some_and(|error| {
+            error.status.is_client_error()
+                && error.status != StatusCode::GONE
+                && error.status != StatusCode::TOO_MANY_REQUESTS
+        })
 }
 
 fn bookmarks_path() -> PathBuf {

@@ -136,6 +136,23 @@ impl<A: Action + Clone> DismissibleToastStack<A> {
         ctx.notify();
     }
 
+    #[cfg(test)]
+    pub fn toast_texts(&self) -> Vec<&str> {
+        self.toasts
+            .iter()
+            .map(|toast| toast.dismissible_toast.main_text())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn persistent_toast_texts(&self) -> Vec<&str> {
+        self.toasts
+            .iter()
+            .filter(|toast| toast.abort_handle.is_none())
+            .map(|toast| toast.dismissible_toast.main_text())
+            .collect()
+    }
+
     fn evict_oldest_toasts(&mut self) {
         while self.toasts.len() > MAX_VISIBLE_TOASTS {
             let evicted = self.toasts.remove(0);

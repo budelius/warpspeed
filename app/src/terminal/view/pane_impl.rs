@@ -41,6 +41,8 @@ use crate::pane_group::{BackingView, SplitPaneState, TOGGLE_MAXIMIZE_PANE_BINDIN
 use crate::settings::app_installation_detection::{
     UserAppInstallDetectionSettings, UserAppInstallStatus,
 };
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_handoff::{HandoffSource, moved_agent_name};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shared_session::manager::Manager;
@@ -669,6 +671,39 @@ impl TerminalView {
             .flatten()
             .is_some()
     }
+
+    /// The local agent session in this pane that can be moved into an AgentCtrl managed run.
+    ///
+    /// Locks the terminal model, so callers must not already hold that lock.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn agent_ctrl_move_source(&self, ctx: &AppContext) -> Option<HandoffSource> {
+        let sessions = CLIAgentSessionsModel::as_ref(ctx);
+        let session = sessions.session(self.view_id)?;
+        if session.remote_host.is_some() {
+            return None;
+        }
+        moved_agent_name(session.agent)?;
+        let session_id = sessions.session_id(self.view_id)?.to_owned();
+        // Not the agent-reported cwd: it follows the agent's own `cd`s, while the session file
+        // stays keyed by the directory the agent was launched from.
+        let cwd = self.active_session_path_if_local(ctx)?;
+        Some(HandoffSource {
+            agent: session.agent,
+            session_id,
+            cwd,
+            transcript_path: session.session_context.transcript_path.clone(),
+        })
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn can_move_session_to_agent_ctrl(&self, ctx: &AppContext) -> bool {
+        self.agent_ctrl_move_source(ctx).is_some()
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    pub(crate) fn can_move_session_to_agent_ctrl(&self, _: &AppContext) -> bool {
+        false
+    }
 }
 
 impl BackingView for TerminalView {
@@ -712,6 +747,8 @@ impl BackingView for TerminalView {
         &self,
         ctx: &AppContext,
     ) -> Vec<MenuItem<Self::PaneHeaderOverflowMenuAction>> {
+        // Checked before taking the model lock, which it takes itself.
+        let can_move_session_to_agent_ctrl = self.can_move_session_to_agent_ctrl(ctx);
         let model = self.model.lock();
         let mut items = vec![];
         let source = SharedSessionActionSource::PaneHeader;
@@ -783,6 +820,13 @@ impl BackingView for TerminalView {
                         .into_item(),
                 );
             }
+        }
+        if can_move_session_to_agent_ctrl {
+            items.push(
+                MenuItemFields::new("Move session to AgentCtrl")
+                    .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
+                    .into_item(),
+            );
         }
 
         // Split-pane related items.

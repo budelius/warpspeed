@@ -1276,6 +1276,28 @@ fn second_ctrl_c_while_armed_reuses_the_existing_window() {
 }
 
 #[test]
+fn apply_event_keeps_the_last_reported_transcript_path() {
+    let mut session = cli_agent_session(CLIAgentSessionStatus::InProgress, true);
+    let mut event = rich_event(CLIAgentEventType::Stop);
+    event.payload.transcript_path = Some("/home/ben/.claude/projects/-a/abc.jsonl".to_owned());
+    session.apply_event(&event);
+    assert_eq!(
+        session.session_context.transcript_path.as_deref(),
+        Some(std::path::Path::new(
+            "/home/ben/.claude/projects/-a/abc.jsonl"
+        ))
+    );
+
+    session.apply_event(&rich_event(CLIAgentEventType::PromptSubmit));
+    assert_eq!(
+        session.session_context.transcript_path.as_deref(),
+        Some(std::path::Path::new(
+            "/home/ben/.claude/projects/-a/abc.jsonl"
+        ))
+    );
+}
+
+#[test]
 fn a_command_detected_session_takes_the_id_its_process_registry_reports() {
     App::test((), |mut app| async move {
         let model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());

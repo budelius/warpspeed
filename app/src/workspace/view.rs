@@ -389,6 +389,13 @@ use crate::tab_configs::telemetry::{NewWorktreeConfigOpenSource, WorktreeBranchN
 use crate::tab_configs::{
     NewWorktreeModal, NewWorktreeModalEvent, TabConfigParamsModal, TabConfigParamsModalEvent,
 };
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_handoff::{
+    CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession, agent_exit_command,
+    cut_over_decision, move_failure_message, move_idempotency_key, move_progress_message,
+    prepare_handoff as prepare_agent_session_handoff, select_remote, session_changed_message,
+    stop_request_outcome,
+};
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
 #[cfg(feature = "local_tty")]
@@ -1152,6 +1159,9 @@ pub struct Workspace {
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
+    /// Moves to AgentCtrl that have been confirmed and not yet finished, by terminal view.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    agent_ctrl_moves: HashMap<EntityId, MoveStep>,
     window_process_restart_in_progress: bool,
     /// Whether this window has already given its surviving sessions to the
     /// supervisor. Set once, so the window-close path and the app-termination
@@ -3719,6 +3729,8 @@ impl Workspace {
             change_shell_menu_modal,
             attach_session_menu_modal,
             pending_shell_restart: None,
+            #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+            agent_ctrl_moves: HashMap::new(),
             window_process_restart_in_progress: false,
             sessions_handed_over: false,
             close_session_confirmation_dialog,
@@ -4031,6 +4043,18 @@ impl Workspace {
         ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
         {
             ctx.notify();
+        }
+
+        #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+        if let CLIAgentSessionsModelEvent::Ended {
+            terminal_view_id, ..
+        } = event
+            && matches!(
+                self.agent_ctrl_moves.get(terminal_view_id),
+                Some(MoveStep::CuttingOver { .. })
+            )
+        {
+            self.open_moved_session_viewer(*terminal_view_id, ctx);
         }
     }
 
@@ -13786,6 +13810,568 @@ impl Workspace {
         }
     }
 
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn terminal_view_by_id(
+        &self,
+        terminal_view_id: EntityId,
+        ctx: &AppContext,
+    ) -> Option<ViewHandle<TerminalView>> {
+        self.tabs.iter().find_map(|tab| {
+            let pane_group = tab.pane_group.as_ref(ctx);
+            let pane_id = pane_group.find_pane_id_for_terminal_view(terminal_view_id, ctx)?;
+            pane_group.terminal_view_from_pane_id(pane_id, ctx)
+        })
+    }
+
+    fn move_focused_session_to_agent_ctrl(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(view) = self.focused_terminal_view(ctx) else {
+            return;
+        };
+        self.move_session_to_agent_ctrl_for_terminal_view(view.id(), ctx);
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    fn move_session_to_agent_ctrl_for_terminal_view(
+        &mut self,
+        _: EntityId,
+        _: &mut ViewContext<Self>,
+    ) {
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    fn confirm_move_session_to_agent_ctrl(&mut self, _: EntityId, _: &mut ViewContext<Self>) {}
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn agent_ctrl_move_toast_id(terminal_view_id: EntityId) -> String {
+        format!("agent_ctrl_move:{terminal_view_id}")
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn show_agent_ctrl_move_toast(
+        &mut self,
+        terminal_view_id: EntityId,
+        toast: DismissibleToast<WorkspaceAction>,
+        persistent: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let toast = toast.with_object_id(Self::agent_ctrl_move_toast_id(terminal_view_id));
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            if persistent {
+                toast_stack.add_persistent_toast(toast, ctx);
+            } else {
+                toast_stack.add_ephemeral_toast(toast, ctx);
+            }
+        });
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn agent_ctrl_move_source(
+        &self,
+        terminal_view_id: EntityId,
+        ctx: &AppContext,
+    ) -> Option<HandoffSource> {
+        self.terminal_view_by_id(terminal_view_id, ctx)?
+            .as_ref(ctx)
+            .agent_ctrl_move_source(ctx)
+    }
+
+    /// Asks the user to confirm moving the agent session in `terminal_view_id` to AgentCtrl.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn move_session_to_agent_ctrl_for_terminal_view(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.agent_ctrl_moves.contains_key(&terminal_view_id) {
+            // Re-shown persistently under the move's toast id: an expiring notice there would
+            // replace the warning and then disappear with it.
+            let agent = CLIAgentSessionsModel::as_ref(ctx)
+                .session(terminal_view_id)
+                .map(|session| session.agent);
+            self.show_agent_ctrl_move_toast(
+                terminal_view_id,
+                DismissibleToast::default(move_progress_message(agent)),
+                true,
+                ctx,
+            );
+            return;
+        }
+        let Some(source) = self.agent_ctrl_move_source(terminal_view_id, ctx) else {
+            self.show_agent_ctrl_move_toast(
+                terminal_view_id,
+                DismissibleToast::error(
+                    "This pane has no local Claude, Pi, or Codex session that can be moved to \
+                     AgentCtrl."
+                        .to_owned(),
+                ),
+                false,
+                ctx,
+            );
+            return;
+        };
+        let repo = source.cwd.clone();
+        ctx.spawn(
+            async move { blocking::unblock(move || select_remote(&repo)).await },
+            move |me, remote, ctx| match remote {
+                Ok(remote) => {
+                    me.ask_to_confirm_agent_ctrl_move(terminal_view_id, &source, &remote, ctx)
+                }
+                Err(error) => me.show_agent_ctrl_move_toast(
+                    terminal_view_id,
+                    DismissibleToast::error(format!(
+                        "This session cannot be moved to AgentCtrl: {error:#}"
+                    )),
+                    false,
+                    ctx,
+                ),
+            },
+        );
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn ask_to_confirm_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        source: &HandoffSource,
+        remote: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // A persistent toast, because the ephemeral timeout is too short to read and confirm.
+        let toast = DismissibleToast::default(format!(
+            "Move this {} session to AgentCtrl staging? This pushes your working tree, including \
+             untracked files, to the repo's {remote} remote as a handoff/… branch, and the local \
+             agent exits once the cloud run has resumed.",
+            source.agent.display_name()
+        ))
+        .with_link(ToastLink::new("Move".to_owned()).with_onclick_action(
+            WorkspaceAction::ConfirmMoveSessionToAgentCtrl { terminal_view_id },
+        ));
+        self.show_agent_ctrl_move_toast(terminal_view_id, toast, true, ctx);
+    }
+
+    /// Prepares the handoff branch and session file off the main thread, then imports them.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn confirm_move_session_to_agent_ctrl(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            toast_stack
+                .dismiss_older_toasts(&Self::agent_ctrl_move_toast_id(terminal_view_id), ctx);
+        });
+        if self.agent_ctrl_moves.contains_key(&terminal_view_id) {
+            return;
+        }
+        // Looked up again because the agent may have exited while the confirmation was open.
+        let Some(source) = self.agent_ctrl_move_source(terminal_view_id, ctx) else {
+            self.show_agent_ctrl_move_toast(
+                terminal_view_id,
+                DismissibleToast::error(
+                    "The agent session is no longer running, so nothing was moved.".to_owned(),
+                ),
+                false,
+                ctx,
+            );
+            return;
+        };
+        self.agent_ctrl_moves
+            .insert(terminal_view_id, MoveStep::Preparing);
+        self.show_agent_ctrl_move_toast(
+            terminal_view_id,
+            DismissibleToast::default(move_progress_message(Some(source.agent))),
+            // Persistent so the warning stays up for the whole move; the outcome toast replaces
+            // it.
+            true,
+            ctx,
+        );
+        let task_source = source.clone();
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    let home = dirs::home_dir().context("home directory is unavailable")?;
+                    prepare_agent_session_handoff(&task_source, &home, chrono::Local::now())
+                })
+                .await
+            },
+            move |me, result, ctx| match result {
+                Ok(prepared) => me.import_moved_session(terminal_view_id, source, prepared, ctx),
+                Err(error) => me.fail_agent_ctrl_move(terminal_view_id, &error, None, ctx),
+            },
+        );
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn import_moved_session(
+        &mut self,
+        terminal_view_id: EntityId,
+        source: HandoffSource,
+        prepared: PreparedHandoff,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use managed_agent_sessions::{MovedSessionImport, import_moved_session};
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        self.agent_ctrl_moves
+            .insert(terminal_view_id, MoveStep::Importing);
+        let uploaded = UploadedSession {
+            session_id: source.session_id.clone(),
+            file_path: prepared.session_file_path.clone(),
+            file_len: prepared.session_file.len() as u64,
+            pushed_branch: format!("{}/{}", prepared.remote, prepared.branch),
+        };
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    let source_cwd = source.cwd.display().to_string();
+                    import_moved_session(
+                        ManagedEnvironment::Staging,
+                        MovedSessionImport {
+                            agent_name: prepared.agent_name,
+                            session_id: &source.session_id,
+                            idempotency_key: move_idempotency_key(
+                                &source.session_id,
+                                &prepared.commit,
+                            ),
+                            session_file: prepared.session_file,
+                            repo_url: &prepared.repo_url,
+                            handoff_branch: &prepared.branch,
+                            source_cwd: &source_cwd,
+                        },
+                    )
+                })
+                .await
+            },
+            move |me, result, ctx| match result {
+                Ok(job_id) => me.wait_for_moved_session(terminal_view_id, job_id, uploaded, ctx),
+                Err(error) => me.fail_agent_ctrl_move(
+                    terminal_view_id,
+                    &error,
+                    Some(uploaded.pushed_branch),
+                    ctx,
+                ),
+            },
+        );
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn wait_for_moved_session(
+        &mut self,
+        terminal_view_id: EntityId,
+        job_id: String,
+        uploaded: UploadedSession,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use managed_agent_sessions::wait_until_resumed;
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        self.agent_ctrl_moves.insert(
+            terminal_view_id,
+            MoveStep::WaitingForResume {
+                job_id: job_id.clone(),
+            },
+        );
+        let task_job_id = job_id.clone();
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    wait_until_resumed(
+                        ManagedEnvironment::Staging,
+                        &task_job_id,
+                        Duration::from_secs(120),
+                    )
+                })
+                .await
+            },
+            move |me, result, ctx| match result {
+                Ok(()) => me.cut_over_to_agent_ctrl(terminal_view_id, job_id, uploaded, ctx),
+                Err(error) => {
+                    let Some(step_reached) = me.agent_ctrl_moves.get(&terminal_view_id) else {
+                        return;
+                    };
+                    let reason = move_failure_message(
+                        step_reached,
+                        &format!("{error:#}"),
+                        Some(&uploaded.pushed_branch),
+                    );
+                    // The run may still resume after we gave up on it; the local agent stays
+                    // authoritative, so the cloud copy must not keep going.
+                    me.stop_run_and_fail_agent_ctrl_move(
+                        terminal_view_id,
+                        job_id,
+                        reason,
+                        Some(uploaded.pushed_branch),
+                        ctx,
+                    );
+                }
+            },
+        );
+    }
+
+    /// Asks the dashboard to stop the managed run of a move that failed after import, then fails
+    /// the move with `reason` and whether the stop request went through.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn stop_run_and_fail_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        job_id: String,
+        reason: String,
+        pushed_branch: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use managed_agent_sessions::stop_run;
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        // Keeps the move in flight, so Move is still refused, without leaving it `CuttingOver`,
+        // where the agent ending would open the run that is being stopped.
+        self.agent_ctrl_moves.insert(
+            terminal_view_id,
+            MoveStep::Failed {
+                reason: reason.clone(),
+                pushed_branch: pushed_branch.clone(),
+            },
+        );
+        let stopped_job_id = job_id.clone();
+        ctx.spawn(
+            async move {
+                // Graceful: every moved agent exits on SIGTERM, and the node still pushes the
+                // worktree back on any terminal state.
+                blocking::unblock(move || {
+                    stop_run(ManagedEnvironment::Staging, &stopped_job_id, false)
+                })
+                .await
+                .err()
+                .map(|error| format!("{error:#}"))
+            },
+            move |me, stop_error, ctx| {
+                me.finish_stopped_agent_ctrl_move(
+                    terminal_view_id,
+                    &job_id,
+                    reason,
+                    pushed_branch,
+                    stop_error.as_deref(),
+                    ctx,
+                )
+            },
+        );
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn finish_stopped_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        job_id: &str,
+        reason: String,
+        pushed_branch: Option<String>,
+        stop_error: Option<&str>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(error) = stop_error {
+            log::warn!("Could not stop moved AgentCtrl run {job_id}: {error}");
+        }
+        let outcome = stop_request_outcome(job_id, stop_error);
+        self.finish_agent_ctrl_move(
+            terminal_view_id,
+            MoveStep::Failed {
+                reason: format!("{reason} {outcome}"),
+                pushed_branch,
+            },
+            ctx,
+        );
+    }
+
+    /// Exits the local agent now that the managed run has resumed, unless the pane no longer runs
+    /// the moved session or that session changed after it was uploaded. The viewer replaces the
+    /// agent once its session ends, or the move gives up after ten seconds.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn cut_over_to_agent_ctrl(
+        &mut self,
+        terminal_view_id: EntityId,
+        job_id: String,
+        uploaded: UploadedSession,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.agent_ctrl_moves.insert(
+            terminal_view_id,
+            MoveStep::CuttingOver {
+                job_id: job_id.clone(),
+            },
+        );
+        let sessions = CLIAgentSessionsModel::as_ref(ctx);
+        let current_file_len = std::fs::metadata(&uploaded.file_path)
+            .ok()
+            .map(|metadata| metadata.len());
+        let decision = cut_over_decision(
+            sessions.session_id(terminal_view_id),
+            &uploaded.session_id,
+            current_file_len,
+            uploaded.file_len,
+        );
+        let running_agent = sessions
+            .session(terminal_view_id)
+            .map(|session| session.agent);
+        match decision {
+            CutOver::SessionChanged => {
+                let reason = session_changed_message(Some(&uploaded.pushed_branch));
+                self.stop_run_and_fail_agent_ctrl_move(
+                    terminal_view_id,
+                    job_id,
+                    reason,
+                    Some(uploaded.pushed_branch),
+                    ctx,
+                );
+            }
+            CutOver::LeaveLocalAgent => self.open_moved_session_viewer(terminal_view_id, ctx),
+            CutOver::ExitLocalAgent => {
+                let (Some(terminal_view), Some(exit_command)) = (
+                    self.terminal_view_by_id(terminal_view_id, ctx),
+                    running_agent.and_then(agent_exit_command),
+                ) else {
+                    self.open_moved_session_viewer(terminal_view_id, ctx);
+                    return;
+                };
+                terminal_view.update(ctx, |view, ctx| {
+                    // Ctrl-U clears a half-typed prompt so the exit command is read on its own.
+                    view.write_to_pty(b"\x15".as_slice(), ctx);
+                    view.submit_text_to_cli_agent_pty(exit_command.to_owned(), ctx);
+                });
+                ctx.spawn(
+                    async { warpui::r#async::Timer::after(Duration::from_secs(10)).await },
+                    move |me, _, ctx| {
+                        let still_cutting_over = matches!(
+                            me.agent_ctrl_moves.get(&terminal_view_id),
+                            Some(MoveStep::CuttingOver { job_id: pending }) if *pending == job_id
+                        );
+                        if still_cutting_over {
+                            me.fail_agent_ctrl_move(
+                                terminal_view_id,
+                                &anyhow::anyhow!("the local agent is still running"),
+                                None,
+                                ctx,
+                            );
+                        }
+                    },
+                );
+            }
+        }
+    }
+
+    /// Shows the managed run in the pane the local agent ran in, or in a new tab if that pane has
+    /// been closed or now runs another agent session.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn open_moved_session_viewer(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use managed_agent_sessions::ManagedSessionDeepLink;
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        let Some(MoveStep::CuttingOver { job_id }) =
+            self.agent_ctrl_moves.get(&terminal_view_id).cloned()
+        else {
+            return;
+        };
+        let arguments = ManagedSessionDeepLink {
+            environment: ManagedEnvironment::Staging,
+            job_id: job_id.clone(),
+        }
+        .cli_arguments();
+        let pane_runs_an_agent = CLIAgentSessionsModel::as_ref(ctx)
+            .session(terminal_view_id)
+            .is_some();
+        match self.terminal_view_by_id(terminal_view_id, ctx) {
+            Some(terminal_view) if !pane_runs_an_agent => {
+                Self::execute_managed_session_command_in(&terminal_view, &arguments, ctx);
+                self.finish_agent_ctrl_move(terminal_view_id, MoveStep::Done { job_id }, ctx);
+            }
+            Some(_) => {
+                self.add_terminal_tab(false, ctx);
+                self.execute_managed_session_command(&arguments, ctx);
+                self.agent_ctrl_moves.remove(&terminal_view_id);
+                self.show_agent_ctrl_move_toast(
+                    terminal_view_id,
+                    DismissibleToast::success(format!(
+                        "Moved to AgentCtrl as {job_id}. The moved session was no longer running \
+                         in its pane, so nothing was exited there; the run opened in a new tab."
+                    )),
+                    false,
+                    ctx,
+                );
+            }
+            None => {
+                self.add_terminal_tab(false, ctx);
+                self.execute_managed_session_command(&arguments, ctx);
+                self.finish_agent_ctrl_move(terminal_view_id, MoveStep::Done { job_id }, ctx);
+            }
+        }
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn fail_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        error: &anyhow::Error,
+        pushed_branch: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(step_reached) = self.agent_ctrl_moves.get(&terminal_view_id) else {
+            return;
+        };
+        let reason = move_failure_message(
+            step_reached,
+            &format!("{error:#}"),
+            pushed_branch.as_deref(),
+        );
+        self.finish_agent_ctrl_move(
+            terminal_view_id,
+            MoveStep::Failed {
+                reason,
+                pushed_branch,
+            },
+            ctx,
+        );
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn finish_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        outcome: MoveStep,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.agent_ctrl_moves.remove(&terminal_view_id);
+        match outcome {
+            MoveStep::Done { job_id } => self.show_agent_ctrl_move_toast(
+                terminal_view_id,
+                DismissibleToast::success(format!("Moved to AgentCtrl as {job_id}")),
+                false,
+                ctx,
+            ),
+            MoveStep::Failed {
+                reason,
+                pushed_branch,
+            } => {
+                log::warn!(
+                    "Moving an agent session to AgentCtrl failed (handoff branch: \
+                     {pushed_branch:?}): {reason}"
+                );
+                self.show_agent_ctrl_move_toast(
+                    terminal_view_id,
+                    DismissibleToast::error(reason),
+                    true,
+                    ctx,
+                );
+            }
+            MoveStep::Preparing
+            | MoveStep::Importing
+            | MoveStep::WaitingForResume { .. }
+            | MoveStep::CuttingOver { .. } => {
+                log::error!("A move to AgentCtrl finished in a non-final step: {outcome:?}");
+            }
+        }
+    }
+
     /// Hands the supervised shells of a closing tab that are running an agent or a long-running
     /// command to the supervisor, which keeps them running. Returns the terminal views whose
     /// shells it took.
@@ -18985,6 +19571,22 @@ impl Workspace {
         arguments: &str,
         ctx: &mut ViewContext<Self>,
     ) {
+        let Some(terminal_view) = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+        else {
+            return;
+        };
+        Self::execute_managed_session_command_in(&terminal_view, arguments, ctx);
+    }
+
+    /// [`Self::execute_managed_session_command`] in a specific pane.
+    fn execute_managed_session_command_in(
+        terminal_view: &ViewHandle<TerminalView>,
+        arguments: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let executable = match std::env::current_exe() {
             Ok(path) => path,
             Err(error) => {
@@ -18999,26 +19601,13 @@ impl Workspace {
         #[cfg(windows)]
         let executable = executable.replace('\\', "/");
 
-        self.active_tab_pane_group()
-            .update(ctx, |pane_group_view, pane_group_ctx| {
-                pane_group_view
-                    .active_session_view(pane_group_ctx)
-                    .map(|terminal_view_handle| {
-                        terminal_view_handle.update(
-                            pane_group_ctx,
-                            |terminal_view, terminal_view_ctx| {
-                                let command = format!(
-                                    "{} {arguments}",
-                                    terminal_view
-                                        .shell_family(terminal_view_ctx)
-                                        .shell_escape(&executable)
-                                );
-                                terminal_view
-                                    .execute_command_or_set_pending(&command, terminal_view_ctx);
-                            },
-                        )
-                    })
-            });
+        terminal_view.update(ctx, |terminal_view, ctx| {
+            let command = format!(
+                "{} {arguments}",
+                terminal_view.shell_family(ctx).shell_escape(&executable)
+            );
+            terminal_view.execute_command_or_set_pending(&command, ctx);
+        });
     }
 
     /// Insert the given command that should open a subshell. And set a flag that we should
@@ -25661,6 +26250,13 @@ impl TypedActionView for Workspace {
             DetachSessionForTerminalView { terminal_view_id } => {
                 self.detach_session_for_terminal_view(*terminal_view_id, ctx)
             }
+            MoveSessionToAgentCtrl => self.move_focused_session_to_agent_ctrl(ctx),
+            MoveSessionToAgentCtrlForTerminalView { terminal_view_id } => {
+                self.move_session_to_agent_ctrl_for_terminal_view(*terminal_view_id, ctx)
+            }
+            ConfirmMoveSessionToAgentCtrl { terminal_view_id } => {
+                self.confirm_move_session_to_agent_ctrl(*terminal_view_id, ctx)
+            }
             ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
             AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
             AddGetStartedTab => self.add_get_started_tab(ctx),
@@ -27987,6 +28583,17 @@ impl View for Workspace {
                 .is_some()
         {
             context.set.insert("Workspace_PaneCanDetachSession");
+        }
+
+        if self
+            .active_tab_pane_group()
+            .as_ref(app)
+            .focused_session_view(app)
+            .is_some_and(|view| view.as_ref(app).can_move_session_to_agent_ctrl(app))
+        {
+            context
+                .set
+                .insert("Workspace_PaneCanMoveSessionToAgentCtrl");
         }
 
         // TODO: This is temporary. We currently check if any code pane is open where it should

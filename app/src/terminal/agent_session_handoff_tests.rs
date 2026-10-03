@@ -452,7 +452,7 @@ fn move_session_failure_during_cut_over_asks_to_close_the_agent_manually() {
 }
 
 #[test]
-fn move_session_failure_while_waiting_says_the_run_was_asked_to_stop() {
+fn move_session_failure_while_waiting_leaves_the_stop_outcome_to_the_stop_request() {
     let message = move_failure_message(
         &MoveStep::WaitingForResume {
             job_id: "job-1".to_owned(),
@@ -460,20 +460,40 @@ fn move_session_failure_while_waiting_says_the_run_was_asked_to_stop() {
         "did not resume within 120s",
         None,
     );
-    assert!(message.contains("run job-1 was asked to stop"), "{message}");
-
-    let message = move_failure_message(&MoveStep::Importing, "rejected", None);
-    assert!(!message.contains("asked to stop"), "{message}");
+    assert!(message.contains("waiting for job-1 to resume"), "{message}");
+    assert!(message.contains("still running"), "{message}");
+    assert!(!message.contains("stop"), "{message}");
 }
 
 #[test]
-fn move_session_changed_message_names_the_run_and_branch() {
-    let message = session_changed_message("job-1", Some("gitea/handoff/x"));
+fn move_session_stop_outcome_says_whether_the_stop_was_requested() {
+    let asked = stop_request_outcome("job-1", None);
+    assert!(asked.contains("run job-1 was asked to stop"), "{asked}");
+
+    let failed = stop_request_outcome(
+        "job-1",
+        Some("dashboard returned 401 Unauthorized: https://ben:s3cret@dash.example/x"),
+    );
+    assert!(
+        failed.contains("could not ask run job-1 to stop (dashboard returned 401 Unauthorized"),
+        "{failed}"
+    );
+    assert!(
+        failed.contains("stop it with: warpspeed agent-ctrl stop job-1"),
+        "{failed}"
+    );
+    assert!(!failed.contains("was asked to stop"), "{failed}");
+    assert!(!failed.contains("s3cret"), "{failed}");
+}
+
+#[test]
+fn move_session_changed_message_names_the_branch() {
+    let message = session_changed_message(Some("gitea/handoff/x"));
     assert!(
         message.contains("local session changed during the move"),
         "{message}"
     );
-    assert!(message.contains("run job-1 was asked to stop"), "{message}");
+    assert!(!message.contains("stop"), "{message}");
     assert!(message.contains("gitea/handoff/x"), "{message}");
 }
 

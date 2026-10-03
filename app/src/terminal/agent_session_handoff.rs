@@ -480,10 +480,9 @@ pub(crate) fn move_failure_message(
     match step_reached {
         MoveStep::Preparing => before_cut_over("preparing the handoff"),
         MoveStep::Importing => before_cut_over("importing it"),
-        MoveStep::WaitingForResume { job_id } => format!(
-            "{} The cloud run {job_id} was asked to stop.",
+        MoveStep::WaitingForResume { job_id } => {
             before_cut_over(&format!("waiting for {job_id} to resume"))
-        ),
+        }
         MoveStep::CuttingOver { job_id } | MoveStep::Done { job_id } => format!(
             "Moved to AgentCtrl as {job_id}, but the local agent did not exit; close it manually. \
              Meanwhile the cloud run {job_id} is live; open it with: warpspeed agent-ctrl open {job_id}"
@@ -494,14 +493,27 @@ pub(crate) fn move_failure_message(
 
 /// The message shown when the local session file grew after it was uploaded, so the cloud run
 /// would be missing that work.
-pub(crate) fn session_changed_message(job_id: &str, pushed_branch: Option<&str>) -> String {
+pub(crate) fn session_changed_message(pushed_branch: Option<&str>) -> String {
     let leftover_branch = pushed_branch
         .map(|branch| format!(" The handoff branch {branch} was pushed and can be deleted."))
         .unwrap_or_default();
     format!(
-        "The local session changed during the move to AgentCtrl, so it keeps running here and the \
-         cloud run {job_id} was asked to stop.{leftover_branch}"
+        "The local session changed during the move to AgentCtrl, so it keeps running \
+         here.{leftover_branch}"
     )
+}
+
+/// Whether the managed run of a failed move was asked to stop; `stop_error` is why the stop
+/// request itself failed.
+pub(crate) fn stop_request_outcome(job_id: &str, stop_error: Option<&str>) -> String {
+    match stop_error {
+        None => format!("The cloud run {job_id} was asked to stop."),
+        Some(error) => format!(
+            "WarpSpeed could not ask run {job_id} to stop ({}); stop it with: warpspeed \
+             agent-ctrl stop {job_id}",
+            redact_url_credentials(error)
+        ),
+    }
 }
 
 /// What cut-over does with the local agent once the managed run has resumed.

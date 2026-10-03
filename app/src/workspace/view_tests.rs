@@ -7214,43 +7214,60 @@ fn move_session_failure_while_waiting_leaves_the_local_agent_alone() {
             });
         });
 
-        workspace.update(&mut app, |workspace, ctx| {
-            workspace.agent_ctrl_moves.insert(
-                moved_view_id,
-                MoveStep::WaitingForResume {
-                    job_id: "job-wait".to_owned(),
-                },
-            );
-            workspace.fail_agent_ctrl_move(
-                moved_view_id,
-                &anyhow::anyhow!("managed run job-wait did not resume within 120s"),
-                Some("gitea/handoff/20261003-1200-0b6c1234".to_owned()),
-                ctx,
-            );
-        });
-
-        assert_eq!(
-            agent_ctrl_move_step(&workspace, moved_view_id, &mut app),
-            None
-        );
-        assert!(pty_writes.borrow().is_empty(), "{:?}", pty_writes.borrow());
-        let toasts = app.read(|ctx| {
-            workspace.read(ctx, |workspace, ctx| {
-                workspace
-                    .toast_stack
-                    .as_ref(ctx)
-                    .toast_texts()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
+        let toasts = |workspace: &ViewHandle<Workspace>, app: &mut App| {
+            app.read(|ctx| {
+                workspace.read(ctx, |workspace, ctx| {
+                    workspace
+                        .toast_stack
+                        .as_ref(ctx)
+                        .toast_texts()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
             })
-        });
-        assert!(
-            toasts
-                .iter()
-                .any(|text| text.contains("run job-wait was asked to stop")),
-            "{toasts:?}"
-        );
+        };
+        for (stop_error, expected) in [
+            (None, "run job-wait was asked to stop"),
+            (
+                Some("dashboard returned 403 Forbidden: nope"),
+                "could not ask run job-wait to stop (dashboard returned 403 Forbidden",
+            ),
+        ] {
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.agent_ctrl_moves.insert(
+                    moved_view_id,
+                    MoveStep::WaitingForResume {
+                        job_id: "job-wait".to_owned(),
+                    },
+                );
+                let reason = move_failure_message(
+                    workspace.agent_ctrl_moves.get(&moved_view_id).unwrap(),
+                    "managed run job-wait did not resume within 120s",
+                    Some("gitea/handoff/20261003-1200-0b6c1234"),
+                );
+                workspace.finish_stopped_agent_ctrl_move(
+                    moved_view_id,
+                    "job-wait",
+                    reason,
+                    Some("gitea/handoff/20261003-1200-0b6c1234".to_owned()),
+                    stop_error,
+                    ctx,
+                );
+            });
+
+            assert_eq!(
+                agent_ctrl_move_step(&workspace, moved_view_id, &mut app),
+                None
+            );
+            assert!(pty_writes.borrow().is_empty(), "{:?}", pty_writes.borrow());
+            let toasts = toasts(&workspace, &mut app);
+            assert!(
+                toasts.iter().any(|text| text.contains(expected)
+                    && text.contains("waiting for job-wait to resume")),
+                "{toasts:?}"
+            );
+        }
     });
 }
 

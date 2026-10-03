@@ -394,6 +394,7 @@ use crate::terminal::agent_session_handoff::{
     CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession, agent_exit_command,
     cut_over_decision, move_failure_message, move_idempotency_key,
     prepare_handoff as prepare_agent_session_handoff, select_remote, session_changed_message,
+    stop_request_outcome,
 };
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
@@ -14051,12 +14052,20 @@ impl Workspace {
             move |me, result, ctx| match result {
                 Ok(()) => me.cut_over_to_agent_ctrl(terminal_view_id, job_id, uploaded, ctx),
                 Err(error) => {
+                    let Some(step_reached) = me.agent_ctrl_moves.get(&terminal_view_id) else {
+                        return;
+                    };
+                    let reason = move_failure_message(
+                        step_reached,
+                        &format!("{error:#}"),
+                        Some(&uploaded.pushed_branch),
+                    );
                     // The run may still resume after we gave up on it; the local agent stays
                     // authoritative, so the cloud copy must not keep going.
-                    Self::stop_moved_run(job_id, ctx);
-                    me.fail_agent_ctrl_move(
+                    me.stop_run_and_fail_agent_ctrl_move(
                         terminal_view_id,
-                        &error,
+                        job_id,
+                        reason,
                         Some(uploaded.pushed_branch),
                         ctx,
                     );
@@ -14065,24 +14074,75 @@ impl Workspace {
         );
     }
 
-    /// Asks the dashboard to stop a managed run created by a move, without waiting for it.
+    /// Asks the dashboard to stop the managed run of a move that failed after import, then fails
+    /// the move with `reason` and whether the stop request went through.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
-    fn stop_moved_run(job_id: String, ctx: &mut ViewContext<Self>) {
+    fn stop_run_and_fail_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        job_id: String,
+        reason: String,
+        pushed_branch: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         use managed_agent_sessions::stop_run;
         use warp_cli::managed_sessions::ManagedEnvironment;
 
+        // Keeps the move in flight, so Move is still refused, without leaving it `CuttingOver`,
+        // where the agent ending would open the run that is being stopped.
+        self.agent_ctrl_moves.insert(
+            terminal_view_id,
+            MoveStep::Failed {
+                reason: reason.clone(),
+                pushed_branch: pushed_branch.clone(),
+            },
+        );
+        let stopped_job_id = job_id.clone();
         ctx.spawn(
             async move {
-                let stopped_job_id = job_id.clone();
-                blocking::unblock(move || stop_run(ManagedEnvironment::Staging, &job_id, true))
-                    .await
-                    .map_err(|error| (stopped_job_id, error))
+                // Graceful: every moved agent exits on SIGTERM, and the node still pushes the
+                // worktree back on any terminal state.
+                blocking::unblock(move || {
+                    stop_run(ManagedEnvironment::Staging, &stopped_job_id, false)
+                })
+                .await
+                .err()
+                .map(|error| format!("{error:#}"))
             },
-            |_, result, _| {
-                if let Err((job_id, error)) = result {
-                    log::warn!("Could not stop moved AgentCtrl run {job_id}: {error:#}");
-                }
+            move |me, stop_error, ctx| {
+                me.finish_stopped_agent_ctrl_move(
+                    terminal_view_id,
+                    &job_id,
+                    reason,
+                    pushed_branch,
+                    stop_error.as_deref(),
+                    ctx,
+                )
             },
+        );
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn finish_stopped_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        job_id: &str,
+        reason: String,
+        pushed_branch: Option<String>,
+        stop_error: Option<&str>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(error) = stop_error {
+            log::warn!("Could not stop moved AgentCtrl run {job_id}: {error}");
+        }
+        let outcome = stop_request_outcome(job_id, stop_error);
+        self.finish_agent_ctrl_move(
+            terminal_view_id,
+            MoveStep::Failed {
+                reason: format!("{reason} {outcome}"),
+                pushed_branch,
+            },
+            ctx,
         );
     }
 
@@ -14118,13 +14178,12 @@ impl Workspace {
             .map(|session| session.agent);
         match decision {
             CutOver::SessionChanged => {
-                Self::stop_moved_run(job_id.clone(), ctx);
-                self.finish_agent_ctrl_move(
+                let reason = session_changed_message(Some(&uploaded.pushed_branch));
+                self.stop_run_and_fail_agent_ctrl_move(
                     terminal_view_id,
-                    MoveStep::Failed {
-                        reason: session_changed_message(&job_id, Some(&uploaded.pushed_branch)),
-                        pushed_branch: Some(uploaded.pushed_branch),
-                    },
+                    job_id,
+                    reason,
+                    Some(uploaded.pushed_branch),
                     ctx,
                 );
             }

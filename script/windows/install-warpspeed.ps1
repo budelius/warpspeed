@@ -393,7 +393,7 @@ if ($running.UnidentifiedProcessIds.Count -gt 0) {
 
 $running_count = $running_executables.Count + $running.UnidentifiedProcessIds.Count
 if ($running_count -gt 0) {
-    Write-Host "$running_count WarpSpeed process(es) are still running and were left alone. Each keeps serving its sessions from the version it launched with; use 'Restart window in new process' to move a window to $version."
+    Write-Host "$running_count WarpSpeed process(es) are still running and were left alone. Each keeps serving its sessions from the version it launched with; start WarpSpeed from the Start Menu to use $version. Each version runs its own terminal supervisor, so 'Restart window in new process' keeps a window on the version it already runs."
 }
 
 Write-Host "Installed WarpSpeed $version"

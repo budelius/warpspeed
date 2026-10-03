@@ -1,11 +1,10 @@
-use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use instant::Instant;
 use serde::{Deserialize, Serialize};
 use warpui::r#async::Timer;
@@ -13,7 +12,6 @@ use warpui::r#async::Timer;
 use crate::app_state::WindowSnapshot;
 
 const HANDOFF_ENV: &str = "WARP_WINDOW_PROCESS_HANDOFF";
-const INSTALL_ROOT_ENV: &str = "WARPSPEED_INSTALL_ROOT";
 const PROTOCOL_VERSION: u32 = 1;
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -260,63 +258,13 @@ async fn wait_for_path(path: &Path, timeout: Duration) -> bool {
     false
 }
 
+/// The executable the replacement process runs: this one.
+///
+/// Each build runs its own terminal supervisor, and a window's shells live in the supervisor of the
+/// build it runs. A replacement on any other build would find none of them, so a restart stays on
+/// this build; a newer build is reached by starting a new instance.
 fn replacement_executable() -> Result<PathBuf> {
-    let current_executable = std::env::current_exe()
-        .context("Failed to resolve the current executable for window restart")?;
-    let Some(install_root) = install_root() else {
-        return Ok(current_executable);
-    };
-
-    Ok(
-        installed_replacement_executable(&current_executable, &install_root)?
-            .unwrap_or(current_executable),
-    )
-}
-
-fn installed_replacement_executable(
-    current_executable: &Path,
-    install_root: &Path,
-) -> Result<Option<PathBuf>> {
-    let Ok(version) = fs::read_to_string(install_root.join("current.txt")) else {
-        return Ok(None);
-    };
-    let version = version.trim();
-    if version.is_empty()
-        || !version
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        return Err(anyhow!("The installed WarpSpeed version is invalid"));
-    }
-
-    let executable_name = match current_executable.file_name().and_then(OsStr::to_str) {
-        Some("warp-oss.exe" | "warp-oss") => current_executable
-            .file_name()
-            .expect("the matched executable has a file name"),
-        _ if cfg!(windows) => OsStr::new("warpspeed.exe"),
-        _ => OsStr::new("warpspeed"),
-    };
-    let installed_executable = install_root
-        .join("versions")
-        .join(version)
-        .join(executable_name);
-    Ok(installed_executable
-        .is_file()
-        .then_some(installed_executable))
-}
-
-fn install_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os(INSTALL_ROOT_ENV) {
-        return Some(PathBuf::from(root));
-    }
-
-    #[cfg(windows)]
-    return std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join("Programs").join("WarpSpeed"));
-
-    #[cfg(not(windows))]
-    None
+    std::env::current_exe().context("Failed to resolve the current executable for window restart")
 }
 
 #[cfg(test)]

@@ -47,6 +47,43 @@ fn connected_pair(label: &str) -> (PipeTransport, PipeTransport) {
     (client, supervisor)
 }
 
+#[test]
+fn each_build_gets_its_own_supervisor_pipe() {
+    let state = Path::new(r"C:\Users\someone\AppData\Local\warp\WarpSpeed\data");
+    let old_build = Path::new(r"C:\WarpSpeed\versions\20261002-a\warpspeed.exe");
+    let new_build = Path::new(r"C:\WarpSpeed\versions\20261003-b\warpspeed.exe");
+
+    assert_ne!(
+        supervisor_pipe_name_for(state, old_build),
+        supervisor_pipe_name_for(state, new_build)
+    );
+    assert_eq!(
+        supervisor_pipe_name_for(state, new_build),
+        supervisor_pipe_name_for(state, new_build),
+        "a window and the supervisor it started must agree on the name"
+    );
+}
+
+#[test]
+fn the_supervisor_pipe_ignores_the_executable_path_case() {
+    let state = Path::new(r"C:\data");
+
+    assert_eq!(
+        supervisor_pipe_name_for(state, Path::new(r"C:\WarpSpeed\warpspeed.exe")),
+        supervisor_pipe_name_for(state, Path::new(r"c:\warpspeed\WARPSPEED.EXE"))
+    );
+}
+
+#[test]
+fn separate_state_directories_keep_separate_supervisors() {
+    let executable = Path::new(r"C:\WarpSpeed\warpspeed.exe");
+
+    assert_ne!(
+        supervisor_pipe_name_for(Path::new(r"C:\one"), executable),
+        supervisor_pipe_name_for(Path::new(r"C:\two"), executable)
+    );
+}
+
 /// Two supervisors must not end up serving one name.
 ///
 /// `CreateNamedPipeW` is happy to add a second *server* instance to an existing

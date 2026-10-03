@@ -10,6 +10,8 @@
 //! the client reads it directly, which is what keeps the supervisor out of the
 //! I/O hot path.
 
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use instant::Instant;
 use sha2::{Digest, Sha256};
@@ -44,9 +46,23 @@ const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 /// The name is derived from the state directory, so two Warp installations with
 /// separate state do not share a supervisor, and carries the protocol version
 /// so a v2 client never reaches a v1 supervisor.
+///
+/// It is also derived from this executable's path. Each installed build lives in its own
+/// directory and starts its supervisor from its own executable, so every build gets a supervisor
+/// of the same build and a window never talks to one built from different code.
 pub fn supervisor_pipe_name() -> String {
-    let state_directory = warp_core::paths::state_dir();
-    let hash = Sha256::digest(state_directory.to_string_lossy().as_bytes());
+    let executable = std::env::current_exe().unwrap_or_default();
+    supervisor_pipe_name_for(&warp_core::paths::state_dir(), &executable)
+}
+
+fn supervisor_pipe_name_for(state_directory: &Path, executable: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(state_directory.to_string_lossy().as_bytes());
+    // Separates the two paths so no pair of them hashes like another pair.
+    hasher.update([0]);
+    // Windows paths are case-insensitive, and the same executable can be reached under either case.
+    hasher.update(executable.to_string_lossy().to_lowercase().as_bytes());
+    let hash = hasher.finalize();
     format!(
         r"\\.\pipe\warp-terminal-supervisor-v{}-{}",
         PROTOCOL_VERSION,

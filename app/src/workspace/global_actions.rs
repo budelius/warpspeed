@@ -22,6 +22,14 @@ use crate::workspace::cross_window_tab_drag::CrossWindowTabDrag;
 use crate::workspace::{Workspace, WorkspaceAction};
 use crate::{GlobalResourceHandlesProvider, auth};
 
+#[cfg(not(target_family = "wasm"))]
+use crate::remote_control::may_save_shared_session;
+
+#[cfg(target_family = "wasm")]
+fn may_save_shared_session() -> bool {
+    true
+}
+
 /// Specifies where a forked conversation should be opened.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ForkedConversationDestination {
@@ -136,7 +144,7 @@ fn save_app(_: &(), ctx: &mut AppContext) {
         return;
     }
 
-    let save_app_state = *GeneralSettings::as_ref(ctx).restore_session;
+    let save_app_state = *GeneralSettings::as_ref(ctx).restore_session && may_save_shared_session();
     let save_launch_config_sessions = FeatureFlag::PersistentLaunchConfigSessions.is_enabled();
     if !save_app_state && !save_launch_config_sessions {
         return;

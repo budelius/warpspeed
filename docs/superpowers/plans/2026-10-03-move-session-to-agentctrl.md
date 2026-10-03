@@ -14,7 +14,7 @@
 - Handoff branch must match `^handoff/[A-Za-z0-9._-]{1,100}$`.
 - `session_id`: 1–128 chars of `[A-Za-z0-9-]`. `source_cwd`: ≤ 1024 chars.
 - The repo is accepted only if the normalized `repo_url` equals the normalized `url` of a repository in the node's `AGENT_CTRL_WORKSPACES_FILE`. Normalize: lowercase scheme+host, strip trailing `/` and `.git`, strip userinfo.
-- Per-run worktree path: `<workspace root>/.runs/<job_id>`.
+- Per-run worktree path: `<workspace root>/.runs/<job_id>`. At run end the worktree's work is committed and pushed back to the handoff branch before removal; a failed push keeps the worktree.
 - Audit stores the SHA-256 hex of the session file, never its content. The file is not persisted by the controller.
 - Status event content after resume: exactly `resumed`.
 - Path note sent as the first input after resume: `This session moved from <source_cwd> to <worktree>. Paths in earlier turns refer to the old location.`
@@ -419,7 +419,7 @@ let spawned = match &handoff {
     None => runner.spawn(&cmd.agent_name, backend, config).await,
 };
 ```
-After the existing `runtime.active.insert(..)` and ack: emit the status chunk exactly like `node.rs:366-389` with `content: "resumed".into()`, then send the path note through the same path `SendInputCommand` uses (`ProcessControl::send_input`). When the run's monitor observes a terminal state, call `remove_handoff_worktree` and delete `<worktree>.session/` (hook into the place that removes the run from `runtime.active`). On any error after the worktree was created, remove it before NACKing. Interactive empty prompt: confirm `launch` skips the first stdin turn when `config.prompt` is empty (`process.rs:425-429`); if it doesn't, guard it with `if !config.prompt.is_empty()`.
+After the existing `runtime.active.insert(..)` and ack: emit the status chunk exactly like `node.rs:366-389` with `content: "resumed".into()`, then send the path note through the same path `SendInputCommand` uses (`ProcessControl::send_input`). When the run's monitor observes a terminal state: commit any dirty files in the worktree as `agent-ctrl run <job_id> end`, push `HEAD` to `refs/heads/<handoff_branch>` on origin, then call `remove_handoff_worktree` and delete `<worktree>.session/` (hook into the place that removes the run from `runtime.active`). If the push fails, keep the worktree, emit a `status` chunk `handoff push failed; worktree kept at <path>`, and still delete `<worktree>.session/`. (Ruling 2026-10-03: the agent's unpushed work must never be discarded.) On any error after the worktree was created, remove it before NACKing. Interactive empty prompt: confirm `launch` skips the first stdin turn when `config.prompt` is empty (`process.rs:425-429`); if it doesn't, guard it with `if !config.prompt.is_empty()`.
 
 - [ ] **Step 4: Run** `cargo test` → PASS.
 

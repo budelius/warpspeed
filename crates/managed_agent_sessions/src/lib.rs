@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use instant::Instant;
 use reqwest::StatusCode;
+use reqwest::blocking::multipart::{Form, Part};
 use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -644,6 +645,126 @@ fn attach(
     Ok(())
 }
 
+pub const MAX_SESSION_FILE_BYTES: usize = 33_554_432;
+
+pub struct MovedSessionImport<'a> {
+    pub agent_name: &'a str,
+    pub session_id: &'a str,
+    pub session_file: Vec<u8>,
+    pub repo_url: &'a str,
+    pub handoff_branch: &'a str,
+    pub source_cwd: &'a str,
+    pub idempotency_key: String,
+}
+
+/// Uploads a local session file to the dashboard and returns the new run's job id.
+pub fn import_moved_session(
+    environment: ManagedEnvironment,
+    import: MovedSessionImport<'_>,
+) -> Result<String> {
+    let token = dashboard_token()?;
+    import_moved_session_with(profile(environment), &token, import)
+}
+
+fn import_moved_session_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    import: MovedSessionImport<'_>,
+) -> Result<String> {
+    if import.session_file.len() > MAX_SESSION_FILE_BYTES {
+        bail!("session file is larger than the 32 MiB import limit");
+    }
+    let form = Form::new()
+        .text("agent_name", import.agent_name.to_owned())
+        .text("session_id", import.session_id.to_owned())
+        .text("repo_url", import.repo_url.to_owned())
+        .text("handoff_branch", import.handoff_branch.to_owned())
+        .text("source_cwd", import.source_cwd.to_owned())
+        .part(
+            "session_file",
+            Part::bytes(import.session_file).file_name("session.jsonl"),
+        );
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()?;
+    // Multipart bodies cannot be cloned, so validate the built request rather than using `send`.
+    let request = client
+        .post(format!(
+            "{}/api/agent-control/runs/import",
+            profile.base_url
+        ))
+        .bearer_auth(token)
+        .header("X-Stozn-Client", "warpspeed")
+        .header("Idempotency-Key", import.idempotency_key)
+        .multipart(form)
+        .build()
+        .context("invalid managed-session import request")?;
+    validate_destination_url(profile, request.url())?;
+    let response = client
+        .execute(request)
+        .context("dashboard request failed")?;
+    let response = if response.status().is_success() {
+        response
+    } else {
+        return Err(http_error(response));
+    };
+    let result: Value = response.json().context("invalid import response")?;
+    ensure_command_accepted(&result)?;
+    result
+        .get("job_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context("import response did not include a job id")
+}
+
+/// Blocks until the imported run reports that its session has resumed.
+pub fn wait_until_resumed(
+    environment: ManagedEnvironment,
+    job_id: &str,
+    timeout: Duration,
+) -> Result<()> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
+    wait_until_resumed_with(
+        &client,
+        profile(environment),
+        &token,
+        job_id,
+        Instant::now() + timeout,
+    )
+}
+
+fn wait_until_resumed_with(
+    client: &Client,
+    profile: &EnvironmentProfile,
+    token: &str,
+    job_id: &str,
+    deadline: Instant,
+) -> Result<()> {
+    let started = Instant::now();
+    let mut cursor: Option<String> = None;
+    loop {
+        let (page, _) =
+            fetch_event_page(client, profile, job_id, token, cursor.as_deref(), 15_000)?;
+        if page
+            .items
+            .iter()
+            .any(|event| event.event_type == "status" && event.content == "resumed")
+        {
+            return Ok(());
+        }
+        if page.terminal {
+            bail!("managed run {job_id} ended before resuming");
+        }
+        if Instant::now() >= deadline {
+            let secs = started.elapsed().as_secs();
+            bail!("managed run {job_id} did not resume within {secs}s");
+        }
+        cursor = page.next_cursor.or(cursor);
+    }
+}
+
 fn fetch_descriptor(
     client: &Client,
     profile: &EnvironmentProfile,
@@ -1009,9 +1130,12 @@ fn validate_request_destination(
         .context("managed-session request cannot be safely inspected")?
         .build()
         .context("invalid managed-session request")?;
+    validate_destination_url(profile, request.url())
+}
+
+fn validate_destination_url(profile: &EnvironmentProfile, requested: &reqwest::Url) -> Result<()> {
     let allowed = reqwest::Url::parse(profile.base_url)
         .context("invalid compiled managed-session dashboard URL")?;
-    let requested = request.url();
     let same_origin = requested.scheme() == allowed.scheme()
         && requested.host_str() == allowed.host_str()
         && requested.port_or_known_default() == allowed.port_or_known_default()

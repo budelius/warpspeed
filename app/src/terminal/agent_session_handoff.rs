@@ -29,10 +29,21 @@ pub(crate) struct HandoffSource {
 pub(crate) struct PreparedHandoff {
     pub agent_name: &'static str,
     pub session_file: Vec<u8>,
+    pub session_file_path: PathBuf,
     pub repo_url: String,
     pub remote: String,
     pub branch: String,
     pub commit: String,
+}
+
+/// What a move uploaded, so cut-over can tell whether the local session moved on since.
+#[derive(Clone, Debug)]
+pub(crate) struct UploadedSession {
+    pub session_id: String,
+    pub file_path: PathBuf,
+    pub file_len: u64,
+    /// The handoff branch as `<remote>/<branch>`.
+    pub pushed_branch: String,
 }
 
 /// Where each supported agent keeps its session files.
@@ -257,6 +268,7 @@ pub(crate) fn create_handoff_commit(repo: &Path, session_id: &str) -> Result<Str
         repo,
         [
             "commit-tree",
+            "--no-gpg-sign",
             &tree,
             "-p",
             "HEAD",
@@ -267,7 +279,8 @@ pub(crate) fn create_handoff_commit(repo: &Path, session_id: &str) -> Result<Str
     )
 }
 
-fn select_remote(repo: &Path) -> Result<String> {
+/// The remote a handoff branch is pushed to: `gitea` when present, else `origin`.
+pub(crate) fn select_remote(repo: &Path) -> Result<String> {
     let remotes = git(repo, ["remote"], &[])?;
     PREFERRED_REMOTES
         .into_iter()
@@ -317,7 +330,7 @@ fn prepare_handoff_with_roots(
 
     let repo = source.cwd.as_path();
     let remote = select_remote(repo)?;
-    let repo_url = git(repo, ["remote", "get-url", remote.as_str()], &[])?;
+    let repo_url = strip_url_userinfo(&git(repo, ["remote", "get-url", remote.as_str()], &[])?);
     let commit = create_handoff_commit(repo, &source.session_id)?;
     let branch = handoff_branch_name(now, &source.session_id);
     git(
@@ -334,11 +347,28 @@ fn prepare_handoff_with_roots(
     Ok(PreparedHandoff {
         agent_name,
         session_file,
+        session_file_path: path,
         repo_url,
         remote,
         branch,
         commit,
     })
+}
+
+/// `url` without `user[:password]@`, so a token embedded in a remote URL never leaves the machine.
+/// Remotes that are not URLs with an authority (scp-style `git@host:path`, local paths) are
+/// returned unchanged.
+pub(crate) fn strip_url_userinfo(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_owned();
+    };
+    if !parsed.has_host() || (parsed.username().is_empty() && parsed.password().is_none()) {
+        return url.to_owned();
+    }
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return url.to_owned();
+    }
+    parsed.into()
 }
 
 /// How far a move to AgentCtrl has got. The local agent is only touched from `CuttingOver` on.
@@ -381,13 +411,56 @@ pub(crate) fn move_failure_message(
     match step_reached {
         MoveStep::Preparing => before_cut_over("preparing the handoff"),
         MoveStep::Importing => before_cut_over("importing it"),
-        MoveStep::WaitingForResume { job_id } => {
+        MoveStep::WaitingForResume { job_id } => format!(
+            "{} The cloud run {job_id} was asked to stop.",
             before_cut_over(&format!("waiting for {job_id} to resume"))
-        }
+        ),
         MoveStep::CuttingOver { job_id } | MoveStep::Done { job_id } => format!(
-            "Moved to AgentCtrl as {job_id}, but the local agent did not exit; close it manually."
+            "Moved to AgentCtrl as {job_id}, but the local agent did not exit; close it manually. \
+             Meanwhile the cloud run {job_id} is live; open it with: warpspeed agent-ctrl open {job_id}"
         ),
         MoveStep::Failed { reason, .. } => reason.clone(),
+    }
+}
+
+/// The message shown when the local session file grew after it was uploaded, so the cloud run
+/// would be missing that work.
+pub(crate) fn session_changed_message(job_id: &str, pushed_branch: Option<&str>) -> String {
+    let leftover_branch = pushed_branch
+        .map(|branch| format!(" The handoff branch {branch} was pushed and can be deleted."))
+        .unwrap_or_default();
+    format!(
+        "The local session changed during the move to AgentCtrl, so it keeps running here and the \
+         cloud run {job_id} was asked to stop.{leftover_branch}"
+    )
+}
+
+/// What cut-over does with the local agent once the managed run has resumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CutOver {
+    /// The moved session is still the pane's agent and has not changed since the upload.
+    ExitLocalAgent,
+    /// The moved session no longer runs in the pane, so there is nothing to exit.
+    LeaveLocalAgent,
+    /// The session file grew after the upload (or cannot be read), so the managed run would be
+    /// missing local work.
+    SessionChanged,
+}
+
+/// Decides [`CutOver`] from the pane's current agent session id and the moved session file's
+/// current length (`None` when it cannot be read), against what was uploaded.
+pub(crate) fn cut_over_decision(
+    current_session_id: Option<&str>,
+    moved_session_id: &str,
+    current_file_len: Option<u64>,
+    uploaded_len: u64,
+) -> CutOver {
+    if current_file_len.is_none_or(|len| len > uploaded_len) {
+        CutOver::SessionChanged
+    } else if current_session_id == Some(moved_session_id) {
+        CutOver::ExitLocalAgent
+    } else {
+        CutOver::LeaveLocalAgent
     }
 }
 

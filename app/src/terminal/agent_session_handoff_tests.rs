@@ -303,6 +303,16 @@ fn prepare_handoff_pushes_to_gitea_when_present() {
     init_repo(repo);
     add_bare_remote(repo, "origin", remotes.path());
     let gitea_url = add_bare_remote(repo, "gitea", remotes.path());
+    // A signing setup that cannot work must not block the handoff commit.
+    git(repo, &["config", "commit.gpgsign", "true"]);
+    git(
+        repo,
+        &[
+            "config",
+            "gpg.program",
+            "warpspeed-handoff-test-missing-gpg",
+        ],
+    );
     fs::write(repo.join("untracked.txt"), "new\n").unwrap();
     let source = claude_source(home.path(), repo, b"{\"line\":1}\n");
     let roots = AgentSessionRoots::under_home(home.path());
@@ -312,6 +322,10 @@ fn prepare_handoff_pushes_to_gitea_when_present() {
 
     assert_eq!(prepared.agent_name, "staging-claude-moved");
     assert_eq!(prepared.session_file, b"{\"line\":1}\n");
+    assert_eq!(
+        prepared.session_file_path,
+        session_file_path(source.agent, &source.session_id, &source.cwd, &roots).unwrap()
+    );
     assert_eq!(prepared.remote, "gitea");
     assert_eq!(prepared.repo_url, gitea_url);
     assert_eq!(prepared.branch, "handoff/20261003-1200-0b6c1234");
@@ -428,7 +442,118 @@ fn move_session_failure_during_cut_over_asks_to_close_the_agent_manually() {
         "{message}"
     );
     assert!(message.contains("job-1"), "{message}");
+    assert!(
+        message
+            .contains("the cloud run job-1 is live; open it with: warpspeed agent-ctrl open job-1"),
+        "{message}"
+    );
     assert!(!message.contains("still running"), "{message}");
+}
+
+#[test]
+fn move_session_failure_while_waiting_says_the_run_was_asked_to_stop() {
+    let message = move_failure_message(
+        &MoveStep::WaitingForResume {
+            job_id: "job-1".to_owned(),
+        },
+        "did not resume within 120s",
+        None,
+    );
+    assert!(message.contains("run job-1 was asked to stop"), "{message}");
+
+    let message = move_failure_message(&MoveStep::Importing, "rejected", None);
+    assert!(!message.contains("asked to stop"), "{message}");
+}
+
+#[test]
+fn move_session_changed_message_names_the_run_and_branch() {
+    let message = session_changed_message("job-1", Some("gitea/handoff/x"));
+    assert!(
+        message.contains("local session changed during the move"),
+        "{message}"
+    );
+    assert!(message.contains("run job-1 was asked to stop"), "{message}");
+    assert!(message.contains("gitea/handoff/x"), "{message}");
+}
+
+#[test]
+fn move_session_repo_url_drops_userinfo() {
+    for (configured, sent) in [
+        (
+            "https://bob:t0ken@git.example.com/org/repo.git",
+            "https://git.example.com/org/repo.git",
+        ),
+        (
+            "https://bob@git.example.com/org/repo.git",
+            "https://git.example.com/org/repo.git",
+        ),
+        (
+            "ssh://git@git.example.com:2222/org/repo.git",
+            "ssh://git.example.com:2222/org/repo.git",
+        ),
+        (
+            "https://git.example.com/org/repo.git",
+            "https://git.example.com/org/repo.git",
+        ),
+        (
+            "git@git.example.com:org/repo.git",
+            "git@git.example.com:org/repo.git",
+        ),
+        ("/srv/git/repo.git", "/srv/git/repo.git"),
+        (r"C:\repos\repo.git", r"C:\repos\repo.git"),
+    ] {
+        assert_eq!(strip_url_userinfo(configured), sent, "{configured}");
+    }
+}
+
+#[test]
+fn move_session_cut_over_exits_only_the_unchanged_moved_session() {
+    let moved = SESSION_ID;
+    let cases = [
+        (
+            "same session, unchanged file",
+            Some(moved),
+            Some(100),
+            CutOver::ExitLocalAgent,
+        ),
+        (
+            "another session in the pane",
+            Some("other-session"),
+            Some(100),
+            CutOver::LeaveLocalAgent,
+        ),
+        (
+            "no session in the pane",
+            None,
+            Some(100),
+            CutOver::LeaveLocalAgent,
+        ),
+        (
+            "same session, file grew",
+            Some(moved),
+            Some(101),
+            CutOver::SessionChanged,
+        ),
+        (
+            "another session, moved file grew",
+            Some("other-session"),
+            Some(150),
+            CutOver::SessionChanged,
+        ),
+        (
+            "session file unreadable",
+            Some(moved),
+            None,
+            CutOver::SessionChanged,
+        ),
+    ];
+    for (description, current_id, current_len, expected) in cases {
+        assert_eq!(
+            cut_over_decision(current_id, moved, current_len, 100),
+            expected,
+            "{description}"
+        );
+    }
 }
 
 #[test]

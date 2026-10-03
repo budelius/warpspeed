@@ -392,7 +392,7 @@ use crate::tab_configs::{
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 use crate::terminal::agent_session_handoff::{
     CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession, agent_exit_command,
-    cut_over_decision, move_failure_message, move_idempotency_key,
+    cut_over_decision, move_failure_message, move_idempotency_key, move_progress_message,
     prepare_handoff as prepare_agent_session_handoff, select_remote, session_changed_message,
     stop_request_outcome,
 };
@@ -13849,12 +13849,15 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         if self.agent_ctrl_moves.contains_key(&terminal_view_id) {
+            // Re-shown persistently under the move's toast id: an expiring notice there would
+            // replace the warning and then disappear with it.
+            let agent = CLIAgentSessionsModel::as_ref(ctx)
+                .session(terminal_view_id)
+                .map(|session| session.agent);
             self.show_agent_ctrl_move_toast(
                 terminal_view_id,
-                DismissibleToast::default(
-                    "This session is already moving to AgentCtrl.".to_owned(),
-                ),
-                false,
+                DismissibleToast::default(move_progress_message(agent)),
+                true,
                 ctx,
             );
             return;
@@ -13942,10 +13945,7 @@ impl Workspace {
             .insert(terminal_view_id, MoveStep::Preparing);
         self.show_agent_ctrl_move_toast(
             terminal_view_id,
-            DismissibleToast::default(format!(
-                "Moving {} session to AgentCtrl… don't use the agent until this finishes.",
-                source.agent.display_name()
-            )),
+            DismissibleToast::default(move_progress_message(Some(source.agent))),
             // Persistent so the warning stays up for the whole move; the outcome toast replaces
             // it.
             true,

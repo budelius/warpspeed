@@ -719,3 +719,15 @@ fn move_session_file_ignores_a_reported_path_that_is_not_this_session() {
         );
     }
 }
+
+#[test]
+fn move_session_progress_message_names_the_agent_when_known() {
+    assert_eq!(
+        move_progress_message(Some(CLIAgent::Claude)),
+        "Moving Claude Code session to AgentCtrl… don't use the agent until this finishes."
+    );
+    assert_eq!(
+        move_progress_message(None),
+        "Moving the agent session to AgentCtrl… don't use the agent until this finishes."
+    );
+}

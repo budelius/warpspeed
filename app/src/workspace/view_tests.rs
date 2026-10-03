@@ -7153,6 +7153,65 @@ fn has_pending_command(terminal_view: &ViewHandle<TerminalView>, app: &mut App) 
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 #[test]
+fn move_session_pressed_again_keeps_the_progress_warning_up() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let cwd = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+        let moved_view_id = terminal_view.id();
+
+        workspace.update(&mut app, |workspace, ctx| {
+            seed_agent_session(
+                moved_view_id,
+                crate::terminal::CLIAgent::Claude,
+                Some(MOVE_SESSION_ID),
+                None,
+                cwd.path(),
+                ctx,
+            );
+            workspace.agent_ctrl_moves.insert(
+                moved_view_id,
+                MoveStep::WaitingForResume {
+                    job_id: "job-wait".to_owned(),
+                },
+            );
+            workspace.show_agent_ctrl_move_toast(
+                moved_view_id,
+                DismissibleToast::default(
+                    "Moving Claude Code session to AgentCtrl… don't use the agent until this finishes."
+                        .to_owned(),
+                ),
+                true,
+                ctx,
+            );
+            workspace.move_session_to_agent_ctrl_for_terminal_view(moved_view_id, ctx);
+            workspace.move_session_to_agent_ctrl_for_terminal_view(moved_view_id, ctx);
+        });
+
+        let persistent = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .toast_stack
+                    .as_ref(ctx)
+                    .persistent_toast_texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            persistent,
+            vec![
+                "Moving Claude Code session to AgentCtrl… don't use the agent until this finishes."
+                    .to_owned()
+            ]
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
 fn move_session_cut_over_ignores_endings_it_is_not_waiting_for() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);

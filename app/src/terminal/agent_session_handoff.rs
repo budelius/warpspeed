@@ -503,6 +503,15 @@ pub(crate) fn session_changed_message(pushed_branch: Option<&str>) -> String {
     )
 }
 
+/// The warning shown for the whole of a move of `agent`'s session, when the agent is known.
+pub(crate) fn move_progress_message(agent: Option<CLIAgent>) -> String {
+    let session = agent.map_or_else(
+        || "the agent session".to_owned(),
+        |agent| format!("{} session", agent.display_name()),
+    );
+    format!("Moving {session} to AgentCtrl… don't use the agent until this finishes.")
+}
+
 /// Whether the managed run of a failed move was asked to stop; `stop_error` is why the stop
 /// request itself failed.
 pub(crate) fn stop_request_outcome(job_id: &str, stop_error: Option<&str>) -> String {

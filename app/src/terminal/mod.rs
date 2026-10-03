@@ -15,6 +15,8 @@ use warpui::units::Lines;
 use warpui::{AppContext, SingletonEntity, WindowId};
 mod block_list_settings;
 
+#[cfg(feature = "local_fs")]
+pub(crate) mod agent_session_handoff;
 pub(crate) mod agent_session_history;
 mod alias;
 pub(crate) mod alt_screen;

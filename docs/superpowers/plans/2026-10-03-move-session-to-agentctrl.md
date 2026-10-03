@@ -16,9 +16,9 @@
 - The repo is accepted only if the normalized `repo_url` equals the normalized `url` of a repository in the node's `AGENT_CTRL_WORKSPACES_FILE`. Normalize: lowercase scheme+host, strip trailing `/` and `.git`, strip userinfo.
 - Per-run worktree path: `<workspace root>/.runs/<job_id>`. At run end the worktree's work is committed and pushed back to the handoff branch before removal; a failed push keeps the worktree.
 - Audit stores the SHA-256 hex of the session file, never its content. The file is not persisted by the controller.
-- Status event content after resume: exactly `resumed`.
+- Status event content after resume: exactly `resumed`, emitted only once the backend has actually resumed the session (not at spawn); the node acks the spawn promptly and does the git/worktree/file work in its own task; failures after the ack end the run in a terminal failed state.
 - Path note sent as the first input after resume: `This session moved from <source_cwd> to <worktree>. Paths in earlier turns refer to the old location.`
-- Moved-session agents: `staging-claude-moved`, `staging-pi-moved`, `staging-codex-moved` (permission mode `workspace-write`, interactive).
+- Moved-session agents: `staging-claude-moved`, `staging-pi-moved`, `staging-codex-moved` (interactive; permission mode `acceptEdits` for claude — the Claude CLI accepts only acceptEdits/auto/bypassPermissions/manual/dontAsk/plan — and `workspace-write` for codex and pi).
 - Environment is `staging` only.
 - Branches: `feat/import-moved-session` in agent-ctrl and agent-dash (off `origin/dev`), `feat/move-session-to-agentctrl` in warp. agent-ctrl/agent-dash push to `origin`; warp pushes to `gitea` and `gitlab`, never `origin`.
 

@@ -783,6 +783,9 @@ fn wait_until_resumed_with(
                     };
                     (page.items.is_empty() && cursor.is_none(), None)
                 }
+                Err(error) if is_rejection(&error) => {
+                    return Err(error.context(format!("could not watch managed run {job_id}")));
+                }
                 // The run is already importing; a dashboard blip must not abandon it early.
                 Err(error) => (true, Some(error)),
             };
@@ -1196,10 +1199,37 @@ fn send(
     }
 }
 
+/// A non-success dashboard response, kept typed so callers can tell rejections from blips.
+#[derive(Debug)]
+struct HttpStatusError {
+    status: StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "dashboard returned {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
 fn http_error(response: Response) -> anyhow::Error {
     let status = response.status();
     let body = response.text().unwrap_or_default();
-    anyhow::anyhow!("dashboard returned {status}: {body}")
+    HttpStatusError { status, body }.into()
+}
+
+/// Whether retrying cannot help: the dashboard rejected the request itself (auth, a missing run,
+/// a bad request), as opposed to being briefly unavailable or rate limiting us.
+fn is_rejection(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HttpStatusError>()
+        .is_some_and(|error| {
+            error.status.is_client_error()
+                && error.status != StatusCode::GONE
+                && error.status != StatusCode::TOO_MANY_REQUESTS
+        })
 }
 
 fn bookmarks_path() -> PathBuf {

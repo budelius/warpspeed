@@ -643,6 +643,50 @@ fn resume_wait_gives_up_at_the_deadline_without_spinning() {
 }
 
 #[test]
+fn resume_wait_fails_fast_on_a_client_error() {
+    for status in [
+        "401 Unauthorized",
+        "403 Forbidden",
+        "404 Not Found",
+        "422 Unprocessable Entity",
+    ] {
+        let (base, log) = sequence_fixture(vec![(status, json!({ "error": "denied" }))]);
+        let profile = fixture_profile(base);
+        let started = Instant::now();
+        let error = wait_until_resumed_with(
+            &Client::new(),
+            &profile,
+            "token",
+            "job-1",
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap_err();
+        let code = &status[..3];
+        assert!(format!("{error:#}").contains(code), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{status}");
+        assert_eq!(log.lock().unwrap().len(), 1, "{status}");
+    }
+}
+
+#[test]
+fn resume_wait_retries_rate_limiting() {
+    let (base, log) = sequence_fixture(vec![
+        ("429 Too Many Requests", json!({ "error": "slow down" })),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        "token",
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(log.lock().unwrap().len(), 2);
+}
+
+#[test]
 fn resume_wait_restarts_without_a_cursor_after_a_history_gap() {
     let gap_page = json!({
         "items": [],

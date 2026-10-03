@@ -767,7 +767,16 @@ pub fn run() -> Result<()> {
     features::init_feature_flags();
     #[cfg(all(feature = "local_tty", windows))]
     if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
-        return warp_terminal::local_tty::windows::supervisor_daemon::run();
+        return warp_terminal::local_tty::windows::supervisor_daemon::run(|| {
+            if let Err(error) = warp_logging::init(warp_logging::LogConfig {
+                frontend: warp_logging::LogFrontend::TerminalSupervisor,
+                log_destination: Some(warp_logging::LogDestination::File),
+                ..Default::default()
+            }) {
+                eprintln!("Failed to initialize terminal supervisor logging: {error:#}");
+            }
+            log::info!("Terminal supervisor {} is listening", std::process::id());
+        });
     }
     #[cfg(all(feature = "local_tty", unix))]
     if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {

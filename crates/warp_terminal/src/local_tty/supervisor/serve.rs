@@ -8,6 +8,7 @@
 //! with no processes involved.
 
 use anyhow::Result;
+use log::{info, warn};
 use warp_core::SessionId;
 
 use super::message::{Message, SessionMetadata};
@@ -115,6 +116,7 @@ impl<H: SessionHost> Supervisor<H> {
         event_listener: &ChannelEventListener,
     ) {
         for session_id in self.host.take_orphaned_sessions() {
+            info!("Terminal session {session_id:?} lost its client without a detach; holding it");
             self.table.detach(
                 session_id,
                 ScreenSnapshot {
@@ -152,6 +154,15 @@ impl<H: SessionHost> Supervisor<H> {
                     .map_err(anyhow::Error::from)
                     .and_then(|options| self.host.spawn(*session_id, options, client_pid))
                     .map_err(|error| error.to_string());
+                match &result {
+                    Ok(endpoint) => info!(
+                        "Spawned terminal session {session_id:?} (shell pid {}) for client {client_pid}",
+                        endpoint.pid
+                    ),
+                    Err(error) => warn!(
+                        "Failed to spawn terminal session {session_id:?} for client {client_pid}: {error}"
+                    ),
+                }
                 Some(Message::SpawnResponse { result })
             }
 
@@ -165,6 +176,10 @@ impl<H: SessionHost> Supervisor<H> {
                     .detach(*session_id)
                     .err()
                     .map(|error| error.to_string());
+                info!(
+                    "Client {client_pid} detached terminal session {session_id:?}: {}",
+                    error.as_deref().unwrap_or("ok")
+                );
                 if error.is_none() {
                     self.table.detach(
                         *session_id,
@@ -198,6 +213,12 @@ impl<H: SessionHost> Supervisor<H> {
                     }
                 }
 
+                match &result {
+                    Ok(_) => info!("Client {client_pid} attached terminal session {session_id:?}"),
+                    Err(error) => warn!(
+                        "Client {client_pid} failed to attach terminal session {session_id:?}: {error}"
+                    ),
+                }
                 Some(Message::AttachResponse { result })
             }
 
@@ -221,14 +242,20 @@ impl<H: SessionHost> Supervisor<H> {
             }
 
             Message::Kill { session_id } => {
+                // Whether the shell was alive when the kill arrived separates a client cleaning up
+                // after an exit from a client ending a live shell.
+                let was_running = self.host.is_running(*session_id);
                 self.table.remove(*session_id);
-                Some(Message::KillResponse {
-                    error: self
-                        .host
-                        .kill(*session_id)
-                        .err()
-                        .map(|error| error.to_string()),
-                })
+                let error = self
+                    .host
+                    .kill(*session_id)
+                    .err()
+                    .map(|error| error.to_string());
+                info!(
+                    "Client {client_pid} killed terminal session {session_id:?} (shell was running:                      {was_running}): {}",
+                    error.as_deref().unwrap_or("ok")
+                );
+                Some(Message::KillResponse { error })
             }
 
             Message::ChildStatus { session_id } => Some(Message::ChildStatusResponse {
@@ -277,6 +304,7 @@ impl<H: SessionHost> Supervisor<H> {
         }
 
         for session_id in &ended {
+            info!("Detached terminal session {session_id:?} ended");
             self.table.remove(*session_id);
         }
 
@@ -284,6 +312,9 @@ impl<H: SessionHost> Supervisor<H> {
         // never expire anything.
         let mut expired = self.table.reap_older_than(now_unix_seconds, ttl_seconds);
         for session_id in &expired {
+            info!(
+                "Detached terminal session {session_id:?} expired after {ttl_seconds}s; killing it"
+            );
             let _ = self.host.kill(*session_id);
         }
 

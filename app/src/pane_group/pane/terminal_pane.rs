@@ -110,8 +110,9 @@ pub struct TerminalPane {
 
     pane_configuration: ModelHandle<PaneConfiguration>,
 
-    /// Set only on the session-restore path. Consulted by [`Self::snapshot`]
-    /// while (and only while) this pane's shell is still parked.
+    /// Set only on the session-restore path. Consulted by [`Self::snapshot`] in
+    /// place of the live values while this pane's shell is still parked, and in
+    /// place of any live value the shell has not reported yet after that.
     restored_shell_snapshot_fields: Option<RestoredShellSnapshotFields>,
 
     /// Defining `terminal_manager` before `view` means that `terminal_manager`
@@ -225,6 +226,17 @@ impl TerminalPane {
             .then_some(fields)
     }
 
+    /// The directory this pane was restored with, whether or not its shell has started.
+    ///
+    /// A shell that has started reports no directory until it bootstraps, and one that dies
+    /// first never does. Saving `None` for such a pane would bring it back in the process's
+    /// own working directory, which is then what the shell reports and what gets saved.
+    fn restored_cwd(&self) -> Option<String> {
+        self.restored_shell_snapshot_fields
+            .as_ref()
+            .and_then(|fields| fields.cwd.clone())
+    }
+
     fn deferred_shell_startup_directory(&self, app: &AppContext) -> Option<String> {
         self.terminal_manager(app)
             .read(app, |manager, _| manager.deferred_shell_startup_directory())
@@ -238,10 +250,7 @@ impl TerminalPane {
             .pwd()
             .or_else(|| terminal_view.display_working_directory(app))
             .or_else(|| self.deferred_shell_startup_directory(app))
-            .or_else(|| {
-                self.restored_shell_snapshot_fields(app)
-                    .and_then(|fields| fields.cwd.clone())
-            })
+            .or_else(|| self.restored_cwd())
     }
 
     pub(crate) fn display_working_directory(&self, app: &AppContext) -> Option<String> {
@@ -250,10 +259,7 @@ impl TerminalPane {
             .as_ref(app)
             .display_working_directory(app)
             .or_else(|| self.deferred_shell_startup_directory(app))
-            .or_else(|| {
-                self.restored_shell_snapshot_fields(app)
-                    .and_then(|fields| fields.cwd.clone())
-            })
+            .or_else(|| self.restored_cwd())
     }
 
     /// The [`PaneView<TerminalView>`] for this pane.
@@ -628,7 +634,14 @@ impl PaneContent for TerminalPane {
             // so fall back to what it was restored with.
             let (cwd, shell_launch_data) = match self.restored_shell_snapshot_fields(app) {
                 Some(restored) => (restored.cwd.clone(), restored.shell_launch_data.clone()),
-                None => (view.pwd_if_local(app), view.shell_launch_data_if_local(app)),
+                None => (
+                    view.pwd_if_local(app).or_else(|| self.restored_cwd()),
+                    view.shell_launch_data_if_local(app).or_else(|| {
+                        self.restored_shell_snapshot_fields
+                            .as_ref()
+                            .and_then(|fields| fields.shell_launch_data.clone())
+                    }),
+                ),
             };
 
             let persistent_session_id = self
@@ -1043,10 +1056,15 @@ fn handle_terminal_view_event(
                 // keep the pane open.  There might be useful information visible
                 // in the output, and if this was the first shell spawned when the
                 // user started the app, it will prevent it from suddenly quitting.
+                //
+                // A shell that crashed keeps its pane too, so the pane stays in its saved
+                // session and can be restarted in place instead of being added back by hand.
                 if group
                     .terminal_view_from_pane_id(terminal_pane_id, ctx)
                     .is_some_and(|terminal_view| {
-                        !terminal_view.as_ref(ctx).is_login_shell_bootstrapped()
+                        let terminal_view = terminal_view.as_ref(ctx);
+                        !terminal_view.is_login_shell_bootstrapped()
+                            || !terminal_view.shell_exit_was_requested()
                     })
                 {
                     return;

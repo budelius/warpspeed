@@ -4644,6 +4644,55 @@ fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
     });
 }
 
+/// A restored pane whose shell has started but not bootstrapped -- or died before it did -- has
+/// reported no directory yet. It must re-save the one it was restored with: saving none brings
+/// the pane back in the app's own working directory, which then gets saved for good.
+#[test]
+fn test_started_unbootstrapped_restored_pane_round_trips_cwd() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(terminal_leaf_snapshot(Some(cwd.clone()), None)),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored pane's shell must have started for this test to mean anything"
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected the restored tab to snapshot as a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected the restored leaf to snapshot as a terminal pane");
+        };
+        assert_eq!(
+            terminal.cwd,
+            Some(cwd),
+            "a pane whose shell has not reported a directory must re-save the one it was              restored with"
+        );
+    });
+}
+
 #[test]
 fn test_parked_restored_mixed_shells_round_trip_per_pane() {
     let _lazy_shell_startup = FeatureFlag::LazyShellStartup.override_enabled(true);
@@ -5750,6 +5799,100 @@ fn test_restart_switching_to_wsl_converts_the_directory_to_the_wsl_form() {
             "a restart that switches to WSL must hand the WSL shell the `/mnt/<drive>/...` \
              form of the requested directory; handing it the Windows host path starts the \
              shell somewhere else entirely"
+        );
+    });
+}
+
+fn two_pane_group(app: &mut App) -> warpui::ViewHandle<PaneGroup> {
+    let leaf = |is_focused| PaneTemplateType::PaneTemplate {
+        is_focused,
+        cwd: "/".into(),
+        commands: vec![],
+        pane_mode: PaneMode::Terminal,
+        shell: None,
+    };
+    mock_pane_group(
+        app,
+        MockOptions {
+            layout: PanesLayout::Template {
+                template: PaneTemplateType::PaneBranchTemplate {
+                    split_direction:
+                        crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                    panes: vec![leaf(Some(true)), leaf(None)],
+                },
+                shell_start: ShellStartPolicy::Deferred,
+            },
+            ..Default::default()
+        },
+    )
+}
+
+/// Ends pane 1's bootstrapped shell, after `before_exit` has run against its view, and waits for
+/// the exit to reach the view.
+async fn end_second_pane_shell(
+    app: &mut App,
+    pane_group: &warpui::ViewHandle<PaneGroup>,
+    before_exit: impl FnOnce(&mut TerminalView),
+) {
+    let view = app
+        .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(1, ctx)))
+        .expect("pane 1 has a terminal view");
+    let manager = app
+        .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(1, ctx)))
+        .expect("pane 1 has a terminal manager");
+    let exited = Rc::new(RefCell::new(false));
+    app.update(|ctx| {
+        let exited = exited.clone();
+        ctx.subscribe_to_view(&view, move |_, event, _| {
+            if let TerminalViewEvent::Exited = event {
+                *exited.borrow_mut() = true;
+            }
+        });
+        view.update(ctx, |view, _| {
+            view.set_login_shell_bootstrapped_for_test();
+            before_exit(view);
+        });
+        manager
+            .read(ctx, |manager, _| manager.model())
+            .lock()
+            .exit(ExitReason::ShellProcessExited);
+    });
+    assert_eventually_within!(
+        Duration::from_secs(10) => *exited.borrow(),
+        "the shell's exit never reached the view (waited 10s)"
+    );
+}
+
+/// A shell that ends without being asked to keeps its pane, so the pane stays in its saved
+/// session and can be restarted.
+#[test]
+fn test_crashed_shell_keeps_its_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = two_pane_group(&mut app);
+
+        end_second_pane_shell(&mut app, &pane_group, |_| {}).await;
+
+        assert_eq!(
+            app.read(|ctx| pane_group.as_ref(ctx).visible_pane_ids().len()),
+            2,
+            "a crashed shell must not close its pane"
+        );
+    });
+}
+
+/// A shell the user ended with EOF closes its pane, as it always has.
+#[test]
+fn test_shell_ended_by_eof_closes_its_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = two_pane_group(&mut app);
+
+        end_second_pane_shell(&mut app, &pane_group, TerminalView::set_eof_sent_for_test).await;
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| pane_group.as_ref(ctx).visible_pane_ids().len()) == 1,
+            "a shell the user ended must close its pane (waited 10s)"
         );
     });
 }

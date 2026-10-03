@@ -2957,6 +2957,11 @@ pub struct TerminalView {
     /// (tab close, update relaunch, etc.) are not attributed to agent commands.
     manual_pty_shutdown_requested: bool,
 
+    /// Set when the user sends EOF, cleared when they run a command. A shell that ends while
+    /// this is set ended because the user asked it to, not because it crashed. Not cleared by a
+    /// completed block: ending the shell completes its active block before the exit arrives.
+    eof_sent_since_last_command: bool,
+
     /// `true` while this view's shell is being deliberately restarted.
     ///
     /// `ModelEvent::Exit` cannot otherwise distinguish a shell that died from
@@ -4498,6 +4503,7 @@ impl TerminalView {
             active_init_project_model: None,
             is_pending_aws_login: false,
             manual_pty_shutdown_requested: false,
+            eof_sent_since_last_command: false,
             restart_in_progress: false,
             first_time_cloud_agent_setup_view,
             environment_setup_mode_selector,
@@ -9241,6 +9247,7 @@ impl TerminalView {
     }
 
     fn ctrl_d(&mut self, ctx: &mut ViewContext<Self>) {
+        self.eof_sent_since_last_command = true;
         let arc = self.model.clone();
         let mut model = arc.lock();
 
@@ -16268,6 +16275,27 @@ impl TerminalView {
         self.is_login_shell_bootstrapped
     }
 
+    /// Test-only: records that the user sent EOF, as Ctrl-D does.
+    #[cfg(test)]
+    pub(crate) fn set_eof_sent_for_test(&mut self) {
+        self.eof_sent_since_last_command = true;
+    }
+
+    /// Whether this view's shell, if it has ended, ended because it was asked to: the user ran
+    /// `exit` or `logout`, sent EOF, or Warp shut the PTY down. Anything else is a crash.
+    pub fn shell_exit_was_requested(&self) -> bool {
+        if self.manual_pty_shutdown_requested || self.eof_sent_since_last_command {
+            return true;
+        }
+        let command = self
+            .model
+            .lock()
+            .block_list()
+            .active_block()
+            .command_to_string();
+        matches!(command.split_whitespace().next(), Some("exit" | "logout"))
+    }
+
     /// Test-only: marks this view as having completed the login-shell bootstrap
     /// handshake, which unit-test harnesses never perform for real.
     ///
@@ -21931,6 +21959,7 @@ impl TerminalView {
                     self.focus_terminal(ctx);
                 }
 
+                self.eof_sent_since_last_command = false;
                 ctx.emit(Event::ExecuteCommand(event.as_ref().clone()));
 
                 if self.block_onboarding_active {
@@ -22241,6 +22270,7 @@ impl TerminalView {
                 ctx.emit(Event::ShowCommandSearch(options.clone()));
             }
             InputEvent::CtrlD => {
+                self.eof_sent_since_last_command = true;
                 ctx.emit(Event::CtrlD);
             }
             InputEvent::CtrlC { cleared_buffer_len } => {

@@ -13416,7 +13416,17 @@ impl Workspace {
             .block_list()
             .active_block()
             .is_active_and_long_running();
-        let cwd = view.as_ref(ctx).pwd_if_local(ctx).map(PathBuf::from);
+        // A shell that died before bootstrapping never reported a directory, so fall back to the
+        // one the pane was started or restored in rather than the process's own.
+        let cwd = view
+            .as_ref(ctx)
+            .pwd_if_local(ctx)
+            .or_else(|| {
+                self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
+                    pane_group.terminal_working_directory(pane_group.focused_pane_id(ctx), ctx)
+                })
+            })
+            .map(PathBuf::from);
 
         if is_busy {
             let running_command = manager

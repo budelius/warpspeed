@@ -176,6 +176,8 @@ fn interactive_run_count(runtime: &NodeRuntime) -> usize
 
 **Files:** Modify `src/workspace_handoff.rs` (new fns next to `prepare_handoff_worktree`), `src/remote/node.rs` sweep (`sweep_stale_session_dirs`). Tests inline (real git fixture `test_support::handoff_fixture` :211).
 
+**Also in this task (owns the Global-Constraints URL rule):** extend `normalize_repo_url` in `src/workspace_handoff.rs:8-26` so scp-style `git@host:path(.git)` (and `user@host:path`) normalizes to `https://host/path` — tests: `git@gitlab.com:pseekoo/x.git` == `https://gitlab.com/pseekoo/x` == `https://user:tok@gitlab.com/pseekoo/x.git/`; `redacted_repo_url` for an scp url must then equal its normalized form, and `RepositoryInfo.url` reported by the node (A3, `workspace.rs:~662`) must equal `normalize_repo_url(configured)` for scp AND https inputs (add that assertion to A3's reachability test). Also tighten the A3 `ls-remote` pattern to `refs/heads/<branch>` (exact match).
+
 **Produces:**
 ```rust
 pub fn valid_base_branch(branch: &str) -> bool;                   // Global Constraints regex

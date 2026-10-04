@@ -182,7 +182,7 @@ pub fn valid_base_branch(branch: &str) -> bool;                   // Global Cons
 pub fn agent_branch(job_id: &str) -> String;                      // format!("agent/{job_id}")
 /// Fetches `origin/<base>` into the repository checkout and creates `<root>/.runs/<job_id>` on new branch `agent/<job_id>`.
 pub async fn prepare_run_worktree(config: &WorkspaceConfig, repo_url: &str, base_branch: Option<&str>, job_id: &str) -> Result<PathBuf, BackendError>;
-/// Removes `.runs/*.session` dirs; removes worktrees whose lock is free and whose HEAD equals origin/<branch>; keeps and logs the rest.
+/// Removes `.runs/*.session` dirs; removes worktrees whose lock is free and whose HEAD equals origin/<branch> (and their `.runs/<job>.lock` and `.runs/<job>.branch` files); keeps and logs the rest.
 pub async fn sweep_runs(config: &WorkspaceConfig) -> SweepReport { removed_worktrees: Vec<String>, kept_worktrees: Vec<(String, String)>, removed_session_dirs: usize }
 ```
 

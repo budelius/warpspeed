@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Lock files: checkout lock `<root>/.locks/<repo_name>.lock`; worktree lock `<root>/.runs/<job_id>.lock`. The root lock `<root>/.agent-ctrl-workspace.lock` remains ONLY for `prepare()` (initial clones). (Spec said `<root>/<repo>/.agent-ctrl-checkout.lock`; moved out of the checkout so the lock file never shows up as an untracked file.)
+- Lock files: checkout (working-tree) lock `<root>/.locks/<repo_name>.lock` held by shared-checkout runs for their lifetime; checkout METADATA lock `<root>/.locks/<repo_name>.git.lock` held briefly around fetch / worktree add|remove / branch -D (metadata ops never block on a running shared agent); worktree lock `<root>/.runs/<job_id>.lock`. The root lock `<root>/.agent-ctrl-workspace.lock` remains ONLY for `prepare()` (initial clones). (Spec said `<root>/<repo>/.agent-ctrl-checkout.lock`; moved out of the checkout so the lock file never shows up as an untracked file.)
 - Fresh interactive run: worktree `<root>/.runs/<job_id>`, branch `agent/<job_id>` from `origin/<base>`; `<base>` defaults to the repo's configured `branch`.
 - `base_branch`: `^[A-Za-z0-9._/-]{1,100}$`, no `..`, no leading `-` or `/`, no component starting with `.`.
 - `task_id` is optional when `repo_url` is present (fleet runs are not ticket work); the dashboard skips task resolution and forwards empty task fields, as `import` does.

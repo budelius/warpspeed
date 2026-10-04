@@ -288,9 +288,8 @@ fn spawn_supervised_pty_inner(
         .context("Failed to attach the child to the pseudoconsole")?;
     startup_info.lpAttributeList = attributes.as_mut_ptr();
 
-    let directory = working_directory
-        .filter(|path| path.is_dir())
-        .map(|path| HSTRING::from(path.as_os_str()));
+    let directory =
+        super::shell_start_directory(working_directory).map(|path| HSTRING::from(path.as_os_str()));
 
     let mut process_information = PROCESS_INFORMATION::default();
     let base_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;

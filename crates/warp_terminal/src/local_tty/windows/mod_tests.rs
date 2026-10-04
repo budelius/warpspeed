@@ -76,3 +76,19 @@ fn an_unchanged_cell_count_is_dropped() {
 fn a_forced_resize_is_sent_even_when_unchanged() {
     assert!(resize_is_worth_sending(Some((120, 30)), (120, 30), true));
 }
+
+#[test]
+fn shell_start_directory_keeps_an_existing_directory() {
+    let dir = std::env::temp_dir();
+    assert_eq!(super::shell_start_directory(Some(&dir)), Some(dir));
+}
+
+/// A shell given no usable directory must not inherit the starting process's own, which for the
+/// app and the supervisor is the install directory.
+#[test]
+fn shell_start_directory_falls_back_to_home() {
+    let home = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+    let missing = std::env::temp_dir().join("warp-shell-start-directory-that-does-not-exist");
+    assert_eq!(super::shell_start_directory(None), home);
+    assert_eq!(super::shell_start_directory(Some(&missing)), home);
+}

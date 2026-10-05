@@ -263,6 +263,18 @@ JustVibe: battery-cafe https://gitlab.com/pseekoo/battery-cafe.git main
 Repo names must satisfy `render.py`'s policy (`[A-Za-z0-9._-]`, unique). Rename the three profiles, add `requires_repo: true` under `operator_control`, keep descriptions `Interactive <Agent> session on an operator repository`. Node env + resources as constrained. `render.py --workspace-repos-txt <instance>` prints the UNION of the hand-maintained `workspace-repos-extra.txt` lines (kept verbatim; ruling 2026-10-05: nothing stops syncing) and a `<name> <url>` line for each configured repository not already present (dedupe by normalized url); regenerate `workspace-repos.txt` and make the test compare file vs render and assert every extras line and every configured repo are present.
 - [ ] Step 4: Python tests green. Step 5: commit `deploy(staging): IWAKAN and JustVibe repositories, rw interactive profiles, run cap`. Push `feat/fleet-runs`.
 
+### Task A8: Progress visible in Gitea — periodic push of run branches
+
+**Why (user principle, 2026-10-05):** progress must be seen in Gitea, not only at run end.
+
+**Files:** Modify `src/remote/node.rs` (the isolated-run lifecycle: start a periodic task per run), `src/workspace_handoff.rs` (new `push_unpushed_commits(worktree, branch) -> Result<bool>`), docs.
+
+**Behavior:** while an isolated run (fresh or moved) is active, every `AGENT_CTRL_PROGRESS_PUSH_SECS` (default 300) the node runs, under the metadata lock, `git rev-list origin/<branch>..HEAD` in the worktree and, if non-empty, `git push origin HEAD:refs/heads/<branch>` (hardened `run_git`, no hooks). It never auto-commits mid-run (the agent's own commits are pushed; dirty files are committed only by the existing run-end push-back). Push failures are logged and retried next tick; three consecutive failures emit one viewer `Status` chunk `progress push failing: <redacted reason>`. The task stops when the run leaves `runtime.active`.
+
+**Tests:** fake-backend node test with a 1 s interval: a commit made in the worktree appears on origin's `agent/<job>` before the run ends; a clean worktree pushes nothing; the task stops after run end (no further pushes); failure path emits the status chunk after 3 failures.
+
+- [ ] Steps: RED tests → implement → `cargo test`/clippy/fmt → commit `feat(node): push run branches periodically so progress shows in Gitea`.
+
 ---
 
 ## Part B — stoz3n-agent-dash

@@ -259,7 +259,7 @@ JustVibe: battery-cafe https://gitlab.com/pseekoo/battery-cafe.git main
          solscrap https://gitlab.com/pseekoo/solscrap.git main
          staats-druckerei https://gitlab.com/pseekoo/staats-druckerei.git main
 ```
-Repo names must satisfy `render.py`'s policy (`[A-Za-z0-9._-]`, unique). Rename the three profiles, add `requires_repo: true` under `operator_control`, keep descriptions `Interactive <Agent> session on an operator repository`. Node env + resources as constrained. `render.py --workspace-repos-txt` prints the `<name> <url>` lines for an instance; regenerate `workspace-repos.txt` and make the test compare file vs render.
+Repo names must satisfy `render.py`'s policy (`[A-Za-z0-9._-]`, unique). Rename the three profiles, add `requires_repo: true` under `operator_control`, keep descriptions `Interactive <Agent> session on an operator repository`. Node env + resources as constrained. `render.py --workspace-repos-txt <instance>` prints the UNION of the hand-maintained `workspace-repos-extra.txt` lines (kept verbatim; ruling 2026-10-05: nothing stops syncing) and a `<name> <url>` line for each configured repository not already present (dedupe by normalized url); regenerate `workspace-repos.txt` and make the test compare file vs render and assert every extras line and every configured repo are present.
 - [ ] Step 4: Python tests green. Step 5: commit `deploy(staging): IWAKAN and JustVibe repositories, rw interactive profiles, run cap`. Push `feat/fleet-runs`.
 
 ---

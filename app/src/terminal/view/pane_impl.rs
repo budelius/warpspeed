@@ -45,6 +45,8 @@ use crate::settings::app_installation_detection::{
 };
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 use crate::terminal::agent_session_handoff::{HandoffSource, agent_ctrl_profile};
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_history;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shared_session::manager::Manager;
@@ -686,12 +688,31 @@ impl TerminalView {
         fallback_cwd: Option<&std::path::Path>,
         ctx: &AppContext,
     ) -> Option<HandoffSource> {
-        // Not the agent-reported cwd: it follows the agent's own `cd`s, while the session file
-        // stays keyed by the directory the agent was launched from.
+        // The shell's directory first: the agent-reported one follows the agent's own `cd`s, while
+        // the session file stays keyed by the directory the agent was launched from.
         let cwd = self
             .active_session_path_if_local(ctx)
-            .or_else(|| fallback_cwd.map(std::path::Path::to_path_buf));
+            .or_else(|| self.agent_recorded_cwd(fallback_cwd?, ctx));
         self.agent_ctrl_move_source_in(cwd, ctx)
+    }
+
+    /// `cwd` only if this pane's agent itself recorded it, as its hook-reported directory or in
+    /// its session history, so a remote-control caller cannot choose which repository is pushed.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn agent_recorded_cwd(&self, cwd: &std::path::Path, ctx: &AppContext) -> Option<PathBuf> {
+        let sessions = CLIAgentSessionsModel::as_ref(ctx);
+        let session = sessions.session(self.view_id)?;
+        let session_id = sessions.session_id(self.view_id)?;
+        let hook_reported = session
+            .session_context
+            .cwd
+            .as_deref()
+            .is_some_and(|hook_cwd| std::path::Path::new(hook_cwd) == cwd);
+        let recorded = hook_reported
+            || agent_session_history::find_all(session.agent)
+                .iter()
+                .any(|past| past.session_id == session_id && past.cwd == cwd);
+        recorded.then(|| cwd.to_path_buf())
     }
 
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]

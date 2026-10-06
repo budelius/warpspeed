@@ -259,6 +259,43 @@ fn move_session_uses_the_callers_directory_when_the_pane_has_none() {
     });
 }
 
+/// A directory the agent never recorded is refused, so a caller on the pipe cannot choose which
+/// repository gets pushed.
+#[test]
+fn move_session_refuses_a_directory_the_agent_did_not_record() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let agent_cwd = TempDir::new().unwrap();
+        let other_dir = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        let terminal_view_id = terminal_view.id();
+        seed_claude_session(
+            &terminal_view,
+            None,
+            &agent_cwd.path().display().to_string(),
+            "/tmp/session.jsonl",
+            &mut app,
+        );
+
+        let (response, step) = app.update(|ctx| {
+            let response = handle(
+                Request::MoveSessionToAgentCtrl {
+                    terminal_view_id: terminal_view_id.as_u64(),
+                    cwd: Some(other_dir.path().display().to_string()),
+                },
+                ctx,
+            );
+            (
+                response,
+                workspace.as_ref(ctx).agent_ctrl_move_step(terminal_view_id),
+            )
+        });
+        assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+        assert_eq!(step, None);
+    });
+}
+
 #[test]
 fn move_session_fails_for_a_pane_without_an_agent_session() {
     App::test((), |mut app| async move {

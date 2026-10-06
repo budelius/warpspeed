@@ -79,7 +79,9 @@ pub fn marker_path(pid: u32) -> PathBuf {
 /// path, and move a pane's agent session to AgentCtrl unattended: that pushes a
 /// handoff commit of the working tree, untracked files that are not ignored
 /// included, uploads the session transcript to AgentCtrl staging, and types the
-/// local agent's exit command into its pane. Beyond that it
+/// local agent's exit command into its pane. The caller may name the directory
+/// for a pane whose shell has none, but only one the agent itself recorded is
+/// honoured, so it cannot pick which repository is pushed. Beyond that it
 /// cannot read a terminal's output or write to one: that needs the supervisor's
 /// own channel, which lends PTY handles and is guarded accordingly.
 #[cfg(windows)]

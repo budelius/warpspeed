@@ -244,11 +244,7 @@ fn move_session_to_agent_ctrl(
 }
 
 #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
-fn move_session_to_agent_ctrl(
-    _terminal_view_id: u64,
-    _fallback_cwd: Option<PathBuf>,
-    _ctx: &mut AppContext,
-) -> Response {
+fn move_session_to_agent_ctrl(_: u64, _: Option<PathBuf>, _: &mut AppContext) -> Response {
     Response::Failed {
         error: "This build cannot move sessions to AgentCtrl".to_owned(),
     }

@@ -28,7 +28,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 const MOVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Why a move this gave up waiting for failed. The instance carries the move on regardless.
+/// The failure reason of a move this command stopped waiting for. The instance carries the move
+/// on regardless.
 const TIMED_OUT: &str = "timed out (may still complete; check the fleet)";
 
 /// How many `none` answers, or failures to reach the instance at all, in a row end a move as

@@ -36,6 +36,8 @@ pub(crate) struct PaneAgentInput {
     pub locator: PaneViewLocator,
     pub tab_index: usize,
     pub tab_title: String,
+    /// 1-based position among the tab's visible panes, as laid out.
+    pub pane_number: usize,
     pub cwd: Option<PathBuf>,
     /// From `CLIAgentSessionsModel`.
     pub running: Option<CliAgentResumeDescriptor>,

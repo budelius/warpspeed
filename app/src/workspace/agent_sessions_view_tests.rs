@@ -32,6 +32,7 @@ fn pane(tab_index: usize, cwd: &str) -> PaneAgentInput {
         },
         tab_index,
         tab_title: format!("tab {tab_index}"),
+        pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
         running: None,
         pending: None,

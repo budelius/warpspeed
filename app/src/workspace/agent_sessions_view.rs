@@ -634,9 +634,15 @@ fn render_row(
                     ViewRowAction::ResumeInFolder { .. } => Some("Resume…"),
                     ViewRowAction::None => None,
                 };
+                let label = Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(8.)
+                    .with_child(text(format!("pane {}", input.pane_number), sub_color).finish())
+                    .with_child(text(label, main_color).finish())
+                    .finish();
                 (
                     PANE_INDENT,
-                    text(label, main_color).finish(),
+                    label,
                     input.cwd.as_ref().map(|cwd| cwd.display().to_string()),
                     button,
                 )

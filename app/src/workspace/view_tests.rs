@@ -7692,3 +7692,38 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
         });
     });
 }
+
+#[test]
+fn agent_session_inputs_lists_a_tabs_visible_panes_as_laid_out() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (expected, hidden) = workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().clone();
+            pane_group.update(ctx, |pane_group, ctx| {
+                let original = pane_group.focused_pane_id(ctx);
+                let left: PaneId = pane_group
+                    .add_terminal_pane(Direction::Left, None, ctx)
+                    .into();
+                pane_group.focus_pane_by_id(original, ctx);
+                let right: PaneId = pane_group
+                    .add_terminal_pane(Direction::Right, None, ctx)
+                    .into();
+                let hidden: PaneId = pane_group
+                    .add_terminal_pane(Direction::Down, None, ctx)
+                    .into();
+                pane_group.hide_pane_for_job(hidden, ctx);
+                (vec![left, original, right], hidden)
+            })
+        });
+
+        let (panes, _) = workspace.read(&app, |workspace, ctx| workspace.agent_session_inputs(ctx));
+
+        let listed: Vec<PaneId> = panes.iter().map(|pane| pane.locator.pane_id).collect();
+        assert_eq!(listed, expected, "left to right, the hidden pane left out");
+        assert!(!listed.contains(&hidden));
+        let numbers: Vec<usize> = panes.iter().map(|pane| pane.pane_number).collect();
+        assert_eq!(numbers, vec![1, 2, 3]);
+    });
+}

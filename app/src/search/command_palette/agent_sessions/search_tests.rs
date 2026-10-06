@@ -169,6 +169,7 @@ fn pane(index: usize, cwd: &str) -> PaneAgentInput {
         locator: locator(index),
         tab_index: index,
         tab_title: format!("tab {index}"),
+        pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
         running: None,
         pending: None,

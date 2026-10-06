@@ -14745,8 +14745,9 @@ impl Workspace {
         Ok(())
     }
 
-    /// What the agent-session rows are built from: this window's terminal panes in tab order,
-    /// and the sessions the supervisor holds with no pane attached.
+    /// What the agent-session rows are built from: this window's visible terminal panes, by tab
+    /// and then as laid out within the tab, and the sessions the supervisor holds with no pane
+    /// attached.
     ///
     /// Asks the supervisor, a blocking round trip, so call it when a picker opens rather than
     /// on every render.
@@ -14778,7 +14779,7 @@ impl Workspace {
             let pane_group_id = tab.pane_group.id();
             let pane_group = tab.pane_group.as_ref(ctx);
             let tab_title = pane_group.display_title(ctx);
-            for pane_id in pane_group.pane_ids() {
+            for (position, pane_id) in pane_group.visible_pane_ids().into_iter().enumerate() {
                 let Some(view) = pane_group.terminal_view_from_pane_id(pane_id, ctx) else {
                     continue;
                 };
@@ -14805,6 +14806,7 @@ impl Workspace {
                     },
                     tab_index,
                     tab_title: tab_title.clone(),
+                    pane_number: position + 1,
                     cwd: pane_group
                         .terminal_working_directory(pane_id, ctx)
                         .map(PathBuf::from),
@@ -14893,8 +14895,8 @@ impl Workspace {
                     .is_some_and(|pane_group| {
                         pane_group
                             .as_ref(ctx)
-                            .pane_ids()
-                            .any(|id| id == target.pane_id)
+                            .visible_pane_ids()
+                            .contains(&target.pane_id)
                     })
             })
             .unwrap_or_else(|| {

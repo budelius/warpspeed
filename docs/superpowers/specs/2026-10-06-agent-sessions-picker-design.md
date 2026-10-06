@@ -182,7 +182,8 @@ and a palette command "Agent sessions: show window".
 ## Errors
 
 - A failed action shows an error toast naming the session and the reason (supervisor
-  unreachable, conversation file gone, pane closed meanwhile); the picker stays open.
+  unreachable, conversation file gone, pane closed meanwhile). The picker closes before acting,
+  so focus moves to the target pane first; the toast is shown over the window.
 - A supervisor that cannot be reached leaves the Detached section with one row saying so; the
   other sections still render.
 - A scan error is logged and the Past section shows what the cache already held.

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Adding a variant at the end of an enum is safe for bincode only in one
 /// direction, and the two ends here can be either older or newer than one
 /// another, so treat any change as a bump.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A request from the `sessions` command to a running window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +55,13 @@ pub enum Request {
         /// came to be broken without anyone noticing.
         close_windows: bool,
     },
+
+    /// Moves the agent session in a pane to AgentCtrl without asking for confirmation, as
+    /// confirming the move in that pane would.
+    MoveSessionToAgentCtrl { terminal_view_id: u64 },
+
+    /// How far the move of a pane's session to AgentCtrl has got.
+    MoveStatus { terminal_view_id: u64 },
 }
 
 /// A running window's answer.
@@ -83,6 +90,17 @@ pub enum Response {
 
     /// The request was understood and could not be carried out.
     Failed { error: String },
+
+    /// The answer to [`Request::MoveSessionToAgentCtrl`]: the move began, and
+    /// [`Request::MoveStatus`] follows it from here.
+    MoveStarted,
+
+    /// The answer to [`Request::MoveStatus`].
+    MoveState {
+        /// One of `preparing`, `importing`, `waiting_for_resume`, `cutting_over`, `done:<job>`,
+        /// `failed:<reason>`, or `none` when the pane has no move in flight or finished.
+        step: String,
+    },
 }
 
 /// One terminal pane of a running instance.
@@ -124,6 +142,21 @@ pub struct PaneSummary {
     /// Answered by the same predicate the exit path itself uses, so this is not
     /// a second opinion about the rule -- it is the rule, asked ahead of time.
     pub survives_quit: bool,
+
+    /// The pane's terminal view, which move requests name it by.
+    pub terminal_view_id: Option<u64>,
+
+    /// The running agent, by the command that starts it: `claude`, `pi`, `codex`, ...
+    pub agent: Option<String>,
+
+    /// The agent's own session id, as its hooks reported it or as recovered from its history.
+    pub agent_session_id: Option<String>,
+
+    /// The directory the agent's hooks reported, which can differ from the shell's.
+    pub agent_cwd: Option<String>,
+
+    /// The session file the agent last reported.
+    pub transcript_path: Option<String>,
 }
 
 /// One saved session that can be reopened.
@@ -137,3 +170,7 @@ pub struct StoredSessionInfo {
     pub panes: usize,
     pub agents: usize,
 }
+
+#[cfg(test)]
+#[path = "protocol_tests.rs"]
+mod tests;

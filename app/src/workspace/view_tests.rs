@@ -6818,7 +6818,7 @@ fn selecting_a_shell_restarts_the_session_before_closing_the_picker() {
 
 /// `initialize_app` plus the STOZN auth singleton the workspace reads, which `initialize_app`
 /// does not register yet.
-fn initialize_app_for_move_session(app: &mut App) {
+pub(crate) fn initialize_app_for_move_session(app: &mut App) {
     initialize_app(app);
     if !app.read(|ctx| ctx.has_singleton_model::<crate::stozn_auth::StoznAuthManager>()) {
         app.add_singleton_model(|_| crate::stozn_auth::StoznAuthManager::new());
@@ -7327,6 +7327,65 @@ fn move_session_failure_while_waiting_leaves_the_local_agent_alone() {
                 "{toasts:?}"
             );
         }
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn move_session_status_keeps_the_outcome_until_the_next_move() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let cwd = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+        let moved_view_id = terminal_view.id();
+        let move_status = |app: &mut App| {
+            app.read(|ctx| {
+                workspace.read(ctx, |workspace, _| {
+                    workspace.agent_ctrl_move_step(moved_view_id)
+                })
+            })
+        };
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.agent_ctrl_moves.insert(
+                moved_view_id,
+                MoveStep::CuttingOver {
+                    job_id: "job-cut".to_owned(),
+                },
+            );
+            workspace.finish_agent_ctrl_move(
+                moved_view_id,
+                MoveStep::Done {
+                    job_id: "job-cut".to_owned(),
+                },
+                ctx,
+            );
+        });
+        assert_eq!(
+            move_status(&mut app),
+            Some(MoveStep::Done {
+                job_id: "job-cut".to_owned()
+            }),
+            "a finished move reports its outcome"
+        );
+
+        let started = workspace.update(&mut app, |workspace, ctx| {
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(cwd.path(), ctx)
+            });
+            seed_agent_session(
+                moved_view_id,
+                crate::terminal::CLIAgent::Claude,
+                Some(MOVE_SESSION_ID),
+                None,
+                cwd.path(),
+                ctx,
+            );
+            let started = workspace.move_session_to_agent_ctrl_unattended(moved_view_id, ctx);
+            (started, workspace.agent_ctrl_move_step(moved_view_id))
+        });
+        assert_eq!(started, (Ok(()), Some(MoveStep::Preparing)));
     });
 }
 

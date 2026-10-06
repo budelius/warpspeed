@@ -22,6 +22,10 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
         Request::ListStoredSessions => list_stored_sessions(),
         Request::OpenStoredSession { name } => open_stored_session(&name, ctx),
         Request::Quit { close_windows } => quit(close_windows, ctx),
+        Request::MoveSessionToAgentCtrl { terminal_view_id } => {
+            move_session_to_agent_ctrl(terminal_view_id, ctx)
+        }
+        Request::MoveStatus { terminal_view_id } => move_status(terminal_view_id, ctx),
     }
 }
 
@@ -89,6 +93,11 @@ fn list_panes(ctx: &mut AppContext) -> Response {
                     has_running_agent: pane.has_running_agent,
                     is_busy: pane.is_busy,
                     survives_quit: pane.survives_quit,
+                    terminal_view_id: Some(pane.terminal_view_id.as_u64()),
+                    agent: pane.agent,
+                    agent_session_id: pane.agent_session_id,
+                    agent_cwd: pane.agent_cwd,
+                    transcript_path: pane.transcript_path,
                 }),
         );
     }
@@ -181,6 +190,93 @@ fn attach(_session_id: warp_core::SessionId, _ctx: &mut AppContext) -> Response 
     }
 }
 
+/// The workspace holding the terminal view `terminal_view_id`, in whichever window it is.
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn workspace_holding_terminal_view(
+    terminal_view_id: warpui::EntityId,
+    ctx: &AppContext,
+) -> Option<warpui::ViewHandle<crate::workspace::Workspace>> {
+    use warpui::SingletonEntity;
+
+    crate::workspace::WorkspaceRegistry::as_ref(ctx)
+        .all_workspaces(ctx)
+        .into_iter()
+        .map(|(_, workspace)| workspace)
+        .find(|workspace| {
+            workspace
+                .as_ref(ctx)
+                .workspace_contains_terminal_view(terminal_view_id, ctx)
+        })
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn terminal_view_entity_id(terminal_view_id: u64) -> Option<warpui::EntityId> {
+    usize::try_from(terminal_view_id)
+        .ok()
+        .map(warpui::EntityId::from_usize)
+}
+
+/// Starts moving a pane's agent session to AgentCtrl, whichever window holds the pane.
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn move_session_to_agent_ctrl(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+    let held = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
+        workspace_holding_terminal_view(view_id, ctx).map(|workspace| (view_id, workspace))
+    });
+    let Some((view_id, workspace)) = held else {
+        return Response::Failed {
+            error: format!("No pane in this instance has terminal view {terminal_view_id}"),
+        };
+    };
+    match workspace.update(ctx, |workspace, ctx| {
+        workspace.move_session_to_agent_ctrl_unattended(view_id, ctx)
+    }) {
+        Ok(()) => Response::MoveStarted,
+        Err(error) => Response::Failed { error },
+    }
+}
+
+#[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+fn move_session_to_agent_ctrl(_terminal_view_id: u64, _ctx: &mut AppContext) -> Response {
+    Response::Failed {
+        error: "This build cannot move sessions to AgentCtrl".to_owned(),
+    }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn move_status(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+    let step = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
+        workspace_holding_terminal_view(view_id, ctx)?
+            .as_ref(ctx)
+            .agent_ctrl_move_step(view_id)
+    });
+    Response::MoveState {
+        step: move_step_label(step.as_ref()),
+    }
+}
+
+#[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+fn move_status(_terminal_view_id: u64, _ctx: &mut AppContext) -> Response {
+    Response::Failed {
+        error: "This build cannot move sessions to AgentCtrl".to_owned(),
+    }
+}
+
+/// The wire form of a move's step, which `sessions` callers match on.
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn move_step_label(step: Option<&crate::terminal::agent_session_handoff::MoveStep>) -> String {
+    use crate::terminal::agent_session_handoff::MoveStep;
+
+    match step {
+        None => "none".to_owned(),
+        Some(MoveStep::Preparing) => "preparing".to_owned(),
+        Some(MoveStep::Importing) => "importing".to_owned(),
+        Some(MoveStep::WaitingForResume { .. }) => "waiting_for_resume".to_owned(),
+        Some(MoveStep::CuttingOver { .. }) => "cutting_over".to_owned(),
+        Some(MoveStep::Done { job_id }) => format!("done:{job_id}"),
+        Some(MoveStep::Failed { reason, .. }) => format!("failed:{reason}"),
+    }
+}
+
 /// Quits, the way a user quitting would.
 ///
 /// Closing the windows takes `ForceTerminate`, which skips only the "are you
@@ -210,3 +306,7 @@ fn quit(close_windows: bool, ctx: &mut AppContext) -> Response {
     }
     Response::Done
 }
+
+#[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+#[path = "handler_tests.rs"]
+mod tests;

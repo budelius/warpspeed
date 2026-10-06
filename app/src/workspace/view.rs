@@ -1174,6 +1174,10 @@ pub struct Workspace {
     /// Moves to AgentCtrl that have been confirmed and not yet finished, by terminal view.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     agent_ctrl_moves: HashMap<EntityId, MoveStep>,
+    /// How the last finished move to AgentCtrl ended, by terminal view, so a caller polling a move
+    /// it started can tell success from failure after the move has left `agent_ctrl_moves`.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    agent_ctrl_move_outcomes: HashMap<EntityId, MoveStep>,
     /// Repositories offered for a fresh AgentCtrl run whose agent has not been picked yet, by
     /// terminal view.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -3752,6 +3756,8 @@ impl Workspace {
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_moves: HashMap::new(),
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+            agent_ctrl_move_outcomes: HashMap::new(),
+            #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_start_offers: HashMap::new(),
             #[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
             fake_start_run_on_repo: None,
@@ -4019,7 +4025,7 @@ impl Workspace {
         }
     }
 
-    fn workspace_contains_terminal_view(
+    pub(crate) fn workspace_contains_terminal_view(
         &self,
         terminal_view_id: EntityId,
         ctx: &AppContext,
@@ -13134,7 +13140,7 @@ impl Workspace {
 
     /// Returns the terminal view for the focused pane in the active tab, if
     /// the focused pane is a terminal pane.
-    fn focused_terminal_view(
+    pub(crate) fn focused_terminal_view(
         &self,
         ctx: &mut ViewContext<Self>,
     ) -> Option<ViewHandle<TerminalView>> {
@@ -13952,6 +13958,37 @@ impl Workspace {
         );
     }
 
+    /// Starts moving the agent session in `terminal_view_id` to AgentCtrl without asking, for a
+    /// caller that has already confirmed. Whether the pane's repository has a remote to push to is
+    /// left to the preparation step, whose failure the move then reports.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn move_session_to_agent_ctrl_unattended(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<(), String> {
+        if self.agent_ctrl_moves.contains_key(&terminal_view_id) {
+            return Err("A move of this session to AgentCtrl is already in progress.".to_owned());
+        }
+        if self.agent_ctrl_move_source(terminal_view_id, ctx).is_none() {
+            return Err(
+                "This pane has no local Claude, Pi, or Codex session that can be moved to AgentCtrl."
+                    .to_owned(),
+            );
+        }
+        self.confirm_move_session_to_agent_ctrl(terminal_view_id, ctx);
+        Ok(())
+    }
+
+    /// The step the move of `terminal_view_id` to AgentCtrl is at, or how the last one ended.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn agent_ctrl_move_step(&self, terminal_view_id: EntityId) -> Option<MoveStep> {
+        self.agent_ctrl_moves
+            .get(&terminal_view_id)
+            .or_else(|| self.agent_ctrl_move_outcomes.get(&terminal_view_id))
+            .cloned()
+    }
+
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     fn ask_to_confirm_agent_ctrl_move(
         &mut self,
@@ -13999,6 +14036,7 @@ impl Workspace {
             );
             return;
         };
+        self.agent_ctrl_move_outcomes.remove(&terminal_view_id);
         self.agent_ctrl_moves
             .insert(terminal_view_id, MoveStep::Preparing);
         self.show_agent_ctrl_move_toast(
@@ -14313,6 +14351,12 @@ impl Workspace {
                 self.add_terminal_tab(false, ctx);
                 self.execute_managed_session_command(&arguments, ctx);
                 self.agent_ctrl_moves.remove(&terminal_view_id);
+                self.agent_ctrl_move_outcomes.insert(
+                    terminal_view_id,
+                    MoveStep::Done {
+                        job_id: job_id.clone(),
+                    },
+                );
                 self.show_agent_ctrl_move_toast(
                     terminal_view_id,
                     DismissibleToast::success(format!(
@@ -14365,6 +14409,8 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         self.agent_ctrl_moves.remove(&terminal_view_id);
+        self.agent_ctrl_move_outcomes
+            .insert(terminal_view_id, outcome.clone());
         match outcome {
             MoveStep::Done { job_id } => self.show_agent_ctrl_move_toast(
                 terminal_view_id,
@@ -14778,7 +14824,8 @@ impl Workspace {
                         .is_active_and_long_running()
                 });
 
-                let agent_session = CLIAgentSessionsModel::as_ref(ctx).session(view.id());
+                let agent_sessions = CLIAgentSessionsModel::as_ref(ctx);
+                let agent_session = agent_sessions.session(view.id());
                 let has_running_agent = agent_session.is_some();
 
                 panes.push(TerminalPaneInfo {
@@ -14798,6 +14845,24 @@ impl Workspace {
                         .map(|shell| detached_sessions::shell_label(&shell.shell_detail()))
                         .unwrap_or_default(),
                     working_directory: view.as_ref(ctx).pwd_if_local(ctx).unwrap_or_default(),
+                    terminal_view_id: view.id(),
+                    agent: agent_session.and_then(|session| {
+                        session
+                            .agent
+                            .command_prefixes()
+                            .first()
+                            .map(|prefix| (*prefix).to_owned())
+                    }),
+                    agent_session_id: agent_sessions.session_id(view.id()).map(str::to_owned),
+                    agent_cwd: agent_session
+                        .and_then(|session| session.session_context.cwd.clone()),
+                    transcript_path: agent_session.and_then(|session| {
+                        session
+                            .session_context
+                            .transcript_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                    }),
                 });
             }
         }

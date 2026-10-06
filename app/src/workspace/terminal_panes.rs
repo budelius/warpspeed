@@ -57,4 +57,19 @@ pub(crate) struct TerminalPaneInfo {
 
     /// Where the pane last was.
     pub(crate) working_directory: String,
+
+    /// The pane's terminal view.
+    pub(crate) terminal_view_id: EntityId,
+
+    /// The running agent, by its first command prefix.
+    pub(crate) agent: Option<String>,
+
+    /// The agent's session id, as its hooks reported it or as recovered from its history.
+    pub(crate) agent_session_id: Option<String>,
+
+    /// The directory the agent's hooks reported.
+    pub(crate) agent_cwd: Option<String>,
+
+    /// The session file the agent last reported.
+    pub(crate) transcript_path: Option<String>,
 }

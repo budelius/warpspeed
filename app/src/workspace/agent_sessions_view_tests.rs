@@ -62,12 +62,14 @@ fn detached(id: u64, title: &str) -> DetachedInput {
 fn kinds(rows: &[ViewRow]) -> Vec<String> {
     rows.iter()
         .map(|row| match row {
-            ViewRow::TabHeader { title } => format!("tab:{title}"),
+            ViewRow::TabHeader { title, .. } => format!("tab:{title}"),
             ViewRow::Pane { input, .. } => format!("pane:{}", input.tab_index),
             ViewRow::PastToggle {
                 count, expanded, ..
             } => format!("toggle:{count}:{expanded}"),
-            ViewRow::Past { row } => format!("past:{}", row.session_id.clone().unwrap_or_default()),
+            ViewRow::Past { row, .. } => {
+                format!("past:{}", row.session_id.clone().unwrap_or_default())
+            }
             ViewRow::DetachedHeader { count } => format!("detached-header:{count}"),
             ViewRow::Detached { row } => {
                 format!("detached:{}", row.title.clone().unwrap_or_default())
@@ -81,7 +83,7 @@ fn kinds(rows: &[ViewRow]) -> Vec<String> {
 fn layout(
     panes: &[PaneAgentInput],
     rows: &[AgentSessionRow],
-    expanded_folders: &HashSet<PathBuf>,
+    expanded_folders: &ExpandedFolders,
     query: &str,
 ) -> Vec<ViewRow> {
     view_rows(
@@ -120,7 +122,7 @@ fn panes_are_grouped_under_their_tab_headers_in_tab_order() {
     let panes = vec![first, second, third];
     let rows = build_rows(&panes, &[], &[]);
 
-    let view = layout(&panes, &rows, &HashSet::new(), "");
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
 
     assert_eq!(
         kinds(&view),
@@ -142,7 +144,7 @@ fn each_pane_gets_the_action_its_state_calls_for() {
     let panes = vec![running.clone(), pending.clone(), shell.clone()];
     let rows = build_rows(&panes, &[], &[]);
 
-    let view = layout(&panes, &rows, &HashSet::new(), "");
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
 
     assert_eq!(
         pane_action(&view, 0),
@@ -170,7 +172,7 @@ fn a_pane_without_a_folder_has_no_action() {
     let panes = vec![shell];
     let rows = build_rows(&panes, &[], &[]);
 
-    let view = layout(&panes, &rows, &HashSet::new(), "");
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
 
     assert_eq!(pane_action(&view, 0), ViewRowAction::None);
 }
@@ -185,13 +187,13 @@ fn past_rows_appear_only_when_their_folder_is_expanded() {
     ];
     let rows = build_rows(&panes, &[], &history);
 
-    let collapsed = layout(&panes, &rows, &HashSet::new(), "");
+    let collapsed = layout(&panes, &rows, &ExpandedFolders::new(), "");
     assert_eq!(
         kinds(&collapsed),
         vec!["tab:tab 0", "pane:0", "toggle:2:false"]
     );
 
-    let expanded = HashSet::from([PathBuf::from("/proj")]);
+    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj"))]);
     let open = layout(&panes, &rows, &expanded, "");
     assert_eq!(
         kinds(&open),
@@ -220,7 +222,7 @@ fn a_query_filters_rows_but_keeps_their_tab_header() {
     let panes = vec![alpha, beta, gamma];
     let rows = build_rows(&panes, &[], &[]);
 
-    let view = layout(&panes, &rows, &HashSet::new(), "beta");
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "beta");
 
     assert_eq!(kinds(&view), vec!["tab:tab 0", "pane:0"]);
     assert!(matches!(
@@ -235,7 +237,7 @@ fn a_query_shows_matching_past_rows_without_expanding() {
     let history = vec![past("needle", "/proj", 1), past("hay", "/proj", 2)];
     let rows = build_rows(&panes, &[], &history);
 
-    let view = layout(&panes, &rows, &HashSet::new(), "needle");
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "needle");
 
     assert_eq!(
         kinds(&view),
@@ -248,7 +250,7 @@ fn the_detached_section_comes_last() {
     let panes = vec![pane(0, "/a"), pane(1, "/b")];
     let rows = build_rows(&panes, &[detached(1, "one"), detached(2, "two")], &[]);
 
-    let view = layout(&panes, &rows, &HashSet::new(), "");
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
 
     assert_eq!(
         kinds(&view),
@@ -285,7 +287,7 @@ fn view_rows_takes_folder_membership_from_the_snapshot_not_the_paths() {
         .position(|row| row.session_id.as_deref() == Some("far"))
         .expect("the far session is a row");
     let membership = PastByFolder::from([(PathBuf::from("/proj"), vec![far])]);
-    let expanded = HashSet::from([PathBuf::from("/proj")]);
+    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj"))]);
 
     let view = view_rows(&panes, &rows, &membership, &expanded, "");
 
@@ -317,4 +319,139 @@ fn past_by_folder_counts_subfolders_and_skips_other_folders() {
         .filter_map(|index| rows[*index].session_id.as_deref())
         .collect();
     assert_eq!(ids, vec!["top", "nested"]);
+}
+
+fn same_tab(tab_index: usize, cwd: &str) -> PaneAgentInput {
+    PaneAgentInput {
+        tab_title: format!("tab {tab_index}"),
+        ..pane(tab_index, cwd)
+    }
+}
+
+fn past_targets(rows: &[ViewRow]) -> Vec<(String, PaneViewLocator)> {
+    rows.iter()
+        .filter_map(|row| match row {
+            ViewRow::Past { row, target } => Some((row.session_id.clone()?, *target)),
+            ViewRow::TabHeader { .. }
+            | ViewRow::Pane { .. }
+            | ViewRow::PastToggle { .. }
+            | ViewRow::DetachedHeader { .. }
+            | ViewRow::Detached { .. }
+            | ViewRow::SupervisorUnreachable => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_folders_past_is_listed_once_per_tab_under_its_last_pane() {
+    let first = same_tab(0, "/proj");
+    let other = same_tab(0, "/other");
+    let last = same_tab(0, "/proj");
+    let panes = vec![first, other, last.clone()];
+    let history = vec![past("top", "/proj", 1), past("nested", "/proj/sub", 2)];
+    let rows = build_rows(&panes, &[], &history);
+
+    let collapsed = layout(&panes, &rows, &ExpandedFolders::new(), "");
+    assert_eq!(
+        kinds(&collapsed),
+        vec!["tab:tab 0", "pane:0", "pane:0", "pane:0", "toggle:2:false"]
+    );
+
+    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj"))]);
+    let open = layout(&panes, &rows, &expanded, "");
+    assert_eq!(
+        kinds(&open),
+        vec![
+            "tab:tab 0",
+            "pane:0",
+            "pane:0",
+            "pane:0",
+            "toggle:2:true",
+            "past:top",
+            "past:nested"
+        ]
+    );
+    assert_eq!(
+        past_targets(&open),
+        vec![("top".into(), last.locator), ("nested".into(), last.locator)],
+        "past rows resume in the pane they are listed under"
+    );
+}
+
+#[test]
+fn expanding_a_folder_in_one_tab_leaves_the_same_folder_in_another_collapsed() {
+    let panes = vec![pane(0, "/proj"), pane(1, "/proj")];
+    let history = vec![past("top", "/proj", 1)];
+    let rows = build_rows(&panes, &[], &history);
+
+    let expanded = ExpandedFolders::from([(1, PathBuf::from("/proj"))]);
+    let view = layout(&panes, &rows, &expanded, "");
+
+    assert_eq!(
+        kinds(&view),
+        vec![
+            "tab:tab 0",
+            "pane:0",
+            "toggle:1:false",
+            "tab:tab 1",
+            "pane:1",
+            "toggle:1:true",
+            "past:top"
+        ]
+    );
+}
+
+#[test]
+fn a_query_lists_matching_past_rows_once_per_tab_and_folder() {
+    let panes = vec![same_tab(0, "/proj"), same_tab(0, "/proj"), pane(1, "/proj")];
+    let history = vec![past("needle", "/proj", 1), past("hay", "/proj", 2)];
+    let rows = build_rows(&panes, &[], &history);
+
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "needle");
+
+    assert_eq!(
+        kinds(&view),
+        vec![
+            "tab:tab 0",
+            "pane:0",
+            "toggle:1:true",
+            "past:needle",
+            "tab:tab 1",
+            "pane:1",
+            "toggle:1:true",
+            "past:needle"
+        ]
+    );
+}
+
+#[test]
+fn every_row_has_its_own_key_and_keeps_it_when_rows_are_added_before_it() {
+    let running = PaneAgentInput {
+        running: Some(claude("r", "/proj")),
+        ..same_tab(0, "/proj")
+    };
+    let panes = vec![running, same_tab(0, "/proj"), pane(1, "/proj")];
+    let history = vec![past("old", "/proj", 5)];
+    let detached_sessions = [detached(1, "one"), detached(2, "two")];
+    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj")), (1, PathBuf::from("/proj"))]);
+    let rows = build_rows(&panes, &detached_sessions, &history);
+    let before = layout(&panes, &rows, &expanded, "");
+
+    let keys: Vec<RowKey> = before.iter().map(ViewRow::key).collect();
+    let unique: HashSet<&RowKey> = keys.iter().collect();
+    assert_eq!(unique.len(), keys.len(), "no two rows share a key");
+
+    let newer_history = vec![past("new", "/proj", 1), past("old", "/proj", 5)];
+    let rows = build_rows(&panes, &detached_sessions, &newer_history);
+    let after = layout(&panes, &rows, &expanded, "");
+    let old_before = before
+        .iter()
+        .position(|row| matches!(row, ViewRow::Past { row, .. } if row.session_id.as_deref() == Some("old")))
+        .expect("the old session is listed");
+    let old_after = after
+        .iter()
+        .position(|row| row.key() == before[old_before].key())
+        .expect("the old session keeps its key");
+    assert_ne!(old_before, old_after, "the new session moved it down");
+    assert!(matches!(&after[old_after], ViewRow::Past { row, .. } if row.session_id.as_deref() == Some("old")));
 }

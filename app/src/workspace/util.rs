@@ -10,7 +10,7 @@ use crate::window_settings::WindowSettings;
 use crate::workspace::Workspace;
 use crate::workspace::tab_group::TabGroupId;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// What composes a pane (i.e. the pane group and the pane itself).
 pub struct PaneViewLocator {
     pub pane_group_id: EntityId,

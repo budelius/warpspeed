@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Local};
@@ -34,6 +34,7 @@ use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{
     AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows, is_row_within,
 };
+use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::detached_sessions::DetachedListError;
 use crate::util::time_format::format_approx_duration_from_now;
 use crate::workspace::PaneViewLocator;
@@ -45,6 +46,7 @@ use crate::workspace::agent_session_actions::{AgentSessionAction, action_for};
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ViewRow {
     TabHeader {
+        tab_index: usize,
         title: String,
     },
     Pane {
@@ -53,12 +55,15 @@ pub(crate) enum ViewRow {
         action: ViewRowAction,
     },
     PastToggle {
+        tab_index: usize,
         folder: PathBuf,
         count: usize,
         expanded: bool,
     },
     Past {
         row: AgentSessionRow,
+        /// The pane it is listed under, which is where it resumes.
+        target: PaneViewLocator,
     },
     DetachedHeader {
         count: usize,
@@ -80,8 +85,65 @@ pub(crate) enum ViewRowAction {
     None,
 }
 
+/// What a row stands for, independent of where it sits in the list, so a click or hover still
+/// reaches its row after the list is rebuilt.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RowKey {
+    TabHeader(usize),
+    Pane(PaneViewLocator),
+    PastToggle {
+        tab_index: usize,
+        folder: PathBuf,
+    },
+    Past {
+        target: PaneViewLocator,
+        agent: Option<CLIAgent>,
+        session_id: Option<String>,
+    },
+    DetachedHeader,
+    Detached {
+        detached_session: Option<warp_core::SessionId>,
+        title: Option<String>,
+    },
+    SupervisorUnreachable,
+}
+
+impl ViewRow {
+    pub(crate) fn key(&self) -> RowKey {
+        match self {
+            ViewRow::TabHeader { tab_index, .. } => RowKey::TabHeader(*tab_index),
+            ViewRow::Pane { input, .. } => RowKey::Pane(input.locator),
+            ViewRow::PastToggle {
+                tab_index, folder, ..
+            } => RowKey::PastToggle {
+                tab_index: *tab_index,
+                folder: folder.clone(),
+            },
+            ViewRow::Past { row, target } => RowKey::Past {
+                target: *target,
+                agent: row.agent,
+                session_id: row.session_id.clone(),
+            },
+            ViewRow::DetachedHeader { .. } => RowKey::DetachedHeader,
+            ViewRow::Detached { row } => RowKey::Detached {
+                detached_session: match &row.state {
+                    AgentSessionState::Detached { session_id } => Some(*session_id),
+                    AgentSessionState::Running { .. }
+                    | AgentSessionState::Pending { .. }
+                    | AgentSessionState::Past => None,
+                },
+                title: row.title.clone(),
+            },
+            ViewRow::SupervisorUnreachable => RowKey::SupervisorUnreachable,
+        }
+    }
+}
+
 /// For each pane folder, the indices into `rows` of the past sessions that lie within it.
 pub(crate) type PastByFolder = HashMap<PathBuf, Vec<usize>>;
+
+/// The (tab index, folder) pairs whose past conversations are shown.
+pub(crate) type ExpandedFolders = HashSet<(usize, PathBuf)>;
 
 /// Works out which past sessions lie within which pane folder. It resolves each pane folder on
 /// disk, so it belongs where a snapshot is taken, never on a keystroke; past sessions come
@@ -108,19 +170,33 @@ pub(crate) fn past_by_folder(panes: &[PaneAgentInput], rows: &[AgentSessionRow])
     by_folder
 }
 
-/// Lays out `rows` (from `build_rows`) by tab and pane, with each pane's past conversations under
-/// a toggle and the detached sessions last. A non-empty `query` keeps only the matching rows, plus
-/// the headers and panes they sit under, and shows matching past rows without expanding.
+fn pane_folder(pane: &PaneAgentInput) -> Option<&Path> {
+    pane.cwd
+        .as_deref()
+        .filter(|folder| !folder.as_os_str().is_empty())
+}
+
+/// Lays out `rows` (from `build_rows`) by tab and pane, with the detached sessions last. Each
+/// folder's past conversations sit once per tab, under a toggle after the last of the tab's panes
+/// in that folder. A non-empty `query` keeps only the matching rows, plus the headers and panes
+/// they sit under, and shows matching past rows without expanding.
 pub(crate) fn view_rows(
     panes: &[PaneAgentInput],
     rows: &[AgentSessionRow],
     past_by_folder: &PastByFolder,
-    expanded_folders: &HashSet<PathBuf>,
+    expanded_folders: &ExpandedFolders,
     query: &str,
 ) -> Vec<ViewRow> {
     let query = query.trim();
     let matches_row = |row: &AgentSessionRow| query.is_empty() || score_row(row, query).is_some();
     let matches_text = |text: &str| match_indices_case_insensitive(text, query).is_some();
+    let mut lists_past_of_folder: HashMap<(usize, &Path), PaneViewLocator> = HashMap::new();
+    for pane in panes {
+        if let Some(folder) = pane_folder(pane) {
+            lists_past_of_folder.insert((pane.tab_index, folder), pane.locator);
+        }
+    }
+
     let mut view = Vec::new();
     let mut current_tab = None;
     for pane in panes {
@@ -130,12 +206,12 @@ pub(crate) fn view_rows(
             }
             AgentSessionState::Detached { .. } | AgentSessionState::Past => false,
         });
-        let folder = pane
-            .cwd
-            .clone()
-            .filter(|folder| !folder.as_os_str().is_empty());
+        let folder = pane_folder(pane);
+        let lists_past = folder.is_some_and(|folder| {
+            lists_past_of_folder.get(&(pane.tab_index, folder)) == Some(&pane.locator)
+        });
         let folder_past: Vec<&AgentSessionRow> = folder
-            .as_ref()
+            .filter(|_| lists_past)
             .and_then(|folder| past_by_folder.get(folder))
             .into_iter()
             .flatten()
@@ -146,9 +222,7 @@ pub(crate) fn view_rows(
         let pane_matches = query.is_empty()
             || row.is_some_and(matches_row)
             || matches_text(&pane.tab_title)
-            || folder
-                .as_ref()
-                .is_some_and(|folder| matches_text(&folder.to_string_lossy()));
+            || folder.is_some_and(|folder| matches_text(&folder.to_string_lossy()));
         if !pane_matches && folder_past.is_empty() {
             continue;
         }
@@ -156,15 +230,16 @@ pub(crate) fn view_rows(
         if current_tab != Some(pane.tab_index) {
             current_tab = Some(pane.tab_index);
             view.push(ViewRow::TabHeader {
+                tab_index: pane.tab_index,
                 title: pane.tab_title.clone(),
             });
         }
-        let action = match (row, &folder) {
+        let action = match (row, folder) {
             (Some(row), _) => action_for(row, Some(pane.locator))
                 .map(ViewRowAction::Act)
                 .unwrap_or(ViewRowAction::None),
             (None, Some(folder)) => ViewRowAction::ResumeInFolder {
-                folder: folder.clone(),
+                folder: folder.to_path_buf(),
                 target: pane.locator,
             },
             (None, None) => ViewRowAction::None,
@@ -176,18 +251,20 @@ pub(crate) fn view_rows(
         });
 
         if let Some(folder) = folder.filter(|_| !folder_past.is_empty()) {
-            let expanded = !query.is_empty() || expanded_folders.contains(&folder);
+            let folder = folder.to_path_buf();
+            let expanded = !query.is_empty()
+                || expanded_folders.contains(&(pane.tab_index, folder.clone()));
             view.push(ViewRow::PastToggle {
+                tab_index: pane.tab_index,
                 folder,
                 count: folder_past.len(),
                 expanded,
             });
             if expanded {
-                view.extend(
-                    folder_past
-                        .into_iter()
-                        .map(|row| ViewRow::Past { row: row.clone() }),
-                );
+                view.extend(folder_past.into_iter().map(|row| ViewRow::Past {
+                    row: row.clone(),
+                    target: pane.locator,
+                }));
             }
         }
     }
@@ -241,7 +318,7 @@ pub enum AgentSessionsViewAction {
     ArrowUp,
     ArrowDown,
     Enter,
-    Activate(usize),
+    Activate(RowKey),
 }
 
 pub fn init(app: &mut AppContext) {
@@ -276,11 +353,11 @@ pub struct AgentSessionsView {
     built_query: String,
     /// Whether past sessions have been scanned at least once; until then the list has none.
     history_loaded: bool,
-    expanded_folders: HashSet<PathBuf>,
+    expanded_folders: ExpandedFolders,
     view_rows: Arc<Vec<ViewRow>>,
-    /// One per row position, grown as the list grows and never made while rendering, so a row's
-    /// button keeps its hover and click state across renders.
-    button_states: Vec<MouseStateHandle>,
+    /// One per row, made when the row first appears and never while rendering, so a row's button
+    /// keeps its hover and click state across renders and rebuilds.
+    button_states: HashMap<RowKey, MouseStateHandle>,
     selected_index: Option<usize>,
     list_state: UniformListState,
     scroll_state: ScrollStateHandle,
@@ -318,9 +395,9 @@ impl AgentSessionsView {
             past_by_folder: PastByFolder::new(),
             built_query: String::new(),
             history_loaded: false,
-            expanded_folders: HashSet::new(),
+            expanded_folders: ExpandedFolders::new(),
             view_rows: Arc::new(Vec::new()),
-            button_states: Vec::new(),
+            button_states: HashMap::new(),
             selected_index: None,
             list_state: UniformListState::new(),
             scroll_state: Arc::new(Mutex::new(Default::default())),
@@ -366,11 +443,12 @@ impl AgentSessionsView {
         self.history_loaded = true;
         let selected = self
             .selected_index
-            .and_then(|index| self.view_rows.get(index).cloned());
+            .and_then(|index| self.view_rows.get(index))
+            .map(ViewRow::key);
         self.set_rows(past);
         self.rebuild_view_rows(ctx);
         self.selected_index = selected
-            .and_then(|selected| self.view_rows.iter().position(|row| *row == selected))
+            .and_then(|selected| self.index_of(&selected))
             .filter(|index| self.is_selectable(*index));
     }
 
@@ -411,9 +489,8 @@ impl AgentSessionsView {
         if let Some(error) = &self.supervisor_error {
             rows.extend(supervisor_rows(error));
         }
-        if self.button_states.len() < rows.len() {
-            self.button_states
-                .resize_with(rows.len(), MouseStateHandle::default);
+        for row in &rows {
+            self.button_states.entry(row.key()).or_default();
         }
         self.view_rows = Arc::new(rows);
         self.selected_index = self
@@ -442,6 +519,10 @@ impl AgentSessionsView {
             EditorEvent::Escape => ctx.emit(AgentSessionsViewEvent::Close),
             _ => {}
         }
+    }
+
+    fn index_of(&self, key: &RowKey) -> Option<usize> {
+        self.view_rows.iter().position(|row| row.key() == *key)
     }
 
     fn is_selectable(&self, index: usize) -> bool {
@@ -481,25 +562,9 @@ impl AgentSessionsView {
         }
     }
 
-    /// The pane a past row is listed under, which is where it resumes.
-    fn owning_pane(&self, index: usize) -> Option<PaneViewLocator> {
-        self.view_rows[..index]
-            .iter()
-            .rev()
-            .find_map(|row| match row {
-                ViewRow::Pane { input, .. } => Some(input.locator),
-                ViewRow::TabHeader { .. }
-                | ViewRow::PastToggle { .. }
-                | ViewRow::Past { .. }
-                | ViewRow::DetachedHeader { .. }
-                | ViewRow::Detached { .. }
-                | ViewRow::SupervisorUnreachable => None,
-            })
-    }
-
     fn past_action(&self, index: usize) -> Option<AgentSessionAction> {
         match self.view_rows.get(index)? {
-            ViewRow::Past { row } => action_for(row, self.owning_pane(index)),
+            ViewRow::Past { row, target } => action_for(row, Some(*target)),
             ViewRow::TabHeader { .. }
             | ViewRow::Pane { .. }
             | ViewRow::PastToggle { .. }
@@ -521,9 +586,12 @@ impl AgentSessionsView {
                 }
                 ViewRowAction::None => {}
             },
-            ViewRow::PastToggle { folder, .. } => {
-                if !self.expanded_folders.remove(&folder) {
-                    self.expanded_folders.insert(folder);
+            ViewRow::PastToggle {
+                tab_index, folder, ..
+            } => {
+                let expansion = (tab_index, folder);
+                if !self.expanded_folders.remove(&expansion) {
+                    self.expanded_folders.insert(expansion);
                 }
                 self.selected_index = Some(index);
                 self.rebuild_view_rows(ctx);
@@ -556,10 +624,11 @@ impl AgentSessionsView {
                 range
                     .filter_map(|index| {
                         let row = view_rows.get(index)?;
-                        let button_state = button_states.get(index)?.clone();
+                        let key = row.key();
+                        let button_state = button_states.get(&key)?.clone();
                         Some(render_row(
                             row,
-                            index,
+                            key,
                             selected_index == Some(index),
                             button_state,
                             app,
@@ -603,7 +672,7 @@ fn session_label(row: &AgentSessionRow) -> String {
 
 fn render_row(
     row: &ViewRow,
-    index: usize,
+    key: RowKey,
     is_selected: bool,
     button_state: MouseStateHandle,
     app: &AppContext,
@@ -619,7 +688,7 @@ fn render_row(
 
     let (indent, label, detail, button): (f32, Box<dyn Element>, Option<String>, Option<&str>) =
         match row {
-            ViewRow::TabHeader { title } => (
+            ViewRow::TabHeader { title, .. } => (
                 12.,
                 text(title.clone(), main_color).with_style(bold()).finish(),
                 None,
@@ -668,7 +737,7 @@ fn render_row(
                     .finish();
                 (PANE_INDENT, label, None, None)
             }
-            ViewRow::Past { row } => (
+            ViewRow::Past { row, .. } => (
                 PAST_INDENT,
                 text(session_label(row), main_color).finish(),
                 row.last_used.map(|last_used| {
@@ -714,7 +783,7 @@ fn render_row(
         .with_child(Shrinkable::new(1.0, detail).finish());
     let is_toggle = matches!(row, ViewRow::PastToggle { .. });
     if let Some(button) = button {
-        line = line.with_child(render_button(button, index, button_state.clone(), app));
+        line = line.with_child(render_button(button, key.clone(), button_state.clone(), app));
     }
 
     let mut container = Container::new(line.finish())
@@ -733,14 +802,14 @@ fn render_row(
     Hoverable::new(button_state, move |_| row_element)
         .with_cursor(Cursor::PointingHand)
         .on_click(move |ctx, _, _| {
-            ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(index));
+            ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(key.clone()));
         })
         .finish()
 }
 
 fn render_button(
     label: &str,
-    index: usize,
+    key: RowKey,
     mouse_state: MouseStateHandle,
     app: &AppContext,
 ) -> Box<dyn Element> {
@@ -768,7 +837,7 @@ fn render_button(
     })
     .with_cursor(Cursor::PointingHand)
     .on_click(move |ctx, _, _| {
-        ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(index));
+        ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(key.clone()));
     })
     .finish()
 }
@@ -798,7 +867,11 @@ impl TypedActionView for AgentSessionsView {
             AgentSessionsViewAction::ArrowUp => self.move_selection(false, ctx),
             AgentSessionsViewAction::ArrowDown => self.move_selection(true, ctx),
             AgentSessionsViewAction::Enter => self.activate_selected(ctx),
-            AgentSessionsViewAction::Activate(index) => self.activate(*index, ctx),
+            AgentSessionsViewAction::Activate(key) => {
+                if let Some(index) = self.index_of(key) {
+                    self.activate(index, ctx);
+                }
+            }
         }
     }
 }

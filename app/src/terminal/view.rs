@@ -503,8 +503,8 @@ use crate::terminal::waterfall_gap_element::WaterfallGapElement;
 use crate::terminal::writeable_pty::{PtyIntent, PtyIntentEvent, TerminalSurface};
 use crate::terminal::{
     AudibleBell, BlockListSettings, BlockListSettingsChangedEvent, CellSizeAndWindowPadding,
-    History, HistoryEntry, ShellHost, ShellLaunchData, SizeInfo, SizeUpdate, SizeUpdateReason,
-    color, element_size_at_last_frame, height_in_range_approx, heights_approx_eq,
+    History, HistoryEntry, HistoryEvent, ShellHost, ShellLaunchData, SizeInfo, SizeUpdate,
+    SizeUpdateReason, color, element_size_at_last_frame, height_in_range_approx, heights_approx_eq,
     heights_approx_gt, heights_approx_gte, prompt,
 };
 use crate::terminal::{
@@ -3655,6 +3655,16 @@ impl TerminalView {
                 _ => {}
             },
         );
+
+        // A pending command is refused until its session's history is registered, and at an
+        // idle prompt nothing else would try it again, leaving it typed in the input forever.
+        ctx.subscribe_to_model(&History::handle(ctx), |me, _, event, ctx| match event {
+            HistoryEvent::Initialized(_) => {
+                if me.input.as_ref(ctx).has_pending_command() {
+                    me.execute_pending_command((), ctx);
+                }
+            }
+        });
 
         ctx.subscribe_to_model(&PaneSettings::handle(ctx), |_, _, event, ctx| {
             if matches!(

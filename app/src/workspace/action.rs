@@ -961,6 +961,12 @@ pub enum WorkspaceAction {
     /// Opens (or focuses) the in-app network log pane as a right-split of the
     /// active pane group. Gated on `ContextFlag::NetworkLogConsole`.
     OpenNetworkLogPane,
+    /// Opens (or focuses) the AgentCtrl fleet pane as a right-split of the active pane group.
+    OpenAgentCtrlFleetPane,
+    /// Opens the AgentCtrl staging run `job_id` in the managed-session viewer, in a new tab.
+    OpenManagedSession {
+        job_id: String,
+    },
     /// Opens or focuses a window scoped to the specified team.
     OpenNewWindowForTeam {
         team_uid: ServerId,
@@ -1103,6 +1109,7 @@ impl WorkspaceAction {
             | ConfirmStartAgentOnAgentCtrl { .. }
             | MoveAllAgentSessionsHere
             | ConfirmMoveAllAgentSessions { .. }
+            | OpenManagedSession { .. }
             | AttachDetachedSession { .. }
             | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets
@@ -1314,6 +1321,7 @@ impl WorkspaceAction {
             | ShowCloudModeV2EnvironmentCreationModal
             | OpenCreateAuthSecretModal { .. }
             | OpenNetworkLogPane
+            | OpenAgentCtrlFleetPane
             | OpenNewWindowForTeam { .. }
             | ShowTeamSwitcherMenu => false,
             #[cfg(debug_assertions)]

@@ -210,6 +210,9 @@ pub enum LeafContents {
     /// The in-app network log pane. Not persisted across restarts because the
     /// backing log is an in-memory ring buffer that starts empty on launch.
     NetworkLog,
+    /// The AgentCtrl fleet pane. Not persisted: it shows live dashboard state and is reopened
+    /// from the command palette.
+    AgentCtrlFleet,
     /// A new first-time user experience which prioritizes choosing a coding repository.
     GetStarted,
 }
@@ -231,6 +234,7 @@ impl LeafContents {
             // starts empty on launch; persisting would also regress back to
             // an on-disk log via the app-state database.
             LeafContents::NetworkLog
+            | LeafContents::AgentCtrlFleet
             // Environment management panes are opened on-demand via workspace
             // actions and have no persistable state.
             | LeafContents::EnvironmentManagement(_) => false,

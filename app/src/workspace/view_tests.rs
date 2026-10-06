@@ -7434,6 +7434,23 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
             toasts.contains(&"Moved to AgentCtrl as job-cut".to_owned()),
             "{toasts:?}"
         );
+        let links = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .toast_stack
+                    .as_ref(ctx)
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .map(|(text, action)| (text.to_owned(), action.cloned()))
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert!(
+            links.iter().any(|(text, action)| text == "Open fleet"
+                && matches!(action, Some(WorkspaceAction::OpenAgentCtrlFleetPane))),
+            "{links:?}"
+        );
     });
 }
 
@@ -7961,6 +7978,165 @@ fn move_all_agent_sessions_confirms_the_project_folder_then_runs_the_cli_in_a_ne
         );
         assert!(
             buffer.contains(&*folder.file_name().unwrap().to_string_lossy()),
+            "{buffer}"
+        );
+    });
+}
+
+fn list_no_runs() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    Ok(Default::default())
+}
+
+fn start_nothing(_: &str, _: &str) -> anyhow::Result<String> {
+    anyhow::bail!("tests never start a run")
+}
+
+fn stop_nothing(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("tests never stop a run")
+}
+
+/// Registers the fleet singletons with a backend that never reaches the dashboard.
+fn initialize_app_for_fleet(app: &mut App) {
+    use crate::agent_ctrl::FleetPaneManager;
+    use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
+
+    initialize_app_for_move_session(app);
+    app.add_singleton_model(|_| {
+        FleetModel::with_backend(FleetBackend {
+            list: list_no_runs,
+            start: start_nothing,
+            stop: stop_nothing,
+        })
+    });
+    app.add_singleton_model(|_| FleetPaneManager::default());
+}
+
+fn fleet_pane_ids(workspace: &ViewHandle<Workspace>, app: &mut App) -> Vec<PaneId> {
+    app.read(|ctx| {
+        workspace.read(ctx, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            pane_group
+                .pane_ids()
+                .filter(|pane_id| {
+                    pane_group
+                        .downcast_pane_by_id::<crate::pane_group::AgentCtrlFleetPane>(*pane_id)
+                        .is_some()
+                })
+                .collect()
+        })
+    })
+}
+
+#[test]
+fn open_agent_ctrl_fleet_binding_is_registered_for_the_palette() {
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:open_agent_ctrl_fleet")
+                .expect("the fleet binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::OpenAgentCtrlFleetPane)
+            ));
+            let editable = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == "workspace:open_agent_ctrl_fleet")
+                .expect("the fleet binding is editable");
+            assert!(
+                editable
+                    .description
+                    .in_context(warpui::keymap::DescriptionContext::Default)
+                    .eq_ignore_ascii_case("Open AgentCtrl fleet")
+            );
+            let context = warpui::keymap::Context {
+                set: ["Workspace"].into_iter().collect(),
+                ..Default::default()
+            };
+            assert!(editable.in_context(&context));
+        });
+    });
+}
+
+#[test]
+fn open_agent_ctrl_fleet_adds_one_pane_and_focuses_it_when_asked_again() {
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        let fleet_panes = fleet_pane_ids(&workspace, &mut app);
+        assert_eq!(fleet_panes.len(), 1);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().clone();
+            let terminal_pane = pane_group
+                .as_ref(ctx)
+                .pane_ids()
+                .find(|pane_id| !fleet_panes.contains(pane_id))
+                .expect("the terminal pane is still there");
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.focus_pane_by_id(terminal_pane, ctx)
+            });
+        });
+        assert_ne!(
+            workspace.read(&app, |workspace, ctx| workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_pane_id(ctx)),
+            fleet_panes[0]
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        assert_eq!(fleet_pane_ids(&workspace, &mut app), fleet_panes);
+        assert_eq!(
+            workspace.read(&app, |workspace, ctx| workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_pane_id(ctx)),
+            fleet_panes[0]
+        );
+    });
+}
+
+#[test]
+fn open_managed_session_runs_the_viewer_in_a_new_tab() {
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let tabs_before = workspace.read(&app, |workspace, _| workspace.tab_count());
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::OpenManagedSession {
+                    job_id: "job-1".to_owned(),
+                },
+                ctx,
+            )
+        });
+
+        assert_eq!(
+            workspace.read(&app, |workspace, _| workspace.tab_count()),
+            tabs_before + 1
+        );
+        let buffer = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("the new tab has a terminal pane");
+            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            buffer.ends_with(" agent-ctrl open job-1 --environment staging"),
             "{buffer}"
         );
     });

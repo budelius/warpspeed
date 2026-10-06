@@ -193,6 +193,7 @@ use focus_state::PaneGroupFocusState;
 #[path = "mod_tests.rs"]
 mod tests;
 
+pub use pane::agent_ctrl_fleet_pane::AgentCtrlFleetPane;
 pub use pane::ai_document_pane::AIDocumentPane;
 pub use pane::ai_fact_pane::AIFactPane;
 pub use pane::code_diff_pane::CodeDiffPane;
@@ -2133,6 +2134,9 @@ impl PaneGroup {
                     "Network log pane should not have been persisted, as it cannot be restored"
                 ))
             }
+            LeafContents::AgentCtrlFleet => Err(anyhow::anyhow!(
+                "AgentCtrl fleet pane should not have been persisted, as it cannot be restored"
+            )),
             LeafContents::GetStarted => {
                 if !FeatureFlag::GetStartedTab.is_enabled() {
                     Err(anyhow::anyhow!("GetStarted pane not supported"))

@@ -1,5 +1,6 @@
 #![allow(clippy::doc_lazy_continuation)]
 
+mod agent_ctrl;
 #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
 mod agent_ctrl_fleet_cli;
 #[cfg(feature = "local_fs")]
@@ -1918,6 +1919,8 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|_| RecordingController::new());
     ctx.add_singleton_model(|_| ExecutionProfileEditorManager::default());
     ctx.add_singleton_model(|_| NetworkLogPaneManager::default());
+    ctx.add_singleton_model(|_| agent_ctrl::FleetPaneManager::default());
+    ctx.add_singleton_model(|_| agent_ctrl::fleet_model::FleetModel::new());
     ctx.add_singleton_model(|_| pricing::PricingInfoModel::new());
     ctx.add_singleton_model(ai::pricing_promotion::PricingPromotionState::new);
     ctx.add_singleton_model(|ctx| {

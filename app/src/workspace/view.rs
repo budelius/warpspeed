@@ -163,6 +163,7 @@ use super::util::{
     WorkspaceMouseStates, WorkspaceState,
 };
 use super::{ActiveSession, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry, util};
+use crate::agent_ctrl::FleetPaneManager;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::agent::CancellationReason;
@@ -305,10 +306,10 @@ use crate::palette::PaletteMode;
 use crate::pane_group::FilePane;
 use crate::pane_group::pane::ActionOrigin;
 use crate::pane_group::{
-    self, AIFactPane, AnyPaneContent, ChildAgentOrigin, CodeDiffPane, CodePane, CodeReviewPanelArg,
-    CustomRouterEditorPane, Direction as PaneGroupDirection, Direction, EnvironmentManagementPane,
-    ExecutionProfileEditorPane, NetworkLogPane, NewTerminalOptions, PaneGroup, PaneId, PanesLayout,
-    TabBarHoverIndex, TerminalPaneId,
+    self, AIFactPane, AgentCtrlFleetPane, AnyPaneContent, ChildAgentOrigin, CodeDiffPane, CodePane,
+    CodeReviewPanelArg, CustomRouterEditorPane, Direction as PaneGroupDirection, Direction,
+    EnvironmentManagementPane, ExecutionProfileEditorPane, NetworkLogPane, NewTerminalOptions,
+    PaneGroup, PaneId, PanesLayout, TabBarHoverIndex, TerminalPaneId,
 };
 use crate::persistence::ModelEvent;
 use crate::projects::ProjectManagementModel;
@@ -14435,7 +14436,10 @@ impl Workspace {
         match outcome {
             MoveStep::Done { job_id } => self.show_agent_ctrl_move_toast(
                 terminal_view_id,
-                DismissibleToast::success(format!("Moved to AgentCtrl as {job_id}")),
+                DismissibleToast::success(format!("Moved to AgentCtrl as {job_id}")).with_link(
+                    ToastLink::new("Open fleet".to_owned())
+                        .with_onclick_action(WorkspaceAction::OpenAgentCtrlFleetPane),
+                ),
                 false,
                 ctx,
             ),
@@ -17867,6 +17871,50 @@ impl Workspace {
                 ctx,
             );
         });
+    }
+
+    /// Opens the AgentCtrl fleet pane as a right-split of the active pane group, or refreshes and
+    /// focuses the window's open one.
+    pub(crate) fn open_agent_ctrl_fleet_pane(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(locator) = FleetPaneManager::as_ref(ctx).find_pane(ctx.window_id()) {
+            if let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.pane_group.id() == locator.pane_group_id)
+            {
+                let pane_group = tab.pane_group.clone();
+                let fleet_view = pane_group.read(ctx, |pane_group, ctx| {
+                    pane_group
+                        .downcast_pane_by_id::<AgentCtrlFleetPane>(locator.pane_id)
+                        .map(|pane| pane.fleet_view(ctx))
+                });
+                if let Some(fleet_view) = fleet_view {
+                    fleet_view.update(ctx, |view, ctx| view.refresh(ctx));
+                }
+            }
+            self.focus_pane(locator, ctx);
+            return;
+        }
+
+        let pane = AgentCtrlFleetPane::new(ctx);
+        self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+            pane_group.add_pane_with_direction(
+                Direction::Right,
+                pane,
+                true, /* focus_new_pane */
+                ctx,
+            );
+        });
+    }
+
+    fn open_managed_session_in_new_tab(&mut self, job_id: &str, ctx: &mut ViewContext<Self>) {
+        let arguments = managed_agent_sessions::ManagedSessionDeepLink {
+            environment: warp_cli::managed_sessions::ManagedEnvironment::Staging,
+            job_id: job_id.to_owned(),
+        }
+        .cli_arguments();
+        self.add_terminal_tab(false, ctx);
+        self.execute_managed_session_command(&arguments, ctx);
     }
 
     fn show_handoff_environment_creation_modal(&mut self, ctx: &mut ViewContext<Self>) {
@@ -26896,6 +26944,8 @@ impl TypedActionView for Workspace {
             OpenNetworkLogPane => {
                 self.open_network_log_pane(ctx);
             }
+            OpenAgentCtrlFleetPane => self.open_agent_ctrl_fleet_pane(ctx),
+            OpenManagedSession { job_id } => self.open_managed_session_in_new_tab(job_id, ctx),
             FixSettingsWithOz { error_description } => {
                 use crate::ai::skills::SkillManager;
                 let modify_settings_skill = SkillManager::as_ref(ctx)

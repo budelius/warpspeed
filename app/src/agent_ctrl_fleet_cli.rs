@@ -18,7 +18,7 @@ use managed_agent_sessions::{list_repositories, normalize_repo_url};
 use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, ManagedSessionsCommand};
 
 use crate::remote_control::address;
-use crate::remote_control::client::Instance;
+use crate::remote_control::client::{self, Instance};
 use crate::remote_control::protocol::{PROTOCOL_VERSION, PaneSummary, Request, Response};
 use crate::terminal::CLIAgent;
 use crate::terminal::agent_session_handoff::repo_url_for;
@@ -28,9 +28,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 const MOVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// How many status answers in a row may be missing before a move counts as lost. One missed
-/// answer is ordinary while the instance's main thread is busy cutting a pane over.
-const MAX_CONSECUTIVE_UNANSWERED: usize = 3;
+/// How many `none` answers, or failures to reach the instance at all, in a row end a move as
+/// lost. A single `none` can race the instance recording a move it has just accepted.
+const MAX_CONSECUTIVE_LOST: usize = 3;
 
 const LOG_FILE_NAME: &str = "agentctrl-move-all.log";
 
@@ -201,7 +201,11 @@ fn plan_one(
             non_empty(pane.agent_cwd.as_deref())
                 .map(|cwd| (PathBuf::from(cwd), SourceOrigin::HookCwd))
         })
-        .or_else(|| history(agent, session_id).map(|cwd| (cwd, SourceOrigin::SessionHistory)))
+        .or_else(|| {
+            history(agent, session_id)
+                .filter(|cwd| !cwd.as_os_str().is_empty())
+                .map(|cwd| (cwd, SourceOrigin::SessionHistory))
+        })
         .ok_or(Skip::NoDirectory)?;
 
     if !is_under(&cwd, under) {
@@ -222,19 +226,35 @@ fn plan_one(
     })
 }
 
+/// A status request failed because the instance is no longer running, as opposed to answering
+/// slowly.
+#[derive(Debug)]
+pub(crate) struct InstanceGone(pub String);
+
+impl fmt::Display for InstanceGone {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InstanceGone {}
+
 /// Asks for a move's step every `interval` until it is done or failed, or `timeout` has passed.
 ///
-/// `call` answers with the step's wire form (see [`Response::MoveState`]).
+/// `call` answers with the step's wire form (see [`Response::MoveState`]). Errors other than
+/// [`InstanceGone`] are retried until the timeout without counting against the move.
 pub(crate) fn poll_until_terminal(
     call: &mut dyn FnMut() -> Result<String>,
     timeout: Duration,
     interval: Duration,
 ) -> MoveOutcome {
     let started = Instant::now();
-    let mut unanswered = 0;
+    let mut untracked = 0;
+    let mut gone = 0;
     loop {
         match call() {
             Ok(step) => {
+                gone = 0;
                 if let Some(job_id) = step.strip_prefix("done:") {
                     return MoveOutcome::Done {
                         job_id: job_id.to_owned(),
@@ -246,22 +266,24 @@ pub(crate) fn poll_until_terminal(
                     };
                 }
                 if step == "none" {
-                    unanswered += 1;
-                    if unanswered >= MAX_CONSECUTIVE_UNANSWERED {
+                    untracked += 1;
+                    if untracked >= MAX_CONSECUTIVE_LOST {
                         return MoveOutcome::Failed {
-                            reason: "the instance no longer tracks this move".to_owned(),
+                            reason: "the instance has no record of this move".to_owned(),
                         };
                     }
                 } else {
-                    unanswered = 0;
+                    untracked = 0;
                 }
             }
             Err(error) => {
-                unanswered += 1;
-                if unanswered >= MAX_CONSECUTIVE_UNANSWERED {
-                    return MoveOutcome::Failed {
-                        reason: format!("{error:#}"),
-                    };
+                if let Some(InstanceGone(reason)) = error.downcast_ref::<InstanceGone>() {
+                    gone += 1;
+                    if gone >= MAX_CONSECUTIVE_LOST {
+                        return MoveOutcome::Failed {
+                            reason: reason.clone(),
+                        };
+                    }
                 }
             }
         }
@@ -337,10 +359,14 @@ impl SessionHistory {
             .borrow_mut()
             .entry(agent)
             .or_insert_with(|| {
-                agent_session_history::find_all(agent)
-                    .into_iter()
-                    .map(|session| (session.session_id, session.cwd))
-                    .collect()
+                // `find_all` lists newest first, and the newest record of a session wins.
+                let mut cwds = HashMap::new();
+                for session in agent_session_history::find_all(agent) {
+                    if !session.cwd.as_os_str().is_empty() {
+                        cwds.entry(session.session_id).or_insert(session.cwd);
+                    }
+                }
+                cwds
             })
             .get(session_id)
             .cloned()
@@ -450,10 +476,15 @@ fn move_one(instance: &Instance, terminal_view_id: u64) -> MoveOutcome {
             };
         }
     }
-    let mut status = || match instance.call(Request::MoveStatus { terminal_view_id })? {
-        Response::MoveState { step } => Ok(step),
-        Response::Failed { error } => bail!(error),
-        other => bail!("unexpected answer to a move status: {other:?}"),
+    let pid = instance.pid();
+    let mut status = || match instance.call(Request::MoveStatus { terminal_view_id }) {
+        Ok(Response::MoveState { step }) => Ok(step),
+        Ok(Response::Failed { error }) => bail!(error),
+        Ok(other) => bail!("unexpected answer to a move status: {other:?}"),
+        Err(error) if !client::is_listening(pid) => {
+            Err(InstanceGone(format!("instance {pid} stopped answering: {error:#}")).into())
+        }
+        Err(error) => Err(error),
     };
     poll_until_terminal(&mut status, MOVE_TIMEOUT, POLL_INTERVAL)
 }

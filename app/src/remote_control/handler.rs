@@ -244,10 +244,15 @@ fn move_session_to_agent_ctrl(_terminal_view_id: u64, _ctx: &mut AppContext) -> 
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 fn move_status(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+    use warpui::SingletonEntity;
+
+    // Looked up in every workspace's moves rather than through the workspace holding the pane:
+    // a pane closed mid-move is in no tab, yet its move carries on to an outcome.
     let step = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
-        workspace_holding_terminal_view(view_id, ctx)?
-            .as_ref(ctx)
-            .agent_ctrl_move_step(view_id)
+        crate::workspace::WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .find_map(|(_, workspace)| workspace.as_ref(ctx).agent_ctrl_move_step(view_id))
     });
     Response::MoveState {
         step: move_step_label(step.as_ref()),

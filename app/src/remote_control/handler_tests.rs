@@ -242,3 +242,34 @@ fn move_steps_have_stable_labels() {
         assert_eq!(move_step_label(step.as_ref()), label);
     }
 }
+
+#[test]
+fn move_status_reports_the_move_of_a_pane_closed_mid_move() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        // A terminal view in no tab of any window, as a pane closed during its move is.
+        let closed_view_id = EntityId::new();
+
+        workspace.update(&mut app, |workspace, _| {
+            workspace.set_agent_ctrl_move_step_for_test(
+                closed_view_id,
+                MoveStep::CuttingOver {
+                    job_id: "job-1".to_owned(),
+                },
+            )
+        });
+        assert_eq!(move_status(closed_view_id, &mut app), "cutting_over");
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.finish_agent_ctrl_move_for_test(
+                closed_view_id,
+                MoveStep::Done {
+                    job_id: "job-1".to_owned(),
+                },
+                ctx,
+            )
+        });
+        assert_eq!(move_status(closed_view_id, &mut app), "done:job-1");
+    });
+}

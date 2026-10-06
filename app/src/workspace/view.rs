@@ -13982,6 +13982,25 @@ impl Workspace {
         Ok(())
     }
 
+    #[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn set_agent_ctrl_move_step_for_test(
+        &mut self,
+        terminal_view_id: EntityId,
+        step: MoveStep,
+    ) {
+        self.agent_ctrl_moves.insert(terminal_view_id, step);
+    }
+
+    #[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn finish_agent_ctrl_move_for_test(
+        &mut self,
+        terminal_view_id: EntityId,
+        outcome: MoveStep,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.finish_agent_ctrl_move(terminal_view_id, outcome, ctx);
+    }
+
     /// The step the move of `terminal_view_id` to AgentCtrl is at, or how the last one ended.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     pub(crate) fn agent_ctrl_move_step(&self, terminal_view_id: EntityId) -> Option<MoveStep> {

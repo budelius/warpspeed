@@ -326,7 +326,8 @@ fn polling_gives_up_after_the_timeout() {
 
 #[test]
 fn polling_fails_once_the_instance_stops_answering() {
-    let mut call = || -> anyhow::Result<String> { anyhow::bail!("pipe closed") };
+    let mut call =
+        || -> anyhow::Result<String> { Err(InstanceGone("pipe closed".to_owned()).into()) };
     let outcome = poll_until_terminal(&mut call, Duration::from_secs(60), Duration::ZERO);
     let MoveOutcome::Failed { reason } = outcome else {
         panic!("expected a failure, got {outcome:?}");
@@ -366,4 +367,63 @@ fn move_all_is_routed_to_this_module() {
         panic!("expected an agent-ctrl command");
     };
     assert!(move_all_request(managed).is_none());
+}
+
+#[test]
+fn polling_retries_slow_answers_without_giving_up_the_move() {
+    let mut answers = (0..5)
+        .map(|_| Err(anyhow::anyhow!("did not answer within 20 seconds")))
+        .chain([Ok("done:job-1".to_owned())]);
+    let mut call = || answers.next().expect("polling stops at done");
+    let outcome = poll_until_terminal(&mut call, Duration::from_secs(60), Duration::ZERO);
+    assert_eq!(
+        outcome,
+        MoveOutcome::Done {
+            job_id: "job-1".to_owned()
+        }
+    );
+}
+
+#[test]
+fn polling_forgives_none_answers_that_a_real_step_interrupts() {
+    let (outcome, _) = poll(
+        &["none", "preparing", "none", "none", "done:job-1"],
+        Duration::from_secs(60),
+    );
+    assert_eq!(
+        outcome,
+        MoveOutcome::Done {
+            job_id: "job-1".to_owned()
+        }
+    );
+}
+
+#[test]
+fn polling_follows_a_move_whose_pane_was_closed_to_its_outcome() {
+    let (outcome, _) = poll(
+        &["preparing", "cutting_over", "done:job-1"],
+        Duration::from_secs(60),
+    );
+    assert_eq!(
+        outcome,
+        MoveOutcome::Done {
+            job_id: "job-1".to_owned()
+        }
+    );
+}
+
+#[test]
+fn an_empty_history_directory_counts_as_no_directory() {
+    let panes = [(
+        10,
+        pane(PaneSpec {
+            working_directory: "",
+            ..Default::default()
+        }),
+    )];
+    let history = |_: CLIAgent, _: &str| Some(PathBuf::new());
+    let (sources, skipped) = plan(&panes, &history, &configured_repo);
+
+    assert!(sources.is_empty());
+    assert_eq!(skipped[0].1, Skip::NoDirectory);
 }

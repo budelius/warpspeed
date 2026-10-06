@@ -167,7 +167,7 @@ pub struct TerminalManager<S> {
     /// repaint the session's screen. Set only when the pane is opening onto a
     /// detached session, which leaves it with nothing else to show.
     repaint_screen_on_attach: bool,
-    cli_agent_resume_command: Option<String>,
+    pub(super) cli_agent_resume_command: Option<String>,
     #[cfg(unix)]
     pub(super) persistent_server_client:
         Option<Arc<crate::terminal::local_tty::server::TerminalServerClient>>,
@@ -871,6 +871,12 @@ impl<S> TerminalManager<S> {
         self.deferred_shell
             .as_ref()
             .and_then(|shell| shell.startup_directory.clone())
+    }
+
+    /// The agent resume command waiting for this pane's shell to start.
+    #[cfg(test)]
+    pub(crate) fn cli_agent_resume_command(&self) -> Option<&str> {
+        self.cli_agent_resume_command.as_deref()
     }
 
     /// Returns the terminal model owned by this manager.

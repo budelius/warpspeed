@@ -4752,6 +4752,63 @@ fn test_parked_restored_pane_round_trips_its_agent() {
     });
 }
 
+/// The resume command a pane is restored with must reach its terminal manager, which runs it once
+/// the shell starts. A manager that drops it restores a plain shell and the agent never resumes.
+#[test]
+fn test_restored_pane_hands_its_resume_command_to_the_terminal_manager() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let mut snapshot = terminal_leaf_snapshot(Some(cwd.clone()), None);
+        if let PaneNodeSnapshot::Leaf(leaf) = &mut snapshot
+            && let LeafContents::Terminal(terminal) = &mut leaf.contents
+        {
+            terminal.cli_agent_resume_descriptor =
+                Some(crate::app_state::CliAgentResumeDescriptor {
+                    agent: crate::terminal::CLIAgent::Claude,
+                    session_id: Some("restored-session".to_owned()),
+                    cwd: PathBuf::from(&cwd),
+                    title: None,
+                    captured_unix_seconds: Some(1),
+                });
+        }
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+
+        let resume_command = app.read(|ctx| {
+            manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<TerminalManager<crate::terminal::TerminalView>>()
+                    .expect("a restored pane runs on the GUI terminal manager")
+                    .cli_agent_resume_command()
+                    .map(str::to_owned)
+            })
+        });
+        assert_eq!(
+            resume_command.as_deref(),
+            Some("claude --resume restored-session"),
+            "the restored pane's resume command must wait in its terminal manager"
+        );
+    });
+}
+
 /// A restored agent pane whose tab nobody has opened has no live agent session, so anything
 /// listing agents must ask for the restored one or report the pane as having none.
 #[test]

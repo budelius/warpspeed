@@ -14,6 +14,7 @@ use crate::search::mixer::SearchMixer;
 use crate::server::ids::SyncId;
 use crate::util::bindings::CommandBinding;
 use crate::workspace::PaneViewLocator;
+use crate::workspace::agent_session_actions::AgentSessionAction;
 
 pub type CommandPaletteMixer = SearchMixer<CommandPaletteItemAction>;
 
@@ -54,6 +55,9 @@ pub enum CommandPaletteItemAction {
     },
     ForkConversation {
         conversation_id: AIConversationId,
+    },
+    AgentSession {
+        action: AgentSessionAction,
     },
     OpenLaunchConfiguration {
         config: Arc<LaunchConfig>,
@@ -114,6 +118,7 @@ impl CommandPaletteItemAction {
                 id: *conversation_id,
             },
             CommandPaletteItemAction::ForkConversation { .. } => ItemSummary::ForkConversation,
+            CommandPaletteItemAction::AgentSession { .. } => ItemSummary::AgentSession,
             CommandPaletteItemAction::NewSession { source } => ItemSummary::NewSession {
                 id: source.id().clone(),
             },
@@ -212,6 +217,8 @@ pub enum ItemSummary {
     },
     ForkConversation,
     NewConversation,
+    /// Agent sessions come and go between palette openings, so they are not kept as recents.
+    AgentSession,
     /// No-op action (used for non-interactable separator items that don't do anything on click).
     NoOp,
 }

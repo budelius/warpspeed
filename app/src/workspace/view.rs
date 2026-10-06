@@ -328,6 +328,7 @@ use crate::resource_center::{
 };
 use crate::reward_view::{RewardEvent, RewardKind, RewardView};
 use crate::root_view::{NewWorkspaceSource, OpenLaunchConfigArg, quake_mode_window_id};
+use crate::search::command_palette::agent_sessions::DataSource as AgentSessionsDataSource;
 use crate::search::command_palette::view::{
     Event as CommandPaletteEvent, NavigationMode, View as CommandPalette,
 };
@@ -400,6 +401,9 @@ use crate::terminal::agent_session_handoff::{
     stop_request_outcome,
 };
 use crate::terminal::agent_session_history::is_safe_session_id;
+use crate::terminal::agent_session_history_model::{
+    AgentSessionHistoryEvent, AgentSessionHistoryModel,
+};
 use crate::terminal::agent_sessions_index::{DetachedInput, PaneAgentInput};
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
@@ -1228,6 +1232,7 @@ pub struct Workspace {
     cached_keybindings: HashMap<String, Option<String>>,
     is_user_menu_open: bool,
     tab_bar_pinned_by_popup: bool,
+    is_subscribed_to_agent_session_history: bool,
     user_menu: ViewHandle<Menu<WorkspaceAction>>,
     native_modal: ViewHandle<NativeModal>,
     shared_objects_creation_denied_modal: ViewHandle<SharedObjectsCreationDeniedModal>,
@@ -3775,6 +3780,7 @@ impl Workspace {
             show_team_switcher_menu: false,
             is_user_menu_open: false,
             tab_bar_pinned_by_popup: false,
+            is_subscribed_to_agent_session_history: false,
             user_menu,
             native_modal,
             shared_objects_creation_denied_modal,
@@ -16956,6 +16962,97 @@ impl Workspace {
         ctx.notify();
     }
 
+    fn open_agent_sessions_mode_palette(&mut self, ctx: &mut ViewContext<Self>) {
+        self.load_agent_sessions_snapshot(ctx);
+        self.palette.update(ctx, |view, ctx| {
+            view.reset(ctx);
+            view.set_active_query_filter(QueryFilter::AgentSessions, ctx);
+            view.set_initial_selection_offset(0, ctx);
+        });
+        ctx.notify();
+    }
+
+    /// Opens the palette on agent sessions, with `folder` as the initial query when given.
+    pub(crate) fn open_agent_sessions_palette(
+        &mut self,
+        folder: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.open_palette_action(
+            PaletteMode::AgentSessions,
+            PaletteSource::AgentSessionsWindow,
+            folder.as_deref(),
+            ctx,
+        );
+    }
+
+    fn agent_sessions_data_source(&self, app: &AppContext) -> ModelHandle<AgentSessionsDataSource> {
+        self.palette
+            .as_ref(app)
+            .data_source_store
+            .as_ref(app)
+            .agent_sessions_data_source()
+            .clone()
+    }
+
+    /// Snapshots this window's agent sessions for the palette and refreshes past sessions in the
+    /// background. Asks the supervisor, so it runs once per opening rather than per query.
+    fn load_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.is_shared_session_viewer_focused(ctx) {
+            return;
+        }
+        if !self.is_subscribed_to_agent_session_history {
+            self.is_subscribed_to_agent_session_history = true;
+            ctx.subscribe_to_model(
+                &AgentSessionHistoryModel::handle(ctx),
+                |me, _, event, ctx| me.handle_agent_session_history_event(event, ctx),
+            );
+        }
+
+        let pane_group = self.active_tab_pane_group();
+        let focused = PaneViewLocator {
+            pane_group_id: pane_group.id(),
+            pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+        };
+        let (panes, detached) = self.agent_session_inputs(ctx);
+        let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
+        self.agent_sessions_data_source(ctx)
+            .update(ctx, |source, _| {
+                source.set_snapshot(panes, detached, Some(focused), &past);
+            });
+        AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
+    }
+
+    fn clear_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        self.agent_sessions_data_source(ctx)
+            .update(ctx, |source, _| source.clear());
+    }
+
+    fn handle_agent_session_history_event(
+        &mut self,
+        event: &AgentSessionHistoryEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            AgentSessionHistoryEvent::Updated => {
+                let source = self.agent_sessions_data_source(ctx);
+                if !source.as_ref(ctx).is_loaded() {
+                    return;
+                }
+                let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
+                source.update(ctx, |source, _| source.refresh_past(&past));
+                if self
+                    .palette
+                    .as_ref(ctx)
+                    .is_mode_enabled(PaletteMode::AgentSessions, ctx)
+                {
+                    self.palette
+                        .update(ctx, |palette, ctx| palette.rerun_query(ctx));
+                }
+            }
+        }
+    }
+
     fn open_ctrl_tab_palette(
         &mut self,
         query_filter: QueryFilter,
@@ -17081,6 +17178,7 @@ impl Workspace {
         self.current_workspace_state.is_palette_open = false;
         self.current_workspace_state.is_ctrl_tab_palette_open = false;
         self.tab_bar_pinned_by_popup = false;
+        self.clear_agent_sessions_snapshot(ctx);
         self.sync_window_button_visibility(ctx);
         if focus_active_tab
             // If the user did not do any action on the command palette (eg. closed via shortcut or clicking away)
@@ -17169,6 +17267,8 @@ impl Workspace {
         if matches!(source, PaletteSource::TitleBarSearchBar) {
             self.tab_bar_pinned_by_popup = true;
         }
+        // Each opening takes a fresh snapshot, so drop one a previous opening left behind.
+        self.clear_agent_sessions_snapshot(ctx);
         if matches!(source, PaletteSource::CtrlTab { .. }) {
             self.current_workspace_state.is_ctrl_tab_palette_open = true;
         } else {
@@ -17192,6 +17292,7 @@ impl Workspace {
             PaletteMode::WarpDrive => self.open_warp_drive_palette(ctx),
             PaletteMode::Files => self.open_files_palette(ctx),
             PaletteMode::Conversations => self.open_conversations_palette(ctx),
+            PaletteMode::AgentSessions => self.open_agent_sessions_mode_palette(ctx),
         }
 
         ctx.focus(&self.palette);
@@ -17330,6 +17431,13 @@ impl Workspace {
                         &[],
                         ctx,
                     );
+                }
+            }
+            CommandPaletteEvent::AgentSessionsFilterActivated => {
+                if !self.agent_sessions_data_source(ctx).as_ref(ctx).is_loaded() {
+                    self.load_agent_sessions_snapshot(ctx);
+                    self.palette
+                        .update(ctx, |palette, ctx| palette.rerun_query(ctx));
                 }
             }
             CommandPaletteEvent::OpenDirectory { path } => {

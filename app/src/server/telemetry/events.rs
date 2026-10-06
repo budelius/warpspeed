@@ -427,6 +427,7 @@ pub enum PaletteSource {
     PaneHeader,
     AgentTip,
     TitleBarSearchBar,
+    AgentSessionsWindow,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

@@ -96,17 +96,14 @@ impl ZeroState {
             valid_filters.push(QueryFilter::EnvironmentVariables);
         }
 
+        let is_shared_session_viewer_focused = app
+            .views_of_type::<Workspace>(window_id)
+            .and_then(|workspaces| workspaces.first().cloned())
+            .is_some_and(|workspace| workspace.as_ref(app).is_shared_session_viewer_focused(app));
+
         // Don't show Files filter if the user is a viewer of a shared session
-        if FeatureFlag::CommandPaletteFileSearch.is_enabled() {
-            let is_shared_session_viewer_focused = app
-                .views_of_type::<Workspace>(window_id)
-                .and_then(|workspaces| workspaces.first().cloned())
-                .is_some_and(|workspace| {
-                    workspace.as_ref(app).is_shared_session_viewer_focused(app)
-                });
-            if !is_shared_session_viewer_focused {
-                valid_filters.push(QueryFilter::Files);
-            }
+        if FeatureFlag::CommandPaletteFileSearch.is_enabled() && !is_shared_session_viewer_focused {
+            valid_filters.push(QueryFilter::Files);
         }
 
         if show_warp_drive {
@@ -120,6 +117,11 @@ impl ZeroState {
 
         if AISettings::as_ref(app).is_any_ai_enabled(app) {
             valid_filters.push(QueryFilter::Conversations);
+        }
+
+        // Agent sessions act on the local machine, which a shared-session viewer does not own.
+        if !is_shared_session_viewer_focused {
+            valid_filters.push(QueryFilter::AgentSessions);
         }
 
         valid_filters.into_iter()

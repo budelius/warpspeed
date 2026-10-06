@@ -103,6 +103,8 @@ pub enum Event {
     },
     /// Open a directory at the given path.
     OpenDirectory { path: String },
+    /// The agent sessions filter became active, so its snapshot of sessions should be taken.
+    AgentSessionsFilterActivated,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -352,6 +354,12 @@ impl View {
         ctx.notify();
     }
 
+    /// Re-runs the current query, for when a data source's contents changed under it.
+    pub fn rerun_query(&mut self, ctx: &mut ViewContext<Self>) {
+        self.search_bar
+            .update(ctx, |search_bar, ctx| search_bar.run_query(ctx));
+    }
+
     pub fn set_initial_selection_offset(&mut self, offset: isize, ctx: &mut ViewContext<Self>) {
         self.search_bar_state.update(ctx, move |state, _ctx| {
             state.offset_initial_selection_by(offset);
@@ -395,6 +403,7 @@ impl View {
                 | (PaletteMode::LaunchConfig, QueryFilter::LaunchConfigurations)
                 | (PaletteMode::Files, QueryFilter::Files)
                 | (PaletteMode::Conversations, QueryFilter::Conversations)
+                | (PaletteMode::AgentSessions, QueryFilter::AgentSessions)
                 | (PaletteMode::WarpDrive, QueryFilter::Drive)
         )
     }
@@ -553,6 +562,9 @@ impl View {
             // run_query.  Resetting the mixer here would abort the in-flight
             // async file search without re-running it, leaving the palette
             // empty.
+            SearchBarEvent::QueryFilterChanged {
+                new_filter: Some(QueryFilter::AgentSessions),
+            } => ctx.emit(Event::AgentSessionsFilterActivated),
             SearchBarEvent::QueryFilterChanged { .. } => {}
             SearchBarEvent::SelectionUpdateInZeroState { selection_update } => {
                 self.zero_state_items.update(ctx, |items, ctx| {
@@ -732,11 +744,19 @@ impl View {
         result_action: CommandPaletteItemAction,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Separators and agent sessions with nothing to reopen accept as a no-op, which should
+        // leave the palette open.
+        if matches!(result_action, CommandPaletteItemAction::NoOp) {
+            return;
+        }
+
         // Tab navigations don't appear in the main command palette to avoid confusion with session
-        // navigations, so they can't evict real recent items from SelectedItems.
+        // navigations, and agent sessions come and go between openings, so neither can evict real
+        // recent items from SelectedItems.
         if !matches!(
             result_action,
             CommandPaletteItemAction::NavigateToTab { .. }
+                | CommandPaletteItemAction::AgentSession { .. }
         ) {
             let selected_items_handle = SelectedItems::handle(ctx);
             selected_items_handle.update(ctx, |selected_items, _ctx| {
@@ -778,6 +798,14 @@ impl View {
                 }) => {
                     self.reset(ctx);
                     self.set_active_query_filter(QueryFilter::Conversations, ctx);
+                    return;
+                }
+                Some(WorkspaceAction::OpenPalette {
+                    mode: PaletteMode::AgentSessions,
+                    ..
+                }) => {
+                    self.reset(ctx);
+                    self.set_active_query_filter(QueryFilter::AgentSessions, ctx);
                     return;
                 }
                 Some(WorkspaceAction::TogglePalette {
@@ -869,6 +897,9 @@ impl View {
                     restore_layout: None,
                 });
                 send_telemetry_from_app_ctx!(TelemetryEvent::SelectNavigationPaletteItem, ctx);
+            }
+            CommandPaletteItemAction::AgentSession { action } => {
+                ctx.dispatch_typed_action(&WorkspaceAction::AgentSession(action));
             }
             CommandPaletteItemAction::ForkConversation { conversation_id } => {
                 ctx.dispatch_typed_action(&WorkspaceAction::ForkAIConversation {

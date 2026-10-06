@@ -6,7 +6,7 @@ use warp_core::features::FeatureFlag;
 use warpui::keymap::BindingId;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, WindowId};
 
-use super::{conversations, warp_drive};
+use super::{agent_sessions, conversations, warp_drive};
 use crate::drive::settings::WarpDriveSettings;
 use crate::search::QueryFilter;
 use crate::search::action::CommandBindingDataSource;
@@ -29,6 +29,7 @@ pub struct DataSourceStore {
     launch_config_data_source: ModelHandle<launch_config::DataSource>,
     new_session_data_source: Option<ModelHandle<NewSessionDataSource>>,
     all_conversation_data_source: ModelHandle<conversations::DataSource>,
+    agent_sessions_data_source: ModelHandle<agent_sessions::DataSource>,
     repo_data_source: ModelHandle<RepoDataSource>,
     tabs_data_source: Option<ModelHandle<tabs::DataSource>>,
 }
@@ -58,6 +59,8 @@ impl DataSourceStore {
         let all_conversation_data_source: ModelHandle<conversations::DataSource> =
             ctx.add_model(|_| conversations::DataSource::new());
 
+        let agent_sessions_data_source = ctx.add_model(|_| agent_sessions::DataSource::new());
+
         let repo_data_source = ctx.add_model(|_| RepoDataSource::new());
 
         Self {
@@ -67,6 +70,7 @@ impl DataSourceStore {
             launch_config_data_source,
             new_session_data_source,
             all_conversation_data_source,
+            agent_sessions_data_source,
             repo_data_source,
             tabs_data_source: None,
         }
@@ -151,6 +155,14 @@ impl DataSourceStore {
                 );
             }
 
+            // Agent sessions act on this machine, which a shared-session viewer does not own.
+            if !is_shared_session_viewer {
+                mixer.add_sync_source(
+                    self.agent_sessions_data_source.clone(),
+                    HashSet::from([QueryFilter::AgentSessions]),
+                );
+            }
+
             mixer.add_sync_source(
                 self.repo_data_source.clone(),
                 HashSet::from([QueryFilter::Repos]),
@@ -158,6 +170,10 @@ impl DataSourceStore {
 
             ctx.notify();
         });
+    }
+
+    pub(crate) fn agent_sessions_data_source(&self) -> &ModelHandle<agent_sessions::DataSource> {
+        &self.agent_sessions_data_source
     }
 
     /// Resets the [`CommandPaletteMixer`] to the set of data sources relevant for the Ctrl+Tab
@@ -298,6 +314,8 @@ impl DataSourceStore {
                 // as its use is specific to the conversation filter.
                 None
             }
+
+            ItemSummary::AgentSession => None,
 
             ItemSummary::NoOp => {
                 // No-op action (used for non-interactable separator items that don't do anything on click).

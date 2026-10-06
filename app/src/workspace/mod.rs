@@ -1264,6 +1264,16 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Workspace"))
         .with_custom_action(CustomAction::SearchDrive),
+        EditableBinding::new(
+            "workspace:search_agent_sessions",
+            "Agent sessions: search",
+            WorkspaceAction::OpenPalette {
+                mode: PaletteMode::AgentSessions,
+                source: PaletteSource::Keybinding,
+                query: None,
+            },
+        )
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession")),
     ]);
 
     if FeatureFlag::Autoupdate.is_enabled() {

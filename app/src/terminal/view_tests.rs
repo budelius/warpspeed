@@ -10550,3 +10550,66 @@ fn finish_restart_re_enables_an_editor_disabled_by_the_exit_it_is_replacing() {
         });
     });
 }
+
+/// A pane whose supervised shell outlived its connection must offer to reattach it, not report a
+/// dead shell: the pane stays open, and the reattach (a restart) takes the banner away again.
+#[cfg(feature = "local_tty")]
+#[test]
+fn a_detached_shell_shows_the_reattach_banner_and_keeps_the_pane_open() {
+    use crate::terminal::model::terminal_model::ExitReason;
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let exited_count = Rc::new(RefCell::new(0usize));
+        let exited_count_handle = exited_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::Exited = event {
+                    *exited_count_handle.borrow_mut() += 1;
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            view.is_login_shell_bootstrapped = true;
+            view.model.lock().exit(ExitReason::PtyDetached);
+            view.handle_terminal_event(
+                &ModelEvent::Exit {
+                    reason: ExitReason::PtyDetached,
+                },
+                ctx,
+            );
+
+            assert!(view.inline_banners_state.shell_detached_banner.is_some());
+            assert!(
+                view.inline_banners_state
+                    .shell_process_terminated_banner
+                    .is_none(),
+                "a shell that is still running must not be reported as exited"
+            );
+            view.input.read(ctx, |input, ctx| {
+                input.editor().read(ctx, |editor, ctx| {
+                    assert_eq!(
+                        editor.interaction_state(ctx),
+                        crate::editor::InteractionState::Disabled,
+                        "nothing can be typed into a pane with no connection to its shell"
+                    );
+                });
+            });
+
+            view.on_session_restart_started(ctx);
+            assert!(
+                view.inline_banners_state.shell_detached_banner.is_none(),
+                "reattaching must take the banner away"
+            );
+        });
+
+        assert_eq!(
+            *exited_count.borrow(),
+            0,
+            "a detached shell must not emit Event::Exited, which can close the pane"
+        );
+    });
+}

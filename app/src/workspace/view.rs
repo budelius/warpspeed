@@ -13447,6 +13447,23 @@ impl Workspace {
     /// if the pane has a long-running foreground command -- a running CLI
     /// agent counts too, since it is itself a foreground process -- so work
     /// in progress isn't silently lost.
+    fn reattach_focused_shell(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(manager) = self.focused_terminal_manager(ctx) else {
+            return;
+        };
+        let reattached = manager.update(ctx, |manager, ctx| manager.reattach_session(ctx));
+        if !reattached {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "This pane has no supervised shell to reattach.".to_owned(),
+                    ),
+                    ctx,
+                );
+            });
+        }
+    }
+
     fn start_shell_restart(
         &mut self,
         target: Option<ShellLaunchData>,
@@ -26784,6 +26801,11 @@ impl TypedActionView for Workspace {
             RestartShellForTerminalView { terminal_view_id } => {
                 if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
                     self.start_shell_restart(None, ctx);
+                }
+            }
+            ReattachShellForTerminalView { terminal_view_id } => {
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
+                    self.reattach_focused_shell(ctx);
                 }
             }
             RestartWindowInNewProcess => self.restart_window_in_new_process(ctx),

@@ -2058,7 +2058,15 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         cwd: Option<PathBuf>,
         ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
     ) -> bool {
-        self.restart_session_inner(target, cwd, ctx);
+        self.restart_session_inner(target, cwd, None, ctx);
+        true
+    }
+
+    fn reattach_session(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>) -> bool {
+        let Some(session_id) = self.persistent_session_id else {
+            return false;
+        };
+        self.restart_session_inner(None, None, Some(session_id), ctx);
         true
     }
 

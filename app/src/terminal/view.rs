@@ -90,12 +90,12 @@ use init::{INPUT_BOX_VISIBLE_KEY, TOGGLE_BLOCK_FILTER_KEYBINDING};
 use inline_banner::{
     AliasExpansionBanner, AliasExpansionBannerAction, AwsBedrockLoginBannerAction,
     AwsBedrockLoginBannerState, AwsCliNotInstalledBannerAction, AwsCliNotInstalledBannerState,
-    ByoLlmAuthBannerSessionState, OpenInWarpBannerState, VimModeBannerAction,
-    render_alias_expansion_banner, render_aws_bedrock_login_banner,
+    ByoLlmAuthBannerSessionState, OpenInWarpBannerState, ShellDetachedBannerState,
+    VimModeBannerAction, render_alias_expansion_banner, render_aws_bedrock_login_banner,
     render_aws_cli_not_installed_banner, render_inline_notifications_discovery_banner,
     render_inline_notifications_error_banner, render_inline_shared_session_ended_banner,
     render_inline_shared_session_started_banner, render_open_in_warp_banner,
-    render_shell_process_terminated_banner, render_vim_mode_banner,
+    render_shell_detached_banner, render_shell_process_terminated_banner, render_vim_mode_banner,
 };
 pub use inline_banner::{NotificationsDiscoveryBannerAction, NotificationsErrorBannerAction};
 use instant::Instant;
@@ -1019,6 +1019,7 @@ pub enum InlineBannerType {
     SharedSessionStart,
     SharedSessionEnd,
     ShellProcessTerminated,
+    ShellDetached,
     OpenInWarp,
     VimMode,
     CodebaseIndexSpeedbump,
@@ -1045,6 +1046,7 @@ impl InlineBannerType {
             | Self::SharedSessionStart
             | Self::SharedSessionEnd
             | Self::ShellProcessTerminated
+            | Self::ShellDetached
             | Self::OpenInWarp
             | Self::VimMode => false,
         }
@@ -1086,6 +1088,8 @@ struct InlineBannersState {
     /// shell process has terminated, or None if there is no
     /// banner to display.
     shell_process_terminated_banner: Option<ShellProcessTerminatedBanner>,
+
+    shell_detached_banner: Option<ShellDetachedBannerState>,
 
     open_in_warp_banner: Option<OpenInWarpBannerState>,
 
@@ -11052,6 +11056,23 @@ impl TerminalView {
     }
 
     /// Inserts a banner notifying the user that the shell process has terminated.
+    fn insert_shell_detached_banner(&mut self, ctx: &mut ViewContext<Self>) {
+        let banner_id = self.inline_banners_state.next_banner_id();
+        self.inline_banners_state.shell_detached_banner =
+            Some(ShellDetachedBannerState::new(banner_id));
+        // Like the terminated banner: no block follows the last one run, so the banner goes
+        // after it.
+        let active_block_index = self.model.lock().block_list().active_block_index();
+        self.model
+            .lock()
+            .block_list_mut()
+            .insert_inline_banner_after_block(
+                active_block_index,
+                InlineBannerItem::new(banner_id, InlineBannerType::ShellDetached),
+            );
+        ctx.notify();
+    }
+
     fn insert_shell_process_terminated_banner(
         &mut self,
         termination_type: shell_terminated_banner::TerminationType,
@@ -11983,6 +12004,22 @@ impl TerminalView {
                     // meant to look untouched, and above all no `Event::Exited`
                     // -- the sole emitter of that variant in this crate, which
                     // `TerminalPane` turns into `close_pane`.
+                    return;
+                }
+
+                if matches!(reason, ExitReason::PtyDetached) {
+                    // The shell is still running in the supervisor, so nothing it was doing has
+                    // failed and the pane must stay open to reattach it: no failed conversation,
+                    // no terminated banner, and no `Event::Exited`.
+                    self.insert_shell_detached_banner(ctx);
+                    self.input.update(ctx, |input, ctx| {
+                        input.editor().update(ctx, |editor, ctx| {
+                            editor.set_interaction_state(
+                                crate::editor::InteractionState::Disabled,
+                                ctx,
+                            );
+                        });
+                    });
                     return;
                 }
 
@@ -24521,6 +24558,13 @@ impl TerminalView {
             );
         }
 
+        if let Some(state) = &self.inline_banners_state.shell_detached_banner {
+            inline_banners.insert(
+                state.id,
+                render_shell_detached_banner(state, self.view_id, appearance),
+            );
+        }
+
         if (FeatureFlag::CreatingSharedSessions.is_enabled()
             && ContextFlag::CreateSharedSession.is_enabled())
             || FeatureFlag::ViewingSharedSessions.is_enabled()
@@ -26905,6 +26949,12 @@ impl TerminalSurface for TerminalView {
                 .block_list_mut()
                 .remove_inline_banner(banner.banner_id);
         }
+        if let Some(banner) = self.inline_banners_state.shell_detached_banner.take() {
+            self.model
+                .lock()
+                .block_list_mut()
+                .remove_inline_banner(banner.id);
+        }
 
         let rich_banner_ids = self
             .rich_content_views
@@ -27315,6 +27365,7 @@ impl TypedActionView for TerminalView {
             | AltMouseAction(_)
             | ToggleMaximizePane
             | RestartShell
+            | ReattachShell
             | ChangeShell
             | DetachSession
             | MoveSessionToAgentCtrl
@@ -27647,6 +27698,11 @@ impl TypedActionView for TerminalView {
             // `ToggleMaximizePane`) achieves by emitting an event instead.
             RestartShell => {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::RestartShellForTerminalView {
+                    terminal_view_id: self.view_id,
+                });
+            }
+            ReattachShell => {
+                ctx.dispatch_typed_action_deferred(WorkspaceAction::ReattachShellForTerminalView {
                     terminal_view_id: self.view_id,
                 });
             }

@@ -1580,12 +1580,6 @@ enum CanExecuteCommand {
     No(DenyExecutionReason),
 }
 
-impl CanExecuteCommand {
-    pub fn is_no(&self) -> bool {
-        matches!(self, CanExecuteCommand::No(_))
-    }
-}
-
 pub struct Input {
     model: Arc<FairMutex<TerminalModel>>,
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,

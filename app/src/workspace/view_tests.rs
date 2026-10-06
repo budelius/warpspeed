@@ -7532,3 +7532,119 @@ fn agent_session_start_focuses_the_pane_already_running_its_conversation() {
         });
     });
 }
+
+#[test]
+fn the_pane_menu_offers_agent_sessions() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            let items = terminal_view
+                .as_ref(ctx)
+                .pane_header_overflow_menu_items(ctx);
+            let item = items
+                .iter()
+                .filter_map(|item| item.fields())
+                .find(|fields| fields.label() == "Agent sessions…")
+                .expect("the pane menu offers the window's agent sessions");
+            assert!(matches!(
+                item.on_select_action(),
+                Some(crate::terminal::view::TerminalAction::ShowAgentSessions)
+            ));
+        });
+    });
+}
+
+#[test]
+fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let first_tab = workspace.tabs[0].pane_group.clone();
+            let locator = PaneViewLocator {
+                pane_group_id: first_tab.id(),
+                pane_id: first_tab.as_ref(ctx).focused_pane_id(ctx),
+            };
+            assert!(!workspace.agent_sessions_modal.is_open());
+
+            workspace.handle_action(
+                &WorkspaceAction::ShowAgentSessions {
+                    focus: Some(locator),
+                },
+                ctx,
+            );
+
+            assert!(workspace.agent_sessions_modal.is_open());
+            assert!(
+                workspace
+                    .current_workspace_state
+                    .is_any_non_palette_modal_open(ctx)
+            );
+            let selected = workspace
+                .agent_sessions_modal
+                .view
+                .as_ref(ctx)
+                .body()
+                .as_ref(ctx)
+                .selected_pane();
+            assert_eq!(selected, Some(locator));
+
+            workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
+            assert!(
+                workspace.agent_sessions_modal.is_open(),
+                "showing it again keeps it open"
+            );
+        });
+    });
+}
+
+#[test]
+fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        // Opening the palette reads these, which `initialize_app` leaves out.
+        app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
+        app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let first_tab = workspace.tabs[0].pane_group.clone();
+            let target = PaneViewLocator {
+                pane_group_id: first_tab.id(),
+                pane_id: first_tab.as_ref(ctx).focused_pane_id(ctx),
+            };
+            workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
+            assert_eq!(workspace.active_tab_index(), 1);
+
+            workspace.handle_agent_sessions_view_event(
+                &AgentSessionsViewEvent::ResumeInFolder {
+                    folder: std::env::temp_dir(),
+                    target,
+                },
+                ctx,
+            );
+
+            assert!(!workspace.agent_sessions_modal.is_open());
+            assert_eq!(workspace.active_tab_index(), 0);
+            assert!(workspace.current_workspace_state.is_palette_open);
+            assert!(
+                workspace
+                    .palette
+                    .as_ref(ctx)
+                    .is_mode_enabled(PaletteMode::AgentSessions, ctx)
+            );
+        });
+    });
+}

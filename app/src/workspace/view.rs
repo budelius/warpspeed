@@ -521,6 +521,7 @@ use crate::workflows::{
     WorkflowViewMode,
 };
 use crate::workspace::action::CommandSearchOptions;
+use crate::workspace::agent_sessions_view::{AgentSessionsView, AgentSessionsViewEvent};
 use crate::workspace::bonus_grant_notification_model::BonusGrantNotificationEvent;
 #[cfg(target_os = "macos")]
 use crate::workspace::cli_install;
@@ -1166,6 +1167,8 @@ pub struct Workspace {
     /// them, opened by `ToggleAttachSessionMenu`; selecting an entry dispatches
     /// `AttachDetachedSession`.
     attach_session_menu_modal: ModalViewState<Modal<Menu<WorkspaceAction>>>,
+    /// The window's agent sessions by tab and pane, opened by `ShowAgentSessions`.
+    agent_sessions_modal: ModalViewState<Modal<AgentSessionsView>>,
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
@@ -2255,6 +2258,40 @@ impl Workspace {
         ModalViewState::new(modal)
     }
 
+    fn build_agent_sessions_modal(
+        ctx: &mut ViewContext<Self>,
+    ) -> ModalViewState<Modal<AgentSessionsView>> {
+        let body = ctx.add_typed_action_view(AgentSessionsView::new);
+        ctx.subscribe_to_view(&body, |me, _, event, ctx| {
+            me.handle_agent_sessions_view_event(event, ctx);
+        });
+        let modal = ctx.add_typed_action_view(|ctx| {
+            Modal::new(None, body, ctx)
+                .close_modal_button_disabled()
+                .with_modal_style(UiComponentStyles {
+                    width: Some(640.),
+                    height: Some(520.),
+                    ..Default::default()
+                })
+                .with_body_style(UiComponentStyles {
+                    padding: Some(Coords::uniform(0.)),
+                    height: Some(520.),
+                    ..Default::default()
+                })
+                .with_header_style(UiComponentStyles {
+                    height: Some(0.),
+                    padding: Some(Coords::uniform(0.)),
+                    ..Default::default()
+                })
+        });
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
+            if matches!(event, ModalEvent::Close) {
+                me.close_agent_sessions_modal(ctx);
+            }
+        });
+        ModalViewState::new(modal)
+    }
+
     fn build_new_worktree_modal(
         ctx: &mut ViewContext<Self>,
     ) -> ModalViewState<Modal<NewWorktreeModal>> {
@@ -3337,6 +3374,7 @@ impl Workspace {
         let restart_shell_confirmation_modal = Self::build_restart_shell_confirmation_modal(ctx);
         let change_shell_menu_modal = Self::build_change_shell_menu_modal(ctx);
         let attach_session_menu_modal = Self::build_attach_session_menu_modal(ctx);
+        let agent_sessions_modal = Self::build_agent_sessions_modal(ctx);
 
         let session_config_modal = Self::build_session_config_modal(ctx);
 
@@ -3739,6 +3777,7 @@ impl Workspace {
             restart_shell_confirmation_modal,
             change_shell_menu_modal,
             attach_session_menu_modal,
+            agent_sessions_modal,
             pending_shell_restart: None,
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_moves: HashMap::new(),
@@ -14714,16 +14753,21 @@ impl Workspace {
     pub(crate) fn agent_session_inputs(
         &self,
         ctx: &AppContext,
-    ) -> (Vec<PaneAgentInput>, Vec<DetachedInput>) {
-        let detached = detached_sessions::list(ctx)
-            .into_iter()
-            .map(|session| DetachedInput {
-                session_id: session.session_id,
-                title: session.title,
-                cwd: session.cwd,
-                detached_for_seconds: session.detached_for_seconds,
-            })
-            .collect();
+    ) -> (
+        Vec<PaneAgentInput>,
+        Result<Vec<DetachedInput>, detached_sessions::DetachedListError>,
+    ) {
+        let detached = detached_sessions::list_checked(ctx).map(|sessions| {
+            sessions
+                .into_iter()
+                .map(|session| DetachedInput {
+                    session_id: session.session_id,
+                    title: session.title,
+                    cwd: session.cwd,
+                    detached_for_seconds: session.detached_for_seconds,
+                })
+                .collect()
+        });
         (self.agent_pane_inputs(ctx), detached)
     }
 
@@ -17001,13 +17045,7 @@ impl Workspace {
         if self.is_shared_session_viewer_focused(ctx) {
             return;
         }
-        if !self.is_subscribed_to_agent_session_history {
-            self.is_subscribed_to_agent_session_history = true;
-            ctx.subscribe_to_model(
-                &AgentSessionHistoryModel::handle(ctx),
-                |me, _, event, ctx| me.handle_agent_session_history_event(event, ctx),
-            );
-        }
+        self.subscribe_to_agent_session_history(ctx);
 
         let pane_group = self.active_tab_pane_group();
         let focused = PaneViewLocator {
@@ -17015,12 +17053,102 @@ impl Workspace {
             pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
         };
         let (panes, detached) = self.agent_session_inputs(ctx);
+        // The palette has no place for an unreachable supervisor; it lists what it can.
+        let detached = detached.unwrap_or_default();
         let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
         self.agent_sessions_data_source(ctx)
             .update(ctx, |source, _| {
                 source.set_snapshot(panes, detached, Some(focused), &past);
             });
         AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
+    }
+
+    /// Subscribes on first use rather than in `new`, since some test setups build a workspace
+    /// without registering the history model.
+    fn subscribe_to_agent_session_history(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.is_subscribed_to_agent_session_history {
+            self.is_subscribed_to_agent_session_history = true;
+            ctx.subscribe_to_model(
+                &AgentSessionHistoryModel::handle(ctx),
+                |me, _, event, ctx| me.handle_agent_session_history_event(event, ctx),
+            );
+        }
+    }
+
+    /// Opens the window's agent sessions with `focus`'s pane selected, the focused pane when
+    /// `None`. Asks the supervisor once, here, not per render.
+    fn show_agent_sessions(&mut self, focus: Option<PaneViewLocator>, ctx: &mut ViewContext<Self>) {
+        if self.is_shared_session_viewer_focused(ctx) {
+            return;
+        }
+        self.subscribe_to_agent_session_history(ctx);
+        let focus = focus.or_else(|| {
+            let pane_group = self.active_tab_pane_group();
+            Some(PaneViewLocator {
+                pane_group_id: pane_group.id(),
+                pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+            })
+        });
+        let (panes, detached) = self.agent_session_inputs(ctx);
+        let history = AgentSessionHistoryModel::as_ref(ctx);
+        let (past, history_loaded) = (history.sessions().to_vec(), history.is_loaded());
+        self.agent_sessions_modal.view.update(ctx, |modal, ctx| {
+            modal.body().update(ctx, |view, ctx| {
+                view.set_inputs(panes, detached, &past, history_loaded, focus, ctx);
+            });
+        });
+        self.agent_sessions_modal.open();
+        self.current_workspace_state.is_agent_sessions_modal_open = true;
+        ctx.focus(&self.agent_sessions_modal.view);
+        AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
+        ctx.notify();
+    }
+
+    fn show_agent_sessions_for_terminal_view(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(locator) = self.tabs.iter().find_map(|tab| {
+            tab.pane_group
+                .as_ref(ctx)
+                .find_pane_id_for_terminal_view(terminal_view_id, ctx)
+                .map(|pane_id| PaneViewLocator {
+                    pane_group_id: tab.pane_group.id(),
+                    pane_id,
+                })
+        }) else {
+            log::debug!("Ignoring agent sessions for a terminal view that is not in this window");
+            return;
+        };
+        self.show_agent_sessions(Some(locator), ctx);
+    }
+
+    fn close_agent_sessions_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        self.agent_sessions_modal.close();
+        self.current_workspace_state.is_agent_sessions_modal_open = false;
+        self.focus_active_tab(ctx);
+        ctx.notify();
+    }
+
+    fn handle_agent_sessions_view_event(
+        &mut self,
+        event: &AgentSessionsViewEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            AgentSessionsViewEvent::Act(action) => {
+                self.close_agent_sessions_modal(ctx);
+                self.perform_agent_session_action(action, ctx);
+            }
+            AgentSessionsViewEvent::ResumeInFolder { folder, target } => {
+                self.close_agent_sessions_modal(ctx);
+                // The palette resumes into the focused pane, so that must be the clicked one.
+                self.focus_pane(*target, ctx);
+                self.open_agent_sessions_palette(Some(folder.display().to_string()), ctx);
+            }
+            AgentSessionsViewEvent::Close => self.close_agent_sessions_modal(ctx),
+        }
     }
 
     fn clear_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
@@ -17035,11 +17163,18 @@ impl Workspace {
     ) {
         match event {
             AgentSessionHistoryEvent::Updated => {
+                let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
+                if self.agent_sessions_modal.is_open() {
+                    self.agent_sessions_modal.view.update(ctx, |modal, ctx| {
+                        modal
+                            .body()
+                            .update(ctx, |view, ctx| view.refresh_past(&past, ctx));
+                    });
+                }
                 let source = self.agent_sessions_data_source(ctx);
                 if !source.as_ref(ctx).is_loaded() {
                     return;
                 }
-                let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
                 source.update(ctx, |source, _| source.refresh_past(&past));
                 if self
                     .palette
@@ -26661,6 +26796,10 @@ impl TypedActionView for Workspace {
             ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
             AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
             AgentSession(action) => self.perform_agent_session_action(action, ctx),
+            ShowAgentSessions { focus } => self.show_agent_sessions(*focus, ctx),
+            ShowAgentSessionsForTerminalView { terminal_view_id } => {
+                self.show_agent_sessions_for_terminal_view(*terminal_view_id, ctx)
+            }
             AddGetStartedTab => self.add_get_started_tab(ctx),
             AddAmbientAgentTab => self.add_ambient_agent_tab(ctx),
             AddAgentTab => self.add_terminal_tab_with_new_agent_view(ctx),
@@ -29930,6 +30069,10 @@ impl View for Workspace {
 
         if self.attach_session_menu_modal.is_open() {
             stack.add_child(self.attach_session_menu_modal.render());
+        }
+
+        if self.agent_sessions_modal.is_open() {
+            stack.add_child(self.agent_sessions_modal.render());
         }
 
         if self.workflow_modal.as_ref(app).is_open() {

@@ -828,6 +828,13 @@ impl BackingView for TerminalView {
                     .into_item(),
             );
         }
+        if !shared_session_status.is_viewer() {
+            items.push(
+                MenuItemFields::new("Agent sessions…")
+                    .with_on_select_action(TerminalAction::ShowAgentSessions)
+                    .into_item(),
+            );
+        }
 
         // Split-pane related items.
         if self.split_pane_state(ctx).is_in_split_pane() {

@@ -27323,6 +27323,7 @@ impl TypedActionView for TerminalView {
             | ChangeShell
             | DetachSession
             | MoveSessionToAgentCtrl
+            | ShowAgentSessions
             | PromptContextMenu { .. }
             | OpenInputContextMenu { .. }
             | InputContextMenuItem(_)
@@ -27669,6 +27670,13 @@ impl TypedActionView for TerminalView {
             MoveSessionToAgentCtrl => {
                 ctx.dispatch_typed_action_deferred(
                     WorkspaceAction::MoveSessionToAgentCtrlForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
+            }
+            ShowAgentSessions => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::ShowAgentSessionsForTerminalView {
                         terminal_view_id: self.view_id,
                     },
                 );

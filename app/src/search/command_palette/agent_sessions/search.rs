@@ -12,7 +12,7 @@ pub(super) struct RowMatch {
 
 /// The text a row shows as its title: the conversation title, else a short session id, else the
 /// agent's name.
-pub(super) fn row_title(row: &AgentSessionRow) -> String {
+pub(crate) fn row_title(row: &AgentSessionRow) -> String {
     if let Some(title) = row.title.as_deref().filter(|title| !title.is_empty()) {
         return title.to_owned();
     }
@@ -57,7 +57,6 @@ pub(super) fn match_row(row: &AgentSessionRow, query: &str) -> Option<RowMatch> 
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn score_row(row: &AgentSessionRow, query: &str) -> Option<i64> {
     match_row(row, query).map(|matched| matched.score)
 }

@@ -309,6 +309,13 @@ pub enum WorkspaceAction {
     },
     /// Focuses, starts, attaches or resumes the agent session a picker row stands for.
     AgentSession(AgentSessionAction),
+    /// Opens the window's agent sessions by tab and pane, with `focus`'s pane selected.
+    ShowAgentSessions {
+        focus: Option<PaneViewLocator>,
+    },
+    ShowAgentSessionsForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Restores this window in a newly launched application process, then closes the original.
     RestartWindowInNewProcess,
     /// Opens (or closes, if already open) the shell picker, which lists the
@@ -1133,6 +1140,8 @@ impl WorkspaceAction {
             | RestartShell
             | RestartShellForTerminalView { .. }
             | ToggleAttachSessionMenu
+            | ShowAgentSessions { .. }
+            | ShowAgentSessionsForTerminalView { .. }
             | RestartWindowInNewProcess
             | ToggleChangeShellMenu
             | ToggleChangeShellMenuForTerminalView { .. }

@@ -19,7 +19,7 @@ mod supervisor_host;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::FromRawHandle as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -215,6 +215,21 @@ pub enum PtySpawnError {
     UnsupportedShellStarter(String),
 }
 
+/// The directory a shell starts in: `requested` if it exists, else the user's home.
+///
+/// Never `None` while the home exists, because a shell started without a directory inherits
+/// the starting process's own -- for the supervisor and the app, the install directory.
+pub(super) fn shell_start_directory(requested: Option<&Path>) -> Option<PathBuf> {
+    requested
+        .filter(|path| path.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+        })
+}
+
 pub(super) fn spawn(
     options: PtyOptions,
     event_loop_tx: mio_channel::Sender<writeable_pty::Message>,
@@ -274,14 +289,7 @@ pub(super) fn spawn(
     };
     let mut process_information = PROCESS_INFORMATION::default();
 
-    let start_directory = options
-        .start_dir
-        .filter(|start_dir| start_dir.is_dir())
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(PathBuf::from)
-                .filter(|path| path.is_dir())
-        })
+    let start_directory = shell_start_directory(options.start_dir.as_deref())
         .map(|path| HSTRING::from(path.as_os_str()));
 
     let base_flags =

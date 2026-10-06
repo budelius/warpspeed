@@ -4693,6 +4693,65 @@ fn test_started_unbootstrapped_restored_pane_round_trips_cwd() {
     });
 }
 
+/// A restored agent pane whose shell is still parked has not started its agent, so no live agent
+/// session exists for it yet. It must re-save the agent it was restored with, or the next save
+/// drops the agent and the session stops resuming it.
+#[test]
+fn test_parked_restored_pane_round_trips_its_agent() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let descriptor = crate::app_state::CliAgentResumeDescriptor {
+            agent: crate::terminal::CLIAgent::Claude,
+            session_id: Some("restored-session".to_owned()),
+            cwd: PathBuf::from(&cwd),
+            title: None,
+            captured_unix_seconds: Some(1),
+        };
+        let mut snapshot = terminal_leaf_snapshot(Some(cwd), None);
+        if let PaneNodeSnapshot::Leaf(leaf) = &mut snapshot
+            && let LeafContents::Terminal(terminal) = &mut leaf.contents
+        {
+            terminal.cli_agent_resume_descriptor = Some(descriptor.clone());
+        }
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored agent pane must be parked for this test to mean anything"
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected the restored tab to snapshot as a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected the restored leaf to snapshot as a terminal pane");
+        };
+        assert_eq!(
+            terminal.cli_agent_resume_descriptor,
+            Some(descriptor),
+            "a parked pane must re-save the agent it was restored with"
+        );
+    });
+}
+
 #[test]
 fn test_parked_restored_mixed_shells_round_trip_per_pane() {
     let _lazy_shell_startup = FeatureFlag::LazyShellStartup.override_enabled(true);

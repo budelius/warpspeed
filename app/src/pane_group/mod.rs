@@ -1453,6 +1453,7 @@ impl PaneGroup {
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned()),
                     shell_launch_data: parked_shell_launch_data,
+                    cli_agent_resume_descriptor: None,
                 };
 
                 let (view, terminal_manager) = match pane_mode {
@@ -1771,6 +1772,9 @@ impl PaneGroup {
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned()),
                     shell_launch_data: terminal_snapshot.shell_launch_data.clone(),
+                    cli_agent_resume_descriptor: terminal_snapshot
+                        .cli_agent_resume_descriptor
+                        .clone(),
                 };
 
                 // Filter conversation IDs to only include those that have task messages

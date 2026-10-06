@@ -209,7 +209,7 @@ setlocal
 set "WARPSPEED_INSTALL_ROOT=%~dp0"
 set /p WARPSPEED_VERSION=<"%~dp0current.txt"
 if not defined WARPSPEED_VERSION exit /b 1
-start "" "%~dp0versions\%WARPSPEED_VERSION%\warpspeed.exe" %*
+start "" /D "%USERPROFILE%" "%~dp0versions\%WARPSPEED_VERSION%\warpspeed.exe" %*
 '@
 [IO.File]::WriteAllText($launcher_path, $launcher, [Text.Encoding]::ASCII)
 

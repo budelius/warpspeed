@@ -99,6 +99,10 @@ pub(in crate::pane_group) struct RestoredShellSnapshotFields {
     /// so a shell that is momentarily unresolvable (an unregistered WSL
     /// distro, say) is not erased from the session.
     pub shell_launch_data: Option<ShellLaunchData>,
+    /// The agent this pane was restored running, kept until the agent is running again. A
+    /// restored agent registers only once its resume command runs, which waits for the shell to
+    /// start, so without this every save before then would drop it from the session.
+    pub cli_agent_resume_descriptor: Option<CliAgentResumeDescriptor>,
 }
 
 /// Data kept for terminal panes.
@@ -235,6 +239,24 @@ impl TerminalPane {
         self.restored_shell_snapshot_fields
             .as_ref()
             .and_then(|fields| fields.cwd.clone())
+    }
+
+    /// The agent this pane was restored with, while its resume command has yet to start or is
+    /// still running. Once it has finished, the agent has exited and is no longer the pane's.
+    fn restored_agent_still_resuming(&self, app: &AppContext) -> Option<CliAgentResumeDescriptor> {
+        let descriptor = self
+            .restored_shell_snapshot_fields
+            .as_ref()?
+            .cli_agent_resume_descriptor
+            .clone()?;
+        let shell_parked = self
+            .terminal_manager(app)
+            .read(app, |manager, _| manager.has_deferred_shell());
+        let resume_pending = self
+            .terminal_view(app)
+            .as_ref(app)
+            .has_pending_command_or_awaiting_completion(app);
+        (shell_parked || resume_pending).then_some(descriptor)
     }
 
     fn deferred_shell_startup_directory(&self, app: &AppContext) -> Option<String> {
@@ -668,6 +690,9 @@ impl PaneContent for TerminalPane {
                         captured_unix_seconds: Some(Utc::now().timestamp()),
                     })
                 });
+
+            let cli_agent_resume_descriptor =
+                cli_agent_resume_descriptor.or_else(|| self.restored_agent_still_resuming(app));
 
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),

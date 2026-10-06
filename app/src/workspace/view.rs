@@ -17016,18 +17016,17 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Opens the palette on agent sessions, with `folder` as the initial query when given.
-    pub(crate) fn open_agent_sessions_palette(
-        &mut self,
-        folder: Option<String>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.open_palette_action(
-            PaletteMode::AgentSessions,
-            PaletteSource::AgentSessionsWindow,
-            folder.as_deref(),
-            ctx,
-        );
+    /// Opens the palette on agent sessions, with `folder` as the initial query when given, once
+    /// the events already queued have run.
+    ///
+    /// Deferred because focusing a pane queues `PaneFocused`, whose handler closes every modal,
+    /// the palette included, so a palette opened right after a focus change would close again.
+    pub(crate) fn open_agent_sessions_palette(folder: Option<String>, ctx: &mut ViewContext<Self>) {
+        ctx.dispatch_typed_action_deferred(WorkspaceAction::OpenPalette {
+            mode: PaletteMode::AgentSessions,
+            source: PaletteSource::AgentSessionsWindow,
+            query: folder,
+        });
     }
 
     fn agent_sessions_data_source(&self, app: &AppContext) -> ModelHandle<AgentSessionsDataSource> {
@@ -17125,9 +17124,14 @@ impl Workspace {
     }
 
     fn close_agent_sessions_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        self.hide_agent_sessions_modal(ctx);
+        self.focus_active_tab(ctx);
+    }
+
+    /// Closes the window view without handing focus back, for when something else takes it.
+    fn hide_agent_sessions_modal(&mut self, ctx: &mut ViewContext<Self>) {
         self.agent_sessions_modal.close();
         self.current_workspace_state.is_agent_sessions_modal_open = false;
-        self.focus_active_tab(ctx);
         ctx.notify();
     }
 
@@ -17142,10 +17146,11 @@ impl Workspace {
                 self.perform_agent_session_action(action, ctx);
             }
             AgentSessionsViewEvent::ResumeInFolder { folder, target } => {
-                self.close_agent_sessions_modal(ctx);
+                // Refocusing the active tab here would land after the palette opens and close it.
+                self.hide_agent_sessions_modal(ctx);
                 // The palette resumes into the focused pane, so that must be the clicked one.
                 self.focus_pane(*target, ctx);
-                self.open_agent_sessions_palette(Some(folder.display().to_string()), ctx);
+                Self::open_agent_sessions_palette(Some(folder.display().to_string()), ctx);
             }
             AgentSessionsViewEvent::Close => self.close_agent_sessions_modal(ctx),
         }

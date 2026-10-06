@@ -1,6 +1,6 @@
 //! The window's agent sessions, grouped by tab and pane.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,7 @@ use crate::editor::{
     PropagateHorizontalNavigationKeys, SingleLineEditorOptions, TextOptions,
 };
 use crate::search::command_palette::agent_sessions::{row_title, score_row};
-use crate::terminal::agent_session_history::{PastAgentSession, is_within};
+use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath, is_within_resolved};
 use crate::terminal::agent_sessions_index::{
     AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows,
 };
@@ -80,23 +80,47 @@ pub(crate) enum ViewRowAction {
     None,
 }
 
+/// For each pane folder, the indices into `rows` of the past sessions that lie within it.
+pub(crate) type PastByFolder = HashMap<PathBuf, Vec<usize>>;
+
+/// Works out which past sessions lie within which pane folder. It resolves every path on disk
+/// once, so it belongs where a snapshot is taken, never on a keystroke.
+pub(crate) fn past_by_folder(panes: &[PaneAgentInput], rows: &[AgentSessionRow]) -> PastByFolder {
+    let past: Vec<(usize, ResolvedPath)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| matches!(row.state, AgentSessionState::Past))
+        .map(|(index, row)| (index, ResolvedPath::new(&row.cwd)))
+        .collect();
+    let mut by_folder = PastByFolder::new();
+    for folder in panes.iter().filter_map(|pane| pane.cwd.as_ref()) {
+        if folder.as_os_str().is_empty() || by_folder.contains_key(folder) {
+            continue;
+        }
+        let resolved = ResolvedPath::new(folder);
+        let within = past
+            .iter()
+            .filter(|(_, path)| is_within_resolved(path, &resolved))
+            .map(|(index, _)| *index)
+            .collect();
+        by_folder.insert(folder.clone(), within);
+    }
+    by_folder
+}
+
 /// Lays out `rows` (from `build_rows`) by tab and pane, with each pane's past conversations under
 /// a toggle and the detached sessions last. A non-empty `query` keeps only the matching rows, plus
 /// the headers and panes they sit under, and shows matching past rows without expanding.
 pub(crate) fn view_rows(
     panes: &[PaneAgentInput],
     rows: &[AgentSessionRow],
+    past_by_folder: &PastByFolder,
     expanded_folders: &HashSet<PathBuf>,
     query: &str,
 ) -> Vec<ViewRow> {
     let query = query.trim();
     let matches_row = |row: &AgentSessionRow| query.is_empty() || score_row(row, query).is_some();
     let matches_text = |text: &str| match_indices_case_insensitive(text, query).is_some();
-    let past: Vec<&AgentSessionRow> = rows
-        .iter()
-        .filter(|row| matches!(row.state, AgentSessionState::Past))
-        .collect();
-
     let mut view = Vec::new();
     let mut current_tab = None;
     for pane in panes {
@@ -112,13 +136,12 @@ pub(crate) fn view_rows(
             .filter(|folder| !folder.as_os_str().is_empty());
         let folder_past: Vec<&AgentSessionRow> = folder
             .as_ref()
-            .map(|folder| {
-                past.iter()
-                    .copied()
-                    .filter(|row| is_within(&row.cwd, folder) && matches_row(row))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .and_then(|folder| past_by_folder.get(folder))
+            .into_iter()
+            .flatten()
+            .filter_map(|index| rows.get(*index))
+            .filter(|row| matches_row(row))
+            .collect();
 
         let pane_matches = query.is_empty()
             || row.is_some_and(matches_row)
@@ -248,6 +271,9 @@ pub struct AgentSessionsView {
     detached: Vec<DetachedInput>,
     supervisor_error: Option<DetachedListError>,
     rows: Vec<AgentSessionRow>,
+    past_by_folder: PastByFolder,
+    /// The search text `view_rows` was last built from.
+    built_query: String,
     /// Whether past sessions have been scanned at least once; until then the list has none.
     history_loaded: bool,
     expanded_folders: HashSet<PathBuf>,
@@ -289,6 +315,8 @@ impl AgentSessionsView {
             detached: Vec::new(),
             supervisor_error: None,
             rows: Vec::new(),
+            past_by_folder: PastByFolder::new(),
+            built_query: String::new(),
             history_loaded: false,
             expanded_folders: HashSet::new(),
             view_rows: Arc::new(Vec::new()),
@@ -316,7 +344,7 @@ impl AgentSessionsView {
             Ok(detached) => (detached, None),
             Err(error) => (Vec::new(), Some(error)),
         };
-        self.rows = build_rows(&self.panes, &self.detached, past);
+        self.set_rows(past);
         self.expanded_folders.clear();
         self.query_editor.update(ctx, |editor, ctx| {
             editor.clear_buffer_and_reset_undo_stack(ctx)
@@ -336,8 +364,25 @@ impl AgentSessionsView {
     /// Rebuilds the rows with newly scanned past sessions, keeping the rest of the snapshot.
     pub(crate) fn refresh_past(&mut self, past: &[PastAgentSession], ctx: &mut ViewContext<Self>) {
         self.history_loaded = true;
-        self.rows = build_rows(&self.panes, &self.detached, past);
+        let selected = self
+            .selected_index
+            .and_then(|index| self.view_rows.get(index).cloned());
+        self.set_rows(past);
         self.rebuild_view_rows(ctx);
+        self.selected_index = selected
+            .and_then(|selected| self.view_rows.iter().position(|row| *row == selected))
+            .filter(|index| self.is_selectable(*index));
+    }
+
+    fn set_rows(&mut self, past: &[PastAgentSession]) {
+        self.rows = build_rows(&self.panes, &self.detached, past);
+        self.past_by_folder = past_by_folder(&self.panes, &self.rows);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_query(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
+        self.query_editor
+            .update(ctx, |editor, ctx| editor.set_buffer_text(query, ctx));
     }
 
     #[cfg(test)]
@@ -355,7 +400,14 @@ impl AgentSessionsView {
 
     fn rebuild_view_rows(&mut self, ctx: &mut ViewContext<Self>) {
         let query = self.query_editor.as_ref(ctx).buffer_text(ctx);
-        let mut rows = view_rows(&self.panes, &self.rows, &self.expanded_folders, &query);
+        let mut rows = view_rows(
+            &self.panes,
+            &self.rows,
+            &self.past_by_folder,
+            &self.expanded_folders,
+            &query,
+        );
+        self.built_query = query;
         if let Some(error) = &self.supervisor_error {
             rows.extend(supervisor_rows(error));
         }
@@ -373,6 +425,11 @@ impl AgentSessionsView {
     fn handle_query_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
         match event {
             EditorEvent::Edited(_) => {
+                // Clearing the search in `set_inputs` reports an edit only after the rows are
+                // rebuilt and the asked-for pane selected; rebuilding again would lose that.
+                if self.query_editor.as_ref(ctx).buffer_text(ctx) == self.built_query {
+                    return;
+                }
                 self.rebuild_view_rows(ctx);
                 self.selected_index = self.next_selectable(0);
                 if let Some(index) = self.selected_index {

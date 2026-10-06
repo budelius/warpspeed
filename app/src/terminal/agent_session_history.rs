@@ -328,14 +328,35 @@ fn same_directory(left: &Path, right: &Path) -> bool {
 
 /// Whether `path` is `folder` or lies beneath it, normalized as `same_directory` does.
 pub(crate) fn is_within(path: &Path, folder: &Path) -> bool {
-    let (path, folder) = match (path.canonicalize(), folder.canonicalize()) {
-        (Ok(path), Ok(folder)) => (path, folder),
-        _ => (path.to_path_buf(), folder.to_path_buf()),
+    is_within_resolved(&ResolvedPath::new(path), &ResolvedPath::new(folder))
+}
+
+/// A path together with its canonical form, resolved once so that many `is_within_resolved`
+/// checks against it touch the filesystem only once.
+pub(crate) struct ResolvedPath {
+    path: PathBuf,
+    canonical: Option<PathBuf>,
+}
+
+impl ResolvedPath {
+    pub(crate) fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            canonical: path.canonicalize().ok(),
+        }
+    }
+}
+
+/// [`is_within`] for paths already resolved; it does no filesystem calls.
+pub(crate) fn is_within_resolved(path: &ResolvedPath, folder: &ResolvedPath) -> bool {
+    let (path, folder) = match (&path.canonical, &folder.canonical) {
+        (Some(path), Some(folder)) => (path.as_path(), folder.as_path()),
+        _ => (path.path.as_path(), folder.path.as_path()),
     };
     #[cfg(windows)]
     {
         let normalize = |path: &Path| path.to_string_lossy().replace('\\', "/").to_lowercase();
-        let (path, folder) = (normalize(&path), normalize(&folder));
+        let (path, folder) = (normalize(path), normalize(folder));
         let folder = folder.trim_end_matches('/');
         path == folder
             || path

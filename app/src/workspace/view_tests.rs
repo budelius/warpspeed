@@ -7559,51 +7559,77 @@ fn the_pane_menu_offers_agent_sessions() {
     });
 }
 
+fn agent_sessions_selected_pane(
+    workspace: &ViewHandle<Workspace>,
+    app: &mut App,
+) -> Option<PaneViewLocator> {
+    workspace.read(app, |workspace, ctx| {
+        workspace
+            .agent_sessions_modal
+            .view
+            .as_ref(ctx)
+            .body()
+            .as_ref(ctx)
+            .selected_pane()
+    })
+}
+
 #[test]
 fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
         let workspace = mock_workspace(&mut app);
-        workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx)
+        let asked = workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            let second_tab = workspace.tabs[1].pane_group.clone();
+            PaneViewLocator {
+                pane_group_id: second_tab.id(),
+                pane_id: second_tab.as_ref(ctx).focused_pane_id(ctx),
+            }
         });
 
         workspace.update(&mut app, |workspace, ctx| {
-            let first_tab = workspace.tabs[0].pane_group.clone();
-            let locator = PaneViewLocator {
-                pane_group_id: first_tab.id(),
-                pane_id: first_tab.as_ref(ctx).focused_pane_id(ctx),
-            };
             assert!(!workspace.agent_sessions_modal.is_open());
-
             workspace.handle_action(
-                &WorkspaceAction::ShowAgentSessions {
-                    focus: Some(locator),
-                },
+                &WorkspaceAction::ShowAgentSessions { focus: Some(asked) },
                 ctx,
             );
-
             assert!(workspace.agent_sessions_modal.is_open());
             assert!(
                 workspace
                     .current_workspace_state
                     .is_any_non_palette_modal_open(ctx)
             );
-            let selected = workspace
+        });
+        assert_eq!(
+            agent_sessions_selected_pane(&workspace, &mut app),
+            Some(asked),
+            "the asked-for pane stays selected once queued editor events have run"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
                 .agent_sessions_modal
                 .view
-                .as_ref(ctx)
-                .body()
-                .as_ref(ctx)
-                .selected_pane();
-            assert_eq!(selected, Some(locator));
-
-            workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
-            assert!(
-                workspace.agent_sessions_modal.is_open(),
-                "showing it again keeps it open"
+                .update(ctx, |modal, ctx| {
+                    modal
+                        .body()
+                        .update(ctx, |view, ctx| view.set_query("zzz", ctx));
+                });
+        });
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_agent_sessions_modal(ctx);
+            workspace.handle_action(
+                &WorkspaceAction::ShowAgentSessions { focus: Some(asked) },
+                ctx,
             );
         });
+        assert_eq!(
+            agent_sessions_selected_pane(&workspace, &mut app),
+            Some(asked),
+            "reopening after a search clears it and still selects the asked-for pane"
+        );
     });
 }
 
@@ -7615,19 +7641,28 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
         app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
         app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
         let workspace = mock_workspace(&mut app);
-        workspace.update(&mut app, |workspace, ctx| {
-            workspace.add_terminal_tab(false, ctx)
+
+        let target = workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group();
+            let target = PaneViewLocator {
+                pane_group_id: pane_group.id(),
+                pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+            };
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.add_terminal_pane(Direction::Right, None, ctx);
+            });
+            workspace.add_terminal_tab(false, ctx);
+            target
         });
 
         workspace.update(&mut app, |workspace, ctx| {
             let first_tab = workspace.tabs[0].pane_group.clone();
-            let target = PaneViewLocator {
-                pane_group_id: first_tab.id(),
-                pane_id: first_tab.as_ref(ctx).focused_pane_id(ctx),
-            };
+            assert_ne!(
+                first_tab.as_ref(ctx).focused_pane_id(ctx),
+                target.pane_id,
+                "the clicked pane is not the one focused in its tab"
+            );
             workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
-            assert_eq!(workspace.active_tab_index(), 1);
-
             workspace.handle_agent_sessions_view_event(
                 &AgentSessionsViewEvent::ResumeInFolder {
                     folder: std::env::temp_dir(),
@@ -7635,9 +7670,18 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
                 },
                 ctx,
             );
+        });
 
+        workspace.update(&mut app, |workspace, ctx| {
             assert!(!workspace.agent_sessions_modal.is_open());
             assert_eq!(workspace.active_tab_index(), 0);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .focused_pane_id(ctx),
+                target.pane_id
+            );
             assert!(workspace.current_workspace_state.is_palette_open);
             assert!(
                 workspace

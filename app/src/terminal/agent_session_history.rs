@@ -22,7 +22,7 @@ pub(crate) struct PastAgentSession {
     pub modified: SystemTime,
 }
 
-struct Candidate {
+pub(super) struct Candidate {
     agent: CLIAgent,
     path: PathBuf,
     session_id: String,
@@ -111,7 +111,7 @@ fn claude_candidates(root: &Path) -> Vec<Candidate> {
         .collect()
 }
 
-fn pi_candidates(root: &Path) -> Vec<Candidate> {
+pub(super) fn pi_candidates(root: &Path) -> Vec<Candidate> {
     directories(root)
         .into_iter()
         .flat_map(|project| files(&project))
@@ -194,7 +194,7 @@ fn first_claude_text(content: &Value) -> Option<&str> {
         .and_then(|part| part["text"].as_str())
 }
 
-fn describe(candidate: Candidate) -> PastAgentSession {
+pub(super) fn describe(candidate: Candidate) -> PastAgentSession {
     let head = read_head(&candidate.path);
     let (session_id, cwd, title) = match candidate.agent {
         CLIAgent::Claude => {
@@ -326,6 +326,28 @@ fn same_directory(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Whether `path` is `folder` or lies beneath it, normalized as `same_directory` does.
+pub(crate) fn is_within(path: &Path, folder: &Path) -> bool {
+    let (path, folder) = match (path.canonicalize(), folder.canonicalize()) {
+        (Ok(path), Ok(folder)) => (path, folder),
+        _ => (path.to_path_buf(), folder.to_path_buf()),
+    };
+    #[cfg(windows)]
+    {
+        let normalize = |path: &Path| path.to_string_lossy().replace('\\', "/").to_lowercase();
+        let (path, folder) = (normalize(&path), normalize(&folder));
+        let folder = folder.trim_end_matches('/');
+        path == folder
+            || path
+                .strip_prefix(folder)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(folder)
+    }
+}
+
 fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession> {
     let mut sessions = if agent == CLIAgent::Vibe {
         #[cfg(not(target_family = "wasm"))]
@@ -355,6 +377,19 @@ fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession
 
 pub(crate) fn find_all(agent: CLIAgent) -> Vec<PastAgentSession> {
     scan(agent, None)
+}
+
+pub(crate) const RESUMABLE_AGENTS: [CLIAgent; 3] =
+    [CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Pi];
+
+/// Every resumable agent's past sessions, newest first.
+pub(crate) fn find_all_resumable() -> Vec<PastAgentSession> {
+    let mut sessions = RESUMABLE_AGENTS
+        .into_iter()
+        .flat_map(find_all)
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
+    sessions
 }
 
 /// The sessions `agent` recorded in `cwd` since `not_before`.

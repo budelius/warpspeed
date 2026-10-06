@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    PastAgentSession, UnidentifiedAgent, describe, match_for_restore, pi_candidates, vibe_sessions,
+    PastAgentSession, UnidentifiedAgent, describe, is_within, match_for_restore, pi_candidates,
+    vibe_sessions,
 };
 use crate::terminal::CLIAgent;
 
@@ -218,4 +219,15 @@ fn plain_agent_commands_have_no_session_id() {
         None
     );
     assert_eq!(super::session_id_from_command(CLIAgent::Pi, "pi"), None);
+}
+
+#[test]
+fn is_within_matches_the_folder_and_its_subfolders() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join(".claude").join("worktrees").join("fix");
+    std::fs::create_dir_all(&worktree).unwrap();
+    assert!(is_within(root.path(), root.path()));
+    assert!(is_within(&worktree, root.path()));
+    assert!(!is_within(root.path(), &worktree));
+    assert!(!is_within(Path::new("/elsewhere"), root.path()));
 }

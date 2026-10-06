@@ -18,6 +18,7 @@ mod block_list_settings;
 #[cfg(feature = "local_fs")]
 pub(crate) mod agent_session_handoff;
 pub(crate) mod agent_session_history;
+pub(crate) mod agent_session_history_model;
 mod alias;
 pub(crate) mod alt_screen;
 pub mod alt_screen_reporting;

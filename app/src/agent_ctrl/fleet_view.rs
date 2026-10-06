@@ -46,6 +46,7 @@ pub enum FleetViewEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FleetViewAction {
     Refresh,
+    DismissActionError,
     ToggleStartMenu,
     Start { repo_url: String, agent: CLIAgent },
     Stop { job_id: String },
@@ -69,6 +70,7 @@ pub struct FleetView {
     scroll_state: ClippedScrollStateHandle,
     refresh_mouse_state: MouseStateHandle,
     start_mouse_state: MouseStateHandle,
+    dismiss_error_mouse_state: MouseStateHandle,
     row_mouse_states: HashMap<String, RowMouseStates>,
     /// One per startable agent, by repository URL.
     repo_mouse_states: HashMap<String, [MouseStateHandle; 3]>,
@@ -93,6 +95,7 @@ impl FleetView {
             focus_handle: None,
             scroll_state: Default::default(),
             refresh_mouse_state: Default::default(),
+            dismiss_error_mouse_state: Default::default(),
             start_mouse_state: Default::default(),
             row_mouse_states: HashMap::new(),
             repo_mouse_states: HashMap::new(),
@@ -482,6 +485,34 @@ impl View for FleetView {
                 .finish(),
             );
         }
+        if let Some(error) = model.action_error() {
+            content.add_child(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(SPACING)
+                    .with_child(
+                        Expanded::new(
+                            1.,
+                            Text::new(
+                                error.to_owned(),
+                                appearance.ui_font_family(),
+                                appearance.ui_font_size(),
+                            )
+                            .with_color(appearance.theme().ui_error_color())
+                            .finish(),
+                        )
+                        .finish(),
+                    )
+                    .with_child(Self::button(
+                        "Dismiss",
+                        &self.dismiss_error_mouse_state,
+                        Some(FleetViewAction::DismissActionError),
+                        appearance,
+                    ))
+                    .finish(),
+            );
+        }
         if self.start_menu_open {
             content.add_child(self.render_start_menu(appearance, app));
         }
@@ -515,6 +546,9 @@ impl TypedActionView for FleetView {
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         match action {
             FleetViewAction::Refresh => self.refresh(ctx),
+            FleetViewAction::DismissActionError => self
+                .model
+                .update(ctx, |model, ctx| model.dismiss_action_error(ctx)),
             FleetViewAction::ToggleStartMenu => {
                 self.start_menu_open = !self.start_menu_open;
                 ctx.notify();

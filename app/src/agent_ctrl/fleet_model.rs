@@ -1,10 +1,11 @@
 //! The managed runs on AgentCtrl staging and the repositories it can start runs on, refreshed
 //! while a fleet view is attached.
+use std::collections::HashSet;
 use std::time::Duration;
 
 use managed_agent_sessions::{RepositoryInfo, RunSummary, normalize_repo_url};
 use warp_cli::managed_sessions::ManagedEnvironment;
-use warpui::{Entity, ModelContext, SingletonEntity};
+use warpui::{Entity, EntityId, ModelContext, SingletonEntity};
 
 use crate::terminal::CLIAgent;
 
@@ -88,9 +89,16 @@ pub struct FleetModel {
     backend: FleetBackend,
     runs: Vec<RunSummary>,
     repos: Vec<RepositoryInfo>,
+    /// Why the last refresh failed; cleared by the next successful one.
     last_error: Option<String>,
+    /// Why the last start or stop failed; kept across refreshes until the next start or stop, or
+    /// until dismissed.
+    action_error: Option<String>,
     refreshing: bool,
-    attached_views: usize,
+    /// Set when a refresh is asked for while one is in flight, so the newer state is fetched once
+    /// it lands.
+    refresh_again: bool,
+    attached_views: HashSet<EntityId>,
     /// Whether a refresh timer is pending, so re-attaching within an interval does not start a
     /// second polling chain.
     refresh_scheduled: bool,
@@ -107,8 +115,10 @@ impl FleetModel {
             runs: Vec::new(),
             repos: Vec::new(),
             last_error: None,
+            action_error: None,
             refreshing: false,
-            attached_views: 0,
+            refresh_again: false,
+            attached_views: HashSet::new(),
             refresh_scheduled: false,
         }
     }
@@ -121,6 +131,20 @@ impl FleetModel {
         self.last_error.as_deref()
     }
 
+    pub fn action_error(&self) -> Option<&str> {
+        self.action_error.as_deref()
+    }
+
+    pub fn dismiss_action_error(&mut self, ctx: &mut ModelContext<Self>) {
+        if self.action_error.take().is_some() {
+            ctx.emit(FleetModelEvent::Updated);
+        }
+    }
+
+    pub fn attached_view_count(&self) -> usize {
+        self.attached_views.len()
+    }
+
     pub fn is_refreshing(&self) -> bool {
         self.refreshing
     }
@@ -129,21 +153,24 @@ impl FleetModel {
         group_runs(&self.runs, &self.repos)
     }
 
-    /// Counts a fleet view as showing the runs; the first one starts polling.
-    pub fn attach_view(&mut self, ctx: &mut ModelContext<Self>) {
-        self.attached_views += 1;
-        if self.attached_views == 1 {
+    /// Counts `view_id` as showing the runs; the first one starts polling. Attaching an attached
+    /// view again changes nothing.
+    pub fn attach_view(&mut self, view_id: EntityId, ctx: &mut ModelContext<Self>) {
+        if self.attached_views.insert(view_id) && self.attached_views.len() == 1 {
             self.refresh(ctx);
             self.schedule_refresh(ctx);
         }
     }
 
-    pub fn detach_view(&mut self) {
-        self.attached_views = self.attached_views.saturating_sub(1);
+    /// Stops counting `view_id`. Panes are detached more than once on close (hidden for undo,
+    /// then closed), so detaching a detached view changes nothing.
+    pub fn detach_view(&mut self, view_id: EntityId) {
+        self.attached_views.remove(&view_id);
     }
 
     pub fn refresh(&mut self, ctx: &mut ModelContext<Self>) {
         if self.refreshing {
+            self.refresh_again = true;
             return;
         }
         self.refreshing = true;
@@ -173,6 +200,9 @@ impl FleetModel {
             }
         }
         ctx.emit(FleetModelEvent::Updated);
+        if std::mem::take(&mut self.refresh_again) {
+            self.refresh(ctx);
+        }
     }
 
     /// Starts `agent` on `repo_url`, then refreshes.
@@ -181,12 +211,13 @@ impl FleetModel {
             log::error!("{agent:?} has no AgentCtrl profile to start");
             return;
         };
+        self.action_error = None;
         let start = self.backend.start;
         ctx.spawn(
             async move { blocking::unblock(move || start(profile, &repo_url)).await },
             |me, result, ctx| {
                 if let Err(error) = result {
-                    me.last_error = Some(start_failure_message(&error));
+                    me.action_error = Some(start_failure_message(&error));
                     ctx.emit(FleetModelEvent::Updated);
                 }
                 me.refresh(ctx);
@@ -196,12 +227,13 @@ impl FleetModel {
 
     /// Asks AgentCtrl to stop `job_id` gracefully, then refreshes.
     pub fn stop(&mut self, job_id: String, ctx: &mut ModelContext<Self>) {
+        self.action_error = None;
         let stop = self.backend.stop;
         ctx.spawn(
             async move { blocking::unblock(move || stop(&job_id)).await },
             |me, result, ctx| {
                 if let Err(error) = result {
-                    me.last_error = Some(format!("Could not stop the run: {error:#}"));
+                    me.action_error = Some(format!("Could not stop the run: {error:#}"));
                     ctx.emit(FleetModelEvent::Updated);
                 }
                 me.refresh(ctx);
@@ -210,7 +242,7 @@ impl FleetModel {
     }
 
     fn schedule_refresh(&mut self, ctx: &mut ModelContext<Self>) {
-        if self.refresh_scheduled || !should_poll(self.attached_views) {
+        if self.refresh_scheduled || !should_poll(self.attached_view_count()) {
             return;
         }
         self.refresh_scheduled = true;
@@ -218,7 +250,7 @@ impl FleetModel {
             async { warpui::r#async::Timer::after(REFRESH_INTERVAL).await },
             |me, _, ctx| {
                 me.refresh_scheduled = false;
-                if should_poll(me.attached_views) {
+                if should_poll(me.attached_view_count()) {
                     me.refresh(ctx);
                     me.schedule_refresh(ctx);
                 }

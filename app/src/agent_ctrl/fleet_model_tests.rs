@@ -226,3 +226,86 @@ fn a_failed_refresh_keeps_the_old_runs_and_records_the_error() {
         });
     });
 }
+
+#[test]
+fn a_view_detached_twice_is_uncounted_once() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| FleetModel::with_backend(backend(list_two_runs)));
+        let closed = warpui::EntityId::new();
+        let reopened = warpui::EntityId::new();
+
+        model.update(&mut app, |model, ctx| {
+            model.attach_view(closed, ctx);
+            // Hidden for undo, then closed after the grace period.
+            model.detach_view(closed);
+            model.attach_view(reopened, ctx);
+            model.detach_view(closed);
+        });
+
+        assert_eq!(model.read(&app, |model, _| model.attached_view_count()), 1);
+    });
+}
+
+fn start_fails(_: &str, _: &str) -> anyhow::Result<String> {
+    Err(anyhow::anyhow!("node refused the run"))
+}
+
+#[test]
+fn a_failed_start_outlives_the_refresh_that_follows_it() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                start: start_fails,
+                ..backend(list_two_runs)
+            })
+        });
+
+        model.update(&mut app, |model, ctx| {
+            model.start(WARP.to_owned(), crate::terminal::CLIAgent::Claude, ctx)
+        });
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => model.read(&app, |model, _| {
+                model.runs.len() == 2 && !model.is_refreshing()
+            }),
+            "the refresh after the start never landed"
+        );
+
+        model.read(&app, |model, _| {
+            assert_eq!(model.last_error(), None);
+            let error = model.action_error().expect("the start failure is kept");
+            assert!(error.contains("node refused the run"), "{error}");
+        });
+
+        model.update(&mut app, |model, ctx| model.dismiss_action_error(ctx));
+        assert_eq!(
+            model.read(&app, |model, _| model.action_error().map(str::to_owned)),
+            None
+        );
+    });
+}
+
+static LISTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn list_counting() -> anyhow::Result<FleetSnapshot> {
+    LISTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    list_two_runs()
+}
+
+#[test]
+fn a_refresh_asked_for_during_one_runs_after_it() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| FleetModel::with_backend(backend(list_counting)));
+
+        model.update(&mut app, |model, ctx| {
+            model.refresh(ctx);
+            model.refresh(ctx);
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) =>
+                LISTED.load(std::sync::atomic::Ordering::SeqCst) == 2
+                    && !model.read(&app, |model, _| model.is_refreshing()),
+            "the second refresh never ran"
+        );
+    });
+}

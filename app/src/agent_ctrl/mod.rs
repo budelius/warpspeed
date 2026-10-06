@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use warpui::{Entity, SingletonEntity, WindowId};
 
+use crate::pane_group::PaneId;
 use crate::workspace::PaneViewLocator;
 
 /// The open fleet pane of each window, so a window shows at most one.
@@ -23,8 +24,16 @@ impl FleetPaneManager {
         self.panes.insert(window_id, locator);
     }
 
-    pub fn deregister_pane(&mut self, window_id: &WindowId) {
-        self.panes.remove(window_id);
+    /// Forgets `window_id`'s fleet pane if it is `pane_id`, so a closed pane cannot deregister
+    /// the one that replaced it.
+    pub fn deregister_pane(&mut self, window_id: &WindowId, pane_id: PaneId) {
+        if self
+            .panes
+            .get(window_id)
+            .is_some_and(|locator| locator.pane_id == pane_id)
+        {
+            self.panes.remove(window_id);
+        }
     }
 }
 

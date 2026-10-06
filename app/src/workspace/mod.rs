@@ -1041,7 +1041,6 @@ pub fn init(app: &mut AppContext) {
         "Open AgentCtrl fleet",
         WorkspaceAction::OpenAgentCtrlFleetPane,
     )
-    .with_group(bindings::BindingGroup::Terminal.as_str())
     .with_context_predicate(id!("Workspace"))]);
 
     // Offered only on local panes inside a git work tree, whose repository the run starts in.

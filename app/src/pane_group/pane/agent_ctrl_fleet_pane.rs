@@ -77,7 +77,8 @@ impl PaneContent for AgentCtrlFleetPane {
                 },
             );
         });
-        FleetModel::handle(ctx).update(ctx, |model, ctx| model.attach_view(ctx));
+        let view_id = self.view.id();
+        FleetModel::handle(ctx).update(ctx, |model, ctx| model.attach_view(view_id, ctx));
     }
 
     fn detach(
@@ -91,10 +92,12 @@ impl PaneContent for AgentCtrlFleetPane {
         ctx.unsubscribe_to_view(&self.view);
 
         let window_id = ctx.window_id();
+        let pane_id = self.id();
         FleetPaneManager::handle(ctx).update(ctx, |manager, _| {
-            manager.deregister_pane(&window_id);
+            manager.deregister_pane(&window_id, pane_id);
         });
-        FleetModel::handle(ctx).update(ctx, |model, _| model.detach_view());
+        let view_id = self.view.id();
+        FleetModel::handle(ctx).update(ctx, |model, _| model.detach_view(view_id));
     }
 
     fn snapshot(&self, _app: &AppContext) -> LeafContents {

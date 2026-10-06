@@ -8141,3 +8141,54 @@ fn open_managed_session_runs_the_viewer_in_a_new_tab() {
         );
     });
 }
+
+#[test]
+fn a_closed_fleet_pane_cleaned_up_late_leaves_its_replacement_registered() {
+    use crate::agent_ctrl::FleetPaneManager;
+    use crate::agent_ctrl::fleet_model::FleetModel;
+
+    let _undo_closed_panes = FeatureFlag::UndoClosedPanes.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        let [closed] = fleet_pane_ids(&workspace, &mut app)[..] else {
+            panic!("expected one fleet pane");
+        };
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .update(ctx, |pane_group, ctx| pane_group.close_pane(closed, ctx));
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        let reopened = fleet_pane_ids(&workspace, &mut app)
+            .into_iter()
+            .find(|pane_id| *pane_id != closed)
+            .expect("reopening adds a new fleet pane");
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .update(ctx, |pane_group, ctx| {
+                    pane_group.cleanup_closed_pane(closed, ctx)
+                });
+        });
+
+        app.read(|ctx| {
+            assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 1);
+            let window_id = workspace.window_id(ctx);
+            assert_eq!(
+                FleetPaneManager::as_ref(ctx)
+                    .find_pane(window_id)
+                    .map(|locator| locator.pane_id),
+                Some(reopened)
+            );
+        });
+    });
+}

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -19,21 +21,48 @@ pub enum ManagedSessionsCommand {
     /// List locally bookmarked AgentCtrl sessions.
     List,
 
-    /// Start one task-bound configured operator-enabled agent.
+    /// Start one configured operator-enabled agent, bound to a task or to a repository.
     Start {
         /// Configured agent profile name.
         #[arg(long)]
         agent: String,
 
-        /// Canonical STOZN task id. Every managed session requires one.
+        /// Canonical STOZN task id. Required unless the run starts on a repository.
+        #[arg(long, required_unless_present = "repo", conflicts_with = "repo")]
+        task: Option<String>,
+
+        /// Configured repository URL; starts an interactive run in a fresh worktree.
         #[arg(long)]
-        task: String,
+        repo: Option<String>,
+
+        /// Base branch for the run's worktree; defaults to the repository's configured branch.
+        #[arg(long, requires = "repo", conflicts_with = "task")]
+        branch: Option<String>,
 
         #[arg(long)]
         prompt: Option<String>,
 
         #[arg(long)]
         interactive: bool,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
+    /// List the repositories the AgentCtrl node can start runs on.
+    Repos {
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
+    /// Move every local agent session under a directory to AgentCtrl.
+    MoveAll {
+        #[arg(long)]
+        under: PathBuf,
+
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
 
         #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
         environment: ManagedEnvironment,

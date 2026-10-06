@@ -44,17 +44,20 @@ fn write_file(path: &Path, content: &[u8]) {
 }
 
 #[test]
-fn moved_agent_names() {
+fn agent_ctrl_profiles() {
     assert_eq!(
-        moved_agent_name(CLIAgent::Claude),
-        Some("staging-claude-moved")
+        agent_ctrl_profile(CLIAgent::Claude),
+        Some("staging-claude-interactive-rw")
     );
-    assert_eq!(moved_agent_name(CLIAgent::Pi), Some("staging-pi-moved"));
     assert_eq!(
-        moved_agent_name(CLIAgent::Codex),
-        Some("staging-codex-moved")
+        agent_ctrl_profile(CLIAgent::Pi),
+        Some("staging-pi-interactive-rw")
     );
-    assert_eq!(moved_agent_name(CLIAgent::Gemini), None);
+    assert_eq!(
+        agent_ctrl_profile(CLIAgent::Codex),
+        Some("staging-codex-interactive-rw")
+    );
+    assert_eq!(agent_ctrl_profile(CLIAgent::Gemini), None);
 }
 
 #[test]
@@ -321,7 +324,7 @@ fn prepare_handoff_pushes_to_gitea_when_present() {
 
     let prepared = prepare_handoff_with_roots(&source, &roots, now).unwrap();
 
-    assert_eq!(prepared.agent_name, "staging-claude-moved");
+    assert_eq!(prepared.agent_name, "staging-claude-interactive-rw");
     assert_eq!(prepared.session_file, b"{\"line\":1}\n");
     assert_eq!(
         prepared.session_file_path,

@@ -89,11 +89,11 @@ impl AgentSessionRoots {
     }
 }
 
-pub(crate) fn moved_agent_name(agent: CLIAgent) -> Option<&'static str> {
+pub(crate) fn agent_ctrl_profile(agent: CLIAgent) -> Option<&'static str> {
     match agent {
-        CLIAgent::Claude => Some("staging-claude-moved"),
-        CLIAgent::Pi => Some("staging-pi-moved"),
-        CLIAgent::Codex => Some("staging-codex-moved"),
+        CLIAgent::Claude => managed_agent_sessions::agent_ctrl_profile("claude"),
+        CLIAgent::Pi => managed_agent_sessions::agent_ctrl_profile("pi"),
+        CLIAgent::Codex => managed_agent_sessions::agent_ctrl_profile("codex"),
         CLIAgent::Gemini
         | CLIAgent::Amp
         | CLIAgent::Droid
@@ -392,7 +392,7 @@ fn prepare_handoff_with_roots(
     roots: &AgentSessionRoots,
     now: DateTime<Local>,
 ) -> Result<PreparedHandoff> {
-    let agent_name = moved_agent_name(source.agent)
+    let agent_name = agent_ctrl_profile(source.agent)
         .ok_or_else(|| anyhow!("{:?} sessions cannot be moved", source.agent))?;
     let path = resolve_session_file(source, roots)?;
     let session_file = read_session_file(&path)?;

@@ -456,7 +456,7 @@ fn capturing_fixture(
 
 fn moved_import(session_file: Vec<u8>) -> MovedSessionImport<'static> {
     MovedSessionImport {
-        agent_name: "staging-claude-moved",
+        agent_name: "staging-claude-interactive-rw",
         session_id: "abc-123",
         session_file,
         repo_url: "https://git.example.com/org/repo.git",
@@ -719,6 +719,229 @@ fn resume_wait_restarts_without_a_cursor_after_a_history_gap() {
     assert_eq!(log.len(), 3);
     assert!(log[1].contains("after=c1"), "{}", log[1]);
     assert!(!log[2].contains("after="), "{}", log[2]);
+}
+
+#[test]
+fn start_on_repo_sends_repo_fields_and_no_task() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted", "job_id": "job-7" }));
+    let profile = fixture_profile(base);
+    let job_id = start_run_on_repo_with(
+        &profile,
+        "token",
+        "staging-claude-interactive-rw",
+        "https://gitlab.com/pseekoo/x.git",
+        Some("main"),
+        Some("hello"),
+    )
+    .unwrap();
+    assert_eq!(job_id, "job-7");
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(raw.starts_with("POST /api/agent-control/runs "), "{raw}");
+    let body: Value = serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "agent_name": "staging-claude-interactive-rw",
+            "interactive": true,
+            "repo_url": "https://gitlab.com/pseekoo/x.git",
+            "base_branch": "main",
+            "prompt": "hello"
+        })
+    );
+}
+
+#[test]
+fn start_on_repo_rejects_a_bad_branch_locally() {
+    let profile = fixture_profile("http://127.0.0.1:1");
+    let error = start_run_on_repo_with(
+        &profile,
+        "token",
+        "staging-claude-interactive-rw",
+        "https://gitlab.com/pseekoo/x.git",
+        Some("../x"),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("base branch"), "{error}");
+}
+
+#[test]
+fn base_branch_rule_matches_the_server() {
+    for valid in [
+        "main",
+        "release/1.2",
+        "feature/a-b_c.d",
+        "a",
+        &"x".repeat(100),
+    ] {
+        assert!(valid_base_branch(valid), "rejected {valid}");
+    }
+    for invalid in [
+        "",
+        "-main",
+        "/main",
+        "a/.hidden",
+        ".git",
+        "a..b",
+        "a b",
+        "a//b",
+        "main/",
+        "ma~in",
+        &"x".repeat(101),
+    ] {
+        assert!(!valid_base_branch(invalid), "accepted {invalid}");
+    }
+}
+
+#[test]
+fn start_on_repo_surfaces_node_at_capacity() {
+    let base = http_fixture(
+        "409 Conflict",
+        json!({ "error": "node at capacity", "code": "node_at_capacity" }),
+    );
+    let error = start_run_on_repo_with(
+        &fixture_profile(base),
+        "token",
+        "staging-pi-interactive-rw",
+        "https://gitlab.com/pseekoo/x",
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(is_node_at_capacity(&error), "{error:#}");
+    let status = error.downcast_ref::<HttpStatusError>().unwrap();
+    assert_eq!(status.status, StatusCode::CONFLICT);
+    assert!(!is_node_at_capacity(&anyhow::anyhow!("other")));
+}
+
+#[test]
+fn list_repositories_parses_items() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "items": [
+            { "name": "kaizen", "url": "https://gitlab.com/pseekoo/kaizen", "branch": "main", "reachable": true, "error": null },
+            { "name": "x", "url": "https://gitlab.com/pseekoo/x", "branch": "dev", "reachable": false, "error": "auth failed" }
+        ] }),
+    );
+    let repositories = list_repositories_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(
+        repositories,
+        vec![
+            RepositoryInfo {
+                name: "kaizen".to_owned(),
+                url: "https://gitlab.com/pseekoo/kaizen".to_owned(),
+                branch: "main".to_owned(),
+                reachable: true,
+                error: None,
+            },
+            RepositoryInfo {
+                name: "x".to_owned(),
+                url: "https://gitlab.com/pseekoo/x".to_owned(),
+                branch: "dev".to_owned(),
+                reachable: false,
+                error: Some("auth failed".to_owned()),
+            },
+        ]
+    );
+}
+
+#[test]
+fn list_runs_parses_repo_and_branch() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "items": [
+            {
+                "job_id": "job-repo",
+                "state": "running",
+                "agent_name": "staging-claude-interactive-rw",
+                "interactive": true,
+                "repo_url": "https://gitlab.com/pseekoo/kaizen.git",
+                "branch": "agent/job-repo",
+                "last_activity_at": "2026-10-05T10:00:00.000Z",
+                "created_at": "2026-10-05T09:00:00.000Z"
+            },
+            {
+                "job_id": "job-plain",
+                "state": "completed",
+                "agent_name": "staging-pi-inspector",
+                "interactive": false,
+                "repo_url": null,
+                "branch": null,
+                "last_activity_at": null
+            }
+        ] }),
+    );
+    let runs = list_runs_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(
+        runs,
+        vec![
+            RunSummary {
+                job_id: "job-repo".to_owned(),
+                state: "running".to_owned(),
+                agent_name: "staging-claude-interactive-rw".to_owned(),
+                repo_url: Some("https://gitlab.com/pseekoo/kaizen.git".to_owned()),
+                branch: Some("agent/job-repo".to_owned()),
+                interactive: true,
+                last_activity_at: Some("2026-10-05T10:00:00.000Z".to_owned()),
+            },
+            RunSummary {
+                job_id: "job-plain".to_owned(),
+                state: "completed".to_owned(),
+                agent_name: "staging-pi-inspector".to_owned(),
+                repo_url: None,
+                branch: None,
+                interactive: false,
+                last_activity_at: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn send_input_posts_the_text() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
+    post_input_with(&fixture_profile(base), "token", "job-1", Some("hi")).unwrap();
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(
+        raw.starts_with("POST /api/agent-control/runs/job-1/input "),
+        "{raw}"
+    );
+    assert!(raw.ends_with("{\"text\":\"hi\"}"), "{raw}");
+}
+
+#[test]
+fn normalize_repo_url_matches_server_rule() {
+    let https = normalize_repo_url("https://gitlab.com/pseekoo/x");
+    assert_eq!(https, "https://gitlab.com/pseekoo/x");
+    assert_eq!(normalize_repo_url("git@gitlab.com:pseekoo/x.git"), https);
+    assert_eq!(
+        normalize_repo_url("https://user:tok@gitlab.com/pseekoo/x.git/"),
+        https
+    );
+    assert_eq!(normalize_repo_url("deploy@GitLab.com:pseekoo/x"), https);
+    assert_eq!(
+        normalize_repo_url("dev:glpat-SECRET@git.example.com:team/repo.git"),
+        "https://git.example.com/team/repo"
+    );
+    assert_eq!(
+        normalize_repo_url("https://User@Git-Dev.Obachan.dev/stozn/warpspeed.git/"),
+        "https://git-dev.obachan.dev/stozn/warpspeed"
+    );
+    assert_eq!(normalize_repo_url(r"C:\repos\x"), r"C:\repos\x");
+}
+
+#[test]
+fn agent_ctrl_profiles_are_the_interactive_rw_profiles() {
+    assert_eq!(
+        agent_ctrl_profile("claude"),
+        Some("staging-claude-interactive-rw")
+    );
+    assert_eq!(agent_ctrl_profile("pi"), Some("staging-pi-interactive-rw"));
+    assert_eq!(
+        agent_ctrl_profile("codex"),
+        Some("staging-codex-interactive-rw")
+    );
+    assert_eq!(agent_ctrl_profile("gemini"), None);
 }
 
 #[test]

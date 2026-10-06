@@ -42,7 +42,7 @@ use crate::settings::app_installation_detection::{
     UserAppInstallDetectionSettings, UserAppInstallStatus,
 };
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
-use crate::terminal::agent_session_handoff::{HandoffSource, moved_agent_name};
+use crate::terminal::agent_session_handoff::{HandoffSource, agent_ctrl_profile};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shared_session::manager::Manager;
@@ -682,7 +682,7 @@ impl TerminalView {
         if session.remote_host.is_some() {
             return None;
         }
-        moved_agent_name(session.agent)?;
+        agent_ctrl_profile(session.agent)?;
         let session_id = sessions.session_id(self.view_id)?.to_owned();
         // Not the agent-reported cwd: it follows the agent's own `cd`s, while the session file
         // stays keyed by the directory the agent was launched from.

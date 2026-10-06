@@ -7772,6 +7772,67 @@ fn confirm_claude_start_on_agent_ctrl(
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 #[test]
+fn start_agent_on_agent_ctrl_is_not_offered_again_while_a_start_is_in_flight() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view_id = focused_terminal_view_for_move(&workspace, &mut app).id();
+        let offer_warp = |workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>| {
+            workspace.offer_agent_ctrl_start(
+                terminal_view_id,
+                "gitea",
+                "https://gitea.example.com/acme/warp.git".to_owned(),
+                &[configured_warp_repository()],
+                ctx,
+            );
+            workspace
+                .agent_ctrl_start_offers
+                .contains_key(&terminal_view_id)
+        };
+
+        confirm_claude_start_on_agent_ctrl(
+            &workspace,
+            terminal_view_id,
+            fake_start_run_on_repo,
+            &mut app,
+        );
+        let offered_mid_start = workspace.update(&mut app, offer_warp);
+        assert!(
+            !offered_mid_start,
+            "a second run must not be offered mid-start"
+        );
+        let persistent = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .toast_stack
+                    .as_ref(ctx)
+                    .persistent_toast_texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            persistent,
+            vec!["Starting Claude Code on AgentCtrl…".to_owned()]
+        );
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Started job-new on warp".to_owned()),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        let offered_after_start = workspace.update(&mut app, offer_warp);
+        assert!(
+            offered_after_start,
+            "a finished start frees the pane for another"
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
 fn start_agent_on_agent_ctrl_opens_the_started_run_in_the_pane() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);

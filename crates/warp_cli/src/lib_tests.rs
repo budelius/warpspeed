@@ -103,6 +103,26 @@ fn managed_agent_start_on_a_repository_needs_no_task() {
         "https://x/y.git",
     ]);
     assert!(task_and_repo.is_err());
+    let interactive_on_repo = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "a",
+        "--repo",
+        "https://x/y.git",
+        "--interactive",
+    ]);
+    assert!(interactive_on_repo.is_err());
+    let interactive_task =
+        agent_ctrl_command(&["start", "--agent", "a", "--task", "task-1", "--interactive"]);
+    assert!(matches!(
+        interactive_task,
+        managed_sessions::ManagedSessionsCommand::Start {
+            interactive: true,
+            ..
+        }
+    ));
 }
 
 #[test]

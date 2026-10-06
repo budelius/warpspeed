@@ -1,9 +1,8 @@
 use managed_agent_sessions::{RepositoryInfo, RunSummary};
 use warpui::App;
 
-use crate::test_util::assert_eventually_within;
-
 use super::*;
+use crate::test_util::assert_eventually_within;
 
 fn run(job_id: &str, state: &str, repo_url: Option<&str>) -> RunSummary {
     RunSummary {

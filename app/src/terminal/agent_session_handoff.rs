@@ -613,6 +613,11 @@ pub(crate) fn start_agent_prompt(remote: &str, repository: &RepositoryInfo) -> S
     )
 }
 
+/// The notice shown while a run of `agent` is being started on AgentCtrl.
+pub(crate) fn start_agent_progress_message(agent: CLIAgent) -> String {
+    format!("Starting {} on AgentCtrl…", agent.display_name())
+}
+
 /// Why the pane's repository cannot be offered for a start on AgentCtrl.
 pub(crate) fn start_agent_unavailable_message(error: &anyhow::Error) -> String {
     format!(

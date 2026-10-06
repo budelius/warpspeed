@@ -396,8 +396,8 @@ use crate::terminal::agent_session_handoff::{
     agent_ctrl_profile, agent_exit_command, configured_repository, cut_over_decision,
     move_failure_message, move_idempotency_key, move_progress_message,
     prepare_handoff as prepare_agent_session_handoff, repo_url_for, select_remote,
-    session_changed_message, start_agent_failure_message, start_agent_prompt,
-    start_agent_unavailable_message, stop_request_outcome,
+    session_changed_message, start_agent_failure_message, start_agent_progress_message,
+    start_agent_prompt, start_agent_unavailable_message, stop_request_outcome,
 };
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
@@ -1185,6 +1185,10 @@ pub struct Workspace {
     /// terminal view.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     agent_ctrl_start_offers: HashMap<EntityId, AgentCtrlStartOffer>,
+    /// The agent of each AgentCtrl run still being started, by the terminal view it was started
+    /// from.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    agent_ctrl_starts_in_flight: HashMap<EntityId, CLIAgent>,
     /// Stands in for `managed_agent_sessions::start_run_on_repo`, so tests never reach the
     /// dashboard.
     #[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
@@ -3762,6 +3766,8 @@ impl Workspace {
             agent_ctrl_move_outcomes: HashMap::new(),
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_start_offers: HashMap::new(),
+            #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+            agent_ctrl_starts_in_flight: HashMap::new(),
             #[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
             fake_start_run_on_repo: None,
             window_process_restart_in_progress: false,
@@ -14514,6 +14520,29 @@ impl Workspace {
         });
     }
 
+    /// Re-shows the progress of the run being started from `terminal_view_id`, if there is one.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn reshow_agent_ctrl_start_in_flight(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let Some(agent) = self
+            .agent_ctrl_starts_in_flight
+            .get(&terminal_view_id)
+            .copied()
+        else {
+            return false;
+        };
+        self.show_agent_ctrl_start_toast(
+            terminal_view_id,
+            DismissibleToast::default(start_agent_progress_message(agent)),
+            true,
+            ctx,
+        );
+        true
+    }
+
     /// Looks up the pane's repository and AgentCtrl's configured repositories off the main
     /// thread, then asks which agent to start there.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -14524,6 +14553,10 @@ impl Workspace {
     ) {
         use managed_agent_sessions::list_repositories;
         use warp_cli::managed_sessions::ManagedEnvironment;
+
+        if self.reshow_agent_ctrl_start_in_flight(terminal_view_id, ctx) {
+            return;
+        }
 
         let Some(cwd) = self
             .terminal_view_by_id(terminal_view_id, ctx)
@@ -14584,6 +14617,10 @@ impl Workspace {
             (CLIAgent::Codex, "Codex"),
         ];
 
+        // Checked again here: a start can begin while the repositories are being looked up.
+        if self.reshow_agent_ctrl_start_in_flight(terminal_view_id, ctx) {
+            return;
+        }
         let Some(repository) = configured_repository(&repo_url, repositories) else {
             self.agent_ctrl_start_offers.remove(&terminal_view_id);
             self.show_agent_ctrl_start_toast(
@@ -14634,9 +14671,11 @@ impl Workspace {
             log::error!("{agent:?} has no AgentCtrl profile to start");
             return;
         };
+        self.agent_ctrl_starts_in_flight
+            .insert(terminal_view_id, agent);
         self.show_agent_ctrl_start_toast(
             terminal_view_id,
-            DismissibleToast::default(format!("Starting {} on AgentCtrl…", agent.display_name())),
+            DismissibleToast::default(start_agent_progress_message(agent)),
             // Persistent so it stays up until the outcome toast replaces it.
             true,
             ctx,
@@ -14674,6 +14713,7 @@ impl Workspace {
         use managed_agent_sessions::ManagedSessionDeepLink;
         use warp_cli::managed_sessions::ManagedEnvironment;
 
+        self.agent_ctrl_starts_in_flight.remove(&terminal_view_id);
         let job_id = match result {
             Ok(job_id) => job_id,
             Err(error) => {

@@ -13,6 +13,8 @@ use crate::app_state::get_app_state;
 use crate::features::FeatureFlag;
 use crate::network::NetworkStatus;
 use crate::persistence::ModelEvent;
+#[cfg(not(target_family = "wasm"))]
+use crate::remote_control::may_save_shared_session;
 use crate::root_view::OpenPath;
 use crate::server::server_api::ServerApiProvider;
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
@@ -21,9 +23,6 @@ use crate::undo_close::UndoCloseStack;
 use crate::workspace::cross_window_tab_drag::CrossWindowTabDrag;
 use crate::workspace::{Workspace, WorkspaceAction};
 use crate::{GlobalResourceHandlesProvider, auth};
-
-#[cfg(not(target_family = "wasm"))]
-use crate::remote_control::may_save_shared_session;
 
 #[cfg(target_family = "wasm")]
 fn may_save_shared_session() -> bool {

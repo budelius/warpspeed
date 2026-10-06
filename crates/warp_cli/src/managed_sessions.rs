@@ -42,7 +42,8 @@ pub enum ManagedSessionsCommand {
         #[arg(long)]
         prompt: Option<String>,
 
-        #[arg(long)]
+        /// A run on a repository is always interactive.
+        #[arg(long, conflicts_with = "repo")]
         interactive: bool,
 
         #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]

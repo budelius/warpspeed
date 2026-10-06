@@ -129,3 +129,41 @@ fn a_past_row_without_a_resume_command_has_no_action() {
     let without_agent = row(None, AgentSessionState::Past);
     assert_eq!(action_for(&without_agent, None), None);
 }
+
+#[test]
+fn a_past_row_with_an_unsafe_session_id_has_no_action() {
+    for session_id in ["", "abc; rm -rf ~", "../abc", "a b", "$(whoami)"] {
+        let unsafe_row = AgentSessionRow {
+            session_id: Some(session_id.into()),
+            ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
+        };
+        assert_eq!(action_for(&unsafe_row, None), None, "{session_id:?}");
+    }
+    let uuid_row = AgentSessionRow {
+        session_id: Some("0f8e-41_ab".into()),
+        ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
+    };
+    assert!(action_for(&uuid_row, None).is_some());
+}
+
+#[test]
+fn resume_directory_prefers_the_conversations_folder_then_the_panes() {
+    let exists = |path: &Path| path != Path::new("T:/gone");
+    assert_eq!(
+        resume_directory(Path::new("T:/p/x"), Some("T:/pane".into()), exists),
+        Some(PathBuf::from("T:/p/x"))
+    );
+    assert_eq!(
+        resume_directory(Path::new("T:/gone"), Some("T:/pane".into()), exists),
+        Some(PathBuf::from("T:/pane"))
+    );
+    assert_eq!(
+        resume_directory(Path::new(""), Some("T:/pane".into()), exists),
+        Some(PathBuf::from("T:/pane"))
+    );
+    assert_eq!(
+        resume_directory(Path::new("T:/gone"), Some("T:/gone".into()), exists),
+        None
+    );
+    assert_eq!(resume_directory(Path::new(""), None, exists), None);
+}

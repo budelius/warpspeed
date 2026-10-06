@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use warp_util::path::ShellFamily;
 
 use crate::app_state::CliAgentResumeDescriptor;
+use crate::terminal::agent_session_history::is_safe_session_id;
 use crate::terminal::agent_sessions_index::{AgentSessionRow, AgentSessionState};
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::shell::ShellType;
@@ -36,7 +37,7 @@ pub(crate) fn action_for(
         AgentSessionState::Detached { session_id } => Some(AgentSessionAction::Attach(*session_id)),
         AgentSessionState::Past => {
             let agent = row.agent?;
-            let session_id = row.session_id.clone()?;
+            let session_id = row.session_id.clone().filter(|id| is_safe_session_id(id))?;
             resume_descriptor(agent, &session_id, &row.cwd).resume_command()?;
             Some(AgentSessionAction::Resume {
                 agent,
@@ -60,6 +61,20 @@ pub(crate) fn resume_descriptor(
         title: None,
         captured_unix_seconds: None,
     }
+}
+
+/// Where to resume: the conversation's own folder while it exists, else `fallback`, else
+/// nowhere -- a resume in the wrong folder starts the agent against the wrong project.
+pub(crate) fn resume_directory(
+    cwd: &Path,
+    fallback: Option<PathBuf>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let usable = |path: &Path| !path.as_os_str().is_empty() && is_dir(path);
+    if usable(cwd) {
+        return Some(cwd.to_path_buf());
+    }
+    fallback.filter(|path| usable(path))
 }
 
 /// `cd <cwd>` joined to `resume` with the shell's separator.

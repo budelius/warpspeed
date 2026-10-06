@@ -7482,3 +7482,53 @@ fn agent_session_inputs_lists_each_terminal_pane_in_tab_order() {
         );
     });
 }
+
+#[test]
+fn agent_session_start_focuses_the_pane_already_running_its_conversation() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let running_view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .expect("workspace should start with a terminal view");
+            seed_agent_session(
+                running_view.id(),
+                crate::terminal::CLIAgent::Claude,
+                Some(&session_id),
+                None,
+                &std::env::temp_dir(),
+                ctx,
+            );
+            workspace.add_terminal_tab(false, ctx);
+            assert_eq!(workspace.active_tab_index(), 1);
+
+            let pending_pane = workspace.active_tab_pane_group();
+            let locator = PaneViewLocator {
+                pane_group_id: pending_pane.id(),
+                pane_id: pending_pane.as_ref(ctx).focused_pane_id(ctx),
+            };
+            let descriptor = |session_id: String| CliAgentResumeDescriptor {
+                agent: crate::terminal::CLIAgent::Claude,
+                session_id: Some(session_id),
+                cwd: std::env::temp_dir(),
+                title: None,
+                captured_unix_seconds: None,
+            };
+
+            workspace.start_agent_session(
+                locator,
+                Some(descriptor(uuid::Uuid::new_v4().to_string())),
+                ctx,
+            );
+            assert_eq!(workspace.active_tab_index(), 1);
+
+            workspace.start_agent_session(locator, Some(descriptor(session_id.clone())), ctx);
+            assert_eq!(workspace.active_tab_index(), 0);
+        });
+    });
+}

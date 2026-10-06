@@ -88,7 +88,7 @@ fn directories(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn is_safe_session_id(value: &str) -> bool {
+pub(crate) fn is_safe_session_id(value: &str) -> bool {
     !value.is_empty()
         && value
             .chars()

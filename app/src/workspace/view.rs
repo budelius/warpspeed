@@ -133,7 +133,7 @@ use super::action::{
     VerticalTabsPaneContextMenuTarget, WorkspaceAction,
 };
 use super::agent_session_actions::{
-    AgentSessionAction, ShellKind, resume_command_line, resume_descriptor,
+    AgentSessionAction, ShellKind, resume_command_line, resume_descriptor, resume_directory,
 };
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use super::auto_handoff::AutoCloudHandoffController;
@@ -392,13 +392,14 @@ use crate::tab_configs::telemetry::{NewWorktreeConfigOpenSource, WorktreeBranchN
 use crate::tab_configs::{
     NewWorktreeModal, NewWorktreeModalEvent, TabConfigParamsModal, TabConfigParamsModalEvent,
 };
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
 use crate::terminal::agent_session_handoff::{
     CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession, agent_exit_command,
     cut_over_decision, move_failure_message, move_idempotency_key, move_progress_message,
     prepare_handoff as prepare_agent_session_handoff, select_remote, session_changed_message,
     stop_request_outcome,
 };
-#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_history::is_safe_session_id;
 use crate::terminal::agent_sessions_index::{DetachedInput, PaneAgentInput};
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
@@ -14773,17 +14774,14 @@ impl Workspace {
         match action {
             AgentSessionAction::Focus(locator) => self.focus_pane(*locator, ctx),
             AgentSessionAction::Start(locator) => {
-                if let Some(manager) = self
+                let pending = self
                     .get_pane_group_view_with_id(locator.pane_group_id)
                     .and_then(|pane_group| {
                         pane_group
                             .as_ref(ctx)
-                            .terminal_manager_for_pane_id(locator.pane_id, ctx)
-                    })
-                {
-                    manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
-                }
-                self.focus_pane(*locator, ctx);
+                            .pending_agent_resume(locator.pane_id, ctx)
+                    });
+                self.start_agent_session(*locator, pending, ctx);
             }
             AgentSessionAction::Attach(session_id) => self.attach_agent_session(*session_id, ctx),
             AgentSessionAction::Resume {
@@ -14828,27 +14826,17 @@ impl Workspace {
         target: Option<PaneViewLocator>,
         ctx: &mut ViewContext<Self>,
     ) {
-        // Two agent processes on one conversation would interleave writes to its transcript.
-        let running_here = self.agent_pane_inputs(ctx).into_iter().find(|pane| {
-            pane.running.as_ref().is_some_and(|running| {
-                running.agent == agent && running.session_id.as_deref() == Some(session_id)
-            })
-        });
-        if let Some(pane) = running_here {
-            self.focus_pane(pane.locator, ctx);
-            return;
-        }
-        if running_agent_session_ids().contains(session_id) {
+        if !is_safe_session_id(session_id) {
             self.show_agent_session_error(
-                "This conversation is already running outside this window".to_owned(),
+                format!("Couldn't resume the conversation: {session_id:?} is not a session ID"),
                 ctx,
             );
             return;
         }
-
-        let Some(resume) = resume_descriptor(agent, session_id, cwd).resume_command() else {
+        if self.focus_if_already_running(agent, session_id, ctx) {
             return;
-        };
+        }
+
         let target = target
             .filter(|target| {
                 self.get_pane_group_view_with_id(target.pane_group_id)
@@ -14870,6 +14858,21 @@ impl Workspace {
             .get_pane_group_view_with_id(target.pane_group_id)
             .cloned()
         else {
+            return;
+        };
+        let pane_cwd = pane_group
+            .as_ref(ctx)
+            .terminal_working_directory(target.pane_id, ctx)
+            .map(PathBuf::from);
+        let Some(cwd) = resume_directory(cwd, pane_cwd, Path::is_dir) else {
+            self.show_agent_session_error(
+                "Couldn't resume the conversation: its folder no longer exists".to_owned(),
+                ctx,
+            );
+            return;
+        };
+        let cwd = cwd.as_path();
+        let Some(resume) = resume_descriptor(agent, session_id, cwd).resume_command() else {
             return;
         };
 
@@ -14920,6 +14923,60 @@ impl Workspace {
                 );
             }
         }
+    }
+
+    /// Starts a restored pane's shell, which resumes the agent it was holding.
+    fn start_agent_session(
+        &mut self,
+        locator: PaneViewLocator,
+        pending: Option<CliAgentResumeDescriptor>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(pending) = pending
+            && let Some(session_id) = pending.session_id.as_deref()
+            && self.focus_if_already_running(pending.agent, session_id, ctx)
+        {
+            return;
+        }
+        if let Some(manager) = self
+            .get_pane_group_view_with_id(locator.pane_group_id)
+            .and_then(|pane_group| {
+                pane_group
+                    .as_ref(ctx)
+                    .terminal_manager_for_pane_id(locator.pane_id, ctx)
+            })
+        {
+            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+        }
+        self.focus_pane(locator, ctx);
+    }
+
+    /// Focuses the pane already running this conversation, or says it runs elsewhere. Returns
+    /// whether it was running, in which case the caller must not start it again: two agent
+    /// processes on one conversation would interleave writes to its transcript.
+    fn focus_if_already_running(
+        &mut self,
+        agent: CLIAgent,
+        session_id: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let running_here = self.agent_pane_inputs(ctx).into_iter().find(|pane| {
+            pane.running.as_ref().is_some_and(|running| {
+                running.agent == agent && running.session_id.as_deref() == Some(session_id)
+            })
+        });
+        if let Some(pane) = running_here {
+            self.focus_pane(pane.locator, ctx);
+            return true;
+        }
+        if running_agent_session_ids().contains(session_id) {
+            self.show_agent_session_error(
+                "This conversation is already running outside this window".to_owned(),
+                ctx,
+            );
+            return true;
+        }
+        false
     }
 
     fn show_agent_session_error(&mut self, message: String, ctx: &mut ViewContext<Self>) {

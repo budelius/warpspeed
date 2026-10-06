@@ -6818,7 +6818,7 @@ fn selecting_a_shell_restarts_the_session_before_closing_the_picker() {
 
 /// `initialize_app` plus the STOZN auth singleton the workspace reads, which `initialize_app`
 /// does not register yet.
-fn initialize_app_for_move_session(app: &mut App) {
+pub(crate) fn initialize_app_for_move_session(app: &mut App) {
     initialize_app(app);
     if !app.read(|ctx| ctx.has_singleton_model::<crate::stozn_auth::StoznAuthManager>()) {
         app.add_singleton_model(|_| crate::stozn_auth::StoznAuthManager::new());
@@ -6979,7 +6979,7 @@ fn move_session_source_uses_the_shell_cwd_and_the_reported_transcript() {
                 );
             });
             workspace
-                .agent_ctrl_move_source(terminal_view_id, ctx)
+                .agent_ctrl_move_source(terminal_view_id, None, ctx)
                 .expect("a local Claude session can be moved")
         });
 
@@ -7221,6 +7221,7 @@ fn move_session_cut_over_ignores_endings_it_is_not_waiting_for() {
 
         let cutting_over = MoveStep::CuttingOver {
             job_id: "job-cut".to_owned(),
+            pushed_branch: "gitea/handoff/x".to_owned(),
         };
         workspace.update(&mut app, |workspace, _| {
             workspace
@@ -7332,6 +7333,68 @@ fn move_session_failure_while_waiting_leaves_the_local_agent_alone() {
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 #[test]
+fn move_session_status_keeps_the_outcome_until_the_next_move() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let cwd = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+        let moved_view_id = terminal_view.id();
+        let move_status = |app: &mut App| {
+            app.read(|ctx| {
+                workspace.read(ctx, |workspace, _| {
+                    workspace.agent_ctrl_move_step(moved_view_id)
+                })
+            })
+        };
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.agent_ctrl_moves.insert(
+                moved_view_id,
+                MoveStep::CuttingOver {
+                    job_id: "job-cut".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
+                },
+            );
+            workspace.finish_agent_ctrl_move(
+                moved_view_id,
+                MoveStep::Done {
+                    job_id: "job-cut".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
+                },
+                ctx,
+            );
+        });
+        assert_eq!(
+            move_status(&mut app),
+            Some(MoveStep::Done {
+                job_id: "job-cut".to_owned(),
+                pushed_branch: "gitea/handoff/x".to_owned(),
+            }),
+            "a finished move reports its outcome"
+        );
+
+        let started = workspace.update(&mut app, |workspace, ctx| {
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(cwd.path(), ctx)
+            });
+            seed_agent_session(
+                moved_view_id,
+                crate::terminal::CLIAgent::Claude,
+                Some(MOVE_SESSION_ID),
+                None,
+                cwd.path(),
+                ctx,
+            );
+            let started = workspace.move_session_to_agent_ctrl_unattended(moved_view_id, None, ctx);
+            (started, workspace.agent_ctrl_move_step(moved_view_id))
+        });
+        assert_eq!(started, (Ok(()), Some(MoveStep::Preparing)));
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
 fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
@@ -7344,6 +7407,7 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
                 moved_view_id,
                 MoveStep::CuttingOver {
                     job_id: "job-cut".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
                 },
             );
         });
@@ -7375,5 +7439,822 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
             toasts.contains(&"Moved to AgentCtrl as job-cut".to_owned()),
             "{toasts:?}"
         );
+        let links = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .toast_stack
+                    .as_ref(ctx)
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .map(|(text, action)| (text.to_owned(), action.cloned()))
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert!(
+            links.iter().any(|(text, action)| text == "Open fleet"
+                && matches!(action, Some(WorkspaceAction::OpenAgentCtrlFleetPane))),
+            "{links:?}"
+        );
+    });
+}
+
+/// Whether the focused pane offers starting an agent on AgentCtrl, in its header menu and through
+/// the keymap flag the palette binding is predicated on. Both must always agree.
+fn start_agent_on_agent_ctrl_is_offered(workspace: &ViewHandle<Workspace>, app: &mut App) -> bool {
+    let in_menu = workspace.update(app, |workspace, ctx| {
+        let terminal_view = workspace
+            .focused_terminal_view(ctx)
+            .expect("mock workspace has a focused terminal pane");
+        let items = terminal_view
+            .as_ref(ctx)
+            .pane_header_overflow_menu_items(ctx);
+        let labelled = items.iter().any(|item| {
+            item.fields()
+                .is_some_and(|fields| fields.label() == "Start agent on AgentCtrl in this repo")
+        });
+        let mapped = items.iter().any(|item| {
+            matches!(
+                item.fields().and_then(|fields| fields.on_select_action()),
+                Some(crate::terminal::view::TerminalAction::StartAgentOnAgentCtrl)
+            )
+        });
+        assert_eq!(labelled, mapped, "the menu label and its action must agree");
+        labelled
+    });
+    let in_keymap = app.read(|ctx| {
+        workspace
+            .read(ctx, |workspace, ctx| workspace.keymap_context(ctx))
+            .set
+            .contains("Workspace_PaneCanStartAgentOnAgentCtrl")
+    });
+    assert_eq!(
+        in_menu, in_keymap,
+        "the pane menu and the palette's keymap flag must agree"
+    );
+    in_menu
+}
+
+/// A git work tree with a `gitea` remote, as the start flow expects of the pane's directory.
+fn init_repo_with_gitea_remote(dir: &std::path::Path) {
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "remote",
+            "add",
+            "gitea",
+            "https://gitea.example.com/acme/warp.git",
+        ],
+    ] {
+        let output = command::blocking::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_is_offered_only_for_a_local_repo_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let repo = TempDir::new().unwrap();
+        init_repo_with_gitea_remote(repo.path());
+        let not_a_repo = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+
+        assert!(
+            !start_agent_on_agent_ctrl_is_offered(&workspace, &mut app),
+            "a pane with no local shell directory must not offer the start"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(not_a_repo.path(), ctx);
+                view.set_current_repo_path_for_test(None);
+            });
+        });
+        assert!(
+            !start_agent_on_agent_ctrl_is_offered(&workspace, &mut app),
+            "a pane outside a git work tree must not offer the start"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(repo.path(), ctx);
+                view.set_current_repo_path_for_test(Some(repo.path()));
+            });
+        });
+        assert!(start_agent_on_agent_ctrl_is_offered(&workspace, &mut app));
+    });
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_binding_is_registered_for_the_palette() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:start_agent_on_agent_ctrl")
+                .expect("the start binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::StartAgentOnAgentCtrl)
+            ));
+            let editable = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == "workspace:start_agent_on_agent_ctrl")
+                .expect("the start binding is editable");
+            // The palette title-cases descriptions.
+            assert!(
+                editable
+                    .description
+                    .in_context(warpui::keymap::DescriptionContext::Default)
+                    .eq_ignore_ascii_case("Start agent on AgentCtrl in this repo")
+            );
+            let context = |flags: &[&'static str]| warpui::keymap::Context {
+                set: flags.iter().copied().collect(),
+                ..Default::default()
+            };
+            assert!(editable.in_context(&context(&[
+                "Workspace",
+                "Workspace_PaneCanStartAgentOnAgentCtrl"
+            ])));
+            assert!(!editable.in_context(&context(&["Workspace"])));
+            assert!(!editable.in_context(&context(&["Workspace_PaneCanStartAgentOnAgentCtrl"])));
+        });
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn workspace_toast_texts(workspace: &ViewHandle<Workspace>, app: &mut App) -> Vec<String> {
+    app.read(|ctx| {
+        workspace.read(ctx, |workspace, ctx| {
+            workspace
+                .toast_stack
+                .as_ref(ctx)
+                .toast_texts()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+    })
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn configured_warp_repository() -> managed_agent_sessions::RepositoryInfo {
+    managed_agent_sessions::RepositoryInfo {
+        name: "warp".to_owned(),
+        url: "https://gitea.example.com/acme/warp".to_owned(),
+        branch: "dev".to_owned(),
+        reachable: true,
+        error: None,
+    }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_asks_which_agent_for_a_configured_repo() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view_id = focused_terminal_view_for_move(&workspace, &mut app).id();
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.offer_agent_ctrl_start(
+                terminal_view_id,
+                "gitea",
+                "https://gitea.example.com/acme/warp.git".to_owned(),
+                &[configured_warp_repository()],
+                ctx,
+            );
+        });
+
+        let (persistent, links) = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                let toasts = workspace.toast_stack.as_ref(ctx);
+                let persistent = toasts
+                    .persistent_toast_texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let links = toasts
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .map(|(text, action)| {
+                        let agent = match action {
+                            Some(WorkspaceAction::ConfirmStartAgentOnAgentCtrl {
+                                terminal_view_id: confirmed_view_id,
+                                agent,
+                            }) if *confirmed_view_id == terminal_view_id => Some(*agent),
+                            _ => None,
+                        };
+                        (text.to_owned(), agent)
+                    })
+                    .collect::<Vec<_>>();
+                (persistent, links)
+            })
+        });
+        assert_eq!(
+            persistent,
+            vec!["Start which agent on gitea warp (dev)?".to_owned()]
+        );
+        assert_eq!(
+            links,
+            vec![
+                ("Claude".to_owned(), Some(crate::terminal::CLIAgent::Claude)),
+                ("Pi".to_owned(), Some(crate::terminal::CLIAgent::Pi)),
+                ("Codex".to_owned(), Some(crate::terminal::CLIAgent::Codex)),
+            ]
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_refuses_a_repo_that_is_not_configured() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view_id = focused_terminal_view_for_move(&workspace, &mut app).id();
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.offer_agent_ctrl_start(
+                terminal_view_id,
+                "gitea",
+                "https://gitea.example.com/acme/other.git".to_owned(),
+                &[configured_warp_repository()],
+                ctx,
+            );
+        });
+
+        let toasts = workspace_toast_texts(&workspace, &mut app);
+        assert_eq!(
+            toasts,
+            vec![
+                "repo not configured on AgentCtrl: https://gitea.example.com/acme/other.git"
+                    .to_owned()
+            ]
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn fake_start_run_on_repo(
+    _: warp_cli::managed_sessions::ManagedEnvironment,
+    agent_name: &str,
+    repo_url: &str,
+    base_branch: Option<&str>,
+    prompt: Option<&str>,
+) -> anyhow::Result<String> {
+    assert_eq!(agent_name, "staging-claude-interactive-rw");
+    assert_eq!(repo_url, "https://gitea.example.com/acme/warp.git");
+    assert_eq!((base_branch, prompt), (None, None));
+    Ok("job-new".to_owned())
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn fake_start_run_on_a_full_node(
+    _: warp_cli::managed_sessions::ManagedEnvironment,
+    _: &str,
+    _: &str,
+    _: Option<&str>,
+    _: Option<&str>,
+) -> anyhow::Result<String> {
+    Err(managed_agent_sessions::HttpStatusError {
+        status: reqwest::StatusCode::CONFLICT,
+        body: r#"{"code":"node_at_capacity"}"#.to_owned(),
+    }
+    .into())
+}
+
+/// Offers the `warp` repository in the focused pane, then picks Claude with `start_run` standing
+/// in for the dashboard.
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn confirm_claude_start_on_agent_ctrl(
+    workspace: &ViewHandle<Workspace>,
+    terminal_view_id: EntityId,
+    start_run: StartRunOnRepo,
+    app: &mut App,
+) {
+    workspace.update(app, |workspace, ctx| {
+        workspace.fake_start_run_on_repo = Some(start_run);
+        workspace.offer_agent_ctrl_start(
+            terminal_view_id,
+            "gitea",
+            "https://gitea.example.com/acme/warp.git".to_owned(),
+            &[configured_warp_repository()],
+            ctx,
+        );
+        workspace.handle_action(
+            &WorkspaceAction::ConfirmStartAgentOnAgentCtrl {
+                terminal_view_id,
+                agent: crate::terminal::CLIAgent::Claude,
+            },
+            ctx,
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_is_not_offered_again_while_a_start_is_in_flight() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view_id = focused_terminal_view_for_move(&workspace, &mut app).id();
+        let offer_warp = |workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>| {
+            workspace.offer_agent_ctrl_start(
+                terminal_view_id,
+                "gitea",
+                "https://gitea.example.com/acme/warp.git".to_owned(),
+                &[configured_warp_repository()],
+                ctx,
+            );
+            workspace
+                .agent_ctrl_start_offers
+                .contains_key(&terminal_view_id)
+        };
+
+        confirm_claude_start_on_agent_ctrl(
+            &workspace,
+            terminal_view_id,
+            fake_start_run_on_repo,
+            &mut app,
+        );
+        let offered_mid_start = workspace.update(&mut app, offer_warp);
+        assert!(
+            !offered_mid_start,
+            "a second run must not be offered mid-start"
+        );
+        let persistent = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .toast_stack
+                    .as_ref(ctx)
+                    .persistent_toast_texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            persistent,
+            vec!["Starting Claude Code on AgentCtrl…".to_owned()]
+        );
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Started job-new on warp".to_owned()),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        let offered_after_start = workspace.update(&mut app, offer_warp);
+        assert!(
+            offered_after_start,
+            "a finished start frees the pane for another"
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_opens_the_started_run_in_the_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+
+        confirm_claude_start_on_agent_ctrl(
+            &workspace,
+            terminal_view.id(),
+            fake_start_run_on_repo,
+            &mut app,
+        );
+        assert!(
+            workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Starting Claude Code on AgentCtrl…".to_owned())
+        );
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Started job-new on warp".to_owned()),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        let buffer = app.read(|ctx| {
+            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            buffer.ends_with(" agent-ctrl open job-new --environment staging"),
+            "{buffer}"
+        );
+        assert!(
+            !workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Starting Claude Code on AgentCtrl…".to_owned()),
+            "the outcome replaces the progress toast"
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_says_when_the_node_is_at_capacity() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+
+        confirm_claude_start_on_agent_ctrl(
+            &workspace,
+            terminal_view.id(),
+            fake_start_run_on_a_full_node,
+            &mut app,
+        );
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => workspace_toast_texts(&workspace, &mut app)
+                .contains(&"AgentCtrl node is at capacity; stop a run or try later".to_owned()),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        assert!(!has_pending_command(&terminal_view, &mut app));
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn move_all_agent_sessions_binding_is_registered_for_the_palette() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:move_all_agent_sessions_here")
+                .expect("the move-all binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::MoveAllAgentSessionsHere)
+            ));
+            let editable = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == "workspace:move_all_agent_sessions_here")
+                .expect("the move-all binding is editable");
+            assert!(
+                editable
+                    .description
+                    .in_context(warpui::keymap::DescriptionContext::Default)
+                    .eq_ignore_ascii_case(
+                        "Move all agent sessions in this project folder to AgentCtrl"
+                    )
+            );
+            let context = |flags: &[&'static str]| warpui::keymap::Context {
+                set: flags.iter().copied().collect(),
+                ..Default::default()
+            };
+            assert!(editable.in_context(&context(&[
+                "Workspace",
+                "Workspace_PaneCanMoveAllAgentSessions"
+            ])));
+            assert!(!editable.in_context(&context(&["Workspace"])));
+        });
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn move_all_agent_sessions_confirms_the_project_folder_then_runs_the_cli_in_a_new_tab() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let projects = TempDir::new().unwrap();
+        let repo = projects.path().join("warp");
+        std::fs::create_dir_all(&repo).unwrap();
+        let workspace = mock_workspace(&mut app);
+
+        let has_flag = |workspace: &ViewHandle<Workspace>, app: &mut App| {
+            app.read(|ctx| {
+                workspace
+                    .read(ctx, |workspace, ctx| workspace.keymap_context(ctx))
+                    .set
+                    .contains("Workspace_PaneCanMoveAllAgentSessions")
+            })
+        };
+        assert!(
+            !has_flag(&workspace, &mut app),
+            "a pane outside a local repository must not offer move-all"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(&repo, ctx);
+                view.set_current_repo_path_for_test(Some(&repo));
+            });
+        });
+        assert!(has_flag(&workspace, &mut app));
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::MoveAllAgentSessionsHere, ctx)
+        });
+        let folder = projects.path().to_path_buf();
+        let (persistent, links) = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                let toasts = workspace.toast_stack.as_ref(ctx);
+                let persistent = toasts
+                    .persistent_toast_texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let links = toasts
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .map(|(text, action)| (text.to_owned(), action.cloned()))
+                    .collect::<Vec<_>>();
+                (persistent, links)
+            })
+        });
+        assert_eq!(
+            persistent,
+            vec![format!(
+                "Move every agent session under {} to AgentCtrl?",
+                folder.display()
+            )]
+        );
+        let [(text, Some(WorkspaceAction::ConfirmMoveAllAgentSessions { folder: offered }))] =
+            links.as_slice()
+        else {
+            panic!("expected one confirming link, got {links:?}");
+        };
+        assert_eq!(text, "Move all");
+        assert_eq!(offered, &folder);
+
+        let tabs_before = workspace.read(&app, |workspace, _| workspace.tab_count());
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::ConfirmMoveAllAgentSessions {
+                    folder: folder.clone(),
+                },
+                ctx,
+            )
+        });
+        assert_eq!(
+            workspace.read(&app, |workspace, _| workspace.tab_count()),
+            tabs_before + 1
+        );
+        assert!(
+            workspace_toast_texts(&workspace, &mut app).is_empty(),
+            "confirming dismisses the offer"
+        );
+        let buffer = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("the new tab has a terminal pane");
+            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            buffer.contains(" agent-ctrl move-all --under ") && buffer.ends_with(" --yes"),
+            "{buffer}"
+        );
+        assert!(
+            buffer.contains(&*folder.file_name().unwrap().to_string_lossy()),
+            "{buffer}"
+        );
+    });
+}
+
+fn list_no_runs() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    Ok(Default::default())
+}
+
+fn start_nothing(_: &str, _: &str) -> anyhow::Result<String> {
+    anyhow::bail!("tests never start a run")
+}
+
+fn stop_nothing(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("tests never stop a run")
+}
+
+/// Registers the fleet singletons with a backend that never reaches the dashboard.
+fn initialize_app_for_fleet(app: &mut App) {
+    use crate::agent_ctrl::FleetPaneManager;
+    use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
+
+    initialize_app_for_move_session(app);
+    app.add_singleton_model(|_| {
+        FleetModel::with_backend(FleetBackend {
+            list: list_no_runs,
+            start: start_nothing,
+            stop: stop_nothing,
+        })
+    });
+    app.add_singleton_model(|_| FleetPaneManager::default());
+}
+
+fn fleet_pane_ids(workspace: &ViewHandle<Workspace>, app: &mut App) -> Vec<PaneId> {
+    app.read(|ctx| {
+        workspace.read(ctx, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            pane_group
+                .pane_ids()
+                .filter(|pane_id| {
+                    pane_group
+                        .downcast_pane_by_id::<crate::pane_group::AgentCtrlFleetPane>(*pane_id)
+                        .is_some()
+                })
+                .collect()
+        })
+    })
+}
+
+#[test]
+fn open_agent_ctrl_fleet_binding_is_registered_for_the_palette() {
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:open_agent_ctrl_fleet")
+                .expect("the fleet binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::OpenAgentCtrlFleetPane)
+            ));
+            let editable = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == "workspace:open_agent_ctrl_fleet")
+                .expect("the fleet binding is editable");
+            assert!(
+                editable
+                    .description
+                    .in_context(warpui::keymap::DescriptionContext::Default)
+                    .eq_ignore_ascii_case("Open AgentCtrl fleet")
+            );
+            let context = warpui::keymap::Context {
+                set: ["Workspace"].into_iter().collect(),
+                ..Default::default()
+            };
+            assert!(editable.in_context(&context));
+        });
+    });
+}
+
+#[test]
+fn open_agent_ctrl_fleet_adds_one_pane_and_focuses_it_when_asked_again() {
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        let fleet_panes = fleet_pane_ids(&workspace, &mut app);
+        assert_eq!(fleet_panes.len(), 1);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().clone();
+            let terminal_pane = pane_group
+                .as_ref(ctx)
+                .pane_ids()
+                .find(|pane_id| !fleet_panes.contains(pane_id))
+                .expect("the terminal pane is still there");
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.focus_pane_by_id(terminal_pane, ctx)
+            });
+        });
+        assert_ne!(
+            workspace.read(&app, |workspace, ctx| workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_pane_id(ctx)),
+            fleet_panes[0]
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        assert_eq!(fleet_pane_ids(&workspace, &mut app), fleet_panes);
+        assert_eq!(
+            workspace.read(&app, |workspace, ctx| workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_pane_id(ctx)),
+            fleet_panes[0]
+        );
+    });
+}
+
+#[test]
+fn open_managed_session_runs_the_viewer_in_a_new_tab() {
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let tabs_before = workspace.read(&app, |workspace, _| workspace.tab_count());
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::OpenManagedSession {
+                    job_id: "job-1".to_owned(),
+                },
+                ctx,
+            )
+        });
+
+        assert_eq!(
+            workspace.read(&app, |workspace, _| workspace.tab_count()),
+            tabs_before + 1
+        );
+        let buffer = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("the new tab has a terminal pane");
+            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            buffer.ends_with(" agent-ctrl open job-1 --environment staging"),
+            "{buffer}"
+        );
+    });
+}
+
+#[test]
+fn a_closed_fleet_pane_cleaned_up_late_leaves_its_replacement_registered() {
+    use crate::agent_ctrl::FleetPaneManager;
+    use crate::agent_ctrl::fleet_model::FleetModel;
+
+    let _undo_closed_panes = FeatureFlag::UndoClosedPanes.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app_for_fleet(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        let [closed] = fleet_pane_ids(&workspace, &mut app)[..] else {
+            panic!("expected one fleet pane");
+        };
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .update(ctx, |pane_group, ctx| pane_group.close_pane(closed, ctx));
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        let reopened = fleet_pane_ids(&workspace, &mut app)
+            .into_iter()
+            .find(|pane_id| *pane_id != closed)
+            .expect("reopening adds a new fleet pane");
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .update(ctx, |pane_group, ctx| {
+                    pane_group.cleanup_closed_pane(closed, ctx)
+                });
+        });
+
+        app.read(|ctx| {
+            assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 1);
+            let window_id = workspace.window_id(ctx);
+            assert_eq!(
+                FleetPaneManager::as_ref(ctx)
+                    .find_pane(window_id)
+                    .map(|locator| locator.pane_id),
+                Some(reopened)
+            );
+        });
     });
 }

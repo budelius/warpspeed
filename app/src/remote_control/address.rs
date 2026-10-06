@@ -73,11 +73,17 @@ pub fn marker_path(pid: u32) -> PathBuf {
 /// supervisor, and a second directory chosen separately would be a second
 /// chance to get them wrong.
 ///
-/// What reaching this channel grants is worth stating, because it is less than
-/// it looks. A caller can list panes, move a session between the supervisor and
-/// a window, and quit the app. It cannot read a session's output or write to
-/// one: that needs the supervisor's own channel, which lends PTY handles and is
-/// guarded accordingly.
+/// What reaching this channel grants is worth stating. A caller can list panes,
+/// move a session between the supervisor and a window, and quit the app. It can
+/// also read every pane's agent session id, agent directory, and transcript
+/// path, and move a pane's agent session to AgentCtrl unattended: that pushes a
+/// handoff commit of the working tree, untracked files that are not ignored
+/// included, uploads the session transcript to AgentCtrl staging, and types the
+/// local agent's exit command into its pane. The caller may name the directory
+/// for a pane whose shell has none, but only one the agent itself recorded is
+/// honoured, so it cannot pick which repository is pushed. Beyond that it
+/// cannot read a terminal's output or write to one: that needs the supervisor's
+/// own channel, which lends PTY handles and is guarded accordingly.
 #[cfg(windows)]
 pub fn listen_address(pid: u32) -> Result<String> {
     Ok(format!(

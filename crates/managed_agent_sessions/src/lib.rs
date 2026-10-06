@@ -298,17 +298,32 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
         ManagedSessionsCommand::Start {
             agent,
             task,
+            repo,
+            branch,
             prompt,
             interactive,
             environment,
-        } => start(
-            *environment,
-            agent,
-            task,
-            prompt.as_deref(),
-            *interactive,
-            args.json,
-        ),
+        } => match (repo, task) {
+            (Some(repo), _) => start_on_repo(
+                *environment,
+                agent,
+                repo,
+                branch.as_deref(),
+                prompt.as_deref(),
+                args.json,
+            ),
+            (None, Some(task)) => start(
+                *environment,
+                agent,
+                task,
+                prompt.as_deref(),
+                *interactive,
+                args.json,
+            ),
+            (None, None) => bail!("start requires --task or --repo"),
+        },
+        ManagedSessionsCommand::Repos { environment } => repos(*environment, args.json),
+        ManagedSessionsCommand::MoveAll { .. } => bail!("move-all is handled by the application"),
         ManagedSessionsCommand::Open {
             job_id,
             environment,
@@ -338,44 +353,184 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
 fn list(json_output: bool) -> Result<()> {
     let profile = profile(ManagedEnvironment::Staging);
     let token = dashboard_token()?;
+    let page = fetch_runs_page(profile, &token)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&page)?);
+        return Ok(());
+    }
+    let runs = parse_items::<RunSummary>(page, "managed-run list")?;
+    if runs.is_empty() {
+        println!("No AgentCtrl managed runs in staging.");
+    }
+    for run in runs {
+        let repository = run.repo_url.as_deref().unwrap_or("-");
+        println!(
+            "{}  {:<12} {:<24} {} {repository}",
+            run.job_id, run.state, run.agent_name, profile.alias
+        );
+    }
+    Ok(())
+}
+
+fn repos(environment: ManagedEnvironment, json_output: bool) -> Result<()> {
+    let repositories = list_repositories(environment)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&repositories)?);
+        return Ok(());
+    }
+    if repositories.is_empty() {
+        println!("No repositories are configured on the AgentCtrl node.");
+    }
+    for repository in repositories {
+        let reachable = if repository.reachable {
+            "reachable"
+        } else {
+            "unreachable"
+        };
+        let error = repository
+            .error
+            .map(|error| format!("  ({error})"))
+            .unwrap_or_default();
+        println!(
+            "{:<24} {:<20} {reachable:<12} {}{error}",
+            repository.name, repository.branch, repository.url
+        );
+    }
+    Ok(())
+}
+
+/// A repository the AgentCtrl node has configured for fresh interactive runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryInfo {
+    pub name: String,
+    pub url: String,
+    pub branch: String,
+    pub reachable: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One entry of the dashboard's managed-run list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub job_id: String,
+    pub state: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub interactive: bool,
+    #[serde(default)]
+    pub last_activity_at: Option<String>,
+}
+
+pub fn list_repositories(environment: ManagedEnvironment) -> Result<Vec<RepositoryInfo>> {
+    let token = dashboard_token()?;
+    list_repositories_with(profile(environment), &token)
+}
+
+fn list_repositories_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+) -> Result<Vec<RepositoryInfo>> {
     let page: Value = send(
+        profile,
+        Client::new()
+            .get(format!("{}/api/agent-control/repos", profile.base_url))
+            .bearer_auth(token)
+            .header("X-Stozn-Client", "warpspeed"),
+    )?
+    .json()
+    .context("invalid repository list response")?;
+    parse_items(page, "repository list")
+}
+
+pub fn list_runs(environment: ManagedEnvironment) -> Result<Vec<RunSummary>> {
+    let token = dashboard_token()?;
+    list_runs_with(profile(environment), &token)
+}
+
+fn list_runs_with(profile: &EnvironmentProfile, token: &str) -> Result<Vec<RunSummary>> {
+    parse_items(fetch_runs_page(profile, token)?, "managed-run list")
+}
+
+fn fetch_runs_page(profile: &EnvironmentProfile, token: &str) -> Result<Value> {
+    send(
         profile,
         Client::new()
             .get(format!(
                 "{}/api/agent-control/runs?limit=100",
                 profile.base_url
             ))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .header("X-Stozn-Client", "warpspeed"),
     )?
     .json()
-    .context("invalid managed-run list response")?;
+    .context("invalid managed-run list response")
+}
+
+fn parse_items<T: serde::de::DeserializeOwned>(mut page: Value, what: &str) -> Result<Vec<T>> {
     let items = page
-        .get("items")
-        .and_then(Value::as_array)
-        .context("managed-run list did not contain items")?;
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
-    } else if items.is_empty() {
-        println!("No AgentCtrl managed runs in staging.");
-    } else {
-        for run in items {
-            let job_id = run
-                .get("job_id")
-                .and_then(Value::as_str)
-                .unwrap_or("invalid-job");
-            let state = run
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let agent = run
-                .get("agent_name")
-                .and_then(Value::as_str)
-                .unwrap_or("agent");
-            println!("{job_id}  {state:<12} {agent:<24} {}", profile.alias);
-        }
+        .get_mut("items")
+        .map(Value::take)
+        .with_context(|| format!("{what} did not contain items"))?;
+    serde_json::from_value(items).with_context(|| format!("invalid {what} items"))
+}
+
+/// The AgentCtrl profile that runs moved and fleet sessions of a CLI agent (`claude`, `pi`,
+/// `codex`).
+pub fn agent_ctrl_profile(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some("staging-claude-interactive-rw"),
+        "pi" => Some("staging-pi-interactive-rw"),
+        "codex" => Some("staging-codex-interactive-rw"),
+        _ => None,
     }
-    Ok(())
+}
+
+/// Canonical form of a repository URL, identical to the AgentCtrl node's rule: scheme and host
+/// lowercased, userinfo, trailing `/` and `.git` dropped; scp-style `user@host:path` becomes
+/// `https://host/path`. Local paths are returned unchanged.
+pub fn normalize_repo_url(url: &str) -> String {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let (scheme, host, path) = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            (scheme, host, path)
+        }
+        None => match split_scp_url(url) {
+            Some((host, path)) => ("https", host, path.trim_start_matches('/')),
+            None => return url.to_owned(),
+        },
+    };
+    format!(
+        "{}://{}/{}",
+        scheme.to_ascii_lowercase(),
+        host.to_ascii_lowercase(),
+        path
+    )
+    .trim_end_matches('/')
+    .to_owned()
+}
+
+/// `(host, path)` of an scp-style `user@host:path`. The userinfo is required so that a Windows
+/// drive path (`C:\...`) never matches, and neither it nor the host may contain a path separator,
+/// so a local path with `@` and `:` in it stays a path.
+fn split_scp_url(url: &str) -> Option<(&str, &str)> {
+    url.match_indices('@').find_map(|(at, _)| {
+        let userinfo = &url[..at];
+        let (host, path) = url[at + 1..].split_once(':')?;
+        let separator = |character| matches!(character, '/' | '\\');
+        (!userinfo.is_empty()
+            && !host.is_empty()
+            && !userinfo.contains(separator)
+            && !host.contains(separator))
+        .then_some((host, path))
+    })
 }
 
 fn start(
@@ -386,7 +541,15 @@ fn start(
     interactive: bool,
     json_output: bool,
 ) -> Result<()> {
-    let result = launch_request(environment, agent, task_id, prompt, interactive)?;
+    let token = dashboard_token()?;
+    let result = launch_request_with(
+        profile(environment),
+        &token,
+        agent,
+        LaunchTarget::Task(task_id),
+        prompt,
+        interactive,
+    )?;
     if json_output {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else if let Some(job_id) = result.get("job_id").and_then(Value::as_str) {
@@ -397,27 +560,118 @@ fn start(
     Ok(())
 }
 
-fn launch_request(
+fn start_on_repo(
     environment: ManagedEnvironment,
     agent: &str,
-    task_id: &str,
+    repo_url: &str,
+    base_branch: Option<&str>,
+    prompt: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let job_id = start_run_on_repo(environment, agent, repo_url, base_branch, prompt)?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "status": "accepted", "job_id": job_id }))?
+        );
+    } else {
+        println!("Started {job_id}. Open with: warpspeed agent-ctrl open {job_id}");
+    }
+    Ok(())
+}
+
+/// Starts an interactive run in a fresh worktree of a configured repository and returns its job
+/// id. A node at its interactive-run cap fails with an [`HttpStatusError`] that
+/// [`is_node_at_capacity`] recognizes.
+pub fn start_run_on_repo(
+    environment: ManagedEnvironment,
+    agent_name: &str,
+    repo_url: &str,
+    base_branch: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<String> {
+    let token = dashboard_token()?;
+    start_run_on_repo_with(
+        profile(environment),
+        &token,
+        agent_name,
+        repo_url,
+        base_branch,
+        prompt,
+    )
+}
+
+fn start_run_on_repo_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    agent_name: &str,
+    repo_url: &str,
+    base_branch: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<String> {
+    let result = launch_request_with(
+        profile,
+        token,
+        agent_name,
+        LaunchTarget::Repository {
+            url: repo_url,
+            base_branch,
+        },
+        prompt,
+        true,
+    )?;
+    result
+        .get("job_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context("launch response did not include a job id")
+}
+
+/// What a launched run is bound to.
+enum LaunchTarget<'a> {
+    Task(&'a str),
+    Repository {
+        url: &'a str,
+        base_branch: Option<&'a str>,
+    },
+}
+
+fn launch_request_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    agent: &str,
+    target: LaunchTarget<'_>,
     prompt: Option<&str>,
     interactive: bool,
 ) -> Result<Value> {
     if agent.is_empty() || agent.len() > 128 {
         bail!("agent name must contain 1 to 128 characters");
     }
-    validate_task_id(task_id)?;
     if prompt.is_some_and(|value| value.is_empty() || value.chars().count() > 32_000) {
         bail!("prompt must contain 1 to 32000 characters");
     }
-    let profile = profile(environment);
-    let token = dashboard_token()?;
     let mut body = json!({
         "agent_name": agent,
-        "task_id": task_id,
         "interactive": interactive
     });
+    match target {
+        LaunchTarget::Task(task_id) => {
+            validate_task_id(task_id)?;
+            body["task_id"] = Value::String(task_id.to_owned());
+        }
+        LaunchTarget::Repository { url, base_branch } => {
+            if url.trim().is_empty() || url.chars().count() > 512 {
+                bail!("repository URL must contain 1 to 512 characters");
+            }
+            body["repo_url"] = Value::String(url.to_owned());
+            if let Some(base_branch) = base_branch {
+                if !valid_base_branch(base_branch) {
+                    bail!("invalid base branch {base_branch:?}");
+                }
+                body["base_branch"] = Value::String(base_branch.to_owned());
+            }
+        }
+    }
     if let Some(prompt) = prompt {
         body["prompt"] = Value::String(prompt.to_owned());
     }
@@ -425,7 +679,7 @@ fn launch_request(
         profile,
         Client::new()
             .post(format!("{}/api/agent-control/runs", profile.base_url))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .header("X-Stozn-Client", "warpspeed")
             .header(
                 "Idempotency-Key",
@@ -493,12 +747,34 @@ fn input(
     text: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
+    let token = dashboard_token()?;
+    let result = post_input_with(profile(environment), &token, job_id, text)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        let action = if text.is_some() { "input" } else { "close" };
+        println!("Managed-session {action} accepted for {job_id}.");
+    }
+    Ok(())
+}
+
+/// Sends one follow-up turn to a live interactive run.
+pub fn send_input(environment: ManagedEnvironment, job_id: &str, text: &str) -> Result<()> {
+    let token = dashboard_token()?;
+    post_input_with(profile(environment), &token, job_id, Some(text)).map(drop)
+}
+
+/// Posts `text` as input, or closes the run's input when `text` is `None`.
+fn post_input_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    job_id: &str,
+    text: Option<&str>,
+) -> Result<Value> {
     validate_job_id(job_id)?;
     if text.is_some_and(|value| value.is_empty() || value.chars().count() > 8_000) {
         bail!("input must contain 1 to 8000 characters");
     }
-    let profile = profile(environment);
-    let token = dashboard_token()?;
     let action = if text.is_some() { "input" } else { "close" };
     let body = text.map_or_else(|| json!({}), |text| json!({ "text": text }));
     let response = send(
@@ -508,7 +784,7 @@ fn input(
                 "{}/api/agent-control/runs/{job_id}/{action}",
                 profile.base_url
             ))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .header("X-Stozn-Client", "warpspeed")
             .header(
                 "Idempotency-Key",
@@ -518,12 +794,7 @@ fn input(
     )?;
     let result: Value = response.json().context("invalid input response")?;
     ensure_command_accepted(&result)?;
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
-        println!("Managed-session {action} accepted for {job_id}.");
-    }
-    Ok(())
+    Ok(result)
 }
 
 fn stop(
@@ -977,6 +1248,22 @@ fn validate_task_id(task_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Same rule as the dashboard's `base_branch` check: allowed characters only, at most 100, no
+/// leading `-` or `/`, no trailing `/`, no `..` or `//`, and no component starting with `.`.
+fn valid_base_branch(branch: &str) -> bool {
+    (1..=100).contains(&branch.len())
+        && branch
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+        && !branch.starts_with(['-', '/'])
+        && !branch.ends_with('/')
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch
+            .split('/')
+            .any(|component| component.starts_with('.'))
+}
+
 fn validate_job_id(job_id: &str) -> Result<()> {
     let valid = job_id.starts_with("job-")
         && job_id.len() <= 128
@@ -1201,9 +1488,9 @@ fn send(
 
 /// A non-success dashboard response, kept typed so callers can tell rejections from blips.
 #[derive(Debug)]
-struct HttpStatusError {
-    status: StatusCode,
-    body: String,
+pub struct HttpStatusError {
+    pub status: StatusCode,
+    pub body: String,
 }
 
 impl std::fmt::Display for HttpStatusError {
@@ -1218,6 +1505,19 @@ fn http_error(response: Response) -> anyhow::Error {
     let status = response.status();
     let body = response.text().unwrap_or_default();
     HttpStatusError { status, body }.into()
+}
+
+/// Whether the dashboard refused a launch because the node already runs its maximum number of
+/// interactive runs.
+pub fn is_node_at_capacity(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HttpStatusError>()
+        .is_some_and(|error| {
+            error.status == StatusCode::CONFLICT
+                && serde_json::from_str::<Value>(&error.body).is_ok_and(|body| {
+                    body.get("code").and_then(Value::as_str) == Some("node_at_capacity")
+                })
+        })
 }
 
 /// Whether retrying cannot help: the dashboard rejected the request itself (auth, a missing run,

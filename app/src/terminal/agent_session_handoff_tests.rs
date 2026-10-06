@@ -1,8 +1,8 @@
-use command::blocking::Command;
 use std::fs;
 use std::path::Path;
 
 use chrono::{Local, TimeZone};
+use command::blocking::Command;
 use managed_agent_sessions::MAX_SESSION_FILE_BYTES;
 use tempfile::TempDir;
 
@@ -44,17 +44,20 @@ fn write_file(path: &Path, content: &[u8]) {
 }
 
 #[test]
-fn moved_agent_names() {
+fn agent_ctrl_profiles() {
     assert_eq!(
-        moved_agent_name(CLIAgent::Claude),
-        Some("staging-claude-moved")
+        agent_ctrl_profile(CLIAgent::Claude),
+        Some("staging-claude-interactive-rw")
     );
-    assert_eq!(moved_agent_name(CLIAgent::Pi), Some("staging-pi-moved"));
     assert_eq!(
-        moved_agent_name(CLIAgent::Codex),
-        Some("staging-codex-moved")
+        agent_ctrl_profile(CLIAgent::Pi),
+        Some("staging-pi-interactive-rw")
     );
-    assert_eq!(moved_agent_name(CLIAgent::Gemini), None);
+    assert_eq!(
+        agent_ctrl_profile(CLIAgent::Codex),
+        Some("staging-codex-interactive-rw")
+    );
+    assert_eq!(agent_ctrl_profile(CLIAgent::Gemini), None);
 }
 
 #[test]
@@ -321,7 +324,7 @@ fn prepare_handoff_pushes_to_gitea_when_present() {
 
     let prepared = prepare_handoff_with_roots(&source, &roots, now).unwrap();
 
-    assert_eq!(prepared.agent_name, "staging-claude-moved");
+    assert_eq!(prepared.agent_name, "staging-claude-interactive-rw");
     assert_eq!(prepared.session_file, b"{\"line\":1}\n");
     assert_eq!(
         prepared.session_file_path,
@@ -434,6 +437,7 @@ fn move_session_failure_during_cut_over_asks_to_close_the_agent_manually() {
     let message = move_failure_message(
         &MoveStep::CuttingOver {
             job_id: "job-1".to_owned(),
+            pushed_branch: "gitea/handoff/x".to_owned(),
         },
         "timed out",
         Some("gitea/handoff/x"),
@@ -729,5 +733,133 @@ fn move_session_progress_message_names_the_agent_when_known() {
     assert_eq!(
         move_progress_message(None),
         "Moving the agent session to AgentCtrl… don't use the agent until this finishes."
+    );
+}
+
+#[test]
+fn repo_url_for_prefers_gitea_and_strips_userinfo() {
+    let repo = TempDir::new().unwrap();
+    let repo = repo.path();
+    init_repo(repo);
+    git(
+        repo,
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
+    git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "gitea",
+            "https://bot:s3cret@gitea.example.com/acme/app.git",
+        ],
+    );
+    let subdirectory = repo.join("src");
+    fs::create_dir(&subdirectory).unwrap();
+
+    assert_eq!(
+        repo_url_for(&subdirectory).unwrap(),
+        (
+            "gitea".to_owned(),
+            "https://gitea.example.com/acme/app.git".to_owned()
+        )
+    );
+}
+
+#[test]
+fn repo_url_for_falls_back_to_origin() {
+    let repo = TempDir::new().unwrap();
+    let repo = repo.path();
+    init_repo(repo);
+    git(
+        repo,
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+
+    assert_eq!(
+        repo_url_for(repo).unwrap(),
+        (
+            "origin".to_owned(),
+            "git@github.com:acme/app.git".to_owned()
+        )
+    );
+}
+
+#[test]
+fn repo_url_for_fails_without_a_usable_remote() {
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+    let not_a_repo = TempDir::new().unwrap();
+
+    assert!(repo_url_for(repo.path()).is_err());
+    assert!(repo_url_for(not_a_repo.path()).is_err());
+}
+
+fn repository(name: &str, url: &str, branch: &str) -> RepositoryInfo {
+    RepositoryInfo {
+        name: name.to_owned(),
+        url: url.to_owned(),
+        branch: branch.to_owned(),
+        reachable: true,
+        error: None,
+    }
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_finds_the_repository_by_normalized_url() {
+    let repositories = [
+        repository("other", "https://gitea.example.com/acme/other", "main"),
+        repository("app", "https://Gitea.Example.com/acme/app", "dev"),
+    ];
+
+    for local_url in [
+        "https://gitea.example.com/acme/app.git",
+        "https://gitea.example.com/acme/app/",
+        "git@gitea.example.com:acme/app.git",
+    ] {
+        assert_eq!(
+            configured_repository(local_url, &repositories).map(|repository| &repository.name),
+            Some(&"app".to_owned()),
+            "{local_url}"
+        );
+    }
+    assert_eq!(
+        configured_repository("https://gitea.example.com/acme/missing.git", &repositories),
+        None
+    );
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_prompt_names_the_remote_repo_and_branch() {
+    assert_eq!(
+        start_agent_prompt(
+            "gitea",
+            &repository("warp", "https://gitea.example.com/acme/warp", "dev")
+        ),
+        "Start which agent on gitea warp (dev)?"
+    );
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_failure_says_when_the_node_is_at_capacity() {
+    let at_capacity = anyhow::Error::new(managed_agent_sessions::HttpStatusError {
+        status: reqwest::StatusCode::CONFLICT,
+        body: r#"{"code":"node_at_capacity","message":"too many runs"}"#.to_owned(),
+    })
+    .context("failed to launch the run");
+    assert_eq!(
+        start_agent_failure_message(&at_capacity),
+        "AgentCtrl node is at capacity; stop a run or try later"
+    );
+
+    let other = anyhow!(
+        "dashboard request failed: https://bob:s3cret@dash.example.com/api/agent-control/runs"
+    );
+    let message = start_agent_failure_message(&other);
+    assert!(!message.contains("s3cret"), "{message}");
+    assert!(!message.contains("bob"), "{message}");
+    assert!(
+        message.contains("https://dash.example.com/api/agent-control/runs"),
+        "{message}"
     );
 }

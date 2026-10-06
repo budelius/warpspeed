@@ -48,6 +48,98 @@ fn managed_agent_start_requires_task_attachment() {
     );
 }
 
+fn agent_ctrl_command(arguments: &[&str]) -> managed_sessions::ManagedSessionsCommand {
+    let args = Args::try_parse_from(["warpspeed", "agent-ctrl"].iter().chain(arguments)).unwrap();
+    match args.command() {
+        Some(Command::AgentCtrl(managed)) => managed.command.clone(),
+        other => panic!("expected an agent-ctrl command, got {other:?}"),
+    }
+}
+
+#[test]
+fn managed_agent_start_on_a_repository_needs_no_task() {
+    let command = agent_ctrl_command(&[
+        "start",
+        "--agent",
+        "a",
+        "--repo",
+        "https://x/y.git",
+        "--branch",
+        "main",
+    ]);
+    let managed_sessions::ManagedSessionsCommand::Start {
+        task, repo, branch, ..
+    } = command
+    else {
+        panic!("expected start, got {command:?}");
+    };
+    assert_eq!(task, None);
+    assert_eq!(repo.as_deref(), Some("https://x/y.git"));
+    assert_eq!(branch.as_deref(), Some("main"));
+
+    let without_target = Args::try_parse_from(["warpspeed", "agent-ctrl", "start", "--agent", "a"]);
+    assert!(without_target.is_err());
+    let branch_without_repo = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "a",
+        "--task",
+        "task-1",
+        "--branch",
+        "main",
+    ]);
+    assert!(branch_without_repo.is_err());
+    let task_and_repo = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "a",
+        "--task",
+        "task-1",
+        "--repo",
+        "https://x/y.git",
+    ]);
+    assert!(task_and_repo.is_err());
+    let interactive_on_repo = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "a",
+        "--repo",
+        "https://x/y.git",
+        "--interactive",
+    ]);
+    assert!(interactive_on_repo.is_err());
+    let interactive_task =
+        agent_ctrl_command(&["start", "--agent", "a", "--task", "task-1", "--interactive"]);
+    assert!(matches!(
+        interactive_task,
+        managed_sessions::ManagedSessionsCommand::Start {
+            interactive: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn managed_agent_repos_and_move_all_parse() {
+    assert!(matches!(
+        agent_ctrl_command(&["repos"]),
+        managed_sessions::ManagedSessionsCommand::Repos { .. }
+    ));
+    let command = agent_ctrl_command(&["move-all", "--under", r"T:\p"]);
+    let managed_sessions::ManagedSessionsCommand::MoveAll { under, yes, .. } = command else {
+        panic!("expected move-all, got {command:?}");
+    };
+    assert_eq!(under, std::path::PathBuf::from(r"T:\p"));
+    assert!(!yes);
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "move-all"]).is_err());
+}
+
 #[test]
 fn identifies_worker_subcommands() {
     assert!(is_worker_invocation("minidump-server"));

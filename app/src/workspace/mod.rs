@@ -1037,6 +1037,32 @@ pub fn init(app: &mut AppContext) {
     .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanMoveSessionToAgentCtrl"))]);
 
     app.register_editable_bindings([EditableBinding::new(
+        "workspace:open_agent_ctrl_fleet",
+        "Open AgentCtrl fleet",
+        WorkspaceAction::OpenAgentCtrlFleetPane,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace"))]);
+
+    // Offered only on local panes inside a git work tree, whose repository the run starts in.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:start_agent_on_agent_ctrl",
+        "Start agent on AgentCtrl in this repo",
+        WorkspaceAction::StartAgentOnAgentCtrl,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanStartAgentOnAgentCtrl"))]);
+
+    // Offered only on local panes inside a git work tree, whose parent folder is the one moved.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:move_all_agent_sessions_here",
+        "Move all agent sessions in this project folder to AgentCtrl",
+        WorkspaceAction::MoveAllAgentSessionsHere,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanMoveAllAgentSessions"))]);
+
+    app.register_editable_bindings([EditableBinding::new(
         "workspace:restart_window_in_new_process",
         "Restart window in new process",
         WorkspaceAction::RestartWindowInNewProcess,

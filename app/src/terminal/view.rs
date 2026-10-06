@@ -3036,6 +3036,11 @@ impl TerminalView {
         self.current_repo_path.as_ref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_current_repo_path_for_test(&mut self, repo_path: Option<&Path>) {
+        self.current_repo_path = repo_path.map(|path| LocalOrRemotePath::Local(path.to_owned()));
+    }
+
     /// Returns the local repo path, if the current repo is local.
     /// Remote repo paths return None — full remote support is a follow-up.
     pub fn current_local_repo_path(&self) -> Option<&Path> {
@@ -27313,6 +27318,7 @@ impl TypedActionView for TerminalView {
             | ChangeShell
             | DetachSession
             | MoveSessionToAgentCtrl
+            | StartAgentOnAgentCtrl
             | PromptContextMenu { .. }
             | OpenInputContextMenu { .. }
             | InputContextMenuItem(_)
@@ -27659,6 +27665,13 @@ impl TypedActionView for TerminalView {
             MoveSessionToAgentCtrl => {
                 ctx.dispatch_typed_action_deferred(
                     WorkspaceAction::MoveSessionToAgentCtrlForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
+            }
+            StartAgentOnAgentCtrl => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::StartAgentOnAgentCtrlForTerminalView {
                         terminal_view_id: self.view_id,
                     },
                 );

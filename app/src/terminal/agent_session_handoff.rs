@@ -5,7 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, Local};
 use command::blocking::Command;
-use managed_agent_sessions::MAX_SESSION_FILE_BYTES;
+use managed_agent_sessions::{
+    MAX_SESSION_FILE_BYTES, RepositoryInfo, is_node_at_capacity, normalize_repo_url,
+};
 use tempfile::TempDir;
 
 use crate::terminal::CLIAgent;
@@ -50,6 +52,15 @@ pub(crate) struct UploadedSession {
     pub pushed_branch: String,
 }
 
+/// A repository configured on AgentCtrl that a pane offered for a new run, waiting for the user to
+/// pick the agent.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentCtrlStartOffer {
+    /// The pane's remote URL, without userinfo.
+    pub repo_url: String,
+    pub repo_name: String,
+}
+
 /// Where each supported agent keeps its session files.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentSessionRoots {
@@ -89,11 +100,11 @@ impl AgentSessionRoots {
     }
 }
 
-pub(crate) fn moved_agent_name(agent: CLIAgent) -> Option<&'static str> {
+pub(crate) fn agent_ctrl_profile(agent: CLIAgent) -> Option<&'static str> {
     match agent {
-        CLIAgent::Claude => Some("staging-claude-moved"),
-        CLIAgent::Pi => Some("staging-pi-moved"),
-        CLIAgent::Codex => Some("staging-codex-moved"),
+        CLIAgent::Claude => managed_agent_sessions::agent_ctrl_profile("claude"),
+        CLIAgent::Pi => managed_agent_sessions::agent_ctrl_profile("pi"),
+        CLIAgent::Codex => managed_agent_sessions::agent_ctrl_profile("codex"),
         CLIAgent::Gemini
         | CLIAgent::Amp
         | CLIAgent::Droid
@@ -358,6 +369,14 @@ pub(crate) fn select_remote(repo: &Path) -> Result<String> {
         .ok_or_else(|| anyhow!("{} has no `gitea` or `origin` remote", repo.display()))
 }
 
+/// The remote [`select_remote`] picks for the repository containing `cwd`, and its URL without
+/// userinfo.
+pub(crate) fn repo_url_for(cwd: &Path) -> Result<(String, String)> {
+    let remote = select_remote(cwd)?;
+    let url = git(cwd, ["remote", "get-url", remote.as_str()], &[])?;
+    Ok((remote, strip_url_userinfo(&url)))
+}
+
 fn read_session_file(path: &Path) -> Result<Vec<u8>> {
     let size = fs::metadata(path)
         .with_context(|| format!("failed to stat {}", path.display()))?
@@ -392,14 +411,13 @@ fn prepare_handoff_with_roots(
     roots: &AgentSessionRoots,
     now: DateTime<Local>,
 ) -> Result<PreparedHandoff> {
-    let agent_name = moved_agent_name(source.agent)
+    let agent_name = agent_ctrl_profile(source.agent)
         .ok_or_else(|| anyhow!("{:?} sessions cannot be moved", source.agent))?;
     let path = resolve_session_file(source, roots)?;
     let session_file = read_session_file(&path)?;
 
     let repo = source.cwd.as_path();
-    let remote = select_remote(repo)?;
-    let repo_url = strip_url_userinfo(&git(repo, ["remote", "get-url", remote.as_str()], &[])?);
+    let (remote, repo_url) = repo_url_for(repo)?;
     let commit = create_handoff_commit(repo, &source.session_id)?;
     let branch = handoff_branch_name(now, &source.session_id);
     git(
@@ -448,11 +466,14 @@ pub(crate) enum MoveStep {
     WaitingForResume {
         job_id: String,
     },
+    /// `pushed_branch` is the handoff branch as `<remote>/<branch>`, here and in `Done`.
     CuttingOver {
         job_id: String,
+        pushed_branch: String,
     },
     Done {
         job_id: String,
+        pushed_branch: String,
     },
     Failed {
         reason: String,
@@ -483,7 +504,7 @@ pub(crate) fn move_failure_message(
         MoveStep::WaitingForResume { job_id } => {
             before_cut_over(&format!("waiting for {job_id} to resume"))
         }
-        MoveStep::CuttingOver { job_id } | MoveStep::Done { job_id } => format!(
+        MoveStep::CuttingOver { job_id, .. } | MoveStep::Done { job_id, .. } => format!(
             "Moved to AgentCtrl as {job_id}, but the local agent did not exit; close it manually. \
              Meanwhile the cloud run {job_id} is live; open it with: warpspeed agent-ctrl open {job_id}"
         ),
@@ -572,6 +593,52 @@ fn redact_url_credentials(text: &str) -> String {
     }
     redacted.push_str(rest);
     redacted
+}
+
+/// The repository among those configured on AgentCtrl that `repo_url` names, compared the way the
+/// node compares them.
+pub(crate) fn configured_repository<'a>(
+    repo_url: &str,
+    repositories: &'a [RepositoryInfo],
+) -> Option<&'a RepositoryInfo> {
+    let repo_url = normalize_repo_url(repo_url);
+    repositories
+        .iter()
+        .find(|repository| normalize_repo_url(&repository.url) == repo_url)
+}
+
+/// The question asked before starting an agent on AgentCtrl in `repository`, reached through the
+/// pane's `remote`.
+pub(crate) fn start_agent_prompt(remote: &str, repository: &RepositoryInfo) -> String {
+    format!(
+        "Start which agent on {remote} {} ({})?",
+        repository.name, repository.branch
+    )
+}
+
+/// The notice shown while a run of `agent` is being started on AgentCtrl.
+pub(crate) fn start_agent_progress_message(agent: CLIAgent) -> String {
+    format!("Starting {} on AgentCtrl…", agent.display_name())
+}
+
+/// Why the pane's repository cannot be offered for a start on AgentCtrl.
+pub(crate) fn start_agent_unavailable_message(error: &anyhow::Error) -> String {
+    format!(
+        "Cannot start an agent on AgentCtrl from this pane: {}",
+        redact_url_credentials(&format!("{error:#}"))
+    )
+}
+
+/// The message shown when starting an agent on AgentCtrl failed with `error`.
+pub(crate) fn start_agent_failure_message(error: &anyhow::Error) -> String {
+    if is_node_at_capacity(error) {
+        "AgentCtrl node is at capacity; stop a run or try later".to_owned()
+    } else {
+        format!(
+            "Could not start the agent on AgentCtrl: {}",
+            redact_url_credentials(&format!("{error:#}"))
+        )
+    }
 }
 
 /// The `Idempotency-Key` for importing `session_id` at handoff `commit`, kept within the server's

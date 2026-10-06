@@ -1,5 +1,8 @@
 #![allow(clippy::doc_lazy_continuation)]
 
+mod agent_ctrl;
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+mod agent_ctrl_fleet_cli;
 #[cfg(feature = "local_fs")]
 mod agent_session_registry;
 mod ai;
@@ -862,6 +865,10 @@ pub fn run() -> Result<()> {
             }
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::AgentCtrl(args) => {
+                #[cfg(feature = "local_fs")]
+                if let Some(request) = agent_ctrl_fleet_cli::move_all_request(args) {
+                    return agent_ctrl_fleet_cli::run(request);
+                }
                 return managed_agent_sessions::run(args);
             }
             #[cfg(not(target_family = "wasm"))]
@@ -1912,6 +1919,8 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|_| RecordingController::new());
     ctx.add_singleton_model(|_| ExecutionProfileEditorManager::default());
     ctx.add_singleton_model(|_| NetworkLogPaneManager::default());
+    ctx.add_singleton_model(|_| agent_ctrl::FleetPaneManager::default());
+    ctx.add_singleton_model(|_| agent_ctrl::fleet_model::FleetModel::new());
     ctx.add_singleton_model(|_| pricing::PricingInfoModel::new());
     ctx.add_singleton_model(ai::pricing_promotion::PricingPromotionState::new);
     ctx.add_singleton_model(|ctx| {

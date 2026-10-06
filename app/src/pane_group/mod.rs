@@ -193,6 +193,7 @@ use focus_state::PaneGroupFocusState;
 #[path = "mod_tests.rs"]
 mod tests;
 
+pub use pane::agent_ctrl_fleet_pane::AgentCtrlFleetPane;
 pub use pane::ai_document_pane::AIDocumentPane;
 pub use pane::ai_fact_pane::AIFactPane;
 pub use pane::code_diff_pane::CodeDiffPane;
@@ -2137,6 +2138,9 @@ impl PaneGroup {
                     "Network log pane should not have been persisted, as it cannot be restored"
                 ))
             }
+            LeafContents::AgentCtrlFleet => Err(anyhow::anyhow!(
+                "AgentCtrl fleet pane should not have been persisted, as it cannot be restored"
+            )),
             LeafContents::GetStarted => {
                 if !FeatureFlag::GetStartedTab.is_enabled() {
                     Err(anyhow::anyhow!("GetStarted pane not supported"))
@@ -7324,6 +7328,16 @@ impl PaneGroup {
         self.pane_contents
             .get(&pane_id.into())
             .and_then(|contents| contents.as_any().downcast_ref::<TerminalPane>())
+    }
+
+    /// The agent the terminal pane `pane_id` was restored with, while it has yet to resume it.
+    pub(crate) fn restored_agent_still_resuming(
+        &self,
+        pane_id: impl Into<PaneId>,
+        app: &AppContext,
+    ) -> Option<crate::app_state::CliAgentResumeDescriptor> {
+        self.terminal_session_by_id(pane_id)?
+            .restored_agent_still_resuming(app)
     }
 
     pub fn terminal_manager_for_pane_id(

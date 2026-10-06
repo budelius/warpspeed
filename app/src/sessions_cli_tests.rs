@@ -11,6 +11,12 @@ fn pane(session_id: Option<u64>, survives_quit: bool) -> PaneSummary {
         has_running_agent: false,
         is_busy: false,
         survives_quit,
+        terminal_view_id: None,
+        agent: None,
+        agent_session_id: None,
+        agent_cwd: None,
+        transcript_path: None,
+        agent_not_resumed: false,
     }
 }
 

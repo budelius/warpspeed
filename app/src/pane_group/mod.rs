@@ -72,9 +72,9 @@ use crate::ai_assistant::AskAIType;
 #[cfg(feature = "local_fs")]
 use crate::app_state::CodePaneSnapShot;
 use crate::app_state::{
-    self, AIFactPaneSnapshot, BranchSnapshot, EnvVarCollectionPaneSnapshot, LeafContents,
-    LeafSnapshot, NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot,
-    TerminalPaneSnapshot, WorkflowPaneSnapshot,
+    self, AIFactPaneSnapshot, BranchSnapshot, CliAgentResumeDescriptor,
+    EnvVarCollectionPaneSnapshot, LeafContents, LeafSnapshot, NotebookPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot, TerminalPaneSnapshot, WorkflowPaneSnapshot,
 };
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
@@ -2345,6 +2345,16 @@ impl PaneGroup {
                 })
             }
         }
+    }
+
+    /// The agent a restored terminal pane has yet to resume, if it is one.
+    pub(crate) fn pending_agent_resume(
+        &self,
+        pane_id: PaneId,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
+        self.downcast_pane_by_id::<TerminalPane>(pane_id)?
+            .pending_agent_resume(app)
     }
 
     /// Find the PaneId for a given TerminalView EntityId if it exists within this PaneGroup.

@@ -243,7 +243,10 @@ impl TerminalPane {
 
     /// The agent this pane was restored with, while its resume command has yet to start or is
     /// still running. Once it has finished, the agent has exited and is no longer the pane's.
-    fn restored_agent_still_resuming(&self, app: &AppContext) -> Option<CliAgentResumeDescriptor> {
+    pub(crate) fn pending_agent_resume(
+        &self,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
         let descriptor = self
             .restored_shell_snapshot_fields
             .as_ref()?
@@ -692,7 +695,7 @@ impl PaneContent for TerminalPane {
                 });
 
             let cli_agent_resume_descriptor =
-                cli_agent_resume_descriptor.or_else(|| self.restored_agent_still_resuming(app));
+                cli_agent_resume_descriptor.or_else(|| self.pending_agent_resume(app));
 
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),

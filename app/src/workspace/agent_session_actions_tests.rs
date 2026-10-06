@@ -21,6 +21,7 @@ fn row(agent: Option<CLIAgent>, state: AgentSessionState) -> AgentSessionRow {
         session_id: Some("abc".into()),
         title: None,
         cwd: PathBuf::from("T:/p/x"),
+        canonical_cwd: None,
         last_used: None,
         state,
     }

@@ -44,6 +44,7 @@ fn past_session_at(agent: CLIAgent, id: &str, cwd: &str, age_secs: u64) -> PastA
         agent,
         session_id: id.into(),
         cwd: cwd.into(),
+        canonical_cwd: None,
         title: None,
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
     }

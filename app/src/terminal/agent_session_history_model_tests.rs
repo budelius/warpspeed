@@ -68,6 +68,7 @@ fn refreshes_requested_during_a_load_trigger_exactly_one_more_load() {
                 agent: CLIAgent::Pi,
                 session_id: format!("session-{index}"),
                 cwd: std::path::PathBuf::new(),
+                canonical_cwd: None,
                 title: None,
                 modified: std::time::SystemTime::UNIX_EPOCH,
             })

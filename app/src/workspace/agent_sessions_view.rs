@@ -30,9 +30,9 @@ use crate::editor::{
     PropagateHorizontalNavigationKeys, SingleLineEditorOptions, TextOptions,
 };
 use crate::search::command_palette::agent_sessions::{row_title, score_row};
-use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath, is_within_resolved};
+use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{
-    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows,
+    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows, is_row_within,
 };
 use crate::terminal::detached_sessions::DetachedListError;
 use crate::util::time_format::format_approx_duration_from_now;
@@ -83,14 +83,14 @@ pub(crate) enum ViewRowAction {
 /// For each pane folder, the indices into `rows` of the past sessions that lie within it.
 pub(crate) type PastByFolder = HashMap<PathBuf, Vec<usize>>;
 
-/// Works out which past sessions lie within which pane folder. It resolves every path on disk
-/// once, so it belongs where a snapshot is taken, never on a keystroke.
+/// Works out which past sessions lie within which pane folder. It resolves each pane folder on
+/// disk, so it belongs where a snapshot is taken, never on a keystroke; past sessions come
+/// resolved from the scan.
 pub(crate) fn past_by_folder(panes: &[PaneAgentInput], rows: &[AgentSessionRow]) -> PastByFolder {
-    let past: Vec<(usize, ResolvedPath)> = rows
+    let past: Vec<(usize, &AgentSessionRow)> = rows
         .iter()
         .enumerate()
         .filter(|(_, row)| matches!(row.state, AgentSessionState::Past))
-        .map(|(index, row)| (index, ResolvedPath::new(&row.cwd)))
         .collect();
     let mut by_folder = PastByFolder::new();
     for folder in panes.iter().filter_map(|pane| pane.cwd.as_ref()) {
@@ -100,7 +100,7 @@ pub(crate) fn past_by_folder(panes: &[PaneAgentInput], rows: &[AgentSessionRow])
         let resolved = ResolvedPath::new(folder);
         let within = past
             .iter()
-            .filter(|(_, path)| is_within_resolved(path, &resolved))
+            .filter(|(_, row)| is_row_within(row, &resolved))
             .map(|(index, _)| *index)
             .collect();
         by_folder.insert(folder.clone(), within);

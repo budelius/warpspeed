@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use warpui::{AppContext, Entity};
 
 use crate::search::SyncDataSource;
@@ -9,9 +7,9 @@ use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::separator_search_item::SeparatorSearchItem;
 use crate::search::data_source::{Query, QueryResult};
 use crate::search::mixer::DataSourceRunErrorWrapper;
-use crate::terminal::agent_session_history::{PastAgentSession, is_within};
+use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{
-    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows,
+    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows, is_row_within,
 };
 use crate::workspace::PaneViewLocator;
 use crate::workspace::agent_session_actions::{AgentSessionAction, action_for};
@@ -46,13 +44,10 @@ impl AgentSessionSection {
 }
 
 /// Which section `row` belongs in, relative to the focused pane and its working directory.
-///
-/// Matching a past row against the focused folder resolves both paths on disk, so call this when
-/// a snapshot is taken rather than per query.
 pub(super) fn section_for(
     row: &AgentSessionRow,
     focused: Option<PaneViewLocator>,
-    focused_cwd: Option<&Path>,
+    focused_folder: Option<&ResolvedPath>,
 ) -> AgentSessionSection {
     match &row.state {
         AgentSessionState::Running { locator } | AgentSessionState::Pending { locator } => {
@@ -64,12 +59,7 @@ pub(super) fn section_for(
         }
         AgentSessionState::Detached { .. } => AgentSessionSection::Detached,
         AgentSessionState::Past => {
-            let in_focused_folder = focused_cwd.is_some_and(|folder| {
-                !folder.as_os_str().is_empty()
-                    && !row.cwd.as_os_str().is_empty()
-                    && is_within(&row.cwd, folder)
-            });
-            if in_focused_folder {
+            if focused_folder.is_some_and(|folder| is_row_within(row, folder)) {
                 AgentSessionSection::ThisPane
             } else {
                 AgentSessionSection::Past
@@ -114,12 +104,14 @@ struct Entry {
 }
 
 /// Agent sessions as they stood when the palette opened. Queries only read this snapshot: taking
-/// one asks the supervisor and resolves paths on disk, too slow to repeat per keystroke.
+/// one asks the supervisor and resolves the focused folder on disk, too slow to repeat per
+/// keystroke.
 #[derive(Default)]
 pub struct DataSource {
     panes: Vec<PaneAgentInput>,
     detached: Vec<DetachedInput>,
     focused: Option<PaneViewLocator>,
+    focused_folder: Option<ResolvedPath>,
     entries: Vec<Entry>,
     is_loaded: bool,
 }
@@ -136,6 +128,10 @@ impl DataSource {
         focused: Option<PaneViewLocator>,
         past: &[PastAgentSession],
     ) {
+        self.focused_folder = focused
+            .and_then(|focused| panes.iter().find(|pane| pane.locator == focused))
+            .and_then(|pane| pane.cwd.as_deref())
+            .map(ResolvedPath::new);
         self.panes = panes;
         self.detached = detached;
         self.focused = focused;
@@ -160,17 +156,11 @@ impl DataSource {
     }
 
     fn rebuild(&mut self, past: &[PastAgentSession]) {
-        let focused_cwd: Option<PathBuf> = self.focused.and_then(|focused| {
-            self.panes
-                .iter()
-                .find(|pane| pane.locator == focused)
-                .and_then(|pane| pane.cwd.clone())
-        });
         self.entries = build_rows(&self.panes, &self.detached, past)
             .into_iter()
             .map(|row| Entry {
                 action: action_for(&row, self.focused),
-                section: section_for(&row, self.focused, focused_cwd.as_deref()),
+                section: section_for(&row, self.focused, self.focused_folder.as_ref()),
                 row,
             })
             .collect();

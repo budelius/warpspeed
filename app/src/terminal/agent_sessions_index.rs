@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use warp_core::SessionId;
 
 use crate::app_state::CliAgentResumeDescriptor;
-use crate::terminal::agent_session_history::{PastAgentSession, is_within};
+use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath, is_within_known};
 use crate::terminal::cli_agent::CLIAgent;
 use crate::workspace::PaneViewLocator;
 
@@ -26,8 +26,16 @@ pub(crate) struct AgentSessionRow {
     pub session_id: Option<String>,
     pub title: Option<String>,
     pub cwd: PathBuf,
+    /// `cwd` as the background scan resolved it, for a past conversation; `None` otherwise.
+    pub canonical_cwd: Option<PathBuf>,
     pub last_used: Option<SystemTime>,
     pub state: AgentSessionState,
+}
+
+/// Whether `row`'s conversation lies in `folder` or beneath it, by the paths the background scan
+/// resolved, so it touches no filesystem however many rows are checked.
+pub(crate) fn is_row_within(row: &AgentSessionRow, folder: &ResolvedPath) -> bool {
+    is_within_known(&row.cwd, row.canonical_cwd.as_deref(), folder)
 }
 
 /// One terminal pane of the window, in tab order, as the window view groups it.
@@ -73,6 +81,7 @@ fn live_row(
         session_id: descriptor.session_id.clone(),
         title: descriptor.title.clone(),
         cwd,
+        canonical_cwd: None,
         last_used: descriptor
             .captured_unix_seconds
             .and_then(|seconds| u64::try_from(seconds).ok())
@@ -87,6 +96,7 @@ fn past_row(past: &PastAgentSession, state: AgentSessionState) -> AgentSessionRo
         session_id: Some(past.session_id.clone()),
         title: past.title.clone(),
         cwd: past.cwd.clone(),
+        canonical_cwd: past.canonical_cwd.clone(),
         last_used: Some(past.modified),
         state,
     }
@@ -98,7 +108,11 @@ fn is_detached_conversation(past: &PastAgentSession, detached: &DetachedInput) -
     !detached.title.is_empty()
         && !detached.cwd.as_os_str().is_empty()
         && past.title.as_deref() == Some(detached.title.as_str())
-        && is_within(&past.cwd, &detached.cwd)
+        && is_within_known(
+            &past.cwd,
+            past.canonical_cwd.as_deref(),
+            &ResolvedPath::new(&detached.cwd),
+        )
 }
 
 /// Merges every source into one row per conversation, each in its strongest state
@@ -138,6 +152,7 @@ pub(crate) fn build_rows(
                 AgentSessionRow {
                     title: Some(input.title.clone()),
                     cwd: input.cwd.clone(),
+                    canonical_cwd: None,
                     ..past_row(session, state)
                 }
             }
@@ -146,6 +161,7 @@ pub(crate) fn build_rows(
                 session_id: None,
                 title: Some(input.title.clone()).filter(|title| !title.is_empty()),
                 cwd: input.cwd.clone(),
+                canonical_cwd: None,
                 last_used: None,
                 state,
             },

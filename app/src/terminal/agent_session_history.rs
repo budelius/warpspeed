@@ -18,6 +18,9 @@ pub(crate) struct PastAgentSession {
     pub agent: CLIAgent,
     pub session_id: String,
     pub cwd: PathBuf,
+    /// `cwd` resolved on disk by the scan, off the UI thread, so folder checks need not touch the
+    /// filesystem. `None` when it could not be resolved.
+    pub canonical_cwd: Option<PathBuf>,
     pub title: Option<String>,
     pub modified: SystemTime,
 }
@@ -149,6 +152,7 @@ fn vibe_sessions(root: &Path) -> Vec<PastAgentSession> {
                 agent: CLIAgent::Vibe,
                 session_id: session_id.to_owned(),
                 cwd,
+                canonical_cwd: None,
                 title: entry["title"].as_str().and_then(title),
                 modified,
             })
@@ -262,6 +266,7 @@ pub(super) fn describe(candidate: Candidate) -> PastAgentSession {
         agent: candidate.agent,
         session_id,
         cwd,
+        canonical_cwd: None,
         title,
         modified: candidate.modified,
     }
@@ -326,13 +331,16 @@ fn same_directory(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Whether `path` is `folder` or lies beneath it, normalized as `same_directory` does.
-pub(crate) fn is_within(path: &Path, folder: &Path) -> bool {
-    is_within_resolved(&ResolvedPath::new(path), &ResolvedPath::new(folder))
+fn canonical_directory(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    path.canonicalize().ok()
 }
 
 /// A path together with its canonical form, resolved once so that many `is_within_resolved`
 /// checks against it touch the filesystem only once.
+#[derive(Clone, Debug)]
 pub(crate) struct ResolvedPath {
     path: PathBuf,
     canonical: Option<PathBuf>,
@@ -342,16 +350,25 @@ impl ResolvedPath {
     pub(crate) fn new(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
-            canonical: path.canonicalize().ok(),
+            canonical: canonical_directory(path),
         }
     }
 }
 
-/// [`is_within`] for paths already resolved; it does no filesystem calls.
+/// Whether `path` is `folder` or lies beneath it, normalized as `same_directory` does. It does no
+/// filesystem calls.
 pub(crate) fn is_within_resolved(path: &ResolvedPath, folder: &ResolvedPath) -> bool {
-    let (path, folder) = match (&path.canonical, &folder.canonical) {
-        (Some(path), Some(folder)) => (path.as_path(), folder.as_path()),
-        _ => (path.path.as_path(), folder.path.as_path()),
+    is_within_known(&path.path, path.canonical.as_deref(), folder)
+}
+
+/// [`is_within_resolved`] for a path whose canonical form, if any, is already known.
+pub(crate) fn is_within_known(path: &Path, canonical: Option<&Path>, folder: &ResolvedPath) -> bool {
+    if path.as_os_str().is_empty() || folder.path.as_os_str().is_empty() {
+        return false;
+    }
+    let (path, folder) = match (canonical, &folder.canonical) {
+        (Some(path), Some(folder)) => (path, folder.as_path()),
+        _ => (path, folder.path.as_path()),
     };
     #[cfg(windows)]
     {
@@ -393,7 +410,15 @@ fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession
     sessions.retain(|session| not_before.is_none_or(|time| session.modified >= time));
     sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
     sessions.truncate(MAX_CANDIDATES);
+    resolve_folders(&mut sessions);
     sessions
+}
+
+/// Resolves each session's folder on disk, which the scan does so the UI thread never has to.
+pub(super) fn resolve_folders(sessions: &mut [PastAgentSession]) {
+    for session in sessions {
+        session.canonical_cwd = canonical_directory(&session.cwd);
+    }
 }
 
 pub(crate) fn find_all(agent: CLIAgent) -> Vec<PastAgentSession> {

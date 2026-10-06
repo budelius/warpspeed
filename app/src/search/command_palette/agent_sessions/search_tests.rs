@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use warpui::{App, EntityId};
@@ -14,7 +14,7 @@ use crate::search::command_palette::agent_sessions::data_source::{
 };
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::data_source::{Query, QueryResult};
-use crate::terminal::agent_session_history::PastAgentSession;
+use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{AgentSessionRow, AgentSessionState, PaneAgentInput};
 use crate::terminal::cli_agent::CLIAgent;
 use crate::workspace::PaneViewLocator;
@@ -33,6 +33,7 @@ fn row(title: Option<&str>, cwd: &str, state: AgentSessionState) -> AgentSession
         session_id: Some("3f2a9c1e-7b44-4d0e-9a51-0c8e2b6d1f77".into()),
         title: title.map(str::to_owned),
         cwd: cwd.into(),
+        canonical_cwd: None,
         last_used: None,
         state,
     }
@@ -75,9 +76,8 @@ fn score_row_is_none_without_a_match() {
 #[test]
 fn rows_fall_into_this_pane_running_elsewhere_detached_and_past() {
     let focused = locator(0);
-    let focused_cwd = PathBuf::from("/work/here");
-    let section =
-        |row: &AgentSessionRow| section_for(row, Some(focused), Some(focused_cwd.as_path()));
+    let focused_folder = ResolvedPath::new(Path::new("/work/here"));
+    let section = |row: &AgentSessionRow| section_for(row, Some(focused), Some(&focused_folder));
 
     let here = row(None, "/x", AgentSessionState::Running { locator: focused });
     let pending_here = row(None, "/x", AgentSessionState::Pending { locator: focused });
@@ -181,6 +181,7 @@ fn past_session(id: &str, title: &str, cwd: &str) -> PastAgentSession {
         agent: CLIAgent::Claude,
         session_id: id.into(),
         cwd: cwd.into(),
+        canonical_cwd: None,
         title: Some(title.into()),
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
     }

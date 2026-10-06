@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use super::{
     PastAgentSession, ResolvedPath, UnidentifiedAgent, describe, is_within_known,
-    is_within_resolved, match_for_restore, pi_candidates, resolve_folders, vibe_sessions,
+    match_for_restore, pi_candidates, resolve_folders, vibe_sessions,
 };
 use crate::terminal::CLIAgent;
 
@@ -228,7 +228,11 @@ fn is_within_matches_the_folder_and_its_subfolders() {
     let worktree = root.path().join(".claude").join("worktrees").join("fix");
     std::fs::create_dir_all(&worktree).unwrap();
     let is_within = |path: &Path, folder: &Path| {
-        is_within_resolved(&ResolvedPath::new(path), &ResolvedPath::new(folder))
+        is_within_known(
+            path,
+            path.canonicalize().ok().as_deref(),
+            &ResolvedPath::new(folder),
+        )
     };
     assert!(is_within(root.path(), root.path()));
     assert!(is_within(&worktree, root.path()));

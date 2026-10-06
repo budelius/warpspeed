@@ -338,7 +338,7 @@ fn canonical_directory(path: &Path) -> Option<PathBuf> {
     path.canonicalize().ok()
 }
 
-/// A path together with its canonical form, resolved once so that many `is_within_resolved`
+/// A folder together with its canonical form, resolved once so that many `is_within_known`
 /// checks against it touch the filesystem only once.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedPath {
@@ -355,13 +355,8 @@ impl ResolvedPath {
     }
 }
 
-/// Whether `path` is `folder` or lies beneath it, normalized as `same_directory` does. It does no
-/// filesystem calls.
-pub(crate) fn is_within_resolved(path: &ResolvedPath, folder: &ResolvedPath) -> bool {
-    is_within_known(&path.path, path.canonical.as_deref(), folder)
-}
-
-/// [`is_within_resolved`] for a path whose canonical form, if any, is already known.
+/// Whether `path`, whose canonical form is `canonical` when known, is `folder` or lies beneath
+/// it, normalized as `same_directory` does. It does no filesystem calls.
 pub(crate) fn is_within_known(path: &Path, canonical: Option<&Path>, folder: &ResolvedPath) -> bool {
     if path.as_os_str().is_empty() || folder.path.as_os_str().is_empty() {
         return false;

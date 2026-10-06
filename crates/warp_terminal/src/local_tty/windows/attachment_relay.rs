@@ -16,7 +16,6 @@ use windows::Win32::System::Threading::{
 use super::pipes;
 
 const IO_POLL_MS: u32 = 20;
-const WRITE_TIMEOUT_MS: u32 = 100;
 const BUFFER_SIZE: usize = 64 * 1024;
 
 pub struct AttachmentRelay {
@@ -82,11 +81,11 @@ fn relay(pty: HANDLE, client: HANDLE, stop: &AtomicBool) -> Result<()> {
     while !stop.load(Ordering::Acquire) {
         let read = read_with_timeout(pty, pty_read.0, &mut buffer, IO_POLL_MS)?;
         if read > 0 {
-            write_with_timeout(client, client_write.0, &buffer[..read], WRITE_TIMEOUT_MS)?;
+            write_unless_stopped(client, client_write.0, &buffer[..read], stop)?;
         }
         let read = read_with_timeout(client, client_read.0, &mut buffer, IO_POLL_MS)?;
         if read > 0 {
-            write_with_timeout(pty, pty_write.0, &buffer[..read], WRITE_TIMEOUT_MS)?;
+            write_unless_stopped(pty, pty_write.0, &buffer[..read], stop)?;
         }
     }
     Ok(())
@@ -124,7 +123,17 @@ fn read_with_timeout(
     Ok(read as usize)
 }
 
-fn write_with_timeout(handle: HANDLE, event: HANDLE, bytes: &[u8], timeout_ms: u32) -> Result<()> {
+/// Writes all of `bytes`, waiting for as long as the reader takes to make room.
+///
+/// A slow reader is back-pressure, not a failure: a GUI client stops draining output while it
+/// reflows a large scrollback, and giving up on it would close the pipe under a live pane. A
+/// reader that has gone away breaks the pipe instead, which fails the write.
+fn write_unless_stopped(
+    handle: HANDLE,
+    event: HANDLE,
+    bytes: &[u8],
+    stop: &AtomicBool,
+) -> Result<()> {
     unsafe { ResetEvent(event) }.context("Failed to reset relay write event")?;
     let mut overlapped = OVERLAPPED {
         hEvent: event,
@@ -136,13 +145,16 @@ fn write_with_timeout(handle: HANDLE, event: HANDLE, bytes: &[u8], timeout_ms: u
         Err(error) => return Err(error).context("Attachment relay write failed"),
     };
     if pending {
-        match unsafe { WaitForSingleObject(event, timeout_ms) } {
-            WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => {
-                cancel_and_wait(handle, &overlapped);
-                bail!("Attachment relay client stopped consuming output");
+        loop {
+            match unsafe { WaitForSingleObject(event, IO_POLL_MS) } {
+                WAIT_OBJECT_0 => break,
+                WAIT_TIMEOUT if stop.load(Ordering::Acquire) => {
+                    cancel_and_wait(handle, &overlapped);
+                    bail!("Attachment relay stopped during a write");
+                }
+                WAIT_TIMEOUT => {}
+                other => bail!("Waiting for attachment relay write failed: {other:?}"),
             }
-            other => bail!("Waiting for attachment relay write failed: {other:?}"),
         }
     }
     let mut written = 0;

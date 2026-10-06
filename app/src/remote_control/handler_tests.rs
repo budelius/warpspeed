@@ -24,17 +24,20 @@ fn focused_terminal_view(
     })
 }
 
-/// Gives `terminal_view` a local shell in `shell_cwd` and a Claude session the hooks reported.
+/// Gives `terminal_view` a Claude session the hooks reported, and a local shell in `shell_cwd` when
+/// there is one.
 fn seed_claude_session(
     terminal_view: &ViewHandle<TerminalView>,
-    shell_cwd: &std::path::Path,
+    shell_cwd: Option<&std::path::Path>,
     agent_cwd: &str,
     transcript_path: &str,
     app: &mut App,
 ) {
-    terminal_view.update(app, |view, ctx| {
-        view.set_active_local_session_for_test(shell_cwd, ctx)
-    });
+    if let Some(shell_cwd) = shell_cwd {
+        terminal_view.update(app, |view, ctx| {
+            view.set_active_local_session_for_test(shell_cwd, ctx)
+        });
+    }
     let terminal_view_id = terminal_view.id();
     app.update(|ctx| {
         CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
@@ -65,6 +68,11 @@ fn seed_claude_session(
 }
 
 fn move_status(terminal_view_id: EntityId, app: &mut App) -> String {
+    move_state(terminal_view_id, app).0
+}
+
+/// The step and the pushed handoff branch the instance reports for `terminal_view_id`'s move.
+fn move_state(terminal_view_id: EntityId, app: &mut App) -> (String, Option<String>) {
     match app.update(|ctx| {
         handle(
             Request::MoveStatus {
@@ -73,7 +81,10 @@ fn move_status(terminal_view_id: EntityId, app: &mut App) -> String {
             ctx,
         )
     }) {
-        Response::MoveState { step } => step,
+        Response::MoveState {
+            step,
+            pushed_branch,
+        } => (step, pushed_branch),
         other => panic!("expected a move state, got {other:?}"),
     }
 }
@@ -98,7 +109,7 @@ fn list_panes_reports_the_agent_session_of_each_pane() {
         let terminal_view = focused_terminal_view(&workspace, &mut app);
         seed_claude_session(
             &terminal_view,
-            shell_cwd.path(),
+            Some(shell_cwd.path()),
             "/srv/app/sub",
             "/home/ben/.claude/projects/-srv-app/session.jsonl",
             &mut app,
@@ -140,7 +151,7 @@ fn move_session_starts_a_move_for_a_qualifying_pane() {
         let terminal_view_id = terminal_view.id();
         seed_claude_session(
             &terminal_view,
-            shell_cwd.path(),
+            Some(shell_cwd.path()),
             "/srv/app",
             "/tmp/session.jsonl",
             &mut app,
@@ -154,6 +165,7 @@ fn move_session_starts_a_move_for_a_qualifying_pane() {
             let response = handle(
                 Request::MoveSessionToAgentCtrl {
                     terminal_view_id: terminal_view_id.as_u64(),
+                    cwd: None,
                 },
                 ctx,
             );
@@ -169,7 +181,10 @@ fn move_session_starts_a_move_for_a_qualifying_pane() {
         assert!(matches!(response, Response::MoveStarted), "{response:?}");
         assert_eq!(step, Some(MoveStep::Preparing));
         assert!(
-            matches!(&status, Response::MoveState { step } if step == "preparing"),
+            matches!(
+                &status,
+                Response::MoveState { step, pushed_branch: None } if step == "preparing"
+            ),
             "{status:?}"
         );
 
@@ -177,6 +192,7 @@ fn move_session_starts_a_move_for_a_qualifying_pane() {
             handle(
                 Request::MoveSessionToAgentCtrl {
                     terminal_view_id: terminal_view_id.as_u64(),
+                    cwd: None,
                 },
                 ctx,
             )
@@ -185,6 +201,61 @@ fn move_session_starts_a_move_for_a_qualifying_pane() {
             matches!(&again, Response::Failed { error } if error.contains("already")),
             "a second move of the same pane must be refused: {again:?}"
         );
+    });
+}
+
+/// A pane whose shell reports no directory -- a restored pane, or one whose directory is gone --
+/// still moves when the caller recovered the agent's directory from its hooks or its history.
+#[test]
+fn move_session_uses_the_callers_directory_when_the_pane_has_none() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let agent_cwd = TempDir::new().unwrap();
+        let agent_cwd_text = agent_cwd.path().display().to_string();
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        let terminal_view_id = terminal_view.id();
+        seed_claude_session(
+            &terminal_view,
+            None,
+            &agent_cwd_text,
+            "/tmp/session.jsonl",
+            &mut app,
+        );
+        assert_eq!(
+            listed_pane(terminal_view_id, &mut app).working_directory,
+            ""
+        );
+
+        let without_cwd = app.update(|ctx| {
+            handle(
+                Request::MoveSessionToAgentCtrl {
+                    terminal_view_id: terminal_view_id.as_u64(),
+                    cwd: None,
+                },
+                ctx,
+            )
+        });
+        assert!(
+            matches!(without_cwd, Response::Failed { .. }),
+            "{without_cwd:?}"
+        );
+
+        let (response, step) = app.update(|ctx| {
+            let response = handle(
+                Request::MoveSessionToAgentCtrl {
+                    terminal_view_id: terminal_view_id.as_u64(),
+                    cwd: Some(agent_cwd_text.clone()),
+                },
+                ctx,
+            );
+            (
+                response,
+                workspace.as_ref(ctx).agent_ctrl_move_step(terminal_view_id),
+            )
+        });
+        assert!(matches!(response, Response::MoveStarted), "{response:?}");
+        assert_eq!(step, Some(MoveStep::Preparing));
     });
 }
 
@@ -200,6 +271,7 @@ fn move_session_fails_for_a_pane_without_an_agent_session() {
                 handle(
                     Request::MoveSessionToAgentCtrl {
                         terminal_view_id: requested.as_u64(),
+                        cwd: Some("/srv/app".to_owned()),
                     },
                     ctx,
                 )
@@ -225,10 +297,17 @@ fn move_steps_have_stable_labels() {
         (
             Some(MoveStep::CuttingOver {
                 job_id: job_id.clone(),
+                pushed_branch: "gitea/handoff/x".to_owned(),
             }),
             "cutting_over",
         ),
-        (Some(MoveStep::Done { job_id }), "done:job-1"),
+        (
+            Some(MoveStep::Done {
+                job_id,
+                pushed_branch: "gitea/handoff/x".to_owned(),
+            }),
+            "done:job-1",
+        ),
         (
             Some(MoveStep::Failed {
                 reason: "push rejected".to_owned(),
@@ -256,6 +335,7 @@ fn move_status_reports_the_move_of_a_pane_closed_mid_move() {
                 closed_view_id,
                 MoveStep::CuttingOver {
                     job_id: "job-1".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
                 },
             )
         });
@@ -266,10 +346,14 @@ fn move_status_reports_the_move_of_a_pane_closed_mid_move() {
                 closed_view_id,
                 MoveStep::Done {
                     job_id: "job-1".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
                 },
                 ctx,
             )
         });
-        assert_eq!(move_status(closed_view_id, &mut app), "done:job-1");
+        assert_eq!(
+            move_state(closed_view_id, &mut app),
+            ("done:job-1".to_owned(), Some("gitea/handoff/x".to_owned()))
+        );
     });
 }

@@ -95,6 +95,7 @@ fn pane_working_directory_comes_first() {
             session_id: "session-1".to_owned(),
             cwd: PathBuf::from("/work/warp"),
             recovered_from: SourceOrigin::PaneCwd,
+            repo_url: format!("{CONFIGURED}.git"),
         }]
     );
 }
@@ -265,15 +266,22 @@ fn moves_are_ordered_by_instance_then_tab() {
     );
 }
 
+fn reported(step: &str) -> ReportedStep {
+    ReportedStep {
+        step: step.to_owned(),
+        pushed_branch: None,
+    }
+}
+
 fn poll(steps: &[&str], timeout: Duration) -> (MoveOutcome, usize) {
-    let remaining = RefCell::new(steps.iter().map(|step| step.to_string()));
+    let remaining = RefCell::new(steps.iter().map(|step| reported(step)));
     let mut calls = 0;
     let mut call = || {
         calls += 1;
         Ok(remaining
             .borrow_mut()
             .next()
-            .unwrap_or_else(|| "cutting_over".to_owned()))
+            .unwrap_or_else(|| reported("cutting_over")))
     };
     let outcome = poll_until_terminal(&mut call, timeout, Duration::ZERO);
     (outcome, calls)
@@ -293,7 +301,8 @@ fn polling_stops_at_done_with_the_job_id() {
     assert_eq!(
         outcome,
         MoveOutcome::Done {
-            job_id: "job-42".to_owned()
+            job_id: "job-42".to_owned(),
+            pushed_branch: None,
         }
     );
     assert_eq!(calls, 4);
@@ -319,7 +328,7 @@ fn polling_gives_up_after_the_timeout() {
     assert_eq!(
         outcome,
         MoveOutcome::Failed {
-            reason: "timed out".to_owned()
+            reason: "timed out (may still complete; check the fleet)".to_owned()
         }
     );
 }
@@ -327,7 +336,7 @@ fn polling_gives_up_after_the_timeout() {
 #[test]
 fn polling_fails_once_the_instance_stops_answering() {
     let mut call =
-        || -> anyhow::Result<String> { Err(InstanceGone("pipe closed".to_owned()).into()) };
+        || -> anyhow::Result<ReportedStep> { Err(InstanceGone("pipe closed".to_owned()).into()) };
     let outcome = poll_until_terminal(&mut call, Duration::from_secs(60), Duration::ZERO);
     let MoveOutcome::Failed { reason } = outcome else {
         panic!("expected a failure, got {outcome:?}");
@@ -373,13 +382,17 @@ fn move_all_is_routed_to_this_module() {
 fn polling_retries_slow_answers_without_giving_up_the_move() {
     let mut answers = (0..5)
         .map(|_| Err(anyhow::anyhow!("did not answer within 20 seconds")))
-        .chain([Ok("done:job-1".to_owned())]);
+        .chain([Ok(ReportedStep {
+            step: "done:job-1".to_owned(),
+            pushed_branch: Some("gitea/handoff/claude-1".to_owned()),
+        })]);
     let mut call = || answers.next().expect("polling stops at done");
     let outcome = poll_until_terminal(&mut call, Duration::from_secs(60), Duration::ZERO);
     assert_eq!(
         outcome,
         MoveOutcome::Done {
-            job_id: "job-1".to_owned()
+            job_id: "job-1".to_owned(),
+            pushed_branch: Some("gitea/handoff/claude-1".to_owned()),
         }
     );
 }
@@ -393,7 +406,8 @@ fn polling_forgives_none_answers_that_a_real_step_interrupts() {
     assert_eq!(
         outcome,
         MoveOutcome::Done {
-            job_id: "job-1".to_owned()
+            job_id: "job-1".to_owned(),
+            pushed_branch: None,
         }
     );
 }
@@ -407,7 +421,8 @@ fn polling_follows_a_move_whose_pane_was_closed_to_its_outcome() {
     assert_eq!(
         outcome,
         MoveOutcome::Done {
-            job_id: "job-1".to_owned()
+            job_id: "job-1".to_owned(),
+            pushed_branch: None,
         }
     );
 }
@@ -426,4 +441,93 @@ fn an_empty_history_directory_counts_as_no_directory() {
 
     assert!(sources.is_empty());
     assert_eq!(skipped[0].1, Skip::NoDirectory);
+}
+
+#[test]
+fn a_move_request_carries_the_planned_directory() {
+    let panes = [(
+        10,
+        pane(PaneSpec {
+            terminal_view_id: 4,
+            working_directory: "",
+            agent_cwd: Some("/work/hooked"),
+            ..Default::default()
+        }),
+    )];
+    let (sources, _) = plan(&panes, &no_history, &configured_repo);
+    let request = move_request(&sources[0]);
+
+    let Request::MoveSessionToAgentCtrl {
+        terminal_view_id,
+        cwd,
+    } = request
+    else {
+        panic!("expected a move request, got {request:?}");
+    };
+    assert_eq!(terminal_view_id, 4);
+    assert_eq!(cwd.map(PathBuf::from), Some(PathBuf::from("/work/hooked")));
+}
+
+#[test]
+fn a_handoff_branch_links_to_its_gitea_or_gitlab_page_else_names_itself() {
+    assert_eq!(
+        handoff_branch_link(
+            "https://git-dev.obachan.dev/obachan/warp.git",
+            "gitea/handoff/claude-1"
+        ),
+        "https://git-dev.obachan.dev/obachan/warp/src/branch/handoff/claude-1"
+    );
+    assert_eq!(
+        handoff_branch_link("https://gitlab.com/stozn/dash.git", "origin/handoff/pi-2"),
+        "https://gitlab.com/stozn/dash/-/tree/handoff/pi-2"
+    );
+    assert_eq!(
+        handoff_branch_link("https://github.com/acme/warp.git", "origin/handoff/codex-3"),
+        "origin/handoff/codex-3"
+    );
+}
+
+#[test]
+fn a_finished_move_is_reported_with_its_handoff_branch() {
+    let source = PaneSource {
+        instance_pid: 10,
+        terminal_view_id: 1,
+        agent: CLIAgent::Claude,
+        session_id: "session-1".to_owned(),
+        cwd: PathBuf::from("/work/warp"),
+        recovered_from: SourceOrigin::PaneCwd,
+        repo_url: "https://git-dev.obachan.dev/obachan/warp.git".to_owned(),
+    };
+    let done = MoveOutcome::Done {
+        job_id: "job-1".to_owned(),
+        pushed_branch: Some("gitea/handoff/claude-1".to_owned()),
+    };
+    assert_eq!(
+        describe_outcome(&source, &done),
+        "moved: job-1 (https://git-dev.obachan.dev/obachan/warp/src/branch/handoff/claude-1)"
+    );
+    let failed = MoveOutcome::Failed {
+        reason: "push rejected".to_owned(),
+    };
+    assert_eq!(describe_outcome(&source, &failed), "failed: push rejected");
+}
+
+#[test]
+fn a_skipped_pane_without_a_title_is_located_by_directory_else_by_tab() {
+    let with_directory = pane(PaneSpec::default());
+    assert_eq!(skipped_pane_location(&with_directory), "/work/warp");
+
+    let with_hook_directory = pane(PaneSpec {
+        working_directory: "",
+        agent_cwd: Some("/work/hooked"),
+        ..Default::default()
+    });
+    assert_eq!(skipped_pane_location(&with_hook_directory), "/work/hooked");
+
+    let nowhere = pane(PaneSpec {
+        tab_index: 2,
+        working_directory: "",
+        ..Default::default()
+    });
+    assert_eq!(skipped_pane_location(&nowhere), "window window-1 tab 3");
 }

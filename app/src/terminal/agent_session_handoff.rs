@@ -466,11 +466,14 @@ pub(crate) enum MoveStep {
     WaitingForResume {
         job_id: String,
     },
+    /// `pushed_branch` is the handoff branch as `<remote>/<branch>`, here and in `Done`.
     CuttingOver {
         job_id: String,
+        pushed_branch: String,
     },
     Done {
         job_id: String,
+        pushed_branch: String,
     },
     Failed {
         reason: String,
@@ -501,7 +504,7 @@ pub(crate) fn move_failure_message(
         MoveStep::WaitingForResume { job_id } => {
             before_cut_over(&format!("waiting for {job_id} to resume"))
         }
-        MoveStep::CuttingOver { job_id } | MoveStep::Done { job_id } => format!(
+        MoveStep::CuttingOver { job_id, .. } | MoveStep::Done { job_id, .. } => format!(
             "Moved to AgentCtrl as {job_id}, but the local agent did not exit; close it manually. \
              Meanwhile the cloud run {job_id} is live; open it with: warpspeed agent-ctrl open {job_id}"
         ),

@@ -58,7 +58,12 @@ pub enum Request {
 
     /// Moves the agent session in a pane to AgentCtrl without asking for confirmation, as
     /// confirming the move in that pane would.
-    MoveSessionToAgentCtrl { terminal_view_id: u64 },
+    MoveSessionToAgentCtrl {
+        terminal_view_id: u64,
+        /// The agent's directory as the caller recovered it, used only when the pane's shell
+        /// reports none: a restored pane, or one whose directory has gone, still holds the agent.
+        cwd: Option<String>,
+    },
 
     /// How far the move of a pane's session to AgentCtrl has got.
     MoveStatus { terminal_view_id: u64 },
@@ -100,6 +105,8 @@ pub enum Response {
         /// One of `preparing`, `importing`, `waiting_for_resume`, `cutting_over`, `done:<job>`,
         /// `failed:<reason>`, or `none` when the pane has no move in flight or finished.
         step: String,
+        /// The handoff branch as `<remote>/<branch>`, once it has been pushed.
+        pushed_branch: Option<String>,
     },
 }
 

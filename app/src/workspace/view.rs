@@ -13907,11 +13907,12 @@ impl Workspace {
     fn agent_ctrl_move_source(
         &self,
         terminal_view_id: EntityId,
+        fallback_cwd: Option<&Path>,
         ctx: &AppContext,
     ) -> Option<HandoffSource> {
         self.terminal_view_by_id(terminal_view_id, ctx)?
             .as_ref(ctx)
-            .agent_ctrl_move_source(ctx)
+            .agent_ctrl_move_source(fallback_cwd, ctx)
     }
 
     /// Asks the user to confirm moving the agent session in `terminal_view_id` to AgentCtrl.
@@ -13935,7 +13936,7 @@ impl Workspace {
             );
             return;
         }
-        let Some(source) = self.agent_ctrl_move_source(terminal_view_id, ctx) else {
+        let Some(source) = self.agent_ctrl_move_source(terminal_view_id, None, ctx) else {
             self.show_agent_ctrl_move_toast(
                 terminal_view_id,
                 DismissibleToast::error(
@@ -13970,22 +13971,29 @@ impl Workspace {
     /// Starts moving the agent session in `terminal_view_id` to AgentCtrl without asking, for a
     /// caller that has already confirmed. Whether the pane's repository has a remote to push to is
     /// left to the preparation step, whose failure the move then reports.
+    ///
+    /// `fallback_cwd` is the agent's directory as the caller recovered it, used only when the
+    /// pane's shell reports none.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     pub(crate) fn move_session_to_agent_ctrl_unattended(
         &mut self,
         terminal_view_id: EntityId,
+        fallback_cwd: Option<PathBuf>,
         ctx: &mut ViewContext<Self>,
     ) -> Result<(), String> {
         if self.agent_ctrl_moves.contains_key(&terminal_view_id) {
             return Err("A move of this session to AgentCtrl is already in progress.".to_owned());
         }
-        if self.agent_ctrl_move_source(terminal_view_id, ctx).is_none() {
+        if self
+            .agent_ctrl_move_source(terminal_view_id, fallback_cwd.as_deref(), ctx)
+            .is_none()
+        {
             return Err(
                 "This pane has no local Claude, Pi, or Codex session that can be moved to AgentCtrl."
                     .to_owned(),
             );
         }
-        self.confirm_move_session_to_agent_ctrl(terminal_view_id, ctx);
+        self.start_agent_ctrl_move(terminal_view_id, fallback_cwd.as_deref(), ctx);
         Ok(())
     }
 
@@ -14038,11 +14046,21 @@ impl Workspace {
         self.show_agent_ctrl_move_toast(terminal_view_id, toast, true, ctx);
     }
 
-    /// Prepares the handoff branch and session file off the main thread, then imports them.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     fn confirm_move_session_to_agent_ctrl(
         &mut self,
         terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.start_agent_ctrl_move(terminal_view_id, None, ctx);
+    }
+
+    /// Prepares the handoff branch and session file off the main thread, then imports them.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn start_agent_ctrl_move(
+        &mut self,
+        terminal_view_id: EntityId,
+        fallback_cwd: Option<&Path>,
         ctx: &mut ViewContext<Self>,
     ) {
         self.toast_stack.update(ctx, |toast_stack, ctx| {
@@ -14053,7 +14071,7 @@ impl Workspace {
             return;
         }
         // Looked up again because the agent may have exited while the confirmation was open.
-        let Some(source) = self.agent_ctrl_move_source(terminal_view_id, ctx) else {
+        let Some(source) = self.agent_ctrl_move_source(terminal_view_id, fallback_cwd, ctx) else {
             self.show_agent_ctrl_move_toast(
                 terminal_view_id,
                 DismissibleToast::error(
@@ -14285,6 +14303,7 @@ impl Workspace {
             terminal_view_id,
             MoveStep::CuttingOver {
                 job_id: job_id.clone(),
+                pushed_branch: uploaded.pushed_branch.clone(),
             },
         );
         let sessions = CLIAgentSessionsModel::as_ref(ctx);
@@ -14330,7 +14349,7 @@ impl Workspace {
                     move |me, _, ctx| {
                         let still_cutting_over = matches!(
                             me.agent_ctrl_moves.get(&terminal_view_id),
-                            Some(MoveStep::CuttingOver { job_id: pending }) if *pending == job_id
+                            Some(MoveStep::CuttingOver { job_id: pending, .. }) if *pending == job_id
                         );
                         if still_cutting_over {
                             me.fail_agent_ctrl_move(
@@ -14357,8 +14376,10 @@ impl Workspace {
         use managed_agent_sessions::ManagedSessionDeepLink;
         use warp_cli::managed_sessions::ManagedEnvironment;
 
-        let Some(MoveStep::CuttingOver { job_id }) =
-            self.agent_ctrl_moves.get(&terminal_view_id).cloned()
+        let Some(MoveStep::CuttingOver {
+            job_id,
+            pushed_branch,
+        }) = self.agent_ctrl_moves.get(&terminal_view_id).cloned()
         else {
             return;
         };
@@ -14373,7 +14394,14 @@ impl Workspace {
         match self.terminal_view_by_id(terminal_view_id, ctx) {
             Some(terminal_view) if !pane_runs_an_agent => {
                 Self::execute_managed_session_command_in(&terminal_view, &arguments, ctx);
-                self.finish_agent_ctrl_move(terminal_view_id, MoveStep::Done { job_id }, ctx);
+                self.finish_agent_ctrl_move(
+                    terminal_view_id,
+                    MoveStep::Done {
+                        job_id,
+                        pushed_branch,
+                    },
+                    ctx,
+                );
             }
             Some(_) => {
                 self.add_terminal_tab(false, ctx);
@@ -14383,6 +14411,7 @@ impl Workspace {
                     terminal_view_id,
                     MoveStep::Done {
                         job_id: job_id.clone(),
+                        pushed_branch,
                     },
                 );
                 self.show_agent_ctrl_move_toast(
@@ -14398,7 +14427,14 @@ impl Workspace {
             None => {
                 self.add_terminal_tab(false, ctx);
                 self.execute_managed_session_command(&arguments, ctx);
-                self.finish_agent_ctrl_move(terminal_view_id, MoveStep::Done { job_id }, ctx);
+                self.finish_agent_ctrl_move(
+                    terminal_view_id,
+                    MoveStep::Done {
+                        job_id,
+                        pushed_branch,
+                    },
+                    ctx,
+                );
             }
         }
     }
@@ -14440,7 +14476,7 @@ impl Workspace {
         self.agent_ctrl_move_outcomes
             .insert(terminal_view_id, outcome.clone());
         match outcome {
-            MoveStep::Done { job_id } => self.show_agent_ctrl_move_toast(
+            MoveStep::Done { job_id, .. } => self.show_agent_ctrl_move_toast(
                 terminal_view_id,
                 DismissibleToast::success(format!("Moved to AgentCtrl as {job_id}")).with_link(
                     ToastLink::new("Open fleet".to_owned())
@@ -29096,36 +29132,21 @@ impl View for Workspace {
             context.set.insert("Workspace_PaneCanDetachSession");
         }
 
-        if self
+        let agent_ctrl_actions = self
             .active_tab_pane_group()
             .as_ref(app)
             .focused_session_view(app)
-            .is_some_and(|view| view.as_ref(app).can_move_session_to_agent_ctrl(app))
-        {
+            .map(|view| view.as_ref(app).agent_ctrl_pane_actions(app))
+            .unwrap_or_default();
+        if agent_ctrl_actions.can_move_session {
             context
                 .set
                 .insert("Workspace_PaneCanMoveSessionToAgentCtrl");
         }
-
-        if self
-            .active_tab_pane_group()
-            .as_ref(app)
-            .focused_session_view(app)
-            .is_some_and(|view| view.as_ref(app).can_start_agent_on_agent_ctrl(app))
-        {
+        if agent_ctrl_actions.can_start_agent {
             context.set.insert("Workspace_PaneCanStartAgentOnAgentCtrl");
         }
-
-        if self
-            .active_tab_pane_group()
-            .as_ref(app)
-            .focused_session_view(app)
-            .is_some_and(|view| {
-                view.as_ref(app)
-                    .move_all_agent_sessions_folder(app)
-                    .is_some()
-            })
-        {
+        if agent_ctrl_actions.can_move_all {
             context.set.insert("Workspace_PaneCanMoveAllAgentSessions");
         }
 

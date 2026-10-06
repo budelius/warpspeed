@@ -6979,7 +6979,7 @@ fn move_session_source_uses_the_shell_cwd_and_the_reported_transcript() {
                 );
             });
             workspace
-                .agent_ctrl_move_source(terminal_view_id, ctx)
+                .agent_ctrl_move_source(terminal_view_id, None, ctx)
                 .expect("a local Claude session can be moved")
         });
 
@@ -7221,6 +7221,7 @@ fn move_session_cut_over_ignores_endings_it_is_not_waiting_for() {
 
         let cutting_over = MoveStep::CuttingOver {
             job_id: "job-cut".to_owned(),
+            pushed_branch: "gitea/handoff/x".to_owned(),
         };
         workspace.update(&mut app, |workspace, _| {
             workspace
@@ -7352,12 +7353,14 @@ fn move_session_status_keeps_the_outcome_until_the_next_move() {
                 moved_view_id,
                 MoveStep::CuttingOver {
                     job_id: "job-cut".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
                 },
             );
             workspace.finish_agent_ctrl_move(
                 moved_view_id,
                 MoveStep::Done {
                     job_id: "job-cut".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
                 },
                 ctx,
             );
@@ -7365,7 +7368,8 @@ fn move_session_status_keeps_the_outcome_until_the_next_move() {
         assert_eq!(
             move_status(&mut app),
             Some(MoveStep::Done {
-                job_id: "job-cut".to_owned()
+                job_id: "job-cut".to_owned(),
+                pushed_branch: "gitea/handoff/x".to_owned(),
             }),
             "a finished move reports its outcome"
         );
@@ -7382,7 +7386,7 @@ fn move_session_status_keeps_the_outcome_until_the_next_move() {
                 cwd.path(),
                 ctx,
             );
-            let started = workspace.move_session_to_agent_ctrl_unattended(moved_view_id, ctx);
+            let started = workspace.move_session_to_agent_ctrl_unattended(moved_view_id, None, ctx);
             (started, workspace.agent_ctrl_move_step(moved_view_id))
         });
         assert_eq!(started, (Ok(()), Some(MoveStep::Preparing)));
@@ -7403,6 +7407,7 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
                 moved_view_id,
                 MoveStep::CuttingOver {
                     job_id: "job-cut".to_owned(),
+                    pushed_branch: "gitea/handoff/x".to_owned(),
                 },
             );
         });

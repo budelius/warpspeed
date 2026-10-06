@@ -20,6 +20,11 @@ fn protocol_version_is_two() {
 fn move_requests_round_trip() {
     assert_round_trips(Request::MoveSessionToAgentCtrl {
         terminal_view_id: 42,
+        cwd: None,
+    });
+    assert_round_trips(Request::MoveSessionToAgentCtrl {
+        terminal_view_id: 42,
+        cwd: Some(r"T:\projects\warp".to_owned()),
     });
     assert_round_trips(Request::MoveStatus {
         terminal_view_id: u64::MAX,
@@ -40,8 +45,13 @@ fn move_responses_round_trip() {
     ] {
         assert_round_trips(Response::MoveState {
             step: step.to_owned(),
+            pushed_branch: None,
         });
     }
+    assert_round_trips(Response::MoveState {
+        step: "done:job-1".to_owned(),
+        pushed_branch: Some("gitea/agentctrl/handoff-1".to_owned()),
+    });
 }
 
 #[test]

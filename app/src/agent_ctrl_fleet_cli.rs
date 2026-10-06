@@ -17,16 +17,19 @@ use itertools::Itertools;
 use managed_agent_sessions::{list_repositories, normalize_repo_url};
 use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, ManagedSessionsCommand};
 
+use crate::agent_ctrl::fleet_model::branch_web_url;
 use crate::remote_control::address;
 use crate::remote_control::client::{self, Instance};
 use crate::remote_control::protocol::{PROTOCOL_VERSION, PaneSummary, Request, Response};
-use crate::terminal::CLIAgent;
 use crate::terminal::agent_session_handoff::repo_url_for;
-use crate::terminal::agent_session_history;
+use crate::terminal::{CLIAgent, agent_session_history};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 const MOVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Why a move this gave up waiting for failed. The instance carries the move on regardless.
+const TIMED_OUT: &str = "timed out (may still complete; check the fleet)";
 
 /// How many `none` answers, or failures to reach the instance at all, in a row end a move as
 /// lost. A single `none` can race the instance recording a move it has just accepted.
@@ -43,6 +46,8 @@ pub(crate) struct PaneSource {
     pub session_id: String,
     pub cwd: PathBuf,
     pub recovered_from: SourceOrigin,
+    /// The URL of the remote a move pushes its handoff branch to.
+    pub repo_url: String,
 }
 
 /// Which report of a pane's directory [`PaneSource::cwd`] came from.
@@ -89,16 +94,57 @@ impl fmt::Display for Skip {
 /// How one move ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MoveOutcome {
-    Done { job_id: String },
-    Failed { reason: String },
+    Done {
+        job_id: String,
+        /// The handoff branch as `<remote>/<branch>`, when the instance reported it.
+        pushed_branch: Option<String>,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 impl fmt::Display for MoveOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MoveOutcome::Done { job_id } => write!(f, "moved: {job_id}"),
+            MoveOutcome::Done { job_id, .. } => write!(f, "moved: {job_id}"),
             MoveOutcome::Failed { reason } => write!(f, "failed: {reason}"),
         }
+    }
+}
+
+/// One answer to a move status request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReportedStep {
+    /// The step's wire form (see [`Response::MoveState`]).
+    pub step: String,
+    pub pushed_branch: Option<String>,
+}
+
+/// Where to see the handoff branch `pushed_branch` (`<remote>/<branch>`) of a repository whose
+/// remote is `repo_url`: its Gitea or GitLab page, else the branch itself.
+pub(crate) fn handoff_branch_link(repo_url: &str, pushed_branch: &str) -> String {
+    pushed_branch
+        .split_once('/')
+        .and_then(|(_, branch)| branch_web_url(repo_url, branch))
+        .unwrap_or_else(|| pushed_branch.to_owned())
+}
+
+/// `outcome` as one line, with the handoff branch's page next to a finished move.
+fn describe_outcome(source: &PaneSource, outcome: &MoveOutcome) -> String {
+    match outcome {
+        MoveOutcome::Done {
+            pushed_branch: Some(pushed_branch),
+            ..
+        } => format!(
+            "{outcome} ({})",
+            handoff_branch_link(&source.repo_url, pushed_branch)
+        ),
+        MoveOutcome::Done {
+            pushed_branch: None,
+            ..
+        }
+        | MoveOutcome::Failed { .. } => outcome.to_string(),
     }
 }
 
@@ -223,6 +269,7 @@ fn plan_one(
         session_id: session_id.to_owned(),
         cwd,
         recovered_from,
+        repo_url,
     })
 }
 
@@ -241,10 +288,10 @@ impl std::error::Error for InstanceGone {}
 
 /// Asks for a move's step every `interval` until it is done or failed, or `timeout` has passed.
 ///
-/// `call` answers with the step's wire form (see [`Response::MoveState`]). Errors other than
-/// [`InstanceGone`] are retried until the timeout without counting against the move.
+/// Errors from `call` other than [`InstanceGone`] are retried until the timeout without counting
+/// against the move.
 pub(crate) fn poll_until_terminal(
-    call: &mut dyn FnMut() -> Result<String>,
+    call: &mut dyn FnMut() -> Result<ReportedStep>,
     timeout: Duration,
     interval: Duration,
 ) -> MoveOutcome {
@@ -253,11 +300,15 @@ pub(crate) fn poll_until_terminal(
     let mut gone = 0;
     loop {
         match call() {
-            Ok(step) => {
+            Ok(ReportedStep {
+                step,
+                pushed_branch,
+            }) => {
                 gone = 0;
                 if let Some(job_id) = step.strip_prefix("done:") {
                     return MoveOutcome::Done {
                         job_id: job_id.to_owned(),
+                        pushed_branch,
                     };
                 }
                 if let Some(reason) = step.strip_prefix("failed:") {
@@ -289,7 +340,7 @@ pub(crate) fn poll_until_terminal(
         }
         if started.elapsed() >= timeout {
             return MoveOutcome::Failed {
-                reason: "timed out".to_owned(),
+                reason: TIMED_OUT.to_owned(),
             };
         }
         std::thread::sleep(interval);
@@ -436,12 +487,12 @@ pub(crate) fn run(request: MoveAllRequest) -> Result<()> {
             source.cwd.display()
         );
         let outcome = match instances.get(&source.instance_pid) {
-            Some(instance) => move_one(instance, source.terminal_view_id),
+            Some(instance) => move_one(instance, source),
             None => MoveOutcome::Failed {
                 reason: format!("instance {} is gone", source.instance_pid),
             },
         };
-        println!("  {outcome}");
+        println!("  {}", describe_outcome(source, &outcome));
         results.push((source, outcome));
     }
 
@@ -461,8 +512,18 @@ pub(crate) fn run(request: MoveAllRequest) -> Result<()> {
     Ok(())
 }
 
-fn move_one(instance: &Instance, terminal_view_id: u64) -> MoveOutcome {
-    match instance.call(Request::MoveSessionToAgentCtrl { terminal_view_id }) {
+/// The request that moves `source`, carrying the directory it was planned with for a pane whose
+/// shell reports none.
+pub(crate) fn move_request(source: &PaneSource) -> Request {
+    Request::MoveSessionToAgentCtrl {
+        terminal_view_id: source.terminal_view_id,
+        cwd: Some(source.cwd.to_string_lossy().into_owned()),
+    }
+}
+
+fn move_one(instance: &Instance, source: &PaneSource) -> MoveOutcome {
+    let terminal_view_id = source.terminal_view_id;
+    match instance.call(move_request(source)) {
         Ok(Response::MoveStarted) => {}
         Ok(Response::Failed { error }) => return MoveOutcome::Failed { reason: error },
         Ok(other) => {
@@ -478,7 +539,13 @@ fn move_one(instance: &Instance, terminal_view_id: u64) -> MoveOutcome {
     }
     let pid = instance.pid();
     let mut status = || match instance.call(Request::MoveStatus { terminal_view_id }) {
-        Ok(Response::MoveState { step }) => Ok(step),
+        Ok(Response::MoveState {
+            step,
+            pushed_branch,
+        }) => Ok(ReportedStep {
+            step,
+            pushed_branch,
+        }),
         Ok(Response::Failed { error }) => bail!(error),
         Ok(other) => bail!("unexpected answer to a move status: {other:?}"),
         Err(error) if !client::is_listening(pid) => {
@@ -534,9 +601,21 @@ fn format_plan(
         ));
     }
     for (pane, skip) in skipped {
-        out.push_str(&format!("  {:<39} {skip}\n", pane.title));
+        out.push_str(&format!(
+            "  {:<30} {:<40} {skip}\n",
+            pane.title,
+            skipped_pane_location(pane)
+        ));
     }
     out
+}
+
+/// Where a skipped pane is, so it can be found even when it has no title.
+pub(crate) fn skipped_pane_location(pane: &PaneSummary) -> String {
+    non_empty(Some(pane.working_directory.as_str()))
+        .or_else(|| non_empty(pane.agent_cwd.as_deref()))
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("window {} tab {}", pane.window, pane.tab_index + 1))
 }
 
 fn format_results(
@@ -547,10 +626,11 @@ fn format_results(
         .iter()
         .map(|(source, outcome)| {
             format!(
-                "  {:<30} {:<40} {:<12} {outcome}",
+                "  {:<30} {:<40} {:<12} {}",
                 title_of(source),
                 source.cwd.display(),
-                source.agent.display_name()
+                source.agent.display_name(),
+                describe_outcome(source, outcome)
             )
         })
         .join("\n");

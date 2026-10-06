@@ -1,8 +1,8 @@
-use command::blocking::Command;
 use std::fs;
 use std::path::Path;
 
 use chrono::{Local, TimeZone};
+use command::blocking::Command;
 use managed_agent_sessions::MAX_SESSION_FILE_BYTES;
 use tempfile::TempDir;
 
@@ -437,6 +437,7 @@ fn move_session_failure_during_cut_over_asks_to_close_the_agent_manually() {
     let message = move_failure_message(
         &MoveStep::CuttingOver {
             job_id: "job-1".to_owned(),
+            pushed_branch: "gitea/handoff/x".to_owned(),
         },
         "timed out",
         Some("gitea/handoff/x"),

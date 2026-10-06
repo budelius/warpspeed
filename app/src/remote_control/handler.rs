@@ -5,6 +5,8 @@
 //! the supervisor has confirmed it owns the session, and a pane listing is the
 //! same traversal the exit path uses to decide what survives.
 
+use std::path::PathBuf;
+
 use warpui::AppContext;
 
 use super::protocol::{PaneSummary, Request, Response, StoredSessionInfo};
@@ -22,9 +24,10 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
         Request::ListStoredSessions => list_stored_sessions(),
         Request::OpenStoredSession { name } => open_stored_session(&name, ctx),
         Request::Quit { close_windows } => quit(close_windows, ctx),
-        Request::MoveSessionToAgentCtrl { terminal_view_id } => {
-            move_session_to_agent_ctrl(terminal_view_id, ctx)
-        }
+        Request::MoveSessionToAgentCtrl {
+            terminal_view_id,
+            cwd,
+        } => move_session_to_agent_ctrl(terminal_view_id, cwd.map(PathBuf::from), ctx),
         Request::MoveStatus { terminal_view_id } => move_status(terminal_view_id, ctx),
     }
 }
@@ -218,7 +221,11 @@ fn terminal_view_entity_id(terminal_view_id: u64) -> Option<warpui::EntityId> {
 
 /// Starts moving a pane's agent session to AgentCtrl, whichever window holds the pane.
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
-fn move_session_to_agent_ctrl(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+fn move_session_to_agent_ctrl(
+    terminal_view_id: u64,
+    fallback_cwd: Option<PathBuf>,
+    ctx: &mut AppContext,
+) -> Response {
     let held = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
         workspace_holding_terminal_view(view_id, ctx).map(|workspace| (view_id, workspace))
     });
@@ -228,7 +235,7 @@ fn move_session_to_agent_ctrl(terminal_view_id: u64, ctx: &mut AppContext) -> Re
         };
     };
     match workspace.update(ctx, |workspace, ctx| {
-        workspace.move_session_to_agent_ctrl_unattended(view_id, ctx)
+        workspace.move_session_to_agent_ctrl_unattended(view_id, fallback_cwd, ctx)
     }) {
         Ok(()) => Response::MoveStarted,
         Err(error) => Response::Failed { error },
@@ -236,7 +243,11 @@ fn move_session_to_agent_ctrl(terminal_view_id: u64, ctx: &mut AppContext) -> Re
 }
 
 #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
-fn move_session_to_agent_ctrl(_terminal_view_id: u64, _ctx: &mut AppContext) -> Response {
+fn move_session_to_agent_ctrl(
+    _terminal_view_id: u64,
+    _fallback_cwd: Option<PathBuf>,
+    _ctx: &mut AppContext,
+) -> Response {
     Response::Failed {
         error: "This build cannot move sessions to AgentCtrl".to_owned(),
     }
@@ -256,6 +267,7 @@ fn move_status(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
     });
     Response::MoveState {
         step: move_step_label(step.as_ref()),
+        pushed_branch: step.and_then(move_step_pushed_branch),
     }
 }
 
@@ -277,8 +289,23 @@ fn move_step_label(step: Option<&crate::terminal::agent_session_handoff::MoveSte
         Some(MoveStep::Importing) => "importing".to_owned(),
         Some(MoveStep::WaitingForResume { .. }) => "waiting_for_resume".to_owned(),
         Some(MoveStep::CuttingOver { .. }) => "cutting_over".to_owned(),
-        Some(MoveStep::Done { job_id }) => format!("done:{job_id}"),
+        Some(MoveStep::Done { job_id, .. }) => format!("done:{job_id}"),
         Some(MoveStep::Failed { reason, .. }) => format!("failed:{reason}"),
+    }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn move_step_pushed_branch(
+    step: crate::terminal::agent_session_handoff::MoveStep,
+) -> Option<String> {
+    use crate::terminal::agent_session_handoff::MoveStep;
+
+    match step {
+        MoveStep::Preparing | MoveStep::Importing | MoveStep::WaitingForResume { .. } => None,
+        MoveStep::CuttingOver { pushed_branch, .. } | MoveStep::Done { pushed_branch, .. } => {
+            Some(pushed_branch)
+        }
+        MoveStep::Failed { pushed_branch, .. } => pushed_branch,
     }
 }
 

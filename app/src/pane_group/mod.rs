@@ -6920,6 +6920,27 @@ impl PaneGroup {
         (pane_data, view)
     }
 
+    /// Splits a plain terminal pane to the right of `base`, starting its shell in `directory`.
+    pub fn split_terminal_in_directory(
+        &mut self,
+        base: PaneId,
+        directory: PathBuf,
+        ctx: &mut ViewContext<Self>,
+    ) -> TerminalPaneId {
+        // `Ignore`: the pane is about to run an agent CLI, so it must not open in agent view.
+        let new_pane_id = self.add_session_in_directory(
+            Direction::Right,
+            Some(base),
+            None, /* chosen_shell */
+            Some(directory),
+            None, /* conversation_restoration */
+            DefaultSessionModeBehavior::Ignore,
+            ctx,
+        );
+        ctx.emit(Event::AppStateChanged);
+        new_pane_id
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn add_session_in_directory(
         &mut self,

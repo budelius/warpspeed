@@ -13,6 +13,7 @@ use warpui::platform::Cursor;
 use warpui::platform::keyboard::KeyCode;
 use warpui::{EntityId, WeakViewHandle, WindowId};
 
+use super::agent_session_actions::AgentSessionAction;
 use super::global_actions::{ForkFromExchange, ForkedConversationDestination};
 use super::tab_settings::{
     VerticalTabsCompactSubtitle, VerticalTabsDisplayGranularity, VerticalTabsPrimaryInfo,
@@ -306,6 +307,8 @@ pub enum WorkspaceAction {
     AttachDetachedSession {
         session_id: TerminalSessionId,
     },
+    /// Focuses, starts, attaches or resumes the agent session a picker row stands for.
+    AgentSession(AgentSessionAction),
     /// Restores this window in a newly launched application process, then closes the original.
     RestartWindowInNewProcess,
     /// Opens (or closes, if already open) the shell picker, which lists the
@@ -1080,6 +1083,8 @@ impl WorkspaceAction {
             | MoveSessionToAgentCtrlForTerminalView { .. }
             | ConfirmMoveSessionToAgentCtrl { .. }
             | AttachDetachedSession { .. }
+            // Can open a tab or split a pane, as attaching and resuming do.
+            | AgentSession(_)
             | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets
             // restarted, the user can continue working

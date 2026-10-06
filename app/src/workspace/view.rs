@@ -132,6 +132,9 @@ use super::action::{
     InitContent, NewSessionMenuAnchor, RestoreConversationLayout, TabContextMenuAnchor,
     VerticalTabsPaneContextMenuTarget, WorkspaceAction,
 };
+use super::agent_session_actions::{
+    AgentSessionAction, ShellKind, resume_command_line, resume_descriptor,
+};
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use super::auto_handoff::AutoCloudHandoffController;
 pub(crate) use super::close_session_confirmation_dialog::OpenDialogSource;
@@ -232,9 +235,9 @@ use crate::ai_assistant::execution_context::execution_context_for_session;
 use crate::ai_assistant::panel::{AIAssistantPanelEvent, AIAssistantPanelView};
 use crate::ai_assistant::{AI_ASSISTANT_FEATURE_NAME, AI_ASSISTANT_LOGO_COLOR, AskAIType};
 use crate::app_state::{
-    LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot, NotebookPaneSnapshot,
-    PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, TabGroupSnapshot,
-    TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    CliAgentResumeDescriptor, LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot,
+    NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot,
+    TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
 };
 use crate::appearance::{Appearance, AppearanceManager};
 use crate::auth::AuthStateProvider;
@@ -389,18 +392,20 @@ use crate::tab_configs::telemetry::{NewWorktreeConfigOpenSource, WorktreeBranchN
 use crate::tab_configs::{
     NewWorktreeModal, NewWorktreeModalEvent, TabConfigParamsModal, TabConfigParamsModalEvent,
 };
-#[cfg(all(feature = "local_fs", feature = "local_tty"))]
 use crate::terminal::agent_session_handoff::{
     CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession, agent_exit_command,
     cut_over_decision, move_failure_message, move_idempotency_key, move_progress_message,
     prepare_handoff as prepare_agent_session_handoff, select_remote, session_changed_message,
     stop_request_outcome,
 };
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_sessions_index::{DetachedInput, PaneAgentInput};
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
 #[cfg(feature = "local_tty")]
 use crate::terminal::available_shells::AvailableShells;
 use crate::terminal::block_list_viewport::InputMode;
+use crate::terminal::cli_agent::CLIAgent;
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{PluginModalKind, plugin_manager_for};
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
@@ -14694,6 +14699,235 @@ impl Workspace {
         Ok(())
     }
 
+    /// What the agent-session rows are built from: this window's terminal panes in tab order,
+    /// and the sessions the supervisor holds with no pane attached.
+    ///
+    /// Asks the supervisor, a blocking round trip, so call it when a picker opens rather than
+    /// on every render.
+    pub(crate) fn agent_session_inputs(
+        &self,
+        ctx: &AppContext,
+    ) -> (Vec<PaneAgentInput>, Vec<DetachedInput>) {
+        let detached = detached_sessions::list(ctx)
+            .into_iter()
+            .map(|session| DetachedInput {
+                session_id: session.session_id,
+                title: session.title,
+                cwd: session.cwd,
+                detached_for_seconds: session.detached_for_seconds,
+            })
+            .collect();
+        (self.agent_pane_inputs(ctx), detached)
+    }
+
+    fn agent_pane_inputs(&self, ctx: &AppContext) -> Vec<PaneAgentInput> {
+        let agent_sessions = CLIAgentSessionsModel::as_ref(ctx);
+        let mut panes = Vec::new();
+        for (tab_index, tab) in self.tabs.iter().enumerate() {
+            let pane_group_id = tab.pane_group.id();
+            let pane_group = tab.pane_group.as_ref(ctx);
+            let tab_title = pane_group.display_title(ctx);
+            for pane_id in pane_group.pane_ids() {
+                let Some(view) = pane_group.terminal_view_from_pane_id(pane_id, ctx) else {
+                    continue;
+                };
+                let running =
+                    agent_sessions
+                        .session(view.id())
+                        .map(|session| CliAgentResumeDescriptor {
+                            agent: session.agent,
+                            session_id: agent_sessions.session_id(view.id()).map(str::to_owned),
+                            // Empty lets the row fall back to the pane's directory.
+                            cwd: session
+                                .session_context
+                                .cwd
+                                .clone()
+                                .map(PathBuf::from)
+                                .unwrap_or_default(),
+                            title: session.session_context.display_title(),
+                            captured_unix_seconds: None,
+                        });
+                panes.push(PaneAgentInput {
+                    locator: PaneViewLocator {
+                        pane_group_id,
+                        pane_id,
+                    },
+                    tab_index,
+                    tab_title: tab_title.clone(),
+                    cwd: pane_group
+                        .terminal_working_directory(pane_id, ctx)
+                        .map(PathBuf::from),
+                    running,
+                    pending: pane_group.pending_agent_resume(pane_id, ctx),
+                });
+            }
+        }
+        panes
+    }
+
+    fn perform_agent_session_action(
+        &mut self,
+        action: &AgentSessionAction,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match action {
+            AgentSessionAction::Focus(locator) => self.focus_pane(*locator, ctx),
+            AgentSessionAction::Start(locator) => {
+                if let Some(manager) = self
+                    .get_pane_group_view_with_id(locator.pane_group_id)
+                    .and_then(|pane_group| {
+                        pane_group
+                            .as_ref(ctx)
+                            .terminal_manager_for_pane_id(locator.pane_id, ctx)
+                    })
+                {
+                    manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+                }
+                self.focus_pane(*locator, ctx);
+            }
+            AgentSessionAction::Attach(session_id) => self.attach_agent_session(*session_id, ctx),
+            AgentSessionAction::Resume {
+                agent,
+                session_id,
+                cwd,
+                target,
+            } => self.resume_agent_session(*agent, session_id, cwd, *target, ctx),
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn attach_agent_session(
+        &mut self,
+        session_id: warp_core::SessionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Err(error) = self.attach_session_by_id(session_id, ctx) {
+            self.show_agent_session_error(format!("Couldn't attach the session: {error:#}"), ctx);
+        }
+    }
+
+    #[cfg(not(feature = "local_tty"))]
+    fn attach_agent_session(
+        &mut self,
+        session_id: warp_core::SessionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.show_agent_session_error(
+            format!("Couldn't attach the session {session_id:?}: not supported in this build"),
+            ctx,
+        );
+    }
+
+    /// Reopens a past conversation in `target` when its shell sits idle at a prompt, otherwise in
+    /// a new pane split beside it, so nothing the user is running gets typed over.
+    fn resume_agent_session(
+        &mut self,
+        agent: CLIAgent,
+        session_id: &str,
+        cwd: &Path,
+        target: Option<PaneViewLocator>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Two agent processes on one conversation would interleave writes to its transcript.
+        let running_here = self.agent_pane_inputs(ctx).into_iter().find(|pane| {
+            pane.running.as_ref().is_some_and(|running| {
+                running.agent == agent && running.session_id.as_deref() == Some(session_id)
+            })
+        });
+        if let Some(pane) = running_here {
+            self.focus_pane(pane.locator, ctx);
+            return;
+        }
+        if running_agent_session_ids().contains(session_id) {
+            self.show_agent_session_error(
+                "This conversation is already running outside this window".to_owned(),
+                ctx,
+            );
+            return;
+        }
+
+        let Some(resume) = resume_descriptor(agent, session_id, cwd).resume_command() else {
+            return;
+        };
+        let target = target
+            .filter(|target| {
+                self.get_pane_group_view_with_id(target.pane_group_id)
+                    .is_some_and(|pane_group| {
+                        pane_group
+                            .as_ref(ctx)
+                            .pane_ids()
+                            .any(|id| id == target.pane_id)
+                    })
+            })
+            .unwrap_or_else(|| {
+                let pane_group = self.active_tab_pane_group();
+                PaneViewLocator {
+                    pane_group_id: pane_group.id(),
+                    pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+                }
+            });
+        let Some(pane_group) = self
+            .get_pane_group_view_with_id(target.pane_group_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let idle_view = pane_group
+            .as_ref(ctx)
+            .terminal_view_from_pane_id(target.pane_id, ctx)
+            .filter(|view| {
+                let terminal = view.as_ref(ctx);
+                terminal.is_login_shell_bootstrapped()
+                    && !terminal.is_long_running()
+                    && !terminal.has_pending_command_or_awaiting_completion(ctx)
+                    && CLIAgentSessionsModel::as_ref(ctx)
+                        .session(view.id())
+                        .is_none()
+            });
+        match idle_view {
+            Some(view) => {
+                view.update(ctx, |view, ctx| {
+                    let shell = view
+                        .active_session_shell_type(ctx)
+                        .map(ShellKind::from)
+                        .unwrap_or_else(|| view.shell_family(ctx).into());
+                    view.execute_command_or_set_pending(
+                        &resume_command_line(cwd, &resume, shell),
+                        ctx,
+                    );
+                });
+                self.focus_pane(target, ctx);
+            }
+            None => {
+                let new_pane_id = pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.split_terminal_in_directory(target.pane_id, cwd.to_path_buf(), ctx)
+                });
+                if let Some(view) = pane_group
+                    .as_ref(ctx)
+                    .terminal_view_from_pane_id(new_pane_id, ctx)
+                {
+                    view.update(ctx, |view, ctx| {
+                        view.execute_command_or_set_pending(&resume, ctx);
+                    });
+                }
+                self.focus_pane(
+                    PaneViewLocator {
+                        pane_group_id: target.pane_group_id,
+                        pane_id: new_pane_id.into(),
+                    },
+                    ctx,
+                );
+            }
+        }
+    }
+
+    fn show_agent_session_error(&mut self, message: String, ctx: &mut ViewContext<Self>) {
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            toast_stack.add_ephemeral_toast(DismissibleToast::error(message), ctx);
+        });
+    }
+
     #[cfg(not(feature = "local_tty"))]
     fn hand_session_to_supervisor(
         &mut self,
@@ -26259,6 +26493,7 @@ impl TypedActionView for Workspace {
             }
             ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
             AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
+            AgentSession(action) => self.perform_agent_session_action(action, ctx),
             AddGetStartedTab => self.add_get_started_tab(ctx),
             AddAmbientAgentTab => self.add_ambient_agent_tab(ctx),
             AddAgentTab => self.add_terminal_tab_with_new_agent_view(ctx),
@@ -31932,4 +32167,15 @@ fn set_opencode_warp_plugin(new_entry: &str) -> String {
         },
         Err(e) => format!("Failed to serialize opencode.json: {e}"),
     }
+}
+
+/// Conversation IDs agents on this machine are running, in any terminal.
+#[cfg(not(target_family = "wasm"))]
+fn running_agent_session_ids() -> HashSet<String> {
+    crate::terminal::cli_agent_sessions::process_registry::running_session_ids()
+}
+
+#[cfg(target_family = "wasm")]
+fn running_agent_session_ids() -> HashSet<String> {
+    HashSet::new()
 }

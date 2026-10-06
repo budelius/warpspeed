@@ -7380,3 +7380,105 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
         );
     });
 }
+
+fn resume_into_focused_pane(workspace: &ViewHandle<Workspace>, app: &mut App) -> PaneViewLocator {
+    workspace.update(app, |workspace, ctx| {
+        let pane_group = workspace.active_tab_pane_group();
+        let target = PaneViewLocator {
+            pane_group_id: pane_group.id(),
+            pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+        };
+        workspace.perform_agent_session_action(
+            &AgentSessionAction::Resume {
+                agent: crate::terminal::cli_agent::CLIAgent::Claude,
+                session_id: uuid::Uuid::new_v4().to_string(),
+                cwd: std::env::temp_dir(),
+                target: Some(target),
+            },
+            ctx,
+        );
+        target
+    })
+}
+
+fn pending_command_in(workspace: &ViewHandle<Workspace>, pane_id: PaneId, app: &mut App) -> bool {
+    workspace.read(app, |workspace, ctx| {
+        workspace
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .terminal_view_from_pane_id(pane_id, ctx)
+            .expect("terminal pane")
+            .as_ref(ctx)
+            .has_pending_command_or_awaiting_completion(ctx)
+    })
+}
+
+#[test]
+fn agent_session_resume_splits_beside_a_shell_not_yet_at_its_prompt() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let target = resume_into_focused_pane(&workspace, &mut app);
+
+        let new_pane = workspace.read(&app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            assert_eq!(pane_group.pane_ids().count(), 2);
+            get_newly_created_pane_id(pane_group, &[target.pane_id])
+        });
+        assert!(pending_command_in(&workspace, new_pane, &mut app));
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+    });
+}
+
+#[test]
+fn agent_session_resume_runs_in_an_idle_shell() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let view = workspace.read(&app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .expect("workspace should start with a terminal view")
+        });
+        view.update(&mut app, |view, _| {
+            view.set_login_shell_bootstrapped_for_test()
+        });
+
+        resume_into_focused_pane(&workspace, &mut app);
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .pane_ids()
+                    .count(),
+                1
+            );
+        });
+    });
+}
+
+#[test]
+fn agent_session_inputs_lists_each_terminal_pane_in_tab_order() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx)
+        });
+
+        let (panes, _) = workspace.read(&app, |workspace, ctx| workspace.agent_session_inputs(ctx));
+
+        let tab_indexes: Vec<usize> = panes.iter().map(|pane| pane.tab_index).collect();
+        assert_eq!(tab_indexes, vec![0, 1]);
+        assert!(
+            panes
+                .iter()
+                .all(|pane| pane.running.is_none() && pane.pending.is_none())
+        );
+    });
+}

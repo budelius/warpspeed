@@ -71,6 +71,7 @@ fn pane_summary_with_agent_details_round_trips() {
         agent_session_id: Some("0b6c1234-ffff-4a4a-8b8b-0123456789ab".to_owned()),
         agent_cwd: Some("/srv/app/sub".to_owned()),
         transcript_path: Some("/home/ben/.claude/projects/-srv-app/x.jsonl".to_owned()),
+        agent_not_resumed: false,
     };
     assert_round_trips(Response::Panes {
         panes: vec![
@@ -81,6 +82,12 @@ fn pane_summary_with_agent_details_round_trips() {
                 agent_session_id: None,
                 agent_cwd: None,
                 transcript_path: None,
+                ..pane.clone()
+            },
+            PaneSummary {
+                working_directory: String::new(),
+                has_running_agent: false,
+                agent_not_resumed: true,
                 ..pane
             },
         ],

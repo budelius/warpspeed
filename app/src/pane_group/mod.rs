@@ -7330,6 +7330,16 @@ impl PaneGroup {
             .and_then(|contents| contents.as_any().downcast_ref::<TerminalPane>())
     }
 
+    /// The agent the terminal pane `pane_id` was restored with, while it has yet to resume it.
+    pub(crate) fn restored_agent_still_resuming(
+        &self,
+        pane_id: impl Into<PaneId>,
+        app: &AppContext,
+    ) -> Option<crate::app_state::CliAgentResumeDescriptor> {
+        self.terminal_session_by_id(pane_id)?
+            .restored_agent_still_resuming(app)
+    }
+
     pub fn terminal_manager_for_pane_id(
         &self,
         pane_id: impl Into<PaneId>,

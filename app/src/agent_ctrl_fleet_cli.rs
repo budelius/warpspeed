@@ -72,6 +72,7 @@ impl fmt::Display for SourceOrigin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Skip {
     NoAgentSession,
+    AgentNotResumed,
     NoDirectory,
     OutsideFolder,
     /// The repository's URL, as its remote names it.
@@ -83,6 +84,9 @@ impl fmt::Display for Skip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Skip::NoAgentSession => f.write_str("no agent session"),
+            Skip::AgentNotResumed => {
+                f.write_str("agent not resumed yet — open the tab, then rerun")
+            }
             Skip::NoDirectory => f.write_str("no directory"),
             Skip::OutsideFolder => f.write_str("outside the folder"),
             Skip::RepoNotConfigured(url) => write!(f, "repo not configured: {url}"),
@@ -235,6 +239,9 @@ fn plan_one(
     configured: &[String],
     repo_url_of: &dyn Fn(&Path) -> Option<String>,
 ) -> Result<PaneSource, Skip> {
+    if pane.agent_not_resumed {
+        return Err(Skip::AgentNotResumed);
+    }
     let agent = non_empty(pane.agent.as_deref())
         .and_then(agent_from_label)
         .ok_or(Skip::NoAgentSession)?;

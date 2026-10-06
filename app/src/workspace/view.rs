@@ -14984,6 +14984,11 @@ impl Workspace {
                 let agent_sessions = CLIAgentSessionsModel::as_ref(ctx);
                 let agent_session = agent_sessions.session(view.id());
                 let has_running_agent = agent_session.is_some();
+                let restored_agent = if has_running_agent {
+                    None
+                } else {
+                    pane_group.restored_agent_still_resuming(pane_id, ctx)
+                };
 
                 panes.push(TerminalPaneInfo {
                     pane_group_id,
@@ -15003,14 +15008,23 @@ impl Workspace {
                         .unwrap_or_default(),
                     working_directory: view.as_ref(ctx).pwd_if_local(ctx).unwrap_or_default(),
                     terminal_view_id: view.id(),
-                    agent: agent_session.and_then(|session| {
-                        session
-                            .agent
-                            .command_prefixes()
-                            .first()
-                            .map(|prefix| (*prefix).to_owned())
-                    }),
-                    agent_session_id: agent_sessions.session_id(view.id()).map(str::to_owned),
+                    agent: agent_session
+                        .map(|session| session.agent)
+                        .or(restored_agent.as_ref().map(|restored| restored.agent))
+                        .and_then(|agent| {
+                            agent
+                                .command_prefixes()
+                                .first()
+                                .map(|prefix| (*prefix).to_owned())
+                        }),
+                    agent_session_id: agent_sessions
+                        .session_id(view.id())
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            restored_agent
+                                .as_ref()
+                                .and_then(|restored| restored.session_id.clone())
+                        }),
                     agent_cwd: agent_session
                         .and_then(|session| session.session_context.cwd.clone()),
                     transcript_path: agent_session.and_then(|session| {
@@ -15020,6 +15034,7 @@ impl Workspace {
                             .as_ref()
                             .map(|path| path.display().to_string())
                     }),
+                    agent_not_resumed: restored_agent.is_some(),
                 });
             }
         }

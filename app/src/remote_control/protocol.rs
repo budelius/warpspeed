@@ -164,6 +164,11 @@ pub struct PaneSummary {
 
     /// The session file the agent last reported.
     pub transcript_path: Option<String>,
+
+    /// Whether the agent is one a restored pane has yet to resume, because nobody has opened its
+    /// tab: [`Self::agent`] and [`Self::agent_session_id`] are then the saved ones, and nothing is
+    /// running to move.
+    pub agent_not_resumed: bool,
 }
 
 /// One saved session that can be reopened.

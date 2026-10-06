@@ -15,6 +15,7 @@ struct PaneSpec {
     agent_session_id: Option<&'static str>,
     working_directory: &'static str,
     agent_cwd: Option<&'static str>,
+    agent_not_resumed: bool,
 }
 
 impl Default for PaneSpec {
@@ -26,6 +27,7 @@ impl Default for PaneSpec {
             agent_session_id: Some("session-1"),
             working_directory: "/work/warp",
             agent_cwd: None,
+            agent_not_resumed: false,
         }
     }
 }
@@ -46,6 +48,7 @@ fn pane(spec: PaneSpec) -> PaneSummary {
         agent_session_id: spec.agent_session_id.map(str::to_owned),
         agent_cwd: spec.agent_cwd.map(str::to_owned),
         transcript_path: None,
+        agent_not_resumed: spec.agent_not_resumed,
     }
 }
 
@@ -441,6 +444,30 @@ fn an_empty_history_directory_counts_as_no_directory() {
 
     assert!(sources.is_empty());
     assert_eq!(skipped[0].1, Skip::NoDirectory);
+}
+
+/// After a restore, a tab nobody has opened yet holds its agent only as the descriptor it will
+/// resume: it has no live session, so its shell reports no directory either.
+#[test]
+fn a_restored_agent_that_has_not_resumed_is_skipped_as_such() {
+    let panes = [(
+        10,
+        pane(PaneSpec {
+            working_directory: "",
+            agent_not_resumed: true,
+            ..Default::default()
+        }),
+    )];
+    let history = |_: CLIAgent, _: &str| Some(PathBuf::from("/work/history"));
+    let (sources, skipped) = plan(&panes, &history, &configured_repo);
+
+    assert!(sources.is_empty(), "{sources:?}");
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].1, Skip::AgentNotResumed);
+    assert_eq!(
+        Skip::AgentNotResumed.to_string(),
+        "agent not resumed yet — open the tab, then rerun"
+    );
 }
 
 #[test]

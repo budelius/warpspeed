@@ -243,7 +243,10 @@ impl TerminalPane {
 
     /// The agent this pane was restored with, while its resume command has yet to start or is
     /// still running. Once it has finished, the agent has exited and is no longer the pane's.
-    fn restored_agent_still_resuming(&self, app: &AppContext) -> Option<CliAgentResumeDescriptor> {
+    pub(crate) fn restored_agent_still_resuming(
+        &self,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
         let descriptor = self
             .restored_shell_snapshot_fields
             .as_ref()?

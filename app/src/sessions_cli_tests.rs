@@ -16,6 +16,7 @@ fn pane(session_id: Option<u64>, survives_quit: bool) -> PaneSummary {
         agent_session_id: None,
         agent_cwd: None,
         transcript_path: None,
+        agent_not_resumed: false,
     }
 }
 

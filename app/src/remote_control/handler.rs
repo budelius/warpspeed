@@ -101,6 +101,7 @@ fn list_panes(ctx: &mut AppContext) -> Response {
                     agent_session_id: pane.agent_session_id,
                     agent_cwd: pane.agent_cwd,
                     transcript_path: pane.transcript_path,
+                    agent_not_resumed: pane.agent_not_resumed,
                 }),
         );
     }

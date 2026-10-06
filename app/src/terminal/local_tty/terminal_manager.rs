@@ -380,7 +380,16 @@ where
         cwd: Option<PathBuf>,
         ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
     ) -> bool {
-        self.0.restart_session_inner(target, cwd, ctx);
+        self.0.restart_session_inner(target, cwd, None, ctx);
+        true
+    }
+
+    fn reattach_session(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>) -> bool {
+        let Some(session_id) = self.0.persistent_session_id else {
+            return false;
+        };
+        self.0
+            .restart_session_inner(None, None, Some(session_id), ctx);
         true
     }
 
@@ -979,10 +988,13 @@ impl<S> TerminalManager<S> {
     ///
     /// `target` is the shell to launch, or `None` to relaunch the one this
     /// pane is already running. `cwd` is the replacement's startup directory.
+    /// `reattach` names a supervised session to attach the pane to instead of
+    /// launching a shell.
     pub(super) fn restart_session_inner(
         &mut self,
         target: Option<ShellLaunchData>,
         cwd: Option<PathBuf>,
+        reattach: Option<SessionId>,
         ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
     ) where
         S: TerminalSurface,
@@ -1029,7 +1041,9 @@ impl<S> TerminalManager<S> {
         //    it correct. Nothing can run in between: `join` blocks the main
         //    thread, so no spawned callback is dispatched during step 2.
         self.session_generation = self.session_generation.wrapping_add(1);
-        self.persistent_session_id = None;
+        // A reattach keeps the session's identity: `on_shell_determined` attaches to it rather
+        // than forking. The pane still shows its grid, so there is nothing to repaint.
+        self.persistent_session_id = reattach;
         self.repaint_screen_on_attach = false;
         if let Some(pending) = self.pending_shell_start.take() {
             pending.abort();

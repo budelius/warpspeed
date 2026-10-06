@@ -1,4 +1,4 @@
-use super::{fold_pending_resize, should_kill_on_shutdown};
+use super::{fold_pending_resize, should_detach_on_shutdown, should_kill_on_shutdown};
 use crate::SizeInfo;
 
 fn size(columns: usize) -> SizeInfo {
@@ -46,4 +46,24 @@ fn an_overtaken_forced_resize_keeps_forcing() {
 fn a_forced_resize_forces_the_batch() {
     let (_, forced) = fold_pending_resize(Some((size(100), false)), (size(300), true));
     assert!(forced);
+}
+
+#[test]
+fn a_lost_connection_to_a_running_supervised_shell_detaches_it() {
+    assert!(should_detach_on_shutdown(true, true, true));
+}
+
+#[test]
+fn a_requested_shutdown_still_ends_a_running_supervised_shell() {
+    assert!(!should_detach_on_shutdown(false, true, true));
+}
+
+#[test]
+fn a_lost_connection_to_a_direct_shell_cannot_detach_it() {
+    assert!(!should_detach_on_shutdown(true, false, true));
+}
+
+#[test]
+fn a_lost_connection_to_a_dead_supervised_shell_is_not_detached() {
+    assert!(!should_detach_on_shutdown(true, true, false));
 }

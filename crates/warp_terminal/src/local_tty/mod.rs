@@ -93,6 +93,12 @@ pub trait EventedPty: EventedReadWrite {
     /// resize that carries nothing its transport can express.
     fn on_resize(&mut self, size: &SizeInfo, forced: bool);
 
+    /// Hands a supervised session back to its supervisor, leaving the shell running, so that a
+    /// later attach can resume it. A PTY that no supervisor holds cannot be detached.
+    fn detach(&mut self) -> Result<()> {
+        anyhow::bail!("This terminal session is not held by a supervisor")
+    }
+
     /// Terminate the PTY process
     fn kill(self) -> Result<()>;
 }

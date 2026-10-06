@@ -112,6 +112,14 @@ pub trait TerminalManager: Any {
         false
     }
 
+    /// Attaches this pane again, in place, to the supervised session it lost the connection to,
+    /// keeping its scrollback. Returns whether a reattach was started; managers with no
+    /// supervised session keep the default and return `false`.
+    #[must_use]
+    fn reattach_session(&mut self, _ctx: &mut ModelContext<Box<dyn TerminalManager>>) -> bool {
+        false
+    }
+
     /// Whether [`Self::restart_session`] can do anything for this manager.
     ///
     /// The restart/change-shell commands are registered once, process-wide, and

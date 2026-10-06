@@ -202,6 +202,8 @@ pub enum TerminalAction {
     Close,
     ToggleMaximizePane,
     RestartShell,
+    /// Attaches this pane again to the shell it lost the connection to.
+    ReattachShell,
     ChangeShell,
     DetachSession,
     MoveSessionToAgentCtrl,
@@ -570,6 +572,7 @@ impl fmt::Debug for TerminalAction {
             SplitUp(_) => f.write_str("SplitUp"),
             ToggleMaximizePane => f.write_str("ToggleMaximizeActivePane"),
             RestartShell => f.write_str("RestartShell"),
+            ReattachShell => f.write_str("ReattachShell"),
             ChangeShell => f.write_str("ChangeShell"),
             DetachSession => f.write_str("DetachSession"),
             MoveSessionToAgentCtrl => f.write_str("MoveSessionToAgentCtrl"),

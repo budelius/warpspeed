@@ -279,6 +279,10 @@ pub enum WorkspaceAction {
     RestartShellForTerminalView {
         terminal_view_id: EntityId,
     },
+    /// Attaches a pane again, in place, to the supervised shell it lost the connection to.
+    ReattachShellForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Hands the focused pane's shell to the session supervisor and closes the
     /// pane. The shell and everything running under it keep going; the session
     /// then appears in the picker opened by `ToggleAttachSessionMenu`.
@@ -1158,6 +1162,7 @@ impl WorkspaceAction {
             // do not change persisted state.
             | RestartShell
             | RestartShellForTerminalView { .. }
+            | ReattachShellForTerminalView { .. }
             | ToggleAttachSessionMenu
             | RestartWindowInNewProcess
             | ToggleChangeShellMenu

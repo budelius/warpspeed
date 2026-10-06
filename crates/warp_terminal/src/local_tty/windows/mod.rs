@@ -45,6 +45,7 @@ use super::event_loop::{PTY_TOKEN, SIGNALS_TOKEN};
 use super::shell::{DirectShellStarter, ShellStarter, WslShellStarter};
 use super::spawner::PtyHandle;
 use super::{EventedPty, EventedReadWrite, PtyOptions, SizeInfo, mio_channel};
+use crate::local_tty::screen::ScreenSnapshot;
 use crate::local_tty::spawner::{PtySpawnInfo, PtySpawner};
 use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::windows::proc_thread_attribute_list::ProcThreadAttributeList;
@@ -703,6 +704,20 @@ impl EventedPty for Pty {
         if applied {
             self.last_applied_size = Some(next);
         }
+    }
+
+    fn detach(&mut self) -> anyhow::Result<()> {
+        let (client, session_id) = self
+            .supervisor
+            .as_ref()
+            .context("This terminal session is not held by a supervisor")?;
+        // The pane keeps its own grid, so a reattach into it needs no snapshot, and the
+        // bootstrap is rebuilt for an orphaned shell when the session is attached again.
+        client.detach(
+            *session_id,
+            ScreenSnapshot::default(),
+            SessionMetadata::default(),
+        )
     }
 
     fn kill(mut self) -> anyhow::Result<()> {

@@ -1036,6 +1036,15 @@ pub fn init(app: &mut AppContext) {
     .with_group(bindings::BindingGroup::Terminal.as_str())
     .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanMoveSessionToAgentCtrl"))]);
 
+    // Offered only on local panes inside a git work tree, whose repository the run starts in.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:start_agent_on_agent_ctrl",
+        "Start agent on AgentCtrl in this repo",
+        WorkspaceAction::StartAgentOnAgentCtrl,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanStartAgentOnAgentCtrl"))]);
+
     app.register_editable_bindings([EditableBinding::new(
         "workspace:restart_window_in_new_process",
         "Restart window in new process",

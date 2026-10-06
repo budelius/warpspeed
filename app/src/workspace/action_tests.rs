@@ -105,3 +105,20 @@ fn move_session_actions_save_workspace_state() {
             .should_save_app_state_on_action()
     );
 }
+
+#[test]
+fn start_agent_on_agent_ctrl_actions_save_workspace_state() {
+    let terminal_view_id = EntityId::new();
+    assert!(WorkspaceAction::StartAgentOnAgentCtrl.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::StartAgentOnAgentCtrlForTerminalView { terminal_view_id }
+            .should_save_app_state_on_action()
+    );
+    assert!(
+        WorkspaceAction::ConfirmStartAgentOnAgentCtrl {
+            terminal_view_id,
+            agent: crate::terminal::CLIAgent::Claude,
+        }
+        .should_save_app_state_on_action()
+    );
+}

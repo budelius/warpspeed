@@ -41,9 +41,9 @@ use crate::server::telemetry::{
 use crate::settings_view::{SettingsAction as SettingsTabAction, SettingsSection};
 use crate::tab::{NewSessionMenuItem, SelectedTabColor};
 use crate::tab_configs::TabConfig;
-use crate::terminal::ShellLaunchData;
 use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
+use crate::terminal::{CLIAgent, ShellLaunchData};
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::themes::theme_chooser::ThemeChooserMode;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
@@ -296,6 +296,18 @@ pub enum WorkspaceAction {
     /// told to exit only once the managed run has resumed, and the pane then shows that run.
     ConfirmMoveSessionToAgentCtrl {
         terminal_view_id: EntityId,
+    },
+    /// Offers to start a fresh AgentCtrl run on staging in the repository of the focused pane's
+    /// directory. Nothing starts until `ConfirmStartAgentOnAgentCtrl` picks the agent.
+    StartAgentOnAgentCtrl,
+    StartAgentOnAgentCtrlForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Starts `agent` on the repository offered by `StartAgentOnAgentCtrlForTerminalView` and
+    /// opens the new run in that pane.
+    ConfirmStartAgentOnAgentCtrl {
+        terminal_view_id: EntityId,
+        agent: CLIAgent,
     },
     /// Opens (or closes, if already open) the picker listing the sessions the
     /// supervisor is holding with no pane attached. Selecting an entry there
@@ -1079,6 +1091,9 @@ impl WorkspaceAction {
             | MoveSessionToAgentCtrl
             | MoveSessionToAgentCtrlForTerminalView { .. }
             | ConfirmMoveSessionToAgentCtrl { .. }
+            | StartAgentOnAgentCtrl
+            | StartAgentOnAgentCtrlForTerminalView { .. }
+            | ConfirmStartAgentOnAgentCtrl { .. }
             | AttachDetachedSession { .. }
             | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets

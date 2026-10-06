@@ -391,10 +391,12 @@ use crate::tab_configs::{
 };
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 use crate::terminal::agent_session_handoff::{
-    CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession, agent_exit_command,
-    cut_over_decision, move_failure_message, move_idempotency_key, move_progress_message,
-    prepare_handoff as prepare_agent_session_handoff, select_remote, session_changed_message,
-    stop_request_outcome,
+    AgentCtrlStartOffer, CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession,
+    agent_ctrl_profile, agent_exit_command, configured_repository, cut_over_decision,
+    move_failure_message, move_idempotency_key, move_progress_message,
+    prepare_handoff as prepare_agent_session_handoff, repo_url_for, select_remote,
+    session_changed_message, start_agent_failure_message, start_agent_prompt,
+    start_agent_unavailable_message, stop_request_outcome,
 };
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
@@ -451,7 +453,7 @@ use crate::terminal::view::{
 };
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::{
-    self, BlockListSettings, ShellLaunchData, SizeInfo, TerminalManager, TerminalModel,
+    self, BlockListSettings, CLIAgent, ShellLaunchData, SizeInfo, TerminalManager, TerminalModel,
     TerminalView, detached_sessions,
 };
 use crate::themes::theme::{AnsiColorIdentifier, RespectSystemTheme, ThemeKind};
@@ -575,6 +577,16 @@ use crate::{
 pub const WORKSPACE_PADDING: f32 = 0.0;
 #[cfg(not(target_family = "wasm"))]
 pub const WORKSPACE_PADDING: f32 = 1.0;
+
+/// The signature of `managed_agent_sessions::start_run_on_repo`.
+#[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+type StartRunOnRepo = fn(
+    warp_cli::managed_sessions::ManagedEnvironment,
+    &str,
+    &str,
+    Option<&str>,
+    Option<&str>,
+) -> anyhow::Result<String>;
 
 /// The minimum font size at which terminal text will be rendered.
 const MIN_FONT_SIZE: f32 = 5.0;
@@ -1162,6 +1174,14 @@ pub struct Workspace {
     /// Moves to AgentCtrl that have been confirmed and not yet finished, by terminal view.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     agent_ctrl_moves: HashMap<EntityId, MoveStep>,
+    /// Repositories offered for a fresh AgentCtrl run whose agent has not been picked yet, by
+    /// terminal view.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    agent_ctrl_start_offers: HashMap<EntityId, AgentCtrlStartOffer>,
+    /// Stands in for `managed_agent_sessions::start_run_on_repo`, so tests never reach the
+    /// dashboard.
+    #[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+    fake_start_run_on_repo: Option<StartRunOnRepo>,
     window_process_restart_in_progress: bool,
     /// Whether this window has already given its surviving sessions to the
     /// supervisor. Set once, so the window-close path and the app-termination
@@ -3731,6 +3751,10 @@ impl Workspace {
             pending_shell_restart: None,
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_moves: HashMap::new(),
+            #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+            agent_ctrl_start_offers: HashMap::new(),
+            #[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+            fake_start_run_on_repo: None,
             window_process_restart_in_progress: false,
             sessions_handed_over: false,
             close_session_confirmation_dialog,
@@ -14370,6 +14394,249 @@ impl Workspace {
                 log::error!("A move to AgentCtrl finished in a non-final step: {outcome:?}");
             }
         }
+    }
+
+    fn start_agent_on_agent_ctrl_in_focused_pane(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(view) = self.focused_terminal_view(ctx) else {
+            return;
+        };
+        self.start_agent_on_agent_ctrl_for_terminal_view(view.id(), ctx);
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    fn start_agent_on_agent_ctrl_for_terminal_view(
+        &mut self,
+        _: EntityId,
+        _: &mut ViewContext<Self>,
+    ) {
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    fn confirm_start_agent_on_agent_ctrl(
+        &mut self,
+        _: EntityId,
+        _: CLIAgent,
+        _: &mut ViewContext<Self>,
+    ) {
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn agent_ctrl_start_toast_id(terminal_view_id: EntityId) -> String {
+        format!("agent_ctrl_start:{terminal_view_id}")
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn show_agent_ctrl_start_toast(
+        &mut self,
+        terminal_view_id: EntityId,
+        toast: DismissibleToast<WorkspaceAction>,
+        persistent: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let toast = toast.with_object_id(Self::agent_ctrl_start_toast_id(terminal_view_id));
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            if persistent {
+                toast_stack.add_persistent_toast(toast, ctx);
+            } else {
+                toast_stack.add_ephemeral_toast(toast, ctx);
+            }
+        });
+    }
+
+    /// Looks up the pane's repository and AgentCtrl's configured repositories off the main
+    /// thread, then asks which agent to start there.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn start_agent_on_agent_ctrl_for_terminal_view(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use managed_agent_sessions::list_repositories;
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        let Some(cwd) = self
+            .terminal_view_by_id(terminal_view_id, ctx)
+            .and_then(|view| view.as_ref(ctx).active_session_path_if_local(ctx))
+        else {
+            self.show_agent_ctrl_start_toast(
+                terminal_view_id,
+                DismissibleToast::error(
+                    "This pane has no local directory to start an agent from.".to_owned(),
+                ),
+                false,
+                ctx,
+            );
+            return;
+        };
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    let (remote, repo_url) = repo_url_for(&cwd)?;
+                    let repositories = list_repositories(ManagedEnvironment::Staging)
+                        .context("could not list the repositories configured on AgentCtrl")?;
+                    anyhow::Ok((remote, repo_url, repositories))
+                })
+                .await
+            },
+            move |me, result, ctx| match result {
+                Ok((remote, repo_url, repositories)) => me.offer_agent_ctrl_start(
+                    terminal_view_id,
+                    &remote,
+                    repo_url,
+                    &repositories,
+                    ctx,
+                ),
+                Err(error) => me.show_agent_ctrl_start_toast(
+                    terminal_view_id,
+                    DismissibleToast::error(start_agent_unavailable_message(&error)),
+                    false,
+                    ctx,
+                ),
+            },
+        );
+    }
+
+    /// Asks which agent to start on `repo_url`, reached through the pane's `remote`, when it is
+    /// one of AgentCtrl's `repositories`.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn offer_agent_ctrl_start(
+        &mut self,
+        terminal_view_id: EntityId,
+        remote: &str,
+        repo_url: String,
+        repositories: &[managed_agent_sessions::RepositoryInfo],
+        ctx: &mut ViewContext<Self>,
+    ) {
+        const STARTABLE_AGENTS: [(CLIAgent, &str); 3] = [
+            (CLIAgent::Claude, "Claude"),
+            (CLIAgent::Pi, "Pi"),
+            (CLIAgent::Codex, "Codex"),
+        ];
+
+        let Some(repository) = configured_repository(&repo_url, repositories) else {
+            self.agent_ctrl_start_offers.remove(&terminal_view_id);
+            self.show_agent_ctrl_start_toast(
+                terminal_view_id,
+                DismissibleToast::error(format!("repo not configured on AgentCtrl: {repo_url}")),
+                false,
+                ctx,
+            );
+            return;
+        };
+        // A persistent toast, because the ephemeral timeout is too short to read and choose.
+        let toast = STARTABLE_AGENTS.into_iter().fold(
+            DismissibleToast::default(start_agent_prompt(remote, repository)),
+            |toast, (agent, label)| {
+                toast.with_link(ToastLink::new(label.to_owned()).with_onclick_action(
+                    WorkspaceAction::ConfirmStartAgentOnAgentCtrl {
+                        terminal_view_id,
+                        agent,
+                    },
+                ))
+            },
+        );
+        self.agent_ctrl_start_offers.insert(
+            terminal_view_id,
+            AgentCtrlStartOffer {
+                repo_url,
+                repo_name: repository.name.clone(),
+            },
+        );
+        self.show_agent_ctrl_start_toast(terminal_view_id, toast, true, ctx);
+    }
+
+    /// Starts `agent` on the repository offered in `terminal_view_id` off the main thread.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn confirm_start_agent_on_agent_ctrl(
+        &mut self,
+        terminal_view_id: EntityId,
+        agent: CLIAgent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        // Taken, so a second click on the same offer cannot start a second run.
+        let Some(offer) = self.agent_ctrl_start_offers.remove(&terminal_view_id) else {
+            return;
+        };
+        let Some(profile) = agent_ctrl_profile(agent) else {
+            log::error!("{agent:?} has no AgentCtrl profile to start");
+            return;
+        };
+        self.show_agent_ctrl_start_toast(
+            terminal_view_id,
+            DismissibleToast::default(format!("Starting {} on AgentCtrl…", agent.display_name())),
+            // Persistent so it stays up until the outcome toast replaces it.
+            true,
+            ctx,
+        );
+        #[cfg(not(test))]
+        let start_run_on_repo = managed_agent_sessions::start_run_on_repo;
+        #[cfg(test)]
+        let start_run_on_repo = self
+            .fake_start_run_on_repo
+            .unwrap_or(managed_agent_sessions::start_run_on_repo);
+        let repo_url = offer.repo_url.clone();
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    start_run_on_repo(ManagedEnvironment::Staging, profile, &repo_url, None, None)
+                })
+                .await
+            },
+            move |me, result, ctx| {
+                me.finish_agent_ctrl_start(terminal_view_id, &offer.repo_name, result, ctx)
+            },
+        );
+    }
+
+    /// Opens a started run in the pane it was started from, or in a new tab if that pane has been
+    /// closed, and reports the outcome.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn finish_agent_ctrl_start(
+        &mut self,
+        terminal_view_id: EntityId,
+        repo_name: &str,
+        result: anyhow::Result<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use managed_agent_sessions::ManagedSessionDeepLink;
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        let job_id = match result {
+            Ok(job_id) => job_id,
+            Err(error) => {
+                let message = start_agent_failure_message(&error);
+                log::warn!("Starting an agent on AgentCtrl failed: {message}");
+                self.show_agent_ctrl_start_toast(
+                    terminal_view_id,
+                    DismissibleToast::error(message),
+                    false,
+                    ctx,
+                );
+                return;
+            }
+        };
+        let arguments = ManagedSessionDeepLink {
+            environment: ManagedEnvironment::Staging,
+            job_id: job_id.clone(),
+        }
+        .cli_arguments();
+        match self.terminal_view_by_id(terminal_view_id, ctx) {
+            Some(terminal_view) => {
+                Self::execute_managed_session_command_in(&terminal_view, &arguments, ctx)
+            }
+            None => {
+                self.add_terminal_tab(false, ctx);
+                self.execute_managed_session_command(&arguments, ctx);
+            }
+        }
+        self.show_agent_ctrl_start_toast(
+            terminal_view_id,
+            DismissibleToast::success(format!("Started {job_id} on {repo_name}")),
+            false,
+            ctx,
+        );
     }
 
     /// Hands the supervised shells of a closing tab that are running an agent or a long-running
@@ -26257,6 +26524,14 @@ impl TypedActionView for Workspace {
             ConfirmMoveSessionToAgentCtrl { terminal_view_id } => {
                 self.confirm_move_session_to_agent_ctrl(*terminal_view_id, ctx)
             }
+            StartAgentOnAgentCtrl => self.start_agent_on_agent_ctrl_in_focused_pane(ctx),
+            StartAgentOnAgentCtrlForTerminalView { terminal_view_id } => {
+                self.start_agent_on_agent_ctrl_for_terminal_view(*terminal_view_id, ctx)
+            }
+            ConfirmStartAgentOnAgentCtrl {
+                terminal_view_id,
+                agent,
+            } => self.confirm_start_agent_on_agent_ctrl(*terminal_view_id, *agent, ctx),
             ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
             AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
             AddGetStartedTab => self.add_get_started_tab(ctx),
@@ -28594,6 +28869,15 @@ impl View for Workspace {
             context
                 .set
                 .insert("Workspace_PaneCanMoveSessionToAgentCtrl");
+        }
+
+        if self
+            .active_tab_pane_group()
+            .as_ref(app)
+            .focused_session_view(app)
+            .is_some_and(|view| view.as_ref(app).can_start_agent_on_agent_ctrl(app))
+        {
+            context.set.insert("Workspace_PaneCanStartAgentOnAgentCtrl");
         }
 
         // TODO: This is temporary. We currently check if any code pane is open where it should

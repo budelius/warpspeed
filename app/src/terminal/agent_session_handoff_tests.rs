@@ -734,3 +734,131 @@ fn move_session_progress_message_names_the_agent_when_known() {
         "Moving the agent session to AgentCtrl… don't use the agent until this finishes."
     );
 }
+
+#[test]
+fn repo_url_for_prefers_gitea_and_strips_userinfo() {
+    let repo = TempDir::new().unwrap();
+    let repo = repo.path();
+    init_repo(repo);
+    git(
+        repo,
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
+    git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "gitea",
+            "https://bot:s3cret@gitea.example.com/acme/app.git",
+        ],
+    );
+    let subdirectory = repo.join("src");
+    fs::create_dir(&subdirectory).unwrap();
+
+    assert_eq!(
+        repo_url_for(&subdirectory).unwrap(),
+        (
+            "gitea".to_owned(),
+            "https://gitea.example.com/acme/app.git".to_owned()
+        )
+    );
+}
+
+#[test]
+fn repo_url_for_falls_back_to_origin() {
+    let repo = TempDir::new().unwrap();
+    let repo = repo.path();
+    init_repo(repo);
+    git(
+        repo,
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+
+    assert_eq!(
+        repo_url_for(repo).unwrap(),
+        (
+            "origin".to_owned(),
+            "git@github.com:acme/app.git".to_owned()
+        )
+    );
+}
+
+#[test]
+fn repo_url_for_fails_without_a_usable_remote() {
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+    let not_a_repo = TempDir::new().unwrap();
+
+    assert!(repo_url_for(repo.path()).is_err());
+    assert!(repo_url_for(not_a_repo.path()).is_err());
+}
+
+fn repository(name: &str, url: &str, branch: &str) -> RepositoryInfo {
+    RepositoryInfo {
+        name: name.to_owned(),
+        url: url.to_owned(),
+        branch: branch.to_owned(),
+        reachable: true,
+        error: None,
+    }
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_finds_the_repository_by_normalized_url() {
+    let repositories = [
+        repository("other", "https://gitea.example.com/acme/other", "main"),
+        repository("app", "https://Gitea.Example.com/acme/app", "dev"),
+    ];
+
+    for local_url in [
+        "https://gitea.example.com/acme/app.git",
+        "https://gitea.example.com/acme/app/",
+        "git@gitea.example.com:acme/app.git",
+    ] {
+        assert_eq!(
+            configured_repository(local_url, &repositories).map(|repository| &repository.name),
+            Some(&"app".to_owned()),
+            "{local_url}"
+        );
+    }
+    assert_eq!(
+        configured_repository("https://gitea.example.com/acme/missing.git", &repositories),
+        None
+    );
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_prompt_names_the_remote_repo_and_branch() {
+    assert_eq!(
+        start_agent_prompt(
+            "gitea",
+            &repository("warp", "https://gitea.example.com/acme/warp", "dev")
+        ),
+        "Start which agent on gitea warp (dev)?"
+    );
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_failure_says_when_the_node_is_at_capacity() {
+    let at_capacity = anyhow::Error::new(managed_agent_sessions::HttpStatusError {
+        status: reqwest::StatusCode::CONFLICT,
+        body: r#"{"code":"node_at_capacity","message":"too many runs"}"#.to_owned(),
+    })
+    .context("failed to launch the run");
+    assert_eq!(
+        start_agent_failure_message(&at_capacity),
+        "AgentCtrl node is at capacity; stop a run or try later"
+    );
+
+    let other = anyhow!(
+        "dashboard request failed: https://bob:s3cret@dash.example.com/api/agent-control/runs"
+    );
+    let message = start_agent_failure_message(&other);
+    assert!(!message.contains("s3cret"), "{message}");
+    assert!(!message.contains("bob"), "{message}");
+    assert!(
+        message.contains("https://dash.example.com/api/agent-control/runs"),
+        "{message}"
+    );
+}

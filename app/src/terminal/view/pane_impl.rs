@@ -704,6 +704,18 @@ impl TerminalView {
     pub(crate) fn can_move_session_to_agent_ctrl(&self, _: &AppContext) -> bool {
         false
     }
+
+    /// Whether a fresh AgentCtrl run can be started in this pane's repository: the shell is local
+    /// and its directory is inside a git work tree.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn can_start_agent_on_agent_ctrl(&self, ctx: &AppContext) -> bool {
+        self.current_local_repo_path().is_some() && self.active_session_path_if_local(ctx).is_some()
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    pub(crate) fn can_start_agent_on_agent_ctrl(&self, _: &AppContext) -> bool {
+        false
+    }
 }
 
 impl BackingView for TerminalView {
@@ -747,8 +759,9 @@ impl BackingView for TerminalView {
         &self,
         ctx: &AppContext,
     ) -> Vec<MenuItem<Self::PaneHeaderOverflowMenuAction>> {
-        // Checked before taking the model lock, which it takes itself.
+        // Checked before taking the model lock, which they take themselves.
         let can_move_session_to_agent_ctrl = self.can_move_session_to_agent_ctrl(ctx);
+        let can_start_agent_on_agent_ctrl = self.can_start_agent_on_agent_ctrl(ctx);
         let model = self.model.lock();
         let mut items = vec![];
         let source = SharedSessionActionSource::PaneHeader;
@@ -825,6 +838,13 @@ impl BackingView for TerminalView {
             items.push(
                 MenuItemFields::new("Move session to AgentCtrl")
                     .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
+                    .into_item(),
+            );
+        }
+        if can_start_agent_on_agent_ctrl {
+            items.push(
+                MenuItemFields::new("Start agent on AgentCtrl in this repo")
+                    .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
                     .into_item(),
             );
         }

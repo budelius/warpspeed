@@ -7377,3 +7377,384 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
         );
     });
 }
+
+/// Whether the focused pane offers starting an agent on AgentCtrl, in its header menu and through
+/// the keymap flag the palette binding is predicated on. Both must always agree.
+fn start_agent_on_agent_ctrl_is_offered(workspace: &ViewHandle<Workspace>, app: &mut App) -> bool {
+    let in_menu = workspace.update(app, |workspace, ctx| {
+        let terminal_view = workspace
+            .focused_terminal_view(ctx)
+            .expect("mock workspace has a focused terminal pane");
+        let items = terminal_view
+            .as_ref(ctx)
+            .pane_header_overflow_menu_items(ctx);
+        let labelled = items.iter().any(|item| {
+            item.fields()
+                .is_some_and(|fields| fields.label() == "Start agent on AgentCtrl in this repo")
+        });
+        let mapped = items.iter().any(|item| {
+            matches!(
+                item.fields().and_then(|fields| fields.on_select_action()),
+                Some(crate::terminal::view::TerminalAction::StartAgentOnAgentCtrl)
+            )
+        });
+        assert_eq!(labelled, mapped, "the menu label and its action must agree");
+        labelled
+    });
+    let in_keymap = app.read(|ctx| {
+        workspace
+            .read(ctx, |workspace, ctx| workspace.keymap_context(ctx))
+            .set
+            .contains("Workspace_PaneCanStartAgentOnAgentCtrl")
+    });
+    assert_eq!(
+        in_menu, in_keymap,
+        "the pane menu and the palette's keymap flag must agree"
+    );
+    in_menu
+}
+
+/// A git work tree with a `gitea` remote, as the start flow expects of the pane's directory.
+fn init_repo_with_gitea_remote(dir: &std::path::Path) {
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "remote",
+            "add",
+            "gitea",
+            "https://gitea.example.com/acme/warp.git",
+        ],
+    ] {
+        let output = command::blocking::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_is_offered_only_for_a_local_repo_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let repo = TempDir::new().unwrap();
+        init_repo_with_gitea_remote(repo.path());
+        let not_a_repo = TempDir::new().unwrap();
+        let workspace = mock_workspace(&mut app);
+
+        assert!(
+            !start_agent_on_agent_ctrl_is_offered(&workspace, &mut app),
+            "a pane with no local shell directory must not offer the start"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(not_a_repo.path(), ctx);
+                view.set_current_repo_path_for_test(None);
+            });
+        });
+        assert!(
+            !start_agent_on_agent_ctrl_is_offered(&workspace, &mut app),
+            "a pane outside a git work tree must not offer the start"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(repo.path(), ctx);
+                view.set_current_repo_path_for_test(Some(repo.path()));
+            });
+        });
+        assert!(start_agent_on_agent_ctrl_is_offered(&workspace, &mut app));
+    });
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_binding_is_registered_for_the_palette() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:start_agent_on_agent_ctrl")
+                .expect("the start binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::StartAgentOnAgentCtrl)
+            ));
+            let editable = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == "workspace:start_agent_on_agent_ctrl")
+                .expect("the start binding is editable");
+            // The palette title-cases descriptions.
+            assert!(
+                editable
+                    .description
+                    .in_context(warpui::keymap::DescriptionContext::Default)
+                    .eq_ignore_ascii_case("Start agent on AgentCtrl in this repo")
+            );
+            let context = |flags: &[&'static str]| warpui::keymap::Context {
+                set: flags.iter().copied().collect(),
+                ..Default::default()
+            };
+            assert!(editable.in_context(&context(&[
+                "Workspace",
+                "Workspace_PaneCanStartAgentOnAgentCtrl"
+            ])));
+            assert!(!editable.in_context(&context(&["Workspace"])));
+            assert!(!editable.in_context(&context(&["Workspace_PaneCanStartAgentOnAgentCtrl"])));
+        });
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn workspace_toast_texts(workspace: &ViewHandle<Workspace>, app: &mut App) -> Vec<String> {
+    app.read(|ctx| {
+        workspace.read(ctx, |workspace, ctx| {
+            workspace
+                .toast_stack
+                .as_ref(ctx)
+                .toast_texts()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+    })
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn configured_warp_repository() -> managed_agent_sessions::RepositoryInfo {
+    managed_agent_sessions::RepositoryInfo {
+        name: "warp".to_owned(),
+        url: "https://gitea.example.com/acme/warp".to_owned(),
+        branch: "dev".to_owned(),
+        reachable: true,
+        error: None,
+    }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_asks_which_agent_for_a_configured_repo() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view_id = focused_terminal_view_for_move(&workspace, &mut app).id();
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.offer_agent_ctrl_start(
+                terminal_view_id,
+                "gitea",
+                "https://gitea.example.com/acme/warp.git".to_owned(),
+                &[configured_warp_repository()],
+                ctx,
+            );
+        });
+
+        let (persistent, links) = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                let toasts = workspace.toast_stack.as_ref(ctx);
+                let persistent = toasts
+                    .persistent_toast_texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let links = toasts
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .map(|(text, action)| {
+                        let agent = match action {
+                            Some(WorkspaceAction::ConfirmStartAgentOnAgentCtrl {
+                                terminal_view_id: confirmed_view_id,
+                                agent,
+                            }) if *confirmed_view_id == terminal_view_id => Some(*agent),
+                            _ => None,
+                        };
+                        (text.to_owned(), agent)
+                    })
+                    .collect::<Vec<_>>();
+                (persistent, links)
+            })
+        });
+        assert_eq!(
+            persistent,
+            vec!["Start which agent on gitea warp (dev)?".to_owned()]
+        );
+        assert_eq!(
+            links,
+            vec![
+                ("Claude".to_owned(), Some(crate::terminal::CLIAgent::Claude)),
+                ("Pi".to_owned(), Some(crate::terminal::CLIAgent::Pi)),
+                ("Codex".to_owned(), Some(crate::terminal::CLIAgent::Codex)),
+            ]
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_refuses_a_repo_that_is_not_configured() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view_id = focused_terminal_view_for_move(&workspace, &mut app).id();
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.offer_agent_ctrl_start(
+                terminal_view_id,
+                "gitea",
+                "https://gitea.example.com/acme/other.git".to_owned(),
+                &[configured_warp_repository()],
+                ctx,
+            );
+        });
+
+        let toasts = workspace_toast_texts(&workspace, &mut app);
+        assert_eq!(
+            toasts,
+            vec![
+                "repo not configured on AgentCtrl: https://gitea.example.com/acme/other.git"
+                    .to_owned()
+            ]
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn fake_start_run_on_repo(
+    _: warp_cli::managed_sessions::ManagedEnvironment,
+    agent_name: &str,
+    repo_url: &str,
+    base_branch: Option<&str>,
+    prompt: Option<&str>,
+) -> anyhow::Result<String> {
+    assert_eq!(agent_name, "staging-claude-interactive-rw");
+    assert_eq!(repo_url, "https://gitea.example.com/acme/warp.git");
+    assert_eq!((base_branch, prompt), (None, None));
+    Ok("job-new".to_owned())
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn fake_start_run_on_a_full_node(
+    _: warp_cli::managed_sessions::ManagedEnvironment,
+    _: &str,
+    _: &str,
+    _: Option<&str>,
+    _: Option<&str>,
+) -> anyhow::Result<String> {
+    Err(managed_agent_sessions::HttpStatusError {
+        status: reqwest::StatusCode::CONFLICT,
+        body: r#"{"code":"node_at_capacity"}"#.to_owned(),
+    }
+    .into())
+}
+
+/// Offers the `warp` repository in the focused pane, then picks Claude with `start_run` standing
+/// in for the dashboard.
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn confirm_claude_start_on_agent_ctrl(
+    workspace: &ViewHandle<Workspace>,
+    terminal_view_id: EntityId,
+    start_run: StartRunOnRepo,
+    app: &mut App,
+) {
+    workspace.update(app, |workspace, ctx| {
+        workspace.fake_start_run_on_repo = Some(start_run);
+        workspace.offer_agent_ctrl_start(
+            terminal_view_id,
+            "gitea",
+            "https://gitea.example.com/acme/warp.git".to_owned(),
+            &[configured_warp_repository()],
+            ctx,
+        );
+        workspace.handle_action(
+            &WorkspaceAction::ConfirmStartAgentOnAgentCtrl {
+                terminal_view_id,
+                agent: crate::terminal::CLIAgent::Claude,
+            },
+            ctx,
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_opens_the_started_run_in_the_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+
+        confirm_claude_start_on_agent_ctrl(
+            &workspace,
+            terminal_view.id(),
+            fake_start_run_on_repo,
+            &mut app,
+        );
+        assert!(
+            workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Starting Claude Code on AgentCtrl…".to_owned())
+        );
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Started job-new on warp".to_owned()),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        let buffer = app.read(|ctx| {
+            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            buffer.ends_with(" agent-ctrl open job-new --environment staging"),
+            "{buffer}"
+        );
+        assert!(
+            !workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Starting Claude Code on AgentCtrl…".to_owned()),
+            "the outcome replaces the progress toast"
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_agent_on_agent_ctrl_says_when_the_node_is_at_capacity() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+
+        confirm_claude_start_on_agent_ctrl(
+            &workspace,
+            terminal_view.id(),
+            fake_start_run_on_a_full_node,
+            &mut app,
+        );
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => workspace_toast_texts(&workspace, &mut app)
+                .contains(&"AgentCtrl node is at capacity; stop a run or try later".to_owned()),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        assert!(!has_pending_command(&terminal_view, &mut app));
+    });
+}

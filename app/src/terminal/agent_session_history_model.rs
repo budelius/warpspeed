@@ -12,6 +12,7 @@ pub(crate) struct AgentSessionHistoryModel {
     sessions: Vec<PastAgentSession>,
     loaded: bool,
     refreshing: bool,
+    refresh_again: bool,
 }
 
 impl AgentSessionHistoryModel {
@@ -31,12 +32,9 @@ impl AgentSessionHistoryModel {
         self.refresh_with(find_all_resumable, ctx);
     }
 
-    fn refresh_with(
-        &mut self,
-        load: impl FnOnce() -> Vec<PastAgentSession> + Send + 'static,
-        ctx: &mut ModelContext<Self>,
-    ) {
+    fn refresh_with(&mut self, load: fn() -> Vec<PastAgentSession>, ctx: &mut ModelContext<Self>) {
         if self.refreshing {
+            self.refresh_again = true;
             return;
         }
         self.refreshing = true;
@@ -46,14 +44,16 @@ impl AgentSessionHistoryModel {
                 let _ = sender.send(load());
             })
             .detach();
-        ctx.spawn(receiver, |model, sessions, ctx| {
+        ctx.spawn(receiver, move |model, sessions, ctx| {
             model.refreshing = false;
-            let Ok(sessions) = sessions else {
-                return;
-            };
-            model.sessions = sessions;
-            model.loaded = true;
-            ctx.emit(AgentSessionHistoryEvent::Updated);
+            if let Ok(sessions) = sessions {
+                model.sessions = sessions;
+                model.loaded = true;
+                ctx.emit(AgentSessionHistoryEvent::Updated);
+            }
+            if std::mem::take(&mut model.refresh_again) {
+                model.refresh_with(load, ctx);
+            }
         });
     }
 }

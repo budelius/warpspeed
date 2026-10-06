@@ -173,6 +173,9 @@ fn initialize_run_agents_test(app: &mut App, mode: ExecutionMode) -> RunAgentsTe
     app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
     let history = app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
     app.add_singleton_model(|_| ActiveAgentViewsModel::new());
     app.add_singleton_model(AgentNotificationsModel::new);
     app.add_singleton_model(BlocklistAIPermissions::new);

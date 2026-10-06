@@ -591,6 +591,8 @@ type StartRunOnRepo = fn(
 /// The minimum font size at which terminal text will be rendered.
 const MIN_FONT_SIZE: f32 = 5.0;
 
+const MOVE_ALL_AGENT_SESSIONS_TOAST_ID: &str = "agent_ctrl_move_all";
+
 /// The maximum font size at which terminal text will be rendered.
 const MAX_FONT_SIZE: f32 = 25.0;
 
@@ -14685,6 +14687,62 @@ impl Workspace {
         );
     }
 
+    /// Asks before moving every agent session in the folder holding the focused pane's repository
+    /// to AgentCtrl.
+    fn move_all_agent_sessions_here(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(folder) = self
+            .focused_terminal_view(ctx)
+            .and_then(|view| view.as_ref(ctx).move_all_agent_sessions_folder(ctx))
+        else {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "This pane is not inside a local git repository.".to_owned(),
+                    ),
+                    ctx,
+                );
+            });
+            return;
+        };
+        let toast = DismissibleToast::default(format!(
+            "Move every agent session under {} to AgentCtrl?",
+            folder.display()
+        ))
+        .with_link(
+            ToastLink::new("Move all".to_owned())
+                .with_onclick_action(WorkspaceAction::ConfirmMoveAllAgentSessions { folder }),
+        )
+        .with_object_id(MOVE_ALL_AGENT_SESSIONS_TOAST_ID.to_owned());
+        // A persistent toast, because the ephemeral timeout is too short to read and confirm.
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            toast_stack.add_persistent_toast(toast, ctx);
+        });
+    }
+
+    /// Runs `agent-ctrl move-all` on `folder` in a new tab, where its progress and results show.
+    fn confirm_move_all_agent_sessions(&mut self, folder: &Path, ctx: &mut ViewContext<Self>) {
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            toast_stack.dismiss_older_toasts(MOVE_ALL_AGENT_SESSIONS_TOAST_ID, ctx);
+        });
+        self.add_terminal_tab(false, ctx);
+        let Some(terminal_view) = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+        else {
+            return;
+        };
+        let arguments = terminal_view.update(ctx, |terminal_view, ctx| {
+            format!(
+                "agent-ctrl move-all --under {} --yes",
+                terminal_view
+                    .shell_family(ctx)
+                    .shell_escape(&folder.to_string_lossy())
+            )
+        });
+        Self::execute_managed_session_command_in(&terminal_view, &arguments, ctx);
+    }
+
     /// Hands the supervised shells of a closing tab that are running an agent or a long-running
     /// command to the supervisor, which keeps them running. Returns the terminal views whose
     /// shells it took.
@@ -26597,6 +26655,10 @@ impl TypedActionView for Workspace {
                 terminal_view_id,
                 agent,
             } => self.confirm_start_agent_on_agent_ctrl(*terminal_view_id, *agent, ctx),
+            MoveAllAgentSessionsHere => self.move_all_agent_sessions_here(ctx),
+            ConfirmMoveAllAgentSessions { folder } => {
+                self.confirm_move_all_agent_sessions(folder, ctx)
+            }
             ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
             AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
             AddGetStartedTab => self.add_get_started_tab(ctx),
@@ -28943,6 +29005,19 @@ impl View for Workspace {
             .is_some_and(|view| view.as_ref(app).can_start_agent_on_agent_ctrl(app))
         {
             context.set.insert("Workspace_PaneCanStartAgentOnAgentCtrl");
+        }
+
+        if self
+            .active_tab_pane_group()
+            .as_ref(app)
+            .focused_session_view(app)
+            .is_some_and(|view| {
+                view.as_ref(app)
+                    .move_all_agent_sessions_folder(app)
+                    .is_some()
+            })
+        {
+            context.set.insert("Workspace_PaneCanMoveAllAgentSessions");
         }
 
         // TODO: This is temporary. We currently check if any code pane is open where it should

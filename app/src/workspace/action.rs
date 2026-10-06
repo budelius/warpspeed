@@ -309,6 +309,13 @@ pub enum WorkspaceAction {
         terminal_view_id: EntityId,
         agent: CLIAgent,
     },
+    /// Offers to move every agent session in the folder holding the focused pane's repository to
+    /// AgentCtrl. Nothing moves until `ConfirmMoveAllAgentSessions`.
+    MoveAllAgentSessionsHere,
+    /// Runs `agent-ctrl move-all` on `folder` in a new tab.
+    ConfirmMoveAllAgentSessions {
+        folder: PathBuf,
+    },
     /// Opens (or closes, if already open) the picker listing the sessions the
     /// supervisor is holding with no pane attached. Selecting an entry there
     /// dispatches `AttachDetachedSession`.
@@ -1094,6 +1101,8 @@ impl WorkspaceAction {
             | StartAgentOnAgentCtrl
             | StartAgentOnAgentCtrlForTerminalView { .. }
             | ConfirmStartAgentOnAgentCtrl { .. }
+            | MoveAllAgentSessionsHere
+            | ConfirmMoveAllAgentSessions { .. }
             | AttachDetachedSession { .. }
             | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets

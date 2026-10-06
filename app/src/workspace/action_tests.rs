@@ -122,3 +122,14 @@ fn start_agent_on_agent_ctrl_actions_save_workspace_state() {
         .should_save_app_state_on_action()
     );
 }
+
+#[test]
+fn move_all_agent_sessions_actions_save_workspace_state() {
+    assert!(WorkspaceAction::MoveAllAgentSessionsHere.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::ConfirmMoveAllAgentSessions {
+            folder: std::path::PathBuf::from("/work"),
+        }
+        .should_save_app_state_on_action()
+    );
+}

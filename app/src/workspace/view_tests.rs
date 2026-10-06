@@ -7817,3 +7817,151 @@ fn start_agent_on_agent_ctrl_says_when_the_node_is_at_capacity() {
         assert!(!has_pending_command(&terminal_view, &mut app));
     });
 }
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn move_all_agent_sessions_binding_is_registered_for_the_palette() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        mock_workspace(&mut app);
+
+        app.read(|ctx| {
+            let binding = ctx
+                .get_binding_by_name("workspace:move_all_agent_sessions_here")
+                .expect("the move-all binding must be registered");
+            assert!(matches!(
+                binding
+                    .action
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<WorkspaceAction>(),
+                Some(WorkspaceAction::MoveAllAgentSessionsHere)
+            ));
+            let editable = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == "workspace:move_all_agent_sessions_here")
+                .expect("the move-all binding is editable");
+            assert!(
+                editable
+                    .description
+                    .in_context(warpui::keymap::DescriptionContext::Default)
+                    .eq_ignore_ascii_case(
+                        "Move all agent sessions in this project folder to AgentCtrl"
+                    )
+            );
+            let context = |flags: &[&'static str]| warpui::keymap::Context {
+                set: flags.iter().copied().collect(),
+                ..Default::default()
+            };
+            assert!(editable.in_context(&context(&[
+                "Workspace",
+                "Workspace_PaneCanMoveAllAgentSessions"
+            ])));
+            assert!(!editable.in_context(&context(&["Workspace"])));
+        });
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn move_all_agent_sessions_confirms_the_project_folder_then_runs_the_cli_in_a_new_tab() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let projects = TempDir::new().unwrap();
+        let repo = projects.path().join("warp");
+        std::fs::create_dir_all(&repo).unwrap();
+        let workspace = mock_workspace(&mut app);
+
+        let has_flag = |workspace: &ViewHandle<Workspace>, app: &mut App| {
+            app.read(|ctx| {
+                workspace
+                    .read(ctx, |workspace, ctx| workspace.keymap_context(ctx))
+                    .set
+                    .contains("Workspace_PaneCanMoveAllAgentSessions")
+            })
+        };
+        assert!(
+            !has_flag(&workspace, &mut app),
+            "a pane outside a local repository must not offer move-all"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(&repo, ctx);
+                view.set_current_repo_path_for_test(Some(&repo));
+            });
+        });
+        assert!(has_flag(&workspace, &mut app));
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::MoveAllAgentSessionsHere, ctx)
+        });
+        let folder = projects.path().to_path_buf();
+        let (persistent, links) = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                let toasts = workspace.toast_stack.as_ref(ctx);
+                let persistent = toasts
+                    .persistent_toast_texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let links = toasts
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .map(|(text, action)| (text.to_owned(), action.cloned()))
+                    .collect::<Vec<_>>();
+                (persistent, links)
+            })
+        });
+        assert_eq!(
+            persistent,
+            vec![format!(
+                "Move every agent session under {} to AgentCtrl?",
+                folder.display()
+            )]
+        );
+        let [(text, Some(WorkspaceAction::ConfirmMoveAllAgentSessions { folder: offered }))] =
+            links.as_slice()
+        else {
+            panic!("expected one confirming link, got {links:?}");
+        };
+        assert_eq!(text, "Move all");
+        assert_eq!(offered, &folder);
+
+        let tabs_before = workspace.read(&app, |workspace, _| workspace.tab_count());
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::ConfirmMoveAllAgentSessions {
+                    folder: folder.clone(),
+                },
+                ctx,
+            )
+        });
+        assert_eq!(
+            workspace.read(&app, |workspace, _| workspace.tab_count()),
+            tabs_before + 1
+        );
+        assert!(
+            workspace_toast_texts(&workspace, &mut app).is_empty(),
+            "confirming dismisses the offer"
+        );
+        let buffer = workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("the new tab has a terminal pane");
+            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            buffer.contains(" agent-ctrl move-all --under ") && buffer.ends_with(" --yes"),
+            "{buffer}"
+        );
+        assert!(
+            buffer.contains(&*folder.file_name().unwrap().to_string_lossy()),
+            "{buffer}"
+        );
+    });
+}

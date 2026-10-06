@@ -1045,6 +1045,15 @@ pub fn init(app: &mut AppContext) {
     .with_group(bindings::BindingGroup::Terminal.as_str())
     .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanStartAgentOnAgentCtrl"))]);
 
+    // Offered only on local panes inside a git work tree, whose parent folder is the one moved.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:move_all_agent_sessions_here",
+        "Move all agent sessions in this project folder to AgentCtrl",
+        WorkspaceAction::MoveAllAgentSessionsHere,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanMoveAllAgentSessions"))]);
+
     app.register_editable_bindings([EditableBinding::new(
         "workspace:restart_window_in_new_process",
         "Restart window in new process",

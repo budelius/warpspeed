@@ -1,5 +1,7 @@
 //! This module contains the implementation of `BackingView` for `TerminalView`, as well as
 //! business logic for integrating the terminal view with the pane infra (`crate::pane_group`).
+use std::path::PathBuf;
+
 use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warpui::elements::{
@@ -715,6 +717,21 @@ impl TerminalView {
     #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
     pub(crate) fn can_start_agent_on_agent_ctrl(&self, _: &AppContext) -> bool {
         false
+    }
+
+    /// The folder holding this local pane's repository, whose agent sessions "move all" moves:
+    /// sibling checkouts of one project live side by side there.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn move_all_agent_sessions_folder(&self, ctx: &AppContext) -> Option<PathBuf> {
+        self.active_session_path_if_local(ctx)?;
+        self.current_local_repo_path()?
+            .parent()
+            .map(std::path::Path::to_path_buf)
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    pub(crate) fn move_all_agent_sessions_folder(&self, _: &AppContext) -> Option<PathBuf> {
+        None
     }
 }
 

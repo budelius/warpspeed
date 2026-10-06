@@ -2044,6 +2044,10 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         }
     }
 
+    fn restore_cli_agent_resume_command(&mut self, command: String) {
+        self.cli_agent_resume_command = Some(command);
+    }
+
     fn shutdown_for_process_handoff(&mut self) {
         TerminalManager::shutdown_for_process_handoff(self);
     }

@@ -85,8 +85,9 @@ pub(super) enum ZeroStateSlot {
     Row(usize),
 }
 
-/// The zero-state layout: each non-empty section's rows followed by its separator, sections
-/// bottom-up, rows kept in their given order.
+/// The zero-state layout, bottom-up because the palette renders results reversed: each non-empty
+/// section's rows, last first, followed by its separator. On screen each section then reads in
+/// the rows' given order under its header.
 pub(super) fn zero_state_slots(sections: &[AgentSessionSection]) -> Vec<ZeroStateSlot> {
     let mut slots = Vec::new();
     for section in AgentSessionSection::reverse_order() {
@@ -95,6 +96,7 @@ pub(super) fn zero_state_slots(sections: &[AgentSessionSection]) -> Vec<ZeroStat
             sections
                 .iter()
                 .enumerate()
+                .rev()
                 .filter(|(_, row_section)| **row_section == section)
                 .map(|(index, _)| ZeroStateSlot::Row(index)),
         );
@@ -204,9 +206,11 @@ impl SyncDataSource for DataSource {
                 .collect());
         }
 
+        // Reversed so that, once the palette flips the list, equal scores keep display order.
         Ok(self
             .entries
             .iter()
+            .rev()
             .filter_map(|entry| {
                 match_row(&entry.row, text).map(|matched| Self::item(entry, matched))
             })

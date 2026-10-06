@@ -17434,7 +17434,9 @@ impl Workspace {
                 }
             }
             CommandPaletteEvent::AgentSessionsFilterActivated => {
-                if !self.agent_sessions_data_source(ctx).as_ref(ctx).is_loaded() {
+                if !self.is_shared_session_viewer_focused(ctx)
+                    && !self.agent_sessions_data_source(ctx).as_ref(ctx).is_loaded()
+                {
                     self.load_agent_sessions_snapshot(ctx);
                     self.palette
                         .update(ctx, |palette, ctx| palette.rerun_query(ctx));

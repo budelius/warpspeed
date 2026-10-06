@@ -1047,9 +1047,8 @@ impl View {
                     });
                 }
             }
-            CommandPaletteItemAction::NoOp => {
-                // No-op action (used for non-interactable separator items that don't do anything on click).
-            }
+            // Returned early above.
+            CommandPaletteItemAction::NoOp => {}
         }
 
         self.close(ctx, Some(result_action.result_type()));

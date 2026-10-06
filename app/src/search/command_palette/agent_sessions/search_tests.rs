@@ -146,8 +146,8 @@ fn zero_state_lists_sections_bottom_up_with_a_separator_after_each() {
             ZeroStateSlot::Separator(AgentSessionSection::Detached),
             ZeroStateSlot::Row(3),
             ZeroStateSlot::Separator(AgentSessionSection::RunningElsewhere),
-            ZeroStateSlot::Row(1),
             ZeroStateSlot::Row(4),
+            ZeroStateSlot::Row(1),
             ZeroStateSlot::Separator(AgentSessionSection::ThisPane),
         ]
     );
@@ -293,6 +293,70 @@ fn rows_without_an_action_are_disabled() {
                 results[0].accept_result(),
                 CommandPaletteItemAction::NoOp
             ));
+        },
+    );
+}
+
+/// The palette shows results reversed, so the last result is the topmost row on screen.
+fn on_screen_titles(results: &[QueryResult<CommandPaletteItemAction>]) -> Vec<String> {
+    results
+        .iter()
+        .rev()
+        .map(|result| result.accessibility_label())
+        .collect()
+}
+
+#[test]
+fn zero_state_shows_newest_past_session_first_under_its_header() {
+    let mut newer = past_session("11111111-aaaa", "newer", "/work/there");
+    newer.modified += Duration::from_secs(60);
+    let older = past_session("22222222-bbbb", "older", "/work/there");
+    run_agents_query((Vec::new(), None, vec![older, newer]), "", |results| {
+        assert_eq!(
+            on_screen_titles(results),
+            vec![
+                "Section: Past",
+                "Agent session: newer",
+                "Agent session: older"
+            ]
+        );
+    });
+}
+
+#[test]
+fn search_results_keep_display_order_on_equal_scores() {
+    let mut newer = past_session("11111111-aaaa", "deploy newer", "/work/there");
+    newer.modified += Duration::from_secs(60);
+    let older = past_session("22222222-bbbb", "deploy older", "/work/there");
+    run_agents_query(
+        (Vec::new(), None, vec![older, newer]),
+        "deploy",
+        |results| {
+            assert_eq!(results[0].score(), results[1].score());
+            assert_eq!(
+                on_screen_titles(results),
+                vec!["Agent session: deploy newer", "Agent session: deploy older"]
+            );
+        },
+    );
+}
+
+#[test]
+fn search_results_put_the_best_match_on_top() {
+    let mut scattered = past_session("11111111-aaaa", "one large drawer error", "/work/there");
+    scattered.modified += Duration::from_secs(60);
+    let exact = past_session("22222222-bbbb", "older", "/work/there");
+    run_agents_query(
+        (Vec::new(), None, vec![exact, scattered]),
+        "older",
+        |results| {
+            assert_eq!(
+                on_screen_titles(results),
+                vec![
+                    "Agent session: older",
+                    "Agent session: one large drawer error"
+                ]
+            );
         },
     );
 }

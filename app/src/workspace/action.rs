@@ -284,6 +284,14 @@ pub enum WorkspaceAction {
     ReattachShellForTerminalView {
         terminal_view_id: EntityId,
     },
+    /// Ends a restored pane's session in the supervisor that still holds it, then resumes here.
+    TakeOverHeldSessionForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Resumes a restored pane here without touching the supervisor that still holds its session.
+    StartFreshForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Hands the focused pane's shell to the session supervisor and closes the
     /// pane. The shell and everything running under it keep going; the session
     /// then appears in the picker opened by `ToggleAttachSessionMenu`.
@@ -1175,6 +1183,8 @@ impl WorkspaceAction {
             | RestartShell
             | RestartShellForTerminalView { .. }
             | ReattachShellForTerminalView { .. }
+            | TakeOverHeldSessionForTerminalView { .. }
+            | StartFreshForTerminalView { .. }
             | ToggleAttachSessionMenu
             | ShowAgentSessions { .. }
             | ShowAgentSessionsForTerminalView { .. }

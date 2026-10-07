@@ -13517,6 +13517,29 @@ impl Workspace {
         }
     }
 
+    fn resolve_withheld_restore(&mut self, take_over: bool, ctx: &mut ViewContext<Self>) {
+        let Some(manager) = self.focused_terminal_manager(ctx) else {
+            return;
+        };
+        let handled = manager.update(ctx, |manager, ctx| {
+            if take_over {
+                manager.take_over_held_session(ctx)
+            } else {
+                manager.run_withheld_restore(ctx)
+            }
+        });
+        if !handled {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "This pane has no withheld session to resume.".to_owned(),
+                    ),
+                    ctx,
+                );
+            });
+        }
+    }
+
     fn start_shell_restart(
         &mut self,
         target: Option<ShellLaunchData>,
@@ -27450,6 +27473,16 @@ impl TypedActionView for Workspace {
             ReattachShellForTerminalView { terminal_view_id } => {
                 if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
                     self.reattach_focused_shell(ctx);
+                }
+            }
+            TakeOverHeldSessionForTerminalView { terminal_view_id } => {
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
+                    self.resolve_withheld_restore(true, ctx);
+                }
+            }
+            StartFreshForTerminalView { terminal_view_id } => {
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
+                    self.resolve_withheld_restore(false, ctx);
                 }
             }
             RestartWindowInNewProcess => self.restart_window_in_new_process(ctx),

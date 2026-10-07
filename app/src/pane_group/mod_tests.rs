@@ -5779,6 +5779,73 @@ fn test_restart_drops_the_withheld_restore_and_its_banner() {
     });
 }
 
+#[test]
+fn test_a_withheld_restore_shows_the_holder_banner_with_both_actions() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, _manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: SessionHolder {
+                channel: "x".into(),
+                version: "20261004-173607861-268f56926594".into(),
+                pid: 27784,
+            },
+            session_id: warp_core::SessionId::from(4242u64),
+            agent: None,
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore, ctx);
+            });
+        });
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            let banner = view
+                .session_holder_banner_for_test()
+                .expect("banner is shown");
+            assert_eq!(
+                banner.title(),
+                "Still running under build 20261004-173607861-268f56926594 (pid 27784)"
+            );
+            assert!(banner.offers_take_over());
+            assert_eq!(view.model.lock().block_list().inline_banner_count(), 1);
+        });
+    });
+}
+
+#[test]
+fn test_an_attached_session_offers_only_start_fresh() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, _manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "pi --session abc".to_owned(),
+            holder: SessionHolder {
+                channel: "x".into(),
+                version: "b".into(),
+                pid: 7,
+            },
+            session_id: warp_core::SessionId::from(1u64),
+            agent: None,
+            verdict: HeldVerdict::Attached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore, ctx);
+            });
+        });
+        app.read(|ctx| {
+            let banner = view.as_ref(ctx).session_holder_banner_for_test().unwrap();
+            assert_eq!(banner.title(), "Open in another window (build b, pid 7)");
+            assert!(!banner.offers_take_over());
+        });
+    });
+}
+
 /// The behavioural half of `is_login_shell_bootstrapped = false`.
 ///
 /// Restarting *into a misconfigured shell* is the whole point of the

@@ -457,6 +457,7 @@ pub enum WorkspaceAction {
     CreateTeamAIPrompt,
     ToggleMouseReporting,
     ToggleScrollReporting,
+    ToggleRightClickReporting,
     ToggleFocusReporting,
     StartTabDrag,
     DragTab {
@@ -1197,6 +1198,7 @@ impl WorkspaceAction {
             | ShowCommandSearch(_)
             | ToggleMouseReporting
             | ToggleScrollReporting
+            | ToggleRightClickReporting
             | ToggleFocusReporting
             | ImportToPersonalDrive
             | ImportToTeamDrive

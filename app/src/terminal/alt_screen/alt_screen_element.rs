@@ -22,7 +22,7 @@ use warpui::{
     start_trace,
 };
 
-use super::should_intercept_mouse;
+use super::{should_intercept_mouse, should_intercept_right_click};
 use crate::appearance::Appearance;
 use crate::pane_group::SplitPaneState;
 use crate::settings::EnforceMinimumContrast;
@@ -303,7 +303,7 @@ impl AltScreenElement {
         let point = self.coord_to_point(local_position);
         let shift = mouse_state.modifiers().shift;
 
-        if should_intercept_mouse(&self.model.lock(), shift, app) {
+        if should_intercept_right_click(&self.model.lock(), shift, app) {
             if should_right_click_paste(shift, app) {
                 ctx.dispatch_typed_action(TerminalAction::Paste);
             } else {

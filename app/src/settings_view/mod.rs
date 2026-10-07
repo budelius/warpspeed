@@ -505,6 +505,7 @@ pub mod flags {
     pub const EXTRA_META_KEYS_LEFT_CONTEXT_FLAG: &str = "Extra_Meta_Keys_Left";
     pub const MOUSE_REPORTING_CONTEXT_FLAG: &str = "Mouse_Reporting";
     pub const SCROLL_REPORTING_CONTEXT_FLAG: &str = "Scroll_Reporting";
+    pub const RIGHT_CLICK_REPORTING_CONTEXT_FLAG: &str = "Right_Click_Reporting";
     pub const FOCUS_REPORTING_CONTEXT_FLAG: &str = "Focus_Reporting";
     pub const SSH_REUSE_CONTROL_MASTER_CONTEXT_FLAG: &str = "SSH_Reuse_Control_Master";
     pub const SSH_WARPIFICATION_CONTEXT_FLAG: &str = "SSH_Warpification";

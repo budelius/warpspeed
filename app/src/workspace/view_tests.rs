@@ -8066,6 +8066,14 @@ fn stop_nothing(_: &str) -> anyhow::Result<()> {
     anyhow::bail!("tests never stop a run")
 }
 
+fn pause_nothing(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("tests never pause a run")
+}
+
+fn resume_nothing(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("tests never resume a run")
+}
+
 /// Registers the fleet singletons with a backend that never reaches the dashboard.
 fn initialize_app_for_fleet(app: &mut App) {
     use crate::agent_ctrl::FleetPaneManager;
@@ -8077,6 +8085,8 @@ fn initialize_app_for_fleet(app: &mut App) {
             list: list_no_runs,
             start: start_nothing,
             stop: stop_nothing,
+            pause: pause_nothing,
+            resume: resume_nothing,
         })
     });
     app.add_singleton_model(|_| FleetPaneManager::default());
@@ -8985,5 +8995,78 @@ fn the_pane_header_menu_opens_the_agent_sessions_view_again_after_it_was_closed(
                 "the view opens again from the pane header menu"
             );
         });
+    });
+}
+
+static FLEET_PAUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static FLEET_RESUMED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn pause_recording(job_id: &str) -> anyhow::Result<()> {
+    FLEET_PAUSED.lock().unwrap().push(job_id.to_owned());
+    Ok(())
+}
+
+fn resume_recording(job_id: &str) -> anyhow::Result<()> {
+    FLEET_RESUMED.lock().unwrap().push(job_id.to_owned());
+    Ok(())
+}
+
+#[test]
+fn fleet_row_pause_and_resume_reach_agent_ctrl() {
+    use warpui::TypedActionView as _;
+
+    use crate::agent_ctrl::FleetPaneManager;
+    use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
+    use crate::agent_ctrl::fleet_view::FleetViewAction;
+
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        app.add_singleton_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                list: list_no_runs,
+                start: start_nothing,
+                stop: stop_nothing,
+                pause: pause_recording,
+                resume: resume_recording,
+            })
+        });
+        app.add_singleton_model(|_| FleetPaneManager::default());
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::OpenAgentCtrlFleetPane, ctx)
+        });
+        let [pane_id] = fleet_pane_ids(&workspace, &mut app)[..] else {
+            panic!("expected one fleet pane");
+        };
+        let fleet_view = workspace.read(&app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .downcast_pane_by_id::<crate::pane_group::AgentCtrlFleetPane>(pane_id)
+                .expect("the fleet pane")
+                .fleet_view(ctx)
+        });
+
+        fleet_view.update(&mut app, |view, ctx| {
+            view.handle_action(
+                &FleetViewAction::Pause {
+                    job_id: "job-live".to_owned(),
+                },
+                ctx,
+            );
+            view.handle_action(
+                &FleetViewAction::Resume {
+                    job_id: "job-paused".to_owned(),
+                },
+                ctx,
+            );
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) =>
+                FLEET_PAUSED.lock().unwrap().as_slice() == ["job-live"]
+                    && FLEET_RESUMED.lock().unwrap().as_slice() == ["job-paused"],
+            "the row actions never reached AgentCtrl"
+        );
     });
 }

@@ -23,7 +23,7 @@ pub enum ManagedSessionsCommand {
 
     /// Start one configured operator-enabled agent, bound to a task or to a repository.
     Start {
-        /// Configured agent profile name.
+        /// Agent kind (claude, pi, codex) or configured AgentCtrl profile name.
         #[arg(long)]
         agent: String,
 
@@ -112,6 +112,23 @@ pub enum ManagedSessionsCommand {
 
         #[arg(long)]
         force: bool,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
+    /// Pause a live interactive run: its agent exits, its work is pushed to the run's branch, and
+    /// it frees its node slot until resumed.
+    Pause {
+        job_id: String,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
+    /// Resume a paused run, with its conversation, on a node with a free slot.
+    Resume {
+        job_id: String,
 
         #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
         environment: ManagedEnvironment,

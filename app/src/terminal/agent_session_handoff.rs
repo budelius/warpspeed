@@ -7,6 +7,7 @@ use chrono::{DateTime, Local};
 use command::blocking::Command;
 use managed_agent_sessions::{
     MAX_SESSION_FILE_BYTES, RepositoryInfo, is_node_at_capacity, normalize_repo_url,
+    redact_url_credentials,
 };
 use tempfile::TempDir;
 
@@ -573,26 +574,6 @@ pub(crate) fn cut_over_decision(
     } else {
         CutOver::LeaveLocalAgent
     }
-}
-
-/// Removes `user[:password]@` from every URL in `text`, since git and HTTP errors can echo a
-/// remote URL that embeds a token.
-fn redact_url_credentials(text: &str) -> String {
-    let mut redacted = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(scheme_end) = rest.find("://") {
-        let authority_start = scheme_end + 3;
-        redacted.push_str(&rest[..authority_start]);
-        rest = &rest[authority_start..];
-        let authority_end = rest
-            .find(|c: char| c == '/' || c == '\'' || c == '"' || c.is_whitespace())
-            .unwrap_or(rest.len());
-        if let Some(at) = rest[..authority_end].rfind('@') {
-            rest = &rest[at + 1..];
-        }
-    }
-    redacted.push_str(rest);
-    redacted
 }
 
 /// The repository among those configured on AgentCtrl that `repo_url` names, compared the way the

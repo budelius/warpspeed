@@ -303,25 +303,28 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             prompt,
             interactive,
             environment,
-        } => match (repo, task) {
-            (Some(repo), _) => start_on_repo(
-                *environment,
-                agent,
-                repo,
-                branch.as_deref(),
-                prompt.as_deref(),
-                args.json,
-            ),
-            (None, Some(task)) => start(
-                *environment,
-                agent,
-                task,
-                prompt.as_deref(),
-                *interactive,
-                args.json,
-            ),
-            (None, None) => bail!("start requires --task or --repo"),
-        },
+        } => {
+            let agent = resolve_agent_name(*environment, agent)?;
+            match (repo, task) {
+                (Some(repo), _) => start_on_repo(
+                    *environment,
+                    &agent,
+                    repo,
+                    branch.as_deref(),
+                    prompt.as_deref(),
+                    args.json,
+                ),
+                (None, Some(task)) => start(
+                    *environment,
+                    &agent,
+                    task,
+                    prompt.as_deref(),
+                    *interactive,
+                    args.json,
+                ),
+                (None, None) => bail!("start requires --task or --repo"),
+            }
+        }
         ManagedSessionsCommand::Repos { environment } => repos(*environment, args.json),
         ManagedSessionsCommand::MoveAll { .. } => bail!("move-all is handled by the application"),
         ManagedSessionsCommand::Open {
@@ -347,6 +350,14 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             force,
             environment,
         } => stop(*environment, job_id, *force, args.json),
+        ManagedSessionsCommand::Pause {
+            job_id,
+            environment,
+        } => pause(*environment, job_id, args.json),
+        ManagedSessionsCommand::Resume {
+            job_id,
+            environment,
+        } => resume(*environment, job_id, args.json),
     }
 }
 
@@ -424,6 +435,14 @@ pub struct RunSummary {
     pub interactive: bool,
     #[serde(default)]
     pub last_activity_at: Option<String>,
+    /// The AgentCtrl node the run is on, or last ran on while paused.
+    #[serde(default)]
+    pub node_name: Option<String>,
+    #[serde(default)]
+    pub paused_at: Option<String>,
+    /// Whether the dashboard would accept a pause now; absent from dashboards that predate it.
+    #[serde(default)]
+    pub pause_allowed: Option<bool>,
 }
 
 pub fn list_repositories(environment: ManagedEnvironment) -> Result<Vec<RepositoryInfo>> {
@@ -488,6 +507,35 @@ pub fn agent_ctrl_profile(agent: &str) -> Option<&'static str> {
         "codex" => Some("staging-codex-interactive-rw"),
         _ => None,
     }
+}
+
+/// The CLI agent kinds that [`agent_ctrl_profile`] maps to an AgentCtrl profile.
+pub const AGENT_KINDS: [&str; 3] = ["claude", "pi", "codex"];
+
+/// The AgentCtrl profile that `agent` names: a CLI agent kind maps through
+/// [`agent_ctrl_profile`], and a name with the environment's profile prefix is taken as a
+/// configured profile. Anything else fails before any request, listing what is accepted.
+pub fn resolve_agent_name(environment: ManagedEnvironment, agent: &str) -> Result<String> {
+    if let Some(profile_name) = agent_ctrl_profile(agent) {
+        return Ok(profile_name.to_owned());
+    }
+    let alias = profile(environment).alias;
+    let is_profile_name = agent
+        .strip_prefix(alias)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        });
+    if is_profile_name {
+        return Ok(agent.to_owned());
+    }
+    bail!(
+        "unknown agent {agent:?}; use {} or a profile name starting with {alias}- (for example {alias}-claude-interactive-rw)",
+        AGENT_KINDS.join(", ")
+    )
 }
 
 /// Canonical form of a repository URL, identical to the AgentCtrl node's rule: scheme and host
@@ -702,7 +750,7 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
             println!("Session finished with state {}.", descriptor.state);
             return Ok(());
         }
-        println!("\nCommands: Enter=refresh, send <text>, close, stop, detach");
+        println!("\n{}", viewer_commands(&descriptor.state));
         let command = read_line("> ")?;
         if command.is_empty() || command == "refresh" {
             continue;
@@ -712,23 +760,68 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
             return Ok(());
         }
         if command == "close" {
-            input(environment, job_id, None, false)?;
+            keep_viewing(input(environment, job_id, None, false));
             continue;
         }
         if command == "stop" {
-            stop(environment, job_id, false, false)?;
+            keep_viewing(stop(environment, job_id, false, false));
+            continue;
+        }
+        if command == "resume" {
+            match resume_run(environment, job_id) {
+                Ok(outcome) => println!("{}", run_control_summary("Resumed", job_id, &outcome)),
+                Err(error) => println!("{}", resume_failure_message(&error)),
+            }
             continue;
         }
         if let Some(text) = command.strip_prefix("send ") {
-            input(environment, job_id, Some(text.trim()), false)?;
+            keep_viewing(input(environment, job_id, Some(text.trim()), false));
             continue;
         }
-        println!("Unknown command. Use send <text>, close, stop, refresh, or detach.");
+        println!("Unknown command. Use send <text>, close, resume, stop, refresh, or detach.");
+    }
+}
+
+/// Reports a failed viewer command and lets the viewer carry on, as a paused run refuses `send`,
+/// `close` and `stop`.
+fn keep_viewing(result: Result<()>) {
+    if let Err(error) = result {
+        println!("{}", failure_detail(&error));
     }
 }
 
 fn session_is_finished(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "stopped" | "interrupted")
+}
+
+/// A paused run is live (not finished) but runs no agent until it is resumed.
+pub fn is_paused_state(state: &str) -> bool {
+    state == "paused"
+}
+
+fn paused_notice(job_id: &str) -> String {
+    format!("Paused — resume with: warpspeed agent-ctrl resume {job_id}")
+}
+
+fn attach_banner(descriptor: &SessionDescriptor) -> String {
+    let capabilities = descriptor.capabilities.join(",");
+    let mut banner = format!(
+        "Attached to {} ({}, capabilities: {capabilities}). Closing this view does not stop the run.",
+        descriptor.display_name, descriptor.state
+    );
+    if is_paused_state(&descriptor.state) {
+        banner.push('\n');
+        banner.push_str(&paused_notice(&descriptor.job_id));
+    }
+    banner
+}
+
+fn viewer_commands(state: &str) -> &'static str {
+    if is_paused_state(state) {
+        "Commands: Enter=refresh, resume, stop, detach"
+    } else {
+        "Commands: Enter=refresh, send <text>, close, stop, detach"
+    }
 }
 
 fn read_line(prompt: &str) -> Result<String> {
@@ -814,6 +907,69 @@ fn stop(
     Ok(())
 }
 
+fn pause(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
+    let outcome = pause_run(environment, job_id)
+        .map_err(|error| anyhow::Error::msg(pause_failure_message(&error)))?;
+    print_run_control_outcome("Paused", job_id, &outcome, json_output)
+}
+
+fn resume(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
+    let outcome = resume_run(environment, job_id)
+        .map_err(|error| anyhow::Error::msg(resume_failure_message(&error)))?;
+    print_run_control_outcome("Resumed", job_id, &outcome, json_output)
+}
+
+fn print_run_control_outcome(
+    verb: &str,
+    job_id: &str,
+    outcome: &RunControlOutcome,
+    json_output: bool,
+) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&run_control_json(job_id, outcome))?
+        );
+    } else {
+        println!("{}", run_control_summary(verb, job_id, outcome));
+    }
+    Ok(())
+}
+
+fn run_control_json(job_id: &str, outcome: &RunControlOutcome) -> Value {
+    json!({
+        "job_id": job_id,
+        "state": outcome.state,
+        "node_name": outcome.node_name,
+    })
+}
+
+fn run_control_summary(verb: &str, job_id: &str, outcome: &RunControlOutcome) -> String {
+    let state = if outcome.state.is_empty() {
+        "unknown"
+    } else {
+        &outcome.state
+    };
+    let expected = match verb {
+        "Paused" => "paused",
+        _ => "running",
+    };
+    let location = outcome
+        .node_name
+        .as_ref()
+        .map(|node| format!(" on {node}"))
+        .unwrap_or_default();
+    if state == expected {
+        format!("{verb} {job_id} ({state}){location}")
+    } else {
+        let request = match verb {
+            "Paused" => "Pause",
+            _ => "Resume",
+        };
+        format!("{request} requested for {job_id}; still {state}{location}")
+    }
+}
+
 /// Asks the dashboard to stop a managed run.
 pub fn stop_run(environment: ManagedEnvironment, job_id: &str, force: bool) -> Result<()> {
     validate_job_id(job_id)?;
@@ -827,11 +983,62 @@ fn stop_run_with(
     job_id: &str,
     force: bool,
 ) -> Result<Value> {
+    post_run_command_with(profile, token, job_id, "stop", &json!({ "force": force }))
+}
+
+/// Asks the dashboard to pause a live interactive run: its agent exits, its work is pushed to the
+/// run's branch, and it stops holding a node slot. A run whose agent session AgentCtrl does not
+/// know fails with an error [`is_session_unknown`] recognizes.
+pub fn pause_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunControlOutcome> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    pause_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
+}
+
+/// Asks the dashboard to resume a paused run on a node with a free slot. With every node full it
+/// fails with an error [`is_node_at_capacity`] recognizes.
+pub fn resume_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunControlOutcome> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    resume_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
+}
+
+/// What the dashboard reports after accepting a pause or resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunControlOutcome {
+    pub state: String,
+    pub node_name: Option<String>,
+}
+
+fn run_control_outcome(result: &Value) -> RunControlOutcome {
+    let text = |key| result.get(key).and_then(Value::as_str).map(str::to_owned);
+    RunControlOutcome {
+        state: text("state").unwrap_or_default(),
+        node_name: text("node_name"),
+    }
+}
+
+fn pause_run_with(profile: &EnvironmentProfile, token: &str, job_id: &str) -> Result<Value> {
+    post_run_command_with(profile, token, job_id, "pause", &json!({}))
+}
+
+fn resume_run_with(profile: &EnvironmentProfile, token: &str, job_id: &str) -> Result<Value> {
+    post_run_command_with(profile, token, job_id, "resume", &json!({}))
+}
+
+/// Posts `body` to the run's `command` route and requires the dashboard to accept it.
+fn post_run_command_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    job_id: &str,
+    command: &str,
+    body: &Value,
+) -> Result<Value> {
     let response = send(
         profile,
         Client::new()
             .post(format!(
-                "{}/api/agent-control/runs/{job_id}/stop",
+                "{}/api/agent-control/runs/{job_id}/{command}",
                 profile.base_url
             ))
             .bearer_auth(token)
@@ -840,9 +1047,11 @@ fn stop_run_with(
                 "Idempotency-Key",
                 format!("warpspeed-{}", uuid::Uuid::new_v4()),
             )
-            .json(&json!({ "force": force })),
+            .json(body),
     )?;
-    let result: Value = response.json().context("invalid stop response")?;
+    let result: Value = response
+        .json()
+        .with_context(|| format!("invalid {command} response"))?;
     ensure_command_accepted(&result)?;
     Ok(result)
 }
@@ -887,11 +1096,7 @@ fn attach(
     save_bookmarks(&bookmarks)?;
 
     if !json_output {
-        let capabilities = descriptor.capabilities.join(",");
-        println!(
-            "Attached to {} ({}, capabilities: {}). Closing this view does not stop the run.",
-            descriptor.display_name, descriptor.state, capabilities
-        );
+        println!("{}", attach_banner(&descriptor));
     }
 
     let mut cursor = existing_cursor;
@@ -1437,7 +1642,9 @@ fn validate_verification_url(
 }
 
 fn ensure_command_accepted(result: &Value) -> Result<()> {
-    if result.get("status").and_then(Value::as_str) == Some("accepted") {
+    if result.get("status").and_then(Value::as_str) == Some("accepted")
+        || result.get("accepted").and_then(Value::as_bool) == Some(true)
+    {
         return Ok(());
     }
     let message = result
@@ -1507,17 +1714,80 @@ fn http_error(response: Response) -> anyhow::Error {
     HttpStatusError { status, body }.into()
 }
 
-/// Whether the dashboard refused a launch because the node already runs its maximum number of
-/// interactive runs.
+/// Whether the dashboard refused a launch or resume because no node has a free interactive slot.
 pub fn is_node_at_capacity(error: &anyhow::Error) -> bool {
+    has_error_code(error, StatusCode::CONFLICT, "node_at_capacity")
+}
+
+/// Whether the dashboard refused a pause because AgentCtrl does not know the run's agent session,
+/// without which the run could never be resumed.
+pub fn is_session_unknown(error: &anyhow::Error) -> bool {
+    has_error_code(error, StatusCode::PRECONDITION_FAILED, "session_unknown")
+}
+
+fn has_error_code(error: &anyhow::Error, status: StatusCode, code: &str) -> bool {
     error
         .downcast_ref::<HttpStatusError>()
         .is_some_and(|error| {
-            error.status == StatusCode::CONFLICT
-                && serde_json::from_str::<Value>(&error.body).is_ok_and(|body| {
-                    body.get("code").and_then(Value::as_str) == Some("node_at_capacity")
-                })
+            error.status == status
+                && serde_json::from_str::<Value>(&error.body)
+                    .is_ok_and(|body| body.get("code").and_then(Value::as_str) == Some(code))
         })
+}
+
+/// Removes `user[:password]@` from every URL in `text`, since git and HTTP errors can echo a
+/// remote URL that embeds a token.
+pub fn redact_url_credentials(text: &str) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + 3;
+        redacted.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let authority_end = rest
+            .find(|c: char| matches!(c, '/' | '\'' | '"') || c.is_whitespace())
+            .unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            rest = &rest[at + 1..];
+        }
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+/// The dashboard's `error` text for a rejected request, or the whole error chain when the failure
+/// carries no such text; URL credentials are removed either way.
+fn failure_detail(error: &anyhow::Error) -> String {
+    let dashboard_text = error
+        .downcast_ref::<HttpStatusError>()
+        .and_then(|error| serde_json::from_str::<Value>(&error.body).ok())
+        .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_owned));
+    redact_url_credentials(&dashboard_text.unwrap_or_else(|| format!("{error:#}")))
+}
+
+/// The message shown when asking the dashboard to stop a run failed with `error`.
+pub fn stop_failure_message(error: &anyhow::Error) -> String {
+    format!("Could not stop the run: {}", failure_detail(error))
+}
+
+/// The message shown when asking the dashboard to pause a run failed with `error`.
+pub fn pause_failure_message(error: &anyhow::Error) -> String {
+    if is_session_unknown(error) {
+        "AgentCtrl does not know this run's agent session, so it cannot be paused".to_owned()
+    } else {
+        format!("Could not pause the run: {}", failure_detail(error))
+    }
+}
+
+/// The message shown when asking the dashboard to resume a run failed with `error`.
+pub fn resume_failure_message(error: &anyhow::Error) -> String {
+    if is_node_at_capacity(error) {
+        "Every AgentCtrl node is at capacity; stop or pause a run, then resume again".to_owned()
+    } else if is_session_unknown(error) {
+        "AgentCtrl does not know this run's agent session, so it cannot be resumed".to_owned()
+    } else {
+        format!("Could not resume the run: {}", failure_detail(error))
+    }
 }
 
 /// Whether retrying cannot help: the dashboard rejected the request itself (auth, a missing run,

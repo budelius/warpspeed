@@ -2044,6 +2044,15 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         }
     }
 
+    fn attach_detached_session(
+        &mut self,
+        session_id: warp_core::SessionId,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) {
+        self.restore_persistent_session(session_id, ctx);
+        self.repaint_screen_on_attach = true;
+    }
+
     fn restore_cli_agent_resume_command(&mut self, command: String) {
         self.cli_agent_resume_command = Some(command);
     }

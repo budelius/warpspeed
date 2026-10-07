@@ -1,5 +1,5 @@
-//! The fleet pane's view: AgentCtrl staging's runs, grouped by repository, with Open and Stop on
-//! each run and a Start… menu listing the repositories a run can start on.
+//! The fleet pane's view: AgentCtrl staging's runs, grouped by repository, with Open, Pause or
+//! Resume, and Stop on each run and a Start… menu listing the repositories a run can start on.
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -38,6 +38,24 @@ const STARTABLE_AGENTS: [(CLIAgent, &str); 3] = [
 
 const SPACING: f32 = 8.;
 
+/// Which of Pause or Resume a row offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PauseControl {
+    Pause,
+    Resume,
+    Unavailable,
+}
+
+pub(crate) fn pause_control(row: &FleetRow) -> PauseControl {
+    if row.can_resume() {
+        PauseControl::Resume
+    } else if row.can_pause() {
+        PauseControl::Pause
+    } else {
+        PauseControl::Unavailable
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FleetViewEvent {
     Pane(PaneEvent),
@@ -50,6 +68,8 @@ pub enum FleetViewAction {
     ToggleStartMenu,
     Start { repo_url: String, agent: CLIAgent },
     Stop { job_id: String },
+    Pause { job_id: String },
+    Resume { job_id: String },
 }
 
 /// Pane header overflow menu actions (none).
@@ -60,6 +80,8 @@ pub enum FleetViewHeaderAction {}
 struct RowMouseStates {
     open: MouseStateHandle,
     stop: MouseStateHandle,
+    pause: MouseStateHandle,
+    resume: MouseStateHandle,
     branch: MouseStateHandle,
 }
 
@@ -360,6 +382,8 @@ impl FleetView {
         let theme = appearance.theme();
         let badge_background = if row.is_finished() {
             theme.surface_2()
+        } else if row.is_paused() {
+            theme.surface_3()
         } else {
             theme.accent()
         };
@@ -400,6 +424,16 @@ impl FleetView {
                 Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_spacing(SPACING)
+                    .with_child(
+                        Self::secondary_text(
+                            row.node_name
+                                .as_deref()
+                                .map(|node| format!("on {node}"))
+                                .unwrap_or_else(|| "no node yet".to_owned()),
+                            appearance,
+                        )
+                        .finish(),
+                    )
                     .with_child(branch)
                     .with_child(
                         Self::secondary_text(
@@ -427,6 +461,27 @@ impl FleetView {
                 })
             })
             .finish();
+        let pause_or_resume = match pause_control(row) {
+            PauseControl::Pause => Self::button(
+                "Pause",
+                &mouse_states.pause,
+                Some(FleetViewAction::Pause {
+                    job_id: row.job_id.clone(),
+                }),
+                appearance,
+            ),
+            PauseControl::Resume => Self::button(
+                "Resume",
+                &mouse_states.resume,
+                Some(FleetViewAction::Resume {
+                    job_id: row.job_id.clone(),
+                }),
+                appearance,
+            ),
+            PauseControl::Unavailable => {
+                Self::button("Pause", &mouse_states.pause, None, appearance)
+            }
+        };
         let stop_label = if self.is_stop_armed(&row.job_id) {
             "Confirm stop"
         } else {
@@ -448,6 +503,7 @@ impl FleetView {
                 .with_spacing(SPACING)
                 .with_child(Expanded::new(1., details).finish())
                 .with_child(open)
+                .with_child(pause_or_resume)
                 .with_child(stop)
                 .finish(),
         )
@@ -562,6 +618,16 @@ impl TypedActionView for FleetView {
                 ctx.notify();
             }
             FleetViewAction::Stop { job_id } => self.stop(job_id.clone(), ctx),
+            FleetViewAction::Pause { job_id } => {
+                let job_id = job_id.clone();
+                self.model
+                    .update(ctx, |model, ctx| model.pause(job_id, ctx));
+            }
+            FleetViewAction::Resume { job_id } => {
+                let job_id = job_id.clone();
+                self.model
+                    .update(ctx, |model, ctx| model.resume(job_id, ctx));
+            }
         }
     }
 }
@@ -609,3 +675,7 @@ impl BackingView for FleetView {
         self.focus_handle = Some(focus_handle);
     }
 }
+
+#[cfg(test)]
+#[path = "fleet_view_tests.rs"]
+mod tests;

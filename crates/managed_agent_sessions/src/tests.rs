@@ -113,6 +113,7 @@ fn stozn_login_state_requires_admin_and_visible_ascii_credentials() {
 fn waiting_input_remains_controllable_in_the_ui() {
     assert!(!session_is_finished("waiting_input"));
     assert!(!session_is_finished("running"));
+    assert!(!session_is_finished("paused"));
     assert!(session_is_finished("completed"));
     assert!(session_is_finished("interrupted"));
 }
@@ -363,6 +364,8 @@ fn full_managed_flow_has_dashboard_only_network_authority() {
         ("POST", "/api/agent-control/runs/job-123/input"),
         ("POST", "/api/agent-control/runs/job-123/close"),
         ("POST", "/api/agent-control/runs/job-123/stop"),
+        ("POST", "/api/agent-control/runs/job-123/pause"),
+        ("POST", "/api/agent-control/runs/job-123/resume"),
     ] {
         let request = client.request(
             reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
@@ -883,6 +886,9 @@ fn list_runs_parses_repo_and_branch() {
                 branch: Some("agent/job-repo".to_owned()),
                 interactive: true,
                 last_activity_at: Some("2026-10-05T10:00:00.000Z".to_owned()),
+                node_name: None,
+                paused_at: None,
+                pause_allowed: None,
             },
             RunSummary {
                 job_id: "job-plain".to_owned(),
@@ -892,6 +898,9 @@ fn list_runs_parses_repo_and_branch() {
                 branch: None,
                 interactive: false,
                 last_activity_at: None,
+                node_name: None,
+                paused_at: None,
+                pause_allowed: None,
             },
         ]
     );
@@ -945,6 +954,55 @@ fn agent_ctrl_profiles_are_the_interactive_rw_profiles() {
 }
 
 #[test]
+fn agent_kinds_resolve_to_their_profiles_and_profile_names_pass_through() {
+    let resolve = |agent| resolve_agent_name(ManagedEnvironment::Staging, agent).unwrap();
+    assert_eq!(resolve("claude"), "staging-claude-interactive-rw");
+    assert_eq!(resolve("pi"), "staging-pi-interactive-rw");
+    assert_eq!(resolve("codex"), "staging-codex-interactive-rw");
+    assert_eq!(resolve("staging-pi-lander"), "staging-pi-lander");
+    assert_eq!(
+        resolve("staging-claude-interactive-rw"),
+        "staging-claude-interactive-rw"
+    );
+}
+
+#[test]
+fn an_unknown_agent_fails_with_the_accepted_values() {
+    for unknown in [
+        "gemini",
+        "Claude",
+        "staging-",
+        "prod-claude",
+        "staging-a b",
+        "",
+    ] {
+        let error = resolve_agent_name(ManagedEnvironment::Staging, unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("claude, pi, codex"), "{unknown:?}: {error}");
+        assert!(error.contains("staging-"), "{unknown:?}: {error}");
+    }
+}
+
+#[test]
+fn start_with_an_unknown_agent_fails_before_any_request() {
+    let error = run(&ManagedSessionsArgs {
+        command: ManagedSessionsCommand::Start {
+            agent: "gemini".to_owned(),
+            task: Some("task-1".to_owned()),
+            repo: None,
+            branch: None,
+            prompt: None,
+            interactive: false,
+            environment: ManagedEnvironment::Staging,
+        },
+        json: false,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown agent"), "{error}");
+}
+
+#[test]
 fn stop_run_posts_a_stop_request() {
     let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
     let profile = fixture_profile(base);
@@ -955,4 +1013,307 @@ fn stop_run_posts_a_stop_request() {
         "{raw}"
     );
     assert!(raw.contains("\"force\":true"), "{raw}");
+}
+
+#[test]
+fn pause_and_resume_post_to_the_run_routes() {
+    for (call, route) in [
+        (
+            pause_run_with as fn(&EnvironmentProfile, &str, &str) -> Result<Value>,
+            "pause",
+        ),
+        (resume_run_with, "resume"),
+    ] {
+        let (base, request) = capturing_fixture(
+            json!({ "job_id": "job-1", "state": "paused", "accepted": true, "node_name": "node-1" }),
+        );
+        let result = call(&fixture_profile(base), "token", "job-1").unwrap();
+        let outcome = run_control_outcome(&result);
+        assert_eq!(outcome.state, "paused");
+        assert_eq!(outcome.node_name.as_deref(), Some("node-1"));
+        let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+        assert!(
+            raw.starts_with(&format!("POST /api/agent-control/runs/job-1/{route} ")),
+            "{raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("idempotency-key: warpspeed-"),
+            "{raw}"
+        );
+        assert!(raw.ends_with("{}"), "{raw}");
+    }
+}
+
+#[test]
+fn a_rejected_pause_fails_with_the_dashboard_reason() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "status": "rejected", "error": { "error": "run is not interactive" } }),
+    );
+    let error = pause_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(
+        error.to_string().contains("run is not interactive"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pause_without_a_known_session_is_recognized() {
+    let base = http_fixture(
+        "412 Precondition Failed",
+        json!({ "error": "session id unknown", "code": "session_unknown" }),
+    );
+    let error = pause_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(is_session_unknown(&error), "{error:#}");
+    assert!(!is_node_at_capacity(&error));
+    let message = pause_failure_message(&error);
+    assert!(message.contains("cannot be paused"), "{message}");
+    assert!(!is_session_unknown(&anyhow::anyhow!("other")));
+}
+
+#[test]
+fn a_resume_with_every_node_full_is_recognized() {
+    let base = http_fixture(
+        "409 Conflict",
+        json!({ "error": "node at capacity", "code": "node_at_capacity" }),
+    );
+    let error = resume_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(is_node_at_capacity(&error), "{error:#}");
+    assert!(!is_session_unknown(&error));
+    let message = resume_failure_message(&error);
+    assert!(message.contains("at capacity"), "{message}");
+}
+
+#[test]
+fn other_pause_and_resume_failures_keep_their_cause() {
+    let error = anyhow::anyhow!("dashboard request failed");
+    assert_eq!(
+        pause_failure_message(&error),
+        "Could not pause the run: dashboard request failed"
+    );
+    assert_eq!(
+        resume_failure_message(&error),
+        "Could not resume the run: dashboard request failed"
+    );
+}
+
+#[test]
+fn pause_and_resume_reject_a_bad_job_id_before_any_request() {
+    for result in [
+        pause_run(ManagedEnvironment::Staging, "../x"),
+        resume_run(ManagedEnvironment::Staging, "job-a b"),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("invalid AgentCtrl job id"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn list_runs_parses_node_and_pause_time() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "items": [{
+            "job_id": "job-paused",
+            "state": "paused",
+            "agent_name": "staging-claude-interactive-rw",
+            "interactive": true,
+            "repo_url": "https://gitlab.com/pseekoo/kaizen",
+            "branch": "agent/job-paused",
+            "last_activity_at": "2026-10-07T09:00:00.000Z",
+            "node_name": "agent-ctrl-node-1",
+            "paused_at": "2026-10-07T09:05:00.000Z"
+        }] }),
+    );
+    let runs = list_runs_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(runs[0].state, "paused");
+    assert_eq!(runs[0].node_name.as_deref(), Some("agent-ctrl-node-1"));
+    assert_eq!(
+        runs[0].paused_at.as_deref(),
+        Some("2026-10-07T09:05:00.000Z")
+    );
+}
+
+#[test]
+fn a_pause_or_resume_must_say_accepted_true() {
+    for body in [
+        json!({ "job_id": "job-1", "state": "running", "accepted": false }),
+        json!({ "job_id": "job-1", "state": "running" }),
+    ] {
+        let base = http_fixture("200 OK", body);
+        assert!(pause_run_with(&fixture_profile(base), "token", "job-1").is_err());
+        let base = http_fixture("200 OK", json!({ "state": "running" }));
+        assert!(resume_run_with(&fixture_profile(base), "token", "job-1").is_err());
+    }
+}
+
+#[test]
+fn pause_and_resume_commands_check_the_job_id_before_any_request() {
+    for command in [
+        ManagedSessionsCommand::Pause {
+            job_id: "../x".to_owned(),
+            environment: ManagedEnvironment::Staging,
+        },
+        ManagedSessionsCommand::Resume {
+            job_id: "../x".to_owned(),
+            environment: ManagedEnvironment::Staging,
+        },
+    ] {
+        let error = run(&ManagedSessionsArgs {
+            command,
+            json: false,
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid AgentCtrl job id"),
+            "{error}"
+        );
+    }
+}
+
+fn outcome(state: &str, node_name: Option<&str>) -> RunControlOutcome {
+    RunControlOutcome {
+        state: state.to_owned(),
+        node_name: node_name.map(str::to_owned),
+    }
+}
+
+#[test]
+fn run_control_summary_names_state_and_node() {
+    assert_eq!(
+        run_control_summary("Paused", "job-1", &outcome("paused", Some("node-a"))),
+        "Paused job-1 (paused) on node-a"
+    );
+}
+
+#[test]
+fn run_control_summary_omits_an_absent_node() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("running", None)),
+        "Resumed job-1 (running)"
+    );
+}
+
+#[test]
+fn run_control_summary_reports_an_empty_state_as_unknown() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("", Some("node-a"))),
+        "Resume requested for job-1; still unknown on node-a"
+    );
+}
+
+#[test]
+fn a_pause_that_has_not_landed_says_the_run_is_still_running() {
+    assert_eq!(
+        run_control_summary("Paused", "job-1", &outcome("running", Some("node-a"))),
+        "Pause requested for job-1; still running on node-a"
+    );
+}
+
+#[test]
+fn a_resume_that_has_not_landed_says_the_run_is_still_paused() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("paused", None)),
+        "Resume requested for job-1; still paused"
+    );
+}
+
+#[test]
+fn failure_messages_never_show_url_credentials() {
+    let body = json!({
+        "error": "git fetch https://user:token@host/repo.git failed",
+        "code": "command_rejected"
+    })
+    .to_string();
+    let rejected = || {
+        anyhow::Error::new(HttpStatusError {
+            status: StatusCode::CONFLICT,
+            body: body.clone(),
+        })
+    };
+    for message in [
+        pause_failure_message(&rejected()),
+        resume_failure_message(&rejected()),
+        stop_failure_message(&rejected()),
+    ] {
+        assert!(!message.contains("token"), "{message}");
+        assert!(message.contains("https://host/repo.git"), "{message}");
+        assert!(!message.contains("command_rejected"), "{message}");
+    }
+    let unstructured = anyhow::anyhow!("failed: https://user:token@host/x");
+    assert!(!pause_failure_message(&unstructured).contains("token"));
+}
+
+#[test]
+fn a_resume_without_a_known_session_is_recognized() {
+    let error = anyhow::Error::new(HttpStatusError {
+        status: StatusCode::PRECONDITION_FAILED,
+        body: json!({ "error": "session id unknown", "code": "session_unknown" }).to_string(),
+    });
+    let message = resume_failure_message(&error);
+    assert!(message.contains("cannot be resumed"), "{message}");
+}
+
+#[test]
+fn a_failed_viewer_command_does_not_end_the_viewer() {
+    keep_viewing(Err(anyhow::anyhow!("dashboard returned 409")));
+    keep_viewing(Ok(()));
+}
+
+#[test]
+fn run_control_json_has_exactly_job_id_state_and_node_name() {
+    assert_eq!(
+        run_control_json("job-1", &outcome("paused", Some("node-a"))),
+        json!({ "job_id": "job-1", "state": "paused", "node_name": "node-a" })
+    );
+    assert_eq!(
+        run_control_json("job-1", &outcome("", None)),
+        json!({ "job_id": "job-1", "state": "", "node_name": null })
+    );
+}
+
+#[test]
+fn a_paused_run_is_attached_with_a_resume_notice() {
+    let mut body = descriptor_json();
+    body["state"] = json!("paused");
+    let base = http_fixture("200 OK", body);
+    let descriptor = fetch_descriptor(
+        &Client::new(),
+        &fixture_profile(base),
+        "job-123",
+        "test-token",
+    )
+    .unwrap();
+
+    assert!(is_paused_state(&descriptor.state));
+    let banner = attach_banner(&descriptor);
+    assert!(
+        banner.contains("Paused — resume with: warpspeed agent-ctrl resume job-123"),
+        "{banner}"
+    );
+    let commands = viewer_commands(&descriptor.state);
+    assert!(commands.contains("resume"), "{commands}");
+    assert!(!commands.contains("send"), "{commands}");
+}
+
+#[test]
+fn a_running_run_is_attached_without_a_pause_notice() {
+    let base = http_fixture("200 OK", descriptor_json());
+    let descriptor = fetch_descriptor(
+        &Client::new(),
+        &fixture_profile(base),
+        "job-123",
+        "test-token",
+    )
+    .unwrap();
+
+    let banner = attach_banner(&descriptor);
+    assert!(
+        banner.starts_with("Attached to Inspector (running, capabilities: watch,input,close).")
+    );
+    assert!(!banner.contains("Paused"), "{banner}");
+    assert!(viewer_commands("running").contains("send <text>"));
 }

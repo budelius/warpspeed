@@ -141,6 +141,29 @@ fn managed_agent_repos_and_move_all_parse() {
 }
 
 #[test]
+fn managed_agent_pause_and_resume_parse() {
+    let command = agent_ctrl_command(&["pause", "job-1"]);
+    let managed_sessions::ManagedSessionsCommand::Pause {
+        job_id,
+        environment,
+    } = command
+    else {
+        panic!("expected pause, got {command:?}");
+    };
+    assert_eq!(job_id, "job-1");
+    assert_eq!(environment, managed_sessions::ManagedEnvironment::Staging);
+
+    let command = agent_ctrl_command(&["resume", "job-2"]);
+    let managed_sessions::ManagedSessionsCommand::Resume { job_id, .. } = command else {
+        panic!("expected resume, got {command:?}");
+    };
+    assert_eq!(job_id, "job-2");
+
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "pause"]).is_err());
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "resume"]).is_err());
+}
+
+#[test]
 fn identifies_worker_subcommands() {
     assert!(is_worker_invocation("minidump-server"));
     #[cfg(unix)]
@@ -3385,4 +3408,13 @@ fn report_external_reference_missing_reference_type_fails() {
         result.is_err(),
         "missing --reference-type should fail to parse"
     );
+}
+
+#[test]
+fn managed_agent_start_takes_an_agent_kind() {
+    let command = agent_ctrl_command(&["start", "--agent", "claude", "--repo", "https://x/y"]);
+    let managed_sessions::ManagedSessionsCommand::Start { agent, .. } = command else {
+        panic!("expected start, got {command:?}");
+    };
+    assert_eq!(agent, "claude");
 }

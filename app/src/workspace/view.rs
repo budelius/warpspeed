@@ -22272,6 +22272,15 @@ impl Workspace {
         });
     }
 
+    fn toggle_right_click_reporting(&mut self, ctx: &mut ViewContext<Self>) {
+        AltScreenReporting::handle(ctx).update(ctx, |reporting, ctx| {
+            reporting
+                .right_click_reporting_enabled
+                .toggle_and_save_value(ctx)
+                .expect("RightClickReportingEnabled failed to serialize");
+        });
+    }
+
     fn toggle_focus_reporting(&mut self, ctx: &mut ViewContext<Self>) {
         AltScreenReporting::handle(ctx).update(ctx, |reporting, ctx| {
             reporting
@@ -26378,6 +26387,11 @@ impl Workspace {
         if *reporting_setings.scroll_reporting_enabled.value() {
             context.set.insert(flags::SCROLL_REPORTING_CONTEXT_FLAG);
         }
+        if *reporting_setings.right_click_reporting_enabled.value() {
+            context
+                .set
+                .insert(flags::RIGHT_CLICK_REPORTING_CONTEXT_FLAG);
+        }
         if *reporting_setings.mouse_reporting_enabled.value() {
             context.set.insert(flags::MOUSE_REPORTING_CONTEXT_FLAG);
         }
@@ -28004,6 +28018,7 @@ impl TypedActionView for Workspace {
             }
             ToggleMouseReporting => self.toggle_mouse_reporting(ctx),
             ToggleScrollReporting => self.toggle_scroll_reporting(ctx),
+            ToggleRightClickReporting => self.toggle_right_click_reporting(ctx),
             ToggleFocusReporting => self.toggle_focus_reporting(ctx),
             StartTabDrag => {
                 // Drag supersedes any multi-selection; clear it to avoid stale highlights.

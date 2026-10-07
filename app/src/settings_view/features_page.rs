@@ -78,7 +78,8 @@ use crate::settings::{
     UserNativeRedirectPreference, VimModeEnabled, VimStatusBar, VimUnnamedSystemClipboard,
 };
 use crate::terminal::alt_screen_reporting::{
-    AltScreenReporting, FocusReportingEnabled, MouseReportingEnabled, ScrollReportingEnabled,
+    AltScreenReporting, FocusReportingEnabled, MouseReportingEnabled, RightClickReportingEnabled,
+    ScrollReportingEnabled,
 };
 use crate::terminal::general_settings::{
     GeneralSettings, LinkTooltip, LoginItem, QuitOnLastWindowClosed, RestoreSession,
@@ -209,6 +210,19 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
         .is_supported_on_current_platform(
             AltScreenReporting::as_ref(app)
                 .scroll_reporting_enabled
+                .is_supported_on_current_platform(),
+        ),
+        ToggleSettingActionPair::new(
+            "right-click reporting",
+            builder(SettingsAction::FeaturesPageToggle(
+                FeaturesPageAction::ToggleRightClickReporting,
+            )),
+            context,
+            flags::RIGHT_CLICK_REPORTING_CONTEXT_FLAG,
+        )
+        .is_supported_on_current_platform(
+            AltScreenReporting::as_ref(app)
+                .right_click_reporting_enabled
                 .is_supported_on_current_platform(),
         ),
         ToggleSettingActionPair::new(
@@ -771,6 +785,7 @@ pub enum FeaturesPageAction {
     ToggleMouseReporting,
     ToggleGlobalWorkflowsInUniversalSearch,
     ToggleScrollReporting,
+    ToggleRightClickReporting,
     ToggleFocusReporting,
     ToggleLongRunningNotifications,
     SetLongRunningNotificationThreshold,
@@ -1041,6 +1056,10 @@ impl FeaturesPageAction {
             Self::ToggleScrollReporting => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleScrollReporting".to_string(),
                 value: to_string(*reporting_settings.scroll_reporting_enabled),
+            },
+            Self::ToggleRightClickReporting => TelemetryEvent::FeaturesPageAction {
+                action: "ToggleRightClickReporting".to_string(),
+                value: to_string(*reporting_settings.right_click_reporting_enabled),
             },
             Self::ToggleFocusReporting => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleFocusReporting".to_string(),
@@ -1710,6 +1729,15 @@ impl TypedActionView for FeaturesPageView {
                         .scroll_reporting_enabled
                         .toggle_and_save_value(ctx)
                         .expect("ScrollReportingEnabled failed to serialize");
+                });
+                ctx.notify();
+            }
+            ToggleRightClickReporting => {
+                AltScreenReporting::handle(ctx).update(ctx, |reporting, ctx| {
+                    reporting
+                        .right_click_reporting_enabled
+                        .toggle_and_save_value(ctx)
+                        .expect("RightClickReportingEnabled failed to serialize");
                 });
                 ctx.notify();
             }
@@ -2980,6 +3008,12 @@ impl FeaturesPageView {
             .is_supported_on_current_platform()
         {
             terminal_widgets.push(Box::new(ScrollReportingWidget::default()));
+        }
+        if reporting_settings
+            .right_click_reporting_enabled
+            .is_supported_on_current_platform()
+        {
+            terminal_widgets.push(Box::new(RightClickReportingWidget::default()));
         }
         if reporting_settings
             .focus_reporting_enabled
@@ -6848,6 +6882,74 @@ impl SettingsWidget for ScrollReportingWidget {
                         .build()
                         .on_click(move |ctx, _, _| {
                             ctx.dispatch_typed_action(FeaturesPageAction::ToggleScrollReporting)
+                        })
+                        .finish()
+                } else {
+                    switch.disable().build().finish()
+                }
+            },
+            None,
+        )
+    }
+}
+
+#[derive(Default)]
+struct RightClickReportingWidget {
+    additional_info: MouseStateHandle,
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for RightClickReportingWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "right-click reporting context menu full-screen"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let reporting_settings = AltScreenReporting::as_ref(app);
+        let ui_builder = appearance.ui_builder();
+        render_body_item::<FeaturesPageAction>(
+            "Forward Right-Click to Full-Screen Apps".into(),
+            Some(AdditionalInfo {
+                mouse_state: self.additional_info.clone(),
+                on_click_action: None,
+                secondary_text: Some(
+                    "When off, right-click opens Warp's context menu even in apps that track the \
+                     mouse."
+                        .into(),
+                ),
+                tooltip_override_text: None,
+            }),
+            LocalOnlyIconState::for_setting(
+                RightClickReportingEnabled::storage_key(),
+                RightClickReportingEnabled::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            if *reporting_settings.mouse_reporting_enabled.value() {
+                ToggleState::Enabled
+            } else {
+                ToggleState::Disabled
+            },
+            appearance,
+            {
+                let switch = ui_builder
+                    .switch(self.switch_state.clone())
+                    .check(*reporting_settings.right_click_reporting_enabled.value());
+                if *reporting_settings.mouse_reporting_enabled.value() {
+                    switch
+                        .build()
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(FeaturesPageAction::ToggleRightClickReporting)
                         })
                         .finish()
                 } else {

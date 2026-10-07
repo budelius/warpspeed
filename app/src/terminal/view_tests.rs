@@ -56,7 +56,7 @@ use crate::server::ids::{ClientId, SyncId};
 use crate::server::server_api::ai::SpawnAgentRequest;
 use crate::settings::import::model::ImportedConfigModel;
 use crate::settings::{AISettings, AppEditorSettings, RightClickBehavior, WarpPromptSeparator};
-use crate::terminal::alt_screen::should_intercept_mouse;
+use crate::terminal::alt_screen::{should_intercept_mouse, should_intercept_right_click};
 use crate::terminal::block_list_element::{SnackbarPoint, SnackbarTranslationMode};
 use crate::terminal::block_list_viewport::{ClampingMode, ScrollLines};
 use crate::terminal::cli_agent_sessions::event::{
@@ -813,6 +813,10 @@ fn block_list_right_click_forwards_to_pty_when_long_running_block_owns_mouse() {
         };
         let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
 
+        AltScreenReporting::handle(&app).update(&mut app, |reporting, ctx| {
+            let _ = reporting.right_click_reporting_enabled.set_value(true, ctx);
+        });
+
         let size_info = terminal.update(&mut app, |view, ctx| {
             let mut model = view.model.lock();
             model.simulate_long_running_block("cmd", "output");
@@ -822,6 +826,10 @@ fn block_list_right_click_forwards_to_pty_when_long_running_block_owns_mouse() {
             assert!(
                 !should_intercept_mouse(&model, false, ctx),
                 "the running command should own the mouse with SGR reporting enabled"
+            );
+            assert!(
+                !should_intercept_right_click(&model, false, ctx),
+                "right-click reporting is on, so the running command should own right-clicks too"
             );
             *view.size_info
         });
@@ -1094,6 +1102,128 @@ fn alt_screen_shift_right_click_opens_context_menu_when_right_click_pastes() {
                 "Shift+right-click must never paste into the input box"
             );
         });
+    })
+}
+
+/// Full-screen apps like Pi enable SGR mouse tracking, which hands them left-clicks and
+/// drags. Right-click stays Warp's by default so its context menu keeps working; only when
+/// `right_click_reporting_enabled` is on is the raw right-click forwarded to the app instead.
+#[test]
+fn alt_screen_right_click_opens_context_menu_even_when_app_tracks_mouse() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let (window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        let mut updated = EntityIdSet::default();
+        updated.insert(app.root_view_id(window_id).unwrap());
+        let invalidation = WindowInvalidation {
+            updated,
+            ..Default::default()
+        };
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+
+        let size_info = terminal.update(&mut app, |view, ctx| {
+            let mut model = view.model.lock();
+            model.set_mode(ansi::Mode::SwapScreen {
+                save_cursor_and_clear_screen: true,
+            });
+            model.set_mode(ansi::Mode::SgrMouse);
+            model.set_mode(ansi::Mode::ReportMouseClicks);
+            assert!(model.is_alt_screen_active());
+            assert!(
+                !should_intercept_mouse(&model, false, ctx),
+                "the full-screen app should own left-clicks with SGR reporting enabled"
+            );
+            *view.size_info
+        });
+
+        macro_rules! rerender {
+            () => {
+                app.update(enclose!((presenter, invalidation) move |ctx| {
+                    presenter
+                        .borrow_mut()
+                        .invalidate(invalidation, ctx);
+                    presenter.borrow_mut().build_scene(
+                        vec2f(size_info.pane_width_px, size_info.pane_height_px),
+                        1.,
+                        None,
+                        ctx,
+                    );
+                }));
+            };
+        }
+
+        macro_rules! right_click {
+            () => {
+                rerender!();
+                app.update(enclose!((presenter) move |ctx| {
+                    ctx.simulate_window_event(
+                        warpui::Event::RightMouseDown {
+                            position: vec2f(
+                                2. * size_info.cell_width_px.as_f32(),
+                                2. * size_info.cell_height_px.as_f32() - 1.,
+                            ),
+                            cmd: false,
+                            shift: false,
+                            click_count: 1,
+                        },
+                        window_id,
+                        presenter.clone(),
+                    );
+                }));
+            };
+        }
+
+        assert!(!terminal.read(&app, |view, _ctx| view.is_context_menu_open()));
+        right_click!();
+        assert!(
+            terminal.read(&app, |view, _ctx| view.is_context_menu_open()),
+            "a bare right-click must open Warp's context menu even though the app tracks the mouse"
+        );
+        assert!(
+            pty_writes.borrow().is_empty(),
+            "the right-click must not reach the PTY by default, got {:?}",
+            pty_writes.borrow()
+        );
+
+        terminal.update(&mut app, |view, ctx| view.close_context_menu(ctx, false));
+        AltScreenReporting::handle(&app).update(&mut app, |reporting, ctx| {
+            let _ = reporting.right_click_reporting_enabled.set_value(true, ctx);
+        });
+        terminal.read(&app, |view, ctx| {
+            assert!(!should_intercept_right_click(
+                &view.model.lock(),
+                false,
+                ctx
+            ));
+        });
+
+        right_click!();
+        assert!(
+            !terminal.read(&app, |view, _ctx| view.is_context_menu_open()),
+            "with right-click reporting on, the app owns the right-click instead of Warp's menu"
+        );
+        let writes = pty_writes.borrow();
+        assert_eq!(
+            writes.len(),
+            1,
+            "exactly one raw mouse report should reach the PTY, got {writes:?}"
+        );
+        assert!(
+            writes[0].starts_with(b"\x1b[<2;"),
+            "expected an SGR right-button-press mouse report, got {:?}",
+            writes[0]
+        );
     })
 }
 

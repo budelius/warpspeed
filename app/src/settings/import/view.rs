@@ -715,6 +715,11 @@ impl SettingsImportView {
         AltScreenReporting::handle(ctx).update(ctx, |reporting, ctx| {
             report_if_error!(reporting.mouse_reporting_enabled.set_value_to_default(ctx));
             report_if_error!(reporting.scroll_reporting_enabled.set_value_to_default(ctx));
+            report_if_error!(
+                reporting
+                    .right_click_reporting_enabled
+                    .set_value_to_default(ctx)
+            );
         });
         FontSettings::handle(ctx).update(ctx, |font_settings, ctx| {
             report_if_error!(font_settings.monospace_font_size.set_value_to_default(ctx));

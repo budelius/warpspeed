@@ -22,6 +22,16 @@ define_settings_group!(AltScreenReporting, settings: [
         toml_path: "terminal.scroll_reporting_enabled",
         description: "Whether to forward scroll events to full-screen terminal applications.",
     },
+    right_click_reporting_enabled: RightClickReportingEnabled {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        surface: settings::SettingSurfaces::GUI,
+        private: false,
+        toml_path: "terminal.right_click_reporting_enabled",
+        description: "Whether to forward right-clicks to full-screen terminal applications that track the mouse. When disabled, right-click opens Warp's context menu (or pastes, per the right-click setting) even inside such applications.",
+    },
     focus_reporting_enabled: FocusReportingEnabled {
         type: bool,
         default: true,

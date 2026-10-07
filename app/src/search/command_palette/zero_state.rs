@@ -120,7 +120,7 @@ impl ZeroState {
         }
 
         // Agent sessions act on the local machine, which a shared-session viewer does not own.
-        if !is_shared_session_viewer_focused {
+        if !is_shared_session_viewer_focused && cfg!(feature = "local_tty") {
             valid_filters.push(QueryFilter::AgentSessions);
         }
 

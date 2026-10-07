@@ -1275,13 +1275,15 @@ pub fn init(app: &mut AppContext) {
                 query: None,
             },
         )
-        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession")),
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))
+        .with_enabled(|| cfg!(feature = "local_tty")),
         EditableBinding::new(
             "workspace:show_agent_sessions",
             "Agent sessions: show window",
             WorkspaceAction::ShowAgentSessions { focus: None },
         )
-        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession")),
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))
+        .with_enabled(|| cfg!(feature = "local_tty")),
     ]);
 
     if FeatureFlag::Autoupdate.is_enabled() {

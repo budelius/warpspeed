@@ -156,7 +156,7 @@ impl DataSourceStore {
             }
 
             // Agent sessions act on this machine, which a shared-session viewer does not own.
-            if !is_shared_session_viewer {
+            if !is_shared_session_viewer && cfg!(feature = "local_tty") {
                 mixer.add_sync_source(
                     self.agent_sessions_data_source.clone(),
                     HashSet::from([QueryFilter::AgentSessions]),

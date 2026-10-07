@@ -1,3 +1,5 @@
+use command::blocking::Command;
+
 use super::*;
 
 fn process(pid: u32, parent: u32, name: &str) -> ProcessInfo {
@@ -277,4 +279,22 @@ fn the_tree_walk_still_works_for_entries_without_a_uuid() {
     )
     .unwrap();
     assert_eq!(found.session_id, "pi-1");
+}
+
+/// The extension's own tests run under Node; skipped where Node is not installed.
+#[test]
+fn the_pi_extension_passes_its_node_tests() {
+    let test_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/terminal/cli_agent_sessions/process_registry/warp-session-registry.test.mjs");
+    let output = match Command::new("node").arg("--test").arg(&test_file).output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("could not run node: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "node --test failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

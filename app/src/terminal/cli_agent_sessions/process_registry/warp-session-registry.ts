@@ -99,15 +99,18 @@ function errorFields(error: unknown): Record<string, unknown> {
 }
 
 function installProcessHooks() {
+  // A first listener would stop Node exiting on these, so only join handlers Pi installed. A
+  // skipped rejection still surfaces as an uncaught exception, which the monitor below logs.
   for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) {
-    // A first listener would stop Node exiting on the signal, so only join handlers Pi installed.
     if (process.listenerCount(signal) > 0) {
       process.prependListener(signal, () => log("signal", { signal }));
     }
   }
+  if (process.listenerCount("unhandledRejection") > 0) {
+    process.prependListener("unhandledRejection", (reason) => log("unhandled_rejection", errorFields(reason)));
+  }
   process.stdin?.on?.("end", () => log("stdin_end"));
   process.stdin?.on?.("close", () => log("stdin_close"));
-  process.on("unhandledRejection", (reason) => log("unhandled_rejection", errorFields(reason)));
   process.on("uncaughtExceptionMonitor", (error) => log("uncaught_exception", errorFields(error)));
   process.on("exit", (code) => log("exit", { code }));
 }

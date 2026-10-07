@@ -86,3 +86,23 @@ test("nothing is written when the session id is unknown", async () => {
   await pi.fire("session_start", {}, { sessionManager: { getSessionFile: () => "" } });
   assert.ok(!existsSync(join(agentDir, "warp-sessions", "logs")));
 });
+
+test("an unhandled rejection still ends the process and is logged as the crash", () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+  const script = `
+    const { default: register } = await import(${JSON.stringify(extension)});
+    const handlers = new Map();
+    register({ on: (e, h) => handlers.set(e, h) });
+    await handlers.get("session_start")({}, { sessionManager: { getSessionFile: () => "x_sess-4.jsonl" } });
+    Promise.reject(new Error("boom"));
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0, "the rejection must still end the process");
+  const log = readFileSync(join(agentDir, "warp-sessions", "logs", "sess-4.log"), "utf8").trim().split("\n").map(JSON.parse);
+  const crash = log.find((line) => line.event === "uncaught_exception");
+  assert.ok(crash, "crash line present");
+  assert.match(crash.message, /boom/);
+});

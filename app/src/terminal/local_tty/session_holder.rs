@@ -57,26 +57,38 @@ pub(crate) fn current_holder() -> SessionHolder {
 }
 
 pub(crate) fn verdict(channel: &str, session_id: SessionId) -> HolderVerdict {
-    match connect(channel) {
-        Some(mut transport) => verdict_over(&mut transport, session_id),
-        None => HolderVerdict::Unknown,
-    }
+    verdict_over(|| connect(channel), session_id)
 }
 
 pub(crate) fn end_session(channel: &str, session_id: SessionId) -> Result<()> {
-    let mut transport = connect(channel)
-        .with_context(|| format!("The supervisor on {channel} is not answering"))?;
-    end_session_over(&mut transport, session_id)
+    let mut connected = false;
+    let result = end_session_over(
+        || {
+            let transport = connect(channel);
+            connected |= transport.is_some();
+            transport
+        },
+        session_id,
+    );
+    if connected {
+        result
+    } else {
+        result.with_context(|| format!("The supervisor on {channel} is not answering"))
+    }
 }
 
-pub(crate) fn verdict_over(transport: &mut impl Transport, session_id: SessionId) -> HolderVerdict {
-    let Some(Message::Pong { protocol_version }) = ask(transport, Message::Ping) else {
+/// `open` is called once per request: a supervisor serves a single request per connection.
+pub(crate) fn verdict_over<T: Transport>(
+    mut open: impl FnMut() -> Option<T>,
+    session_id: SessionId,
+) -> HolderVerdict {
+    let Some(Message::Pong { protocol_version }) = ask(&mut open, Message::Ping) else {
         return HolderVerdict::Unknown;
     };
     if protocol_version != PROTOCOL_VERSION {
         return HolderVerdict::Unknown;
     }
-    let Some(Message::ListSessionsResponse { sessions }) = ask(transport, Message::ListSessions)
+    let Some(Message::ListSessionsResponse { sessions }) = ask(&mut open, Message::ListSessions)
     else {
         return HolderVerdict::Unknown;
     };
@@ -90,18 +102,19 @@ pub(crate) fn verdict_over(transport: &mut impl Transport, session_id: SessionId
     }
 }
 
-pub(crate) fn end_session_over(
-    transport: &mut impl Transport,
+/// `open` is called once per request: a supervisor serves a single request per connection.
+pub(crate) fn end_session_over<T: Transport>(
+    mut open: impl FnMut() -> Option<T>,
     session_id: SessionId,
 ) -> Result<()> {
-    match ask(transport, Message::Kill { session_id }) {
+    match ask(&mut open, Message::Kill { session_id }) {
         Some(Message::KillResponse { error: None }) => {}
         Some(Message::KillResponse { error: Some(error) }) => bail!("{error}"),
         _ => bail!("The supervisor did not answer the request to end the session"),
     }
     let deadline = Instant::now() + END_TIMEOUT;
     loop {
-        match ask(transport, Message::ChildStatus { session_id }) {
+        match ask(&mut open, Message::ChildStatus { session_id }) {
             Some(Message::ChildStatusResponse { running: false }) => return Ok(()),
             Some(Message::ChildStatusResponse { running: true }) => {}
             _ => bail!("The supervisor stopped answering while the session was ending"),
@@ -113,8 +126,10 @@ pub(crate) fn end_session_over(
     }
 }
 
-/// One request, one answer, and the acknowledgement the named-pipe server waits for.
-fn ask(transport: &mut impl Transport, message: Message) -> Option<Message> {
+/// One request on a fresh connection, its answer, and the acknowledgement the named-pipe
+/// server waits for.
+fn ask<T: Transport>(open: &mut impl FnMut() -> Option<T>, message: Message) -> Option<Message> {
+    let mut transport = open()?;
     transport.send(&message).ok()?;
     let deadline = Instant::now() + ANSWER_TIMEOUT;
     let answer = loop {

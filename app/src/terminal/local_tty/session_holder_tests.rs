@@ -1,4 +1,7 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use warp_core::SessionId;
 use warp_terminal::local_tty::supervisor::loopback::LoopbackTransport;
@@ -23,11 +26,12 @@ fn summary(id: u64, attached: bool) -> SessionSummary {
     }
 }
 
-/// Answers like a supervisor: `Ping` with the given version, `ListSessions` with `sessions`,
-/// `Kill` with `kill_error`, and `ChildStatus` with `running` decreasing to false after
-/// `running_polls` answers.
+/// Answers like a supervisor: one request per connection, then the `ResponseReceived`
+/// acknowledgement, then the next connection. `Ping` is answered with the given version,
+/// `ListSessions` with `sessions`, `Kill` with `kill_error`, and `ChildStatus` with `running`
+/// decreasing to false after `running_polls` answers. Returns every request it saw.
 fn fake_holder(
-    mut side: LoopbackTransport,
+    connections: mpsc::Receiver<LoopbackTransport>,
     version: u32,
     sessions: Vec<SessionSummary>,
     kill_error: Option<String>,
@@ -35,102 +39,139 @@ fn fake_holder(
 ) -> thread::JoinHandle<Vec<Message>> {
     thread::spawn(move || {
         let mut seen = Vec::new();
-        let mut idle_polls = 0;
-        loop {
-            match side.receive() {
-                Ok(Some(message)) => {
-                    idle_polls = 0;
-                    let reply = match &message {
-                        Message::Ping => Some(Message::Pong {
-                            protocol_version: version,
-                        }),
-                        Message::ListSessions => Some(Message::ListSessionsResponse {
-                            sessions: sessions.clone(),
-                        }),
-                        Message::Kill { .. } => Some(Message::KillResponse {
-                            error: kill_error.clone(),
-                        }),
-                        Message::ChildStatus { .. } => {
-                            let running = running_polls > 0;
-                            running_polls = running_polls.saturating_sub(1);
-                            Some(Message::ChildStatusResponse { running })
-                        }
-                        Message::ResponseReceived => None,
-                        _ => Some(Message::KillResponse {
-                            error: Some("unexpected".into()),
-                        }),
-                    };
-                    seen.push(message);
-                    if let Some(reply) = reply {
-                        side.send(&reply).unwrap();
-                    }
+        for mut side in connections {
+            let Some(message) = receive_blocking(&mut side) else {
+                continue;
+            };
+            let reply = match &message {
+                Message::Ping => Message::Pong {
+                    protocol_version: version,
+                },
+                Message::ListSessions => Message::ListSessionsResponse {
+                    sessions: sessions.clone(),
+                },
+                Message::Kill { .. } => Message::KillResponse {
+                    error: kill_error.clone(),
+                },
+                Message::ChildStatus { .. } => {
+                    let running = running_polls > 0;
+                    running_polls = running_polls.saturating_sub(1);
+                    Message::ChildStatusResponse { running }
                 }
-                Ok(None) => {
-                    idle_polls += 1;
-                    if idle_polls > 100 {
-                        return seen;
-                    }
-                    thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(_) => return seen,
-            }
+                _ => Message::KillResponse {
+                    error: Some("unexpected".into()),
+                },
+            };
+            seen.push(message);
+            side.send(&reply).unwrap();
+            let acknowledgement = receive_blocking(&mut side);
+            assert!(matches!(acknowledgement, Some(Message::ResponseReceived)));
         }
+        seen
     })
+}
+
+fn receive_blocking(side: &mut LoopbackTransport) -> Option<Message> {
+    for _ in 0..400 {
+        if let Ok(Some(message)) = side.receive() {
+            return Some(message);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
+/// An opener that hands the server side of a fresh pair to the fake holder on every call.
+fn opener(
+    connections: mpsc::Sender<LoopbackTransport>,
+) -> impl FnMut() -> Option<LoopbackTransport> {
+    move || {
+        let (client, server) = LoopbackTransport::pair();
+        connections.send(server).unwrap();
+        Some(client)
+    }
 }
 
 #[test]
 fn a_detached_session_the_holder_lists_is_held_detached() {
-    let (mut client, server) = LoopbackTransport::pair();
-    let holder = fake_holder(server, PROTOCOL_VERSION, vec![summary(42, false)], None, 0);
+    let (sender, receiver) = mpsc::channel();
+    let holder = fake_holder(
+        receiver,
+        PROTOCOL_VERSION,
+        vec![summary(42, false)],
+        None,
+        0,
+    );
     assert_eq!(
-        verdict_over(&mut client, SessionId::from(42u64)),
+        verdict_over(opener(sender), SessionId::from(42u64)),
         HolderVerdict::HeldDetached
     );
-    drop(client);
     holder.join().unwrap();
 }
 
 #[test]
 fn an_attached_session_is_held_attached() {
-    let (mut client, server) = LoopbackTransport::pair();
-    let holder = fake_holder(server, PROTOCOL_VERSION, vec![summary(42, true)], None, 0);
+    let (sender, receiver) = mpsc::channel();
+    let holder = fake_holder(receiver, PROTOCOL_VERSION, vec![summary(42, true)], None, 0);
     assert_eq!(
-        verdict_over(&mut client, SessionId::from(42u64)),
+        verdict_over(opener(sender), SessionId::from(42u64)),
         HolderVerdict::HeldAttached
     );
-    drop(client);
     holder.join().unwrap();
 }
 
 #[test]
 fn a_session_the_holder_does_not_list_is_unknown() {
-    let (mut client, server) = LoopbackTransport::pair();
-    let holder = fake_holder(server, PROTOCOL_VERSION, vec![summary(1, false)], None, 0);
+    let (sender, receiver) = mpsc::channel();
+    let holder = fake_holder(receiver, PROTOCOL_VERSION, vec![summary(1, false)], None, 0);
     assert_eq!(
-        verdict_over(&mut client, SessionId::from(42u64)),
+        verdict_over(opener(sender), SessionId::from(42u64)),
         HolderVerdict::Unknown
     );
-    drop(client);
     holder.join().unwrap();
 }
 
 #[test]
 fn a_holder_on_another_protocol_version_is_unknown_and_never_asked_for_sessions() {
-    let (mut client, server) = LoopbackTransport::pair();
+    let (sender, receiver) = mpsc::channel();
     let holder = fake_holder(
-        server,
+        receiver,
         PROTOCOL_VERSION + 1,
         vec![summary(42, false)],
         None,
         0,
     );
     assert_eq!(
-        verdict_over(&mut client, SessionId::from(42u64)),
+        verdict_over(opener(sender), SessionId::from(42u64)),
         HolderVerdict::Unknown
     );
-    drop(client);
     let seen = holder.join().unwrap();
     assert!(!seen.iter().any(|m| matches!(m, Message::ListSessions)));
+}
+
+#[test]
+fn every_request_is_made_on_its_own_connection() {
+    let (sender, receiver) = mpsc::channel();
+    let counted = Arc::new(AtomicUsize::new(0));
+    let holder = fake_holder(
+        receiver,
+        PROTOCOL_VERSION,
+        vec![summary(42, false)],
+        None,
+        0,
+    );
+    let mut open = opener(sender);
+    let open_counted = {
+        let counted = counted.clone();
+        move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            open()
+        }
+    };
+    verdict_over(open_counted, SessionId::from(42u64));
+    let seen = holder.join().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(counted.load(Ordering::SeqCst), seen.len());
 }
 
 #[cfg(unix)]
@@ -163,10 +204,15 @@ fn an_unreachable_channel_is_unknown() {
 
 #[test]
 fn ending_a_session_kills_it_and_waits_until_it_stops_running() {
-    let (mut client, server) = LoopbackTransport::pair();
-    let holder = fake_holder(server, PROTOCOL_VERSION, vec![summary(42, false)], None, 2);
-    end_session_over(&mut client, SessionId::from(42u64)).unwrap();
-    drop(client);
+    let (sender, receiver) = mpsc::channel();
+    let holder = fake_holder(
+        receiver,
+        PROTOCOL_VERSION,
+        vec![summary(42, false)],
+        None,
+        2,
+    );
+    end_session_over(opener(sender), SessionId::from(42u64)).unwrap();
     let seen = holder.join().unwrap();
     assert!(
         seen.iter()
@@ -182,16 +228,15 @@ fn ending_a_session_kills_it_and_waits_until_it_stops_running() {
 
 #[test]
 fn a_kill_the_holder_refuses_is_an_error() {
-    let (mut client, server) = LoopbackTransport::pair();
+    let (sender, receiver) = mpsc::channel();
     let holder = fake_holder(
-        server,
+        receiver,
         PROTOCOL_VERSION,
         vec![],
         Some("no such session".into()),
         0,
     );
-    let error = end_session_over(&mut client, SessionId::from(42u64)).unwrap_err();
+    let error = end_session_over(opener(sender), SessionId::from(42u64)).unwrap_err();
     assert!(error.to_string().contains("no such session"));
-    drop(client);
     holder.join().unwrap();
 }

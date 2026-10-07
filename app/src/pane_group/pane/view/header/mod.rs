@@ -227,8 +227,16 @@ impl<P: BackingView> PaneHeader<P> {
         event: &crate::menu::Event,
         ctx: &mut ViewContext<Self>,
     ) {
-        if let crate::menu::Event::Close { via_select_item: _ } = event {
-            self.close_overlay(ctx);
+        if let crate::menu::Event::Close { via_select_item } = event {
+            // The chosen item's action decides where focus goes next; handing it back to the pane
+            // contents as well would land after that and pull it away (a pane regaining focus
+            // closes the workspace's modals). The menu never held focus, so only a dismissal
+            // returns it.
+            if *via_select_item {
+                self.open_overlay = OpenOverlay::None;
+            } else {
+                self.close_overlay(ctx);
+            }
             self.overflow_menu.update(ctx, |menu, ctx| {
                 menu.reset_selection(ctx);
             });
@@ -265,6 +273,13 @@ impl<P: BackingView> PaneHeader<P> {
     #[cfg(feature = "integration_tests")]
     pub fn is_overlay_open(&self) -> bool {
         !matches!(self.open_overlay, OpenOverlay::None)
+    }
+
+    #[cfg(any(test, feature = "integration_tests"))]
+    pub fn overflow_menu(
+        &self,
+    ) -> &ViewHandle<Menu<PaneHeaderAction<P::PaneHeaderOverflowMenuAction, P::CustomAction>>> {
+        &self.overflow_menu
     }
 
     pub fn set_overflow_menu_items(

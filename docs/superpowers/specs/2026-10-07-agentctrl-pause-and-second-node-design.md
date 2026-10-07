@@ -53,9 +53,17 @@ slot and resume it later with its conversation intact, from the dashboard and fr
 
 - New `JobState::Paused` (`"paused"`), non-terminal, excluded from every capacity count. Persisted
   like the other states (controller job record, Mongo read model, `GET /runs`).
-- New RPCs `PauseAgent { job_id }` and `ResumeAgent { job_id, request_id }` on FleetControl, both
-  operator mutations (same audit/actor/source handling as `StopAgent`), both idempotent: pausing a
-  paused run and resuming a running run are no-ops that return the current state.
+- New RPCs `PauseAgent { job_id, request_id, actor, source }` and
+  `ResumeAgent { job_id, request_id, actor, source }` on FleetControl, both operator mutations
+  (same `mutation_context` audit handling as `StopAgent`), both idempotent: pausing a paused run
+  and resuming a running run are no-ops that return the current state.
+- `StopAgent` on a paused run ends it: the job becomes `Stopped`, and the node that holds the
+  worktree removes the marker and the worktree (nothing new to push; the pause already pushed).
+  The dashboard keeps Stop enabled for paused runs because `paused` is not terminal.
+- Every interactive run records its agent session id on the job at spawn (Claude via the
+  `--session-id` the node generates; Pi and Codex from their first status hook), so the read model
+  can offer Pause; the Mongo job's `node` field is updated on resume and `paused_at` is written
+  as a date.
 - **Pause** (controller → node holding the job): the node asks the agent process to exit cleanly
   (the platform `graceful_stop`; `force` after 60 s), waits for exit, then runs the same work as
   run end minus the removal: commit any dirty tree as `agent-ctrl run <job> pause`, push to the
@@ -119,13 +127,20 @@ slot and resume it later with its conversation intact, from the dashboard and fr
 
 ## Spec B — dashboard
 
-- `POST /api/agent-control/runs/:id/pause` and `/resume` → `PauseAgent` / `ResumeAgent`; errors
-  map as for stop (409 `node_at_capacity` on resume, 412 `session_unknown` on pause).
+- `POST /api/agent-control/runs/:id/pause` and `/resume` → `PauseAgent` / `ResumeAgent`. Empty
+  JSON body, the same `Idempotency-Key` handling as `/stop`; response
+  `200 { job_id, state, accepted: true, node_name }`.
+- `GET /runs/:id/session` and `/runs/:id/events` keep serving a paused run (capabilities `resume`
+  and `stop`, never `input`/`close`), so an attached viewer keeps polling instead of failing.
 - `paused` joins `ALLOWED_JOB_STATES`; it is **not** terminal. Capabilities: `pause` when
   `state == running` and the run is interactive with a known session id; `resume` when
   `state == paused`.
-- Run row and detail: Pause / Resume buttons next to Stop; a `paused` badge; `active_runs` counts
-  paused runs under a separate `paused_runs` figure.
+- Run row and detail: Pause / Resume buttons next to Stop; a `paused` badge; the overview's
+  `active_runs` excludes paused runs, which are listed under a separate `paused_runs`.
+- Error codes: 404 unknown job; 409 `terminal_run`, `not_interactive`, `invalid_state`
+  (pause of a non-running run, resume of a non-paused run), `node_at_capacity` (resume);
+  412 `session_unknown` (pause), taken from the controller's `FAILED_PRECONDITION`, since the read
+  model may lag behind the spawn.
 - `/repos` passes the union through unchanged (the controller does the merge).
 - `/runs` items gain `node_name` and `paused_at`.
 

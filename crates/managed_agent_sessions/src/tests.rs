@@ -1121,3 +1121,46 @@ fn pause_and_resume_commands_check_the_job_id_before_any_request() {
         );
     }
 }
+
+fn outcome(state: &str, node_name: Option<&str>) -> RunControlOutcome {
+    RunControlOutcome {
+        state: state.to_owned(),
+        node_name: node_name.map(str::to_owned),
+    }
+}
+
+#[test]
+fn run_control_summary_names_state_and_node() {
+    assert_eq!(
+        run_control_summary("Paused", "job-1", &outcome("paused", Some("node-a"))),
+        "Paused job-1 (paused) on node-a"
+    );
+}
+
+#[test]
+fn run_control_summary_omits_an_absent_node() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("running", None)),
+        "Resumed job-1 (running)"
+    );
+}
+
+#[test]
+fn run_control_summary_reports_an_empty_state_as_unknown() {
+    assert_eq!(
+        run_control_summary("Paused", "job-1", &outcome("", Some("node-a"))),
+        "Paused job-1 (unknown) on node-a"
+    );
+}
+
+#[test]
+fn run_control_json_has_exactly_job_id_state_and_node_name() {
+    assert_eq!(
+        run_control_json("job-1", &outcome("paused", Some("node-a"))),
+        json!({ "job_id": "job-1", "state": "paused", "node_name": "node-a" })
+    );
+    assert_eq!(
+        run_control_json("job-1", &outcome("", None)),
+        json!({ "job_id": "job-1", "state": "", "node_name": null })
+    );
+}

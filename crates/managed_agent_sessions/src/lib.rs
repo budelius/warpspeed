@@ -846,24 +846,34 @@ fn print_run_control_outcome(
     json_output: bool,
 ) -> Result<()> {
     if json_output {
-        let value = json!({
-            "job_id": job_id,
-            "state": outcome.state,
-            "node_name": outcome.node_name,
-        });
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&run_control_json(job_id, outcome))?
+        );
+    } else {
+        println!("{}", run_control_summary(verb, job_id, outcome));
     }
+    Ok(())
+}
+
+fn run_control_json(job_id: &str, outcome: &RunControlOutcome) -> Value {
+    json!({
+        "job_id": job_id,
+        "state": outcome.state,
+        "node_name": outcome.node_name,
+    })
+}
+
+fn run_control_summary(verb: &str, job_id: &str, outcome: &RunControlOutcome) -> String {
     let state = if outcome.state.is_empty() {
         "unknown"
     } else {
         &outcome.state
     };
     match &outcome.node_name {
-        Some(node) => println!("{verb} {job_id} ({state}) on {node}"),
-        None => println!("{verb} {job_id} ({state})"),
+        Some(node) => format!("{verb} {job_id} ({state}) on {node}"),
+        None => format!("{verb} {job_id} ({state})"),
     }
-    Ok(())
 }
 
 /// Asks the dashboard to stop a managed run.

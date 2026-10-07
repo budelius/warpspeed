@@ -165,3 +165,44 @@ fn a_shell_running_a_program_has_a_child_process_and_an_idle_one_does_not() {
     assert!(!has_child_process_in(200, &processes));
     assert!(!has_child_process_in(4, &processes));
 }
+
+#[test]
+fn an_agent_is_found_by_the_session_its_registry_entry_names() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry(registry.path(), 101, "aaaa-1111", r"T:\projects\warp");
+    write_entry(registry.path(), 201, "bbbb-2222", r"T:\projects\warp");
+    let processes = [
+        process(100, 1, "bash.exe"),
+        process(101, 100, "claude.exe"),
+        process(201, 1, "claude.exe"),
+    ];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "bbbb-2222", &processes, registry.path()),
+        Some(201)
+    );
+}
+
+#[test]
+fn a_registry_entry_whose_process_is_gone_does_not_name_an_agent() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry(registry.path(), 101, "aaaa-1111", r"T:\projects\warp");
+    let processes = [process(100, 1, "bash.exe")];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &processes, registry.path()),
+        None
+    );
+}
+
+#[test]
+fn a_registry_entry_for_another_kind_of_process_does_not_name_an_agent() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry(registry.path(), 101, "aaaa-1111", r"T:\projects\warp");
+    let processes = [process(101, 1, "notepad.exe")];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &processes, registry.path()),
+        None
+    );
+}

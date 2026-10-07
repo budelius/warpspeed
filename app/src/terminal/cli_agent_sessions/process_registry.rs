@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use instant::Instant;
 use serde::Deserialize;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -113,6 +113,49 @@ pub(crate) fn running_session_ids() -> std::collections::HashSet<String> {
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// The process of the `agent` that is running `session_id`, by its own registry entry.
+pub(crate) fn agent_pid_for_session(agent: CLIAgent, session_id: &str) -> Option<u32> {
+    let directory = registry_directory(agent)?;
+    agent_pid_for_session_in(agent, session_id, &process_table(), &directory)
+}
+
+pub(crate) fn agent_pid_for_session_in(
+    agent: CLIAgent,
+    session_id: &str,
+    processes: &[ProcessInfo],
+    registry_directory: &Path,
+) -> Option<u32> {
+    processes
+        .iter()
+        .filter(|process| is_agent_process(agent, &process.name))
+        .find(|process| {
+            read_entry(&registry_directory.join(format!("{}.json", process.pid)))
+                .is_some_and(|entry| entry.session_id == session_id)
+        })
+        .map(|process| process.pid)
+}
+
+/// Ends the agent process holding `session_id`. `Ok(false)` when none is registered.
+#[allow(dead_code)] // wired in by the take-over task
+pub(crate) fn terminate_agent_for_session(agent: CLIAgent, session_id: &str) -> Result<bool> {
+    let Some(pid) = agent_pid_for_session(agent, session_id) else {
+        return Ok(false);
+    };
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let process = system
+        .process(sysinfo::Pid::from_u32(pid))
+        .with_context(|| format!("The {} process {pid} is already gone", agent.display_name()))?;
+    if !process.kill() {
+        bail!("Could not end the {} process {pid}", agent.display_name());
+    }
+    Ok(true)
 }
 
 /// Whether any process is running under `pid`.

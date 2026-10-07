@@ -583,6 +583,7 @@ impl PaneContent for TerminalPane {
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: None,
                 is_active,
@@ -615,6 +616,7 @@ impl PaneContent for TerminalPane {
                 LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: self.uuid.clone(),
                     persistent_session_id: None,
+                    session_holder: None,
                     cli_agent_resume_descriptor: None,
                     cwd: None,
                     is_active,
@@ -700,6 +702,7 @@ impl PaneContent for TerminalPane {
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id,
+                session_holder: None,
                 cli_agent_resume_descriptor,
                 cwd,
                 is_active,

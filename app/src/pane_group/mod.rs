@@ -2310,6 +2310,7 @@ impl PaneGroup {
                         LeafContents::Terminal(TerminalPaneSnapshot {
                             uuid: Uuid::new_v4().as_bytes().to_vec(),
                             persistent_session_id: None,
+                            session_holder: None,
                             cli_agent_resume_descriptor: None,
                             cwd: None,
                             is_active: visible_leaf_is_active_session,

@@ -79,7 +79,6 @@ pub struct FleetRow {
     pub agent: String,
     /// The AgentCtrl node the run is on, or last ran on while paused.
     pub node_name: Option<String>,
-    pub interactive: bool,
     /// Whether the dashboard reports that the run can be paused now.
     pub pause_allowed: bool,
     pub branch: Option<String>,
@@ -98,24 +97,10 @@ impl FleetRow {
     }
 
     /// Only a run the dashboard reports as pausable has an agent session AgentCtrl can resume.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the fleet view offers these once it renders pause and resume"
-        )
-    )]
     pub fn can_pause(&self) -> bool {
         self.pause_allowed && self.state == "running"
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the fleet view offers these once it renders pause and resume"
-        )
-    )]
     pub fn can_resume(&self) -> bool {
         self.is_paused()
     }
@@ -141,8 +126,8 @@ pub struct FleetModel {
     repos: Vec<RepositoryInfo>,
     /// Why the last refresh failed; cleared by the next successful one.
     last_error: Option<String>,
-    /// Why the last start, stop, pause or resume failed; kept across refreshes until the next start or stop, or
-    /// until dismissed.
+    /// Why the last start, stop, pause or resume failed; kept across refreshes until the next
+    /// such action, or until dismissed.
     action_error: Option<String>,
     refreshing: bool,
     /// Set when a refresh is asked for while one is in flight, so the newer state is fetched once
@@ -287,13 +272,6 @@ impl FleetModel {
     }
 
     /// Asks AgentCtrl to pause `job_id`, then refreshes.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the fleet view offers these once it renders pause and resume"
-        )
-    )]
     pub fn pause(&mut self, job_id: String, ctx: &mut ModelContext<Self>) {
         let pause = self.backend.pause;
         self.run_command(
@@ -305,13 +283,6 @@ impl FleetModel {
     }
 
     /// Asks AgentCtrl to resume `job_id`, then refreshes.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the fleet view offers these once it renders pause and resume"
-        )
-    )]
     pub fn resume(&mut self, job_id: String, ctx: &mut ModelContext<Self>) {
         let resume = self.backend.resume;
         self.run_command(
@@ -446,7 +417,6 @@ fn fleet_row(run: &RunSummary, repo_url: Option<&str>) -> FleetRow {
         state: run.state.clone(),
         agent: run.agent_name.clone(),
         node_name: run.node_name.clone(),
-        interactive: run.interactive,
         pause_allowed: run.pause_allowed.unwrap_or(false),
         branch: run.branch.clone(),
         branch_url: repo_url

@@ -147,7 +147,8 @@ slot and resume it later with its conversation intact, from the dashboard and fr
 - `GET /runs/:id/session` and `/runs/:id/events` keep serving a paused run (capabilities `resume`
   and `stop`, never `input`/`close`), so an attached viewer keeps polling instead of failing.
 - `paused` joins `ALLOWED_JOB_STATES`; it is **not** terminal. Capabilities: `pause` when
-  `state == running` and the run is interactive with a known session id; `resume` when
+  `state == running`, the run is interactive, its session id is known and it runs on a branch
+  (task-bound and shared-checkout inspector runs can never pause); `resume` when
   `state == paused`.
 - Run row and detail: Pause / Resume buttons next to Stop; a `paused` badge; the overview's
   `active_runs` excludes paused runs, which are listed under a separate `paused_runs`.

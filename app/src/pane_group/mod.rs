@@ -2357,6 +2357,25 @@ impl PaneGroup {
             .pending_agent_resume(app)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_restored_agent_for_test(
+        &mut self,
+        pane_id: PaneId,
+        descriptor: CliAgentResumeDescriptor,
+    ) {
+        if let Some(pane) = self
+            .pane_contents
+            .get_mut(&pane_id)
+            .and_then(|pane| pane.as_any_mut().downcast_mut::<TerminalPane>())
+        {
+            pane.set_restored_shell_snapshot_fields(RestoredShellSnapshotFields {
+                cwd: None,
+                shell_launch_data: None,
+                cli_agent_resume_descriptor: Some(descriptor),
+            });
+        }
+    }
+
     /// Find the PaneId for a given TerminalView EntityId if it exists within this PaneGroup.
     pub fn find_pane_id_for_terminal_view(
         &self,

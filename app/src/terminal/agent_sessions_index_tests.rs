@@ -187,3 +187,23 @@ fn a_past_session_with_another_title_stays_separate_from_a_detached_shell() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].state, AgentSessionState::Past);
 }
+
+#[test]
+fn a_conversation_restored_into_two_panes_is_listed_once_under_the_first() {
+    let first = PaneAgentInput {
+        pending: Some(claude("a", "/p")),
+        ..pane_at(0, "/p")
+    };
+    let second = PaneAgentInput {
+        pending: Some(claude("a", "/p")),
+        ..pane_at(1, "/p")
+    };
+    let rows = build_rows(&[first.clone(), second], &[], &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].state,
+        AgentSessionState::Pending {
+            locator: first.locator
+        }
+    );
+}

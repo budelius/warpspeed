@@ -116,7 +116,8 @@ fn is_detached_conversation(past: &PastAgentSession, detached: &DetachedInput) -
 }
 
 /// Merges every source into one row per conversation, each in its strongest state
-/// (`Running` > `Detached` > `Pending` > `Past`). Panes are expected in tab order.
+/// (`Running` > `Detached` > `Pending` > `Past`); of several panes restored holding one
+/// conversation, the first lists it. Panes are expected in tab order.
 pub(crate) fn build_rows(
     panes: &[PaneAgentInput],
     detached: &[DetachedInput],
@@ -181,7 +182,7 @@ pub(crate) fn build_rows(
             let key = key_of(descriptor);
             if key
                 .as_ref()
-                .is_some_and(|key| running_keys.contains(key) || detached_keys.contains(key))
+                .is_some_and(|key| live_keys.contains(key) || detached_keys.contains(key))
             {
                 continue;
             }

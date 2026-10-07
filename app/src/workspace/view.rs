@@ -14890,6 +14890,12 @@ impl Workspace {
         if self.focus_if_already_running(agent, session_id, ctx) {
             return;
         }
+        if let Some((window_id, locator)) =
+            self.find_conversation_pane(agent, session_id, ConversationPane::Pending, ctx)
+        {
+            self.start_pending_pane_in_window(window_id, locator, ctx);
+            return;
+        }
 
         let target = target
             .filter(|target| {
@@ -14992,45 +14998,128 @@ impl Workspace {
         {
             return;
         }
-        if let Some(manager) = self
-            .get_pane_group_view_with_id(locator.pane_group_id)
-            .and_then(|pane_group| {
-                pane_group
-                    .as_ref(ctx)
-                    .terminal_manager_for_pane_id(locator.pane_id, ctx)
-            })
-        {
-            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
-        }
-        self.focus_pane(locator, ctx);
+        self.start_pending_pane_in_window(ctx.window_id(), locator, ctx);
     }
 
-    /// Focuses the pane already running this conversation, or says it runs elsewhere. Returns
-    /// whether it was running, in which case the caller must not start it again: two agent
-    /// processes on one conversation would interleave writes to its transcript.
+    /// Focuses the pane, in any window, already running this conversation, or says it runs
+    /// outside this app. Returns whether it was running, in which case the caller must not start
+    /// it again: two agent processes on one conversation would interleave writes to its
+    /// transcript.
     fn focus_if_already_running(
         &mut self,
         agent: CLIAgent,
         session_id: &str,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        let running_here = self.agent_pane_inputs(ctx).into_iter().find(|pane| {
-            pane.running.as_ref().is_some_and(|running| {
-                running.agent == agent && running.session_id.as_deref() == Some(session_id)
-            })
-        });
-        if let Some(pane) = running_here {
-            self.focus_pane(pane.locator, ctx);
+        if let Some((window_id, locator)) =
+            self.find_conversation_pane(agent, session_id, ConversationPane::Running, ctx)
+        {
+            self.focus_pane_in_window(window_id, locator, ctx);
             return true;
         }
         if running_agent_session_ids().contains(session_id) {
             self.show_agent_session_error(
-                "This conversation is already running outside this window".to_owned(),
+                "This conversation is already running outside Warp".to_owned(),
                 ctx,
             );
             return true;
         }
         false
+    }
+
+    /// The pane, in this window or any other, holding the conversation as `wanted`. Reads every
+    /// window's panes, so it belongs on an action, never on a keystroke.
+    fn find_conversation_pane(
+        &self,
+        agent: CLIAgent,
+        session_id: &str,
+        wanted: ConversationPane,
+        ctx: &ViewContext<Self>,
+    ) -> Option<(WindowId, PaneViewLocator)> {
+        let holds = |descriptor: Option<&CliAgentResumeDescriptor>| {
+            descriptor.is_some_and(|descriptor| {
+                descriptor.agent == agent && descriptor.session_id.as_deref() == Some(session_id)
+            })
+        };
+        let find_in = |panes: Vec<PaneAgentInput>| {
+            panes
+                .into_iter()
+                .find(|pane| match wanted {
+                    ConversationPane::Running => holds(pane.running.as_ref()),
+                    ConversationPane::Pending => {
+                        pane.running.is_none() && holds(pane.pending.as_ref())
+                    }
+                })
+                .map(|pane| pane.locator)
+        };
+        let current_window = ctx.window_id();
+        if let Some(locator) = find_in(self.agent_pane_inputs(ctx)) {
+            return Some((current_window, locator));
+        }
+        WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .filter(|(window_id, _)| *window_id != current_window)
+            .find_map(|(window_id, workspace)| {
+                find_in(workspace.as_ref(ctx).agent_pane_inputs(ctx))
+                    .map(|locator| (window_id, locator))
+            })
+    }
+
+    fn focus_pane_in_window(
+        &mut self,
+        window_id: WindowId,
+        locator: PaneViewLocator,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if window_id == ctx.window_id() {
+            self.focus_pane(locator, ctx);
+            return;
+        }
+        ctx.windows().show_window_and_focus_app(window_id);
+        if let Some(root_view_id) = ctx.root_view_id(window_id) {
+            ctx.dispatch_action_for_view(
+                window_id,
+                root_view_id,
+                "root_view:handle_pane_navigation_event",
+                &locator,
+            );
+        }
+    }
+
+    /// Starts a restored pane's shell, which resumes the agent it was holding, and focuses it, in
+    /// whichever window it is.
+    fn start_pending_pane_in_window(
+        &mut self,
+        window_id: WindowId,
+        locator: PaneViewLocator,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Reads the other window's pane group rather than updating its workspace, which would
+        // look back into this one while it is being updated.
+        let pane_group = if window_id == ctx.window_id() {
+            self.get_pane_group_view_with_id(locator.pane_group_id)
+                .cloned()
+        } else {
+            WorkspaceRegistry::as_ref(ctx)
+                .all_workspaces(ctx)
+                .into_iter()
+                .find(|(id, _)| *id == window_id)
+                .and_then(|(_, workspace)| {
+                    workspace
+                        .as_ref(ctx)
+                        .get_pane_group_view_with_id(locator.pane_group_id)
+                        .cloned()
+                })
+        };
+        if let Some(manager) = pane_group.and_then(|pane_group| {
+            pane_group
+                .as_ref(ctx)
+                .terminal_manager_for_pane_id(locator.pane_id, ctx)
+        }) {
+            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+        }
+        self.focus_pane_in_window(window_id, locator, ctx);
     }
 
     fn show_agent_session_error(&mut self, message: String, ctx: &mut ViewContext<Self>) {
@@ -32488,6 +32577,15 @@ fn set_opencode_warp_plugin(new_entry: &str) -> String {
         },
         Err(e) => format!("Failed to serialize opencode.json: {e}"),
     }
+}
+
+/// How a pane holds a conversation.
+#[derive(Clone, Copy)]
+enum ConversationPane {
+    /// Its agent is running the conversation.
+    Running,
+    /// It was restored holding the conversation and its shell has yet to resume it.
+    Pending,
 }
 
 /// Conversation IDs agents on this machine are running, in any terminal.

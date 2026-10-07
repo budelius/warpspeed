@@ -7857,3 +7857,131 @@ fn escape_closes_the_agent_sessions_view_with_focus_off_the_search_box() {
         });
     });
 }
+
+fn claude_conversation(session_id: &str) -> CliAgentResumeDescriptor {
+    CliAgentResumeDescriptor {
+        agent: crate::terminal::CLIAgent::Claude,
+        session_id: Some(session_id.to_owned()),
+        cwd: std::env::temp_dir(),
+        title: None,
+        captured_unix_seconds: None,
+    }
+}
+
+fn resume_conversation(
+    workspace: &ViewHandle<Workspace>,
+    session_id: &str,
+    app: &mut App,
+) -> PaneViewLocator {
+    workspace.update(app, |workspace, ctx| {
+        let pane_group = workspace.active_tab_pane_group();
+        let target = PaneViewLocator {
+            pane_group_id: pane_group.id(),
+            pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+        };
+        workspace.perform_agent_session_action(
+            &AgentSessionAction::Resume {
+                agent: crate::terminal::CLIAgent::Claude,
+                session_id: session_id.to_owned(),
+                cwd: std::env::temp_dir(),
+                target: Some(target),
+            },
+            ctx,
+        );
+        target
+    })
+}
+
+fn active_tab_pane_count(workspace: &ViewHandle<Workspace>, app: &mut App) -> usize {
+    workspace.read(app, |workspace, ctx| {
+        workspace
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .visible_pane_ids()
+            .len()
+    })
+}
+
+#[test]
+fn resuming_a_conversation_restored_into_another_pane_starts_that_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let restored = workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().clone();
+            let pane_id = pane_group.as_ref(ctx).focused_pane_id(ctx);
+            pane_group.update(ctx, |pane_group, _| {
+                pane_group.set_restored_agent_for_test(pane_id, claude_conversation(&session_id))
+            });
+            pane_group
+                .as_ref(ctx)
+                .terminal_view_from_pane_id(pane_id, ctx)
+                .expect("terminal pane")
+                .update(ctx, |view, ctx| {
+                    view.execute_command_or_set_pending("claude --resume restored", ctx)
+                });
+            assert!(
+                pane_group
+                    .as_ref(ctx)
+                    .pending_agent_resume(pane_id, ctx)
+                    .is_some(),
+                "the pane holds the restored conversation"
+            );
+            workspace.add_terminal_tab(false, ctx);
+            PaneViewLocator {
+                pane_group_id: pane_group.id(),
+                pane_id,
+            }
+        });
+
+        resume_conversation(&workspace, &session_id, &mut app);
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.active_tab_index(), 0, "the restored pane's tab");
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .focused_pane_id(ctx),
+                restored.pane_id
+            );
+            assert_eq!(
+                workspace.tabs[1].pane_group.as_ref(ctx).visible_pane_ids().len(),
+                1,
+                "nothing was split to resume it again"
+            );
+        });
+    });
+}
+
+#[test]
+fn resuming_a_conversation_running_in_another_window_does_not_start_it_again() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let elsewhere = mock_workspace(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        elsewhere.update(&mut app, |elsewhere, ctx| {
+            let view = elsewhere
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .expect("terminal pane");
+            seed_agent_session(
+                view.id(),
+                crate::terminal::CLIAgent::Claude,
+                Some(&session_id),
+                None,
+                &std::env::temp_dir(),
+                ctx,
+            );
+        });
+
+        let target = resume_conversation(&workspace, &session_id, &mut app);
+
+        assert_eq!(active_tab_pane_count(&workspace, &mut app), 1);
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+    });
+}

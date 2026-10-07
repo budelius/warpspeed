@@ -647,6 +647,8 @@ pub trait PaneContent: 'static {
 pub trait AnyPaneContent {
     /// This pane's contents, as [`Any`], to allow downcasting.
     fn as_any(&self) -> &dyn Any;
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn as_pane(&self) -> &dyn PaneContent;
     fn pre_attach(&self, group: &PaneGroup, ctx: &mut ViewContext<PaneGroup>) -> bool;
     fn try_attach(
@@ -662,6 +664,11 @@ where
     T: PaneContent,
 {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 

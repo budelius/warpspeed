@@ -705,9 +705,9 @@ impl<T: Action + Clone> SearchBar<T> {
             .collect_vec();
 
         let kept_index = kept_selection.and_then(|key| {
-            query_result_renderers.iter().position(|renderer| {
-                renderer.search_result.selection_key().as_ref() == Some(&key)
-            })
+            query_result_renderers
+                .iter()
+                .position(|renderer| renderer.search_result.selection_key().as_ref() == Some(&key))
         });
         self.state.update(ctx, |state, ctx| {
             state.query_result_renderers = Some(query_result_renderers);
@@ -715,7 +715,9 @@ impl<T: Action + Clone> SearchBar<T> {
         });
 
         match kept_index {
-            Some(index) => self.state.update(ctx, |state, ctx| state.select_index(index, ctx)),
+            Some(index) => self
+                .state
+                .update(ctx, |state, ctx| state.select_index(index, ctx)),
             None => self.handle_selection_update(selection_start, ctx),
         }
 

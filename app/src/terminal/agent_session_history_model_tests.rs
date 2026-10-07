@@ -128,7 +128,10 @@ fn a_refresh_that_finds_nothing_new_announces_nothing() {
         });
 
         model.update(&mut app, |model, ctx| model.refresh_with(load, ctx));
-        updates.next().await.expect("the first load announces itself");
+        updates
+            .next()
+            .await
+            .expect("the first load announces itself");
 
         model.update(&mut app, |model, ctx| model.refresh_with(load, ctx));
         for _ in 0..500 {

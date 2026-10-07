@@ -252,8 +252,8 @@ pub(crate) fn view_rows(
 
         if let Some(folder) = folder.filter(|_| !folder_past.is_empty()) {
             let folder = folder.to_path_buf();
-            let expanded = !query.is_empty()
-                || expanded_folders.contains(&(pane.tab_index, folder.clone()));
+            let expanded =
+                !query.is_empty() || expanded_folders.contains(&(pane.tab_index, folder.clone()));
             view.push(ViewRow::PastToggle {
                 tab_index: pane.tab_index,
                 folder,
@@ -720,17 +720,19 @@ fn render_row(
     let text = |text: String, color| Text::new_inline(text, font, font_size).with_color(color);
     let bold = || Properties::default().weight(Weight::Bold);
 
-    let (indent, label, detail, state, button): (
-        f32,
-        Box<dyn Element>,
-        Option<String>,
-        Option<&str>,
-        Option<&str>,
-    ) = match row {
+    let state = match row {
+        ViewRow::Pane { row, .. } => Some(row.as_ref().map_or("—", |row| row.state.label())),
+        ViewRow::Past { row, .. } | ViewRow::Detached { row } => Some(row.state.label()),
+        ViewRow::TabHeader { .. }
+        | ViewRow::PastToggle { .. }
+        | ViewRow::DetachedHeader { .. }
+        | ViewRow::SupervisorUnreachable => None,
+    };
+    let (indent, label, detail, button): (f32, Box<dyn Element>, Option<String>, Option<&str>) =
+        match row {
             ViewRow::TabHeader { title, .. } => (
                 12.,
                 text(title.clone(), main_color).with_style(bold()).finish(),
-                None,
                 None,
                 None,
             ),
@@ -743,7 +745,6 @@ fn render_row(
                     ViewRowAction::ResumeInFolder { .. } => Some("Resume…"),
                     ViewRowAction::None => None,
                 };
-                let state = row.as_ref().map_or("—", |row| row.state.label());
                 let label = Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_spacing(8.)
@@ -754,7 +755,6 @@ fn render_row(
                     PANE_INDENT,
                     label,
                     input.cwd.as_ref().map(|cwd| cwd.display().to_string()),
-                    Some(state),
                     button,
                 )
             }
@@ -777,7 +777,7 @@ fn render_row(
                     )
                     .with_child(text(format!("Past in this folder ({count})"), sub_color).finish())
                     .finish();
-                (PANE_INDENT, label, None, None, None)
+                (PANE_INDENT, label, None, None)
             }
             ViewRow::Past { row, .. } => (
                 PAST_INDENT,
@@ -785,7 +785,6 @@ fn render_row(
                 row.last_used.map(|last_used| {
                     format_approx_duration_from_now(DateTime::<Local>::from(last_used))
                 }),
-                Some(row.state.label()),
                 action_for(row, None).map(|action| action.label()),
             ),
             ViewRow::DetachedHeader { count } => {
@@ -798,20 +797,17 @@ fn render_row(
                     text(title, main_color).with_style(bold()).finish(),
                     None,
                     None,
-                    None,
                 )
             }
             ViewRow::Detached { row } => (
                 PANE_INDENT,
                 text(session_label(row), main_color).finish(),
                 Some(row.cwd.display().to_string()).filter(|cwd| !cwd.is_empty()),
-                Some(row.state.label()),
                 Some("Attach"),
             ),
             ViewRow::SupervisorUnreachable => (
                 PANE_INDENT,
                 text("Supervisor unreachable".to_owned(), sub_color).finish(),
-                None,
                 None,
                 None,
             ),
@@ -832,7 +828,12 @@ fn render_row(
         line = line.with_child(text(state.to_owned(), sub_color).finish());
     }
     if let Some(button) = button {
-        line = line.with_child(render_button(button, key.clone(), button_state.clone(), app));
+        line = line.with_child(render_button(
+            button,
+            key.clone(),
+            button_state.clone(),
+            app,
+        ));
     }
 
     let mut container = Container::new(line.finish())

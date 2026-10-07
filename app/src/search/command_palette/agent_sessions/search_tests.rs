@@ -396,12 +396,7 @@ fn a_pending_row_reads_as_pending_not_running() {
     assert_eq!(start.trailing_text(), "○ pending · Start");
     assert_eq!(focus.trailing_text(), "● running · Focus");
     assert_eq!(
-        AgentSessionSearchItem::new(
-            past_row("a", "/x"),
-            None,
-            RowMatch::default()
-        )
-        .trailing_text(),
+        AgentSessionSearchItem::new(past_row("a", "/x"), None, RowMatch::default()).trailing_text(),
         ""
     );
 }

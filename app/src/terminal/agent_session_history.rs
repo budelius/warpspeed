@@ -357,7 +357,11 @@ impl ResolvedPath {
 
 /// Whether `path`, whose canonical form is `canonical` when known, is `folder` or lies beneath
 /// it, normalized as `same_directory` does. It does no filesystem calls.
-pub(crate) fn is_within_known(path: &Path, canonical: Option<&Path>, folder: &ResolvedPath) -> bool {
+pub(crate) fn is_within_known(
+    path: &Path,
+    canonical: Option<&Path>,
+    folder: &ResolvedPath,
+) -> bool {
     if path.as_os_str().is_empty() || folder.path.as_os_str().is_empty() {
         return false;
     }

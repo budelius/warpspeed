@@ -373,7 +373,10 @@ fn a_folders_past_is_listed_once_per_tab_under_its_last_pane() {
     );
     assert_eq!(
         past_targets(&open),
-        vec![("top".into(), last.locator), ("nested".into(), last.locator)],
+        vec![
+            ("top".into(), last.locator),
+            ("nested".into(), last.locator)
+        ],
         "past rows resume in the pane they are listed under"
     );
 }
@@ -433,7 +436,8 @@ fn every_row_has_its_own_key_and_keeps_it_when_rows_are_added_before_it() {
     let panes = vec![running, same_tab(0, "/proj"), pane(1, "/proj")];
     let history = vec![past("old", "/proj", 5)];
     let detached_sessions = [detached(1, "one"), detached(2, "two")];
-    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj")), (1, PathBuf::from("/proj"))]);
+    let expanded =
+        ExpandedFolders::from([(0, PathBuf::from("/proj")), (1, PathBuf::from("/proj"))]);
     let rows = build_rows(&panes, &detached_sessions, &history);
     let before = layout(&panes, &rows, &expanded, "");
 
@@ -453,5 +457,7 @@ fn every_row_has_its_own_key_and_keeps_it_when_rows_are_added_before_it() {
         .position(|row| row.key() == before[old_before].key())
         .expect("the old session keeps its key");
     assert_ne!(old_before, old_after, "the new session moved it down");
-    assert!(matches!(&after[old_after], ViewRow::Past { row, .. } if row.session_id.as_deref() == Some("old")));
+    assert!(
+        matches!(&after[old_after], ViewRow::Past { row, .. } if row.session_id.as_deref() == Some("old"))
+    );
 }

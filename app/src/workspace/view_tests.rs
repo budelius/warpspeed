@@ -7608,13 +7608,11 @@ fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
         );
 
         workspace.update(&mut app, |workspace, ctx| {
-            workspace
-                .agent_sessions_modal
-                .update(ctx, |modal, ctx| {
-                    modal
-                        .body()
-                        .update(ctx, |view, ctx| view.set_query("zzz", ctx));
-                });
+            workspace.agent_sessions_modal.update(ctx, |modal, ctx| {
+                modal
+                    .body()
+                    .update(ctx, |view, ctx| view.set_query("zzz", ctx));
+            });
         });
         workspace.update(&mut app, |workspace, ctx| {
             workspace.close_agent_sessions_modal(ctx);
@@ -7737,7 +7735,8 @@ fn past_conversation(
         cwd: PathBuf::from("Z:/somewhere/else"),
         canonical_cwd: None,
         title: Some(title.to_owned()),
-        modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 - age_secs),
+        modified: std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_000_000 - age_secs),
     }
 }
 
@@ -7948,7 +7947,11 @@ fn resuming_a_conversation_restored_into_another_pane_starts_that_pane() {
                 restored.pane_id
             );
             assert_eq!(
-                workspace.tabs[1].pane_group.as_ref(ctx).visible_pane_ids().len(),
+                workspace.tabs[1]
+                    .pane_group
+                    .as_ref(ctx)
+                    .visible_pane_ids()
+                    .len(),
                 1,
                 "nothing was split to resume it again"
             );

@@ -92,7 +92,7 @@ impl SessionHolderBannerState {
 
     fn body(&self) -> String {
         if self.in_flight {
-            return "Ending the session thereâ€¦".to_owned();
+            return "Ending the session there…".to_owned();
         }
         if let Some(error) = &self.error {
             return format!("Taking over failed: {error}");

@@ -1066,6 +1066,7 @@ impl<S> TerminalManager<S> {
                 {
                     terminal_manager.take_over_answers += 1;
                 }
+                terminal_manager.take_over_in_flight = false;
                 if terminal_manager.session_generation != generation {
                     // The holder's session is gone, so its prompt has nothing left to offer, but
                     // the command belonged to the session this pane has since replaced.
@@ -1079,7 +1080,6 @@ impl<S> TerminalManager<S> {
                     }
                     return;
                 }
-                terminal_manager.take_over_in_flight = false;
                 let error = match result {
                     Ok(Ok(())) => {
                         if let Some(restore) = terminal_manager.withheld_restore.take() {

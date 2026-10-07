@@ -11,8 +11,12 @@ use warp_terminal::local_tty::supervisor::transport::Transport;
 
 use crate::app_state::SessionHolder;
 
-/// How long one holder answer may take. A holder that is there answers in milliseconds; a
-/// missing pipe fails at connect; this only bounds a supervisor that accepted and then stalled.
+/// How long a whole verdict may take, connects and answers of both its requests included. It is
+/// asked on the main thread while a restored pane starts, so a holder that accepted and then
+/// stalled must not hold the window up. A holder that is there answers in milliseconds; a missing
+/// pipe fails at connect.
+const VERDICT_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long one request may take while a session is being ended, which runs off the main thread.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to wait for a killed session's shell to go.
 const END_TIMEOUT: Duration = Duration::from_secs(5);
@@ -54,14 +58,14 @@ pub(crate) fn current_holder() -> SessionHolder {
 }
 
 pub(crate) fn verdict(channel: &str, session_id: SessionId) -> HolderVerdict {
-    verdict_over(|| connect(channel), session_id)
+    verdict_over(|timeout| connect(channel, timeout), session_id)
 }
 
 pub(crate) fn end_session(channel: &str, session_id: SessionId) -> Result<()> {
     let mut connected = false;
     let result = end_session_over(
-        || {
-            let transport = connect(channel);
+        |timeout| {
+            let transport = connect(channel, timeout);
             connected |= transport.is_some();
             transport
         },
@@ -74,18 +78,21 @@ pub(crate) fn end_session(channel: &str, session_id: SessionId) -> Result<()> {
     }
 }
 
-/// `open` is called once per request: a supervisor serves a single request per connection.
+/// `open` is called once per request, with how long it may wait to connect: a supervisor serves a
+/// single request per connection.
 pub(crate) fn verdict_over<T: Transport>(
-    mut open: impl FnMut() -> Option<T>,
+    mut open: impl FnMut(Duration) -> Option<T>,
     session_id: SessionId,
 ) -> HolderVerdict {
-    let Some(Message::Pong { protocol_version }) = ask(&mut open, Message::Ping) else {
+    let deadline = Instant::now() + VERDICT_TIMEOUT;
+    let Some(Message::Pong { protocol_version }) = ask(&mut open, Message::Ping, deadline) else {
         return HolderVerdict::Unknown;
     };
     if protocol_version != PROTOCOL_VERSION {
         return HolderVerdict::Unknown;
     }
-    let Some(Message::ListSessionsResponse { sessions }) = ask(&mut open, Message::ListSessions)
+    let Some(Message::ListSessionsResponse { sessions }) =
+        ask(&mut open, Message::ListSessions, deadline)
     else {
         return HolderVerdict::Unknown;
     };
@@ -99,19 +106,28 @@ pub(crate) fn verdict_over<T: Transport>(
     }
 }
 
-/// `open` is called once per request: a supervisor serves a single request per connection.
+/// `open` is called once per request, with how long it may wait to connect: a supervisor serves a
+/// single request per connection.
 pub(crate) fn end_session_over<T: Transport>(
-    mut open: impl FnMut() -> Option<T>,
+    mut open: impl FnMut(Duration) -> Option<T>,
     session_id: SessionId,
 ) -> Result<()> {
-    match ask(&mut open, Message::Kill { session_id }) {
+    match ask(
+        &mut open,
+        Message::Kill { session_id },
+        Instant::now() + ANSWER_TIMEOUT,
+    ) {
         Some(Message::KillResponse { error: None }) => {}
         Some(Message::KillResponse { error: Some(error) }) => bail!("{error}"),
         _ => bail!("The supervisor did not answer the request to end the session"),
     }
     let deadline = Instant::now() + END_TIMEOUT;
     loop {
-        match ask(&mut open, Message::ChildStatus { session_id }) {
+        match ask(
+            &mut open,
+            Message::ChildStatus { session_id },
+            Instant::now() + ANSWER_TIMEOUT,
+        ) {
             Some(Message::ChildStatusResponse { running: false }) => return Ok(()),
             Some(Message::ChildStatusResponse { running: true }) => {}
             _ => bail!("The supervisor stopped answering while the session was ending"),
@@ -124,11 +140,15 @@ pub(crate) fn end_session_over<T: Transport>(
 }
 
 /// One request on a fresh connection, its answer, and the acknowledgement the named-pipe
-/// server waits for.
-fn ask<T: Transport>(open: &mut impl FnMut() -> Option<T>, message: Message) -> Option<Message> {
-    let mut transport = open()?;
+/// server waits for, all by `deadline`.
+fn ask<T: Transport>(
+    open: &mut impl FnMut(Duration) -> Option<T>,
+    message: Message,
+    deadline: Instant,
+) -> Option<Message> {
+    let connect_timeout = deadline.checked_duration_since(Instant::now())?;
+    let mut transport = open(connect_timeout)?;
     transport.send(&message).ok()?;
-    let deadline = Instant::now() + ANSWER_TIMEOUT;
     let answer = loop {
         match transport.receive() {
             Ok(Some(answer)) => break Some(answer),
@@ -141,17 +161,19 @@ fn ask<T: Transport>(open: &mut impl FnMut() -> Option<T>, message: Message) -> 
 }
 
 #[cfg(all(feature = "local_tty", windows))]
-fn connect(channel: &str) -> Option<impl Transport> {
+fn connect(channel: &str, timeout: Duration) -> Option<impl Transport> {
     warp_terminal::local_tty::windows::pipe_transport::PipeTransport::connect_waiting(
-        channel,
-        ANSWER_TIMEOUT,
+        channel, timeout,
     )
     .ok()
     .flatten()
 }
 
+/// A socket connect does not wait for a busy server the way a pipe connect does, so it has no use
+/// for the timeout.
 #[cfg(all(feature = "local_tty", unix))]
-fn connect(channel: &str) -> Option<impl Transport> {
+#[allow(unused_variables)]
+fn connect(channel: &str, timeout: Duration) -> Option<impl Transport> {
     warp_terminal::local_tty::unix_supervisor::transport::UnixSocketTransport::connect(
         std::path::Path::new(channel),
     )
@@ -159,8 +181,10 @@ fn connect(channel: &str) -> Option<impl Transport> {
 }
 
 #[cfg(not(feature = "local_tty"))]
+#[allow(unused_variables)]
 fn connect(
-    _channel: &str,
+    channel: &str,
+    timeout: Duration,
 ) -> Option<warp_terminal::local_tty::supervisor::loopback::LoopbackTransport> {
     None
 }

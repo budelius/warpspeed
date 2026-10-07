@@ -5732,6 +5732,53 @@ fn test_run_withheld_restore_queues_the_command_and_clears_the_banner() {
     });
 }
 
+/// A withheld command belongs to the session it was withheld from. A restart replaces that session,
+/// so the prompt must go with it rather than offer a take-over of a session the pane no longer runs.
+#[test]
+fn test_restart_drops_the_withheld_restore_and_its_banner() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: SessionHolder {
+                channel: "x".into(),
+                version: "test".into(),
+                pid: 1,
+            },
+            session_id: warp_core::SessionId::from(4242u64),
+            agent: None,
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore.clone(), ctx);
+            });
+            manager.update(ctx, |manager, _| {
+                manager.set_withheld_restore_for_test(restore)
+            });
+        });
+        app.read(|ctx| assert!(view.as_ref(ctx).has_session_holder_banner_for_test()));
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
+            });
+        });
+
+        app.read(|ctx| assert!(!view.as_ref(ctx).has_session_holder_banner_for_test()));
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(!manager.run_withheld_restore(ctx))
+            });
+        });
+    });
+}
+
 /// The behavioural half of `is_login_shell_bootstrapped = false`.
 ///
 /// Restarting *into a misconfigured shell* is the whole point of the

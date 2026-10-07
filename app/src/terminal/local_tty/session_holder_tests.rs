@@ -84,8 +84,8 @@ fn receive_blocking(side: &mut LoopbackTransport) -> Option<Message> {
 /// An opener that hands the server side of a fresh pair to the fake holder on every call.
 fn opener(
     connections: mpsc::Sender<LoopbackTransport>,
-) -> impl FnMut() -> Option<LoopbackTransport> {
-    move || {
+) -> impl FnMut(Duration) -> Option<LoopbackTransport> {
+    move |_| {
         let (client, server) = LoopbackTransport::pair();
         connections.send(server).unwrap();
         Some(client)
@@ -163,15 +163,32 @@ fn every_request_is_made_on_its_own_connection() {
     let mut open = opener(sender);
     let open_counted = {
         let counted = counted.clone();
-        move || {
+        move |timeout| {
             counted.fetch_add(1, Ordering::SeqCst);
-            open()
+            open(timeout)
         }
     };
     verdict_over(open_counted, SessionId::from(42u64));
     let seen = holder.join().unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(counted.load(Ordering::SeqCst), seen.len());
+}
+
+/// The verdict is asked on the main thread, so a holder that accepts and then never answers must
+/// cost the window at most the verdict's one shared budget, not a timeout per request.
+#[test]
+fn a_holder_that_accepts_and_never_answers_is_unknown_within_the_verdict_budget() {
+    let (sender, receiver) = mpsc::channel();
+    let silent_holder = thread::spawn(move || receiver.into_iter().collect::<Vec<_>>());
+    let started = Instant::now();
+    let verdict = verdict_over(opener(sender), SessionId::from(42u64));
+    let elapsed = started.elapsed();
+    assert_eq!(verdict, HolderVerdict::Unknown);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "a stalled holder held the verdict up for {elapsed:?}"
+    );
+    silent_holder.join().unwrap();
 }
 
 #[cfg(unix)]

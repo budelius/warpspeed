@@ -960,9 +960,10 @@ impl<S> TerminalManager<S> {
         };
         let generation = self.session_generation;
         let (sender, receiver) = futures::channel::oneshot::channel();
+        let taken_over = restore.clone();
         ctx.background_executor()
             .spawn(async move {
-                let _ = sender.send(end_held_session(&restore));
+                let _ = sender.send(end_held_session(&taken_over));
             })
             .detach();
         ctx.spawn(
@@ -975,6 +976,16 @@ impl<S> TerminalManager<S> {
                     return;
                 };
                 if terminal_manager.session_generation != generation {
+                    // The holder's session is gone, so its prompt has nothing left to offer, but
+                    // the command belonged to the session this pane has since replaced.
+                    if matches!(result, Ok(Ok(())))
+                        && terminal_manager.withheld_restore.as_ref() == Some(&restore)
+                    {
+                        terminal_manager.withheld_restore = None;
+                        terminal_manager
+                            .view
+                            .update(ctx, |view, ctx| view.on_withheld_restore_resolved(ctx));
+                    }
                     return;
                 }
                 let error = match result {
@@ -1148,6 +1159,13 @@ impl<S> TerminalManager<S> {
         //    it correct. Nothing can run in between: `join` blocks the main
         //    thread, so no spawned callback is dispatched during step 2.
         self.session_generation = self.session_generation.wrapping_add(1);
+        // A withheld command was for the replaced session; left in place, its prompt would offer to
+        // take over or resume into a shell that never asked for it.
+        if self.withheld_restore.take().is_some() {
+            self.view.update(ctx, |surface, ctx| {
+                surface.on_withheld_restore_resolved(ctx)
+            });
+        }
         // A reattach keeps the session's identity: `on_shell_determined` attaches to it rather
         // than forking. The pane still shows its grid, so there is nothing to repaint.
         self.persistent_session_id = reattach;

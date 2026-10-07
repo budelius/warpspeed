@@ -138,7 +138,6 @@ pub(crate) fn agent_pid_for_session_in(
 }
 
 /// Ends the agent process holding `session_id`. `Ok(false)` when none is registered.
-#[allow(dead_code)] // wired in by the take-over task
 pub(crate) fn terminate_agent_for_session(agent: CLIAgent, session_id: &str) -> Result<bool> {
     let Some(pid) = agent_pid_for_session(agent, session_id) else {
         return Ok(false);

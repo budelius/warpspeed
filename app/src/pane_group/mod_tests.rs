@@ -63,7 +63,7 @@ use crate::ai::outline::RepoOutlines;
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::ai::restored_conversations::RestoredAgentConversations;
 use crate::ai::skills::SkillManager;
-use crate::app_state::{BranchSnapshot, PaneFlex, SplitDirection};
+use crate::app_state::{BranchSnapshot, PaneFlex, SessionHolder, SplitDirection};
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::user::TEST_USER_UID;
 use crate::changelog_model::ChangelogModel;
@@ -104,6 +104,7 @@ use crate::terminal::shared_session::{
 };
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::terminal::terminal_manager::{HeldVerdict, WithheldRestore};
 use crate::terminal::view::Event as TerminalViewEvent;
 use crate::terminal::{ShellLaunchData, TerminalSurface};
 use crate::test_util::assert_eventually_within;
@@ -5635,6 +5636,97 @@ fn test_restart_clears_the_replaced_shells_post_mortem_state() {
                 !view.is_login_shell_bootstrapped_for_test(),
                 "the replacement has not bootstrapped yet, so the replaced shell's verdict \
                  about itself must not carry over"
+            );
+        });
+    });
+}
+
+/// The guard runs when the attach fails and a holder is recorded. With no holder answering, the
+/// verdict is `Unknown` and the pane restores as it always has: the resume command is queued.
+#[test]
+fn test_an_unreachable_holder_does_not_withhold_the_resume_command() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                manager.restore_persistent_session(warp_core::SessionId::from(4242u64), ctx);
+                manager.restore_cli_agent_resume_command("claude --resume abc".to_owned());
+                manager.restore_session_holder(
+                    SessionHolder {
+                        channel: format!(
+                            r"\\.\pipe\warp-terminal-supervisor-test-missing-{}",
+                            std::process::id()
+                        ),
+                        version: "test".to_owned(),
+                        pid: 1,
+                    },
+                    None,
+                );
+                manager.ensure_shell_started(ctx);
+            });
+        });
+        // The guard runs where the shell start lands, after its starter resolves off the main
+        // thread.
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .established_session_count()
+                    == 1
+            })),
+            "the restored pane's shell never started"
+        );
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(!view.has_session_holder_banner_for_test());
+            assert_eq!(
+                view.pending_command_for_test(ctx).as_deref(),
+                Some("claude --resume abc")
+            );
+        });
+    });
+}
+
+#[test]
+fn test_run_withheld_restore_queues_the_command_and_clears_the_banner() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: SessionHolder {
+                channel: "x".into(),
+                version: "test".into(),
+                pid: 1,
+            },
+            session_id: warp_core::SessionId::from(4242u64),
+            agent: None,
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore.clone(), ctx);
+            });
+            manager.update(ctx, |manager, _| {
+                manager.set_withheld_restore_for_test(restore)
+            });
+        });
+        app.read(|ctx| assert!(view.as_ref(ctx).has_session_holder_banner_for_test()));
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(manager.run_withheld_restore(ctx))
+            });
+        });
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(!view.has_session_holder_banner_for_test());
+            assert_eq!(
+                view.pending_command_for_test(ctx).as_deref(),
+                Some("claude --resume abc")
             );
         });
     });

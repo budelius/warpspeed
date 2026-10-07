@@ -37,6 +37,7 @@ use crate::ai::blocklist::{
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, InputConfig, SerializedBlockListItem,
 };
 use crate::ai::llms::{LLMPreferences, LLMPreferencesEvent};
+use crate::app_state::SessionHolder;
 use crate::context_chips::current_prompt::CurrentPrompt;
 use crate::context_chips::prompt_snapshot::PromptSnapshot;
 use crate::context_chips::prompt_type::PromptType;
@@ -69,6 +70,7 @@ use crate::terminal::shared_session::{
     SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
     SharedSessionStatus, max_session_size,
 };
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::terminal::view::{ConversationRestorationInNewPaneType, Event as TerminalViewEvent};
 use crate::terminal::writeable_pty::terminal_manager_util::wire_up_remote_server_controller_with_view;
 use crate::terminal::{
@@ -2046,6 +2048,33 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
 
     fn restore_cli_agent_resume_command(&mut self, command: String) {
         self.cli_agent_resume_command = Some(command);
+    }
+
+    fn restore_session_holder(&mut self, holder: SessionHolder, agent: Option<HeldAgent>) {
+        self.session_holder = Some(holder);
+        self.held_agent = agent;
+    }
+
+    fn take_over_held_session(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool {
+        self.take_over_held_session_inner(ctx)
+    }
+
+    fn run_withheld_restore(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool {
+        self.run_withheld_restore_inner(ctx)
+    }
+
+    #[cfg(test)]
+    fn set_withheld_restore_for_test(
+        &mut self,
+        restore: crate::terminal::terminal_manager::WithheldRestore,
+    ) {
+        self.withheld_restore = Some(restore);
     }
 
     fn shutdown_for_process_handoff(&mut self) {

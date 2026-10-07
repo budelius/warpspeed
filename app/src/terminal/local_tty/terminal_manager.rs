@@ -36,6 +36,7 @@ use super::terminal_attributes::TerminalAttributesPoller;
 use super::{mio_channel, recorder};
 use crate::ai::aws_credentials::AwsCredentialRefresher as _;
 use crate::ai::blocklist::SerializedBlockListItem;
+use crate::app_state::SessionHolder;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_state::AuthState;
 use crate::banner::BannerState;
@@ -47,8 +48,10 @@ use crate::send_telemetry_on_executor;
 use crate::server::telemetry::{PtySpawnMode as TelemetryPtySpawnMode, TelemetryEvent};
 use crate::settings::{DebugSettings, PrivacySettings, SshSettings};
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
+use crate::terminal::cli_agent_sessions::process_registry;
 use crate::terminal::color::List as ColorList;
 use crate::terminal::event_listener::ChannelEventListener;
+use crate::terminal::local_tty::session_holder::{self, HolderVerdict};
 #[cfg(unix)]
 use crate::terminal::local_tty::terminal_attributes::Event as TerminalAttributesPollerEvent;
 use crate::terminal::local_tty::{Pty, PtyOptions};
@@ -64,7 +67,7 @@ use crate::terminal::shared_session::sharer::network::Network;
 use crate::terminal::shared_session::{IsSharedSessionCreator, SharedSessionStatus};
 use crate::terminal::shell::ShellName;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
-use crate::terminal::terminal_manager::BlockSpacing;
+use crate::terminal::terminal_manager::{BlockSpacing, HeldAgent, HeldVerdict, WithheldRestore};
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
 use crate::terminal::writeable_pty::terminal_manager_util::{
@@ -168,6 +171,10 @@ pub struct TerminalManager<S> {
     /// detached session, which leaves it with nothing else to show.
     repaint_screen_on_attach: bool,
     pub(super) cli_agent_resume_command: Option<String>,
+    pub(super) session_holder: Option<SessionHolder>,
+    pub(super) held_agent: Option<HeldAgent>,
+    /// A resume command the guard withheld because the holder still has the session.
+    pub(super) withheld_restore: Option<WithheldRestore>,
     #[cfg(unix)]
     pub(super) persistent_server_client:
         Option<Arc<crate::terminal::local_tty::server::TerminalServerClient>>,
@@ -368,6 +375,30 @@ where
 
     fn restore_cli_agent_resume_command(&mut self, command: String) {
         self.0.cli_agent_resume_command = Some(command);
+    }
+
+    fn restore_session_holder(&mut self, holder: SessionHolder, agent: Option<HeldAgent>) {
+        self.0.session_holder = Some(holder);
+        self.0.held_agent = agent;
+    }
+
+    fn take_over_held_session(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool {
+        self.0.take_over_held_session_inner(ctx)
+    }
+
+    fn run_withheld_restore(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool {
+        self.0.run_withheld_restore_inner(ctx)
+    }
+
+    #[cfg(test)]
+    fn set_withheld_restore_for_test(&mut self, restore: WithheldRestore) {
+        self.0.withheld_restore = Some(restore);
     }
 
     fn shutdown_for_process_handoff(&mut self) {
@@ -720,6 +751,9 @@ impl<S> TerminalManager<S> {
             persistent_session_id: None,
             repaint_screen_on_attach: false,
             cli_agent_resume_command: None,
+            session_holder: None,
+            held_agent: None,
+            withheld_restore: None,
             #[cfg(unix)]
             persistent_server_client: None,
             session_generation: 0,
@@ -886,6 +920,79 @@ impl<S> TerminalManager<S> {
     #[cfg(test)]
     pub(crate) fn cli_agent_resume_command(&self) -> Option<&str> {
         self.cli_agent_resume_command.as_deref()
+    }
+
+    /// The sole body of `TerminalManagerTrait::run_withheld_restore`, shared like
+    /// [`Self::start_deferred_shell`].
+    pub(super) fn run_withheld_restore_inner(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool
+    where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        let Some(restore) = self.withheld_restore.take() else {
+            return false;
+        };
+        self.view.update(ctx, |view, ctx| {
+            view.on_withheld_restore_resolved(ctx);
+            view.set_pending_restore_command(restore.command, ctx);
+        });
+        true
+    }
+
+    /// The sole body of `TerminalManagerTrait::take_over_held_session`, shared like
+    /// [`Self::start_deferred_shell`].
+    ///
+    /// Ending the session blocks until the holder reports the shell gone, so it runs on the
+    /// background executor; a restart before it answers makes the answer inert.
+    pub(super) fn take_over_held_session_inner(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool
+    where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        let Some(restore) = self.withheld_restore.clone() else {
+            return false;
+        };
+        let generation = self.session_generation;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        ctx.background_executor()
+            .spawn(async move {
+                let _ = sender.send(end_held_session(&restore));
+            })
+            .detach();
+        ctx.spawn(
+            receiver,
+            move |terminal_manager: &mut Box<dyn TerminalManagerTrait>, result, ctx| {
+                let Some(terminal_manager) =
+                    TerminalManagerTrait::as_any_mut(terminal_manager.as_mut())
+                        .downcast_mut::<Self>()
+                else {
+                    return;
+                };
+                if terminal_manager.session_generation != generation {
+                    return;
+                }
+                let error = match result {
+                    Ok(Ok(())) => {
+                        terminal_manager.run_withheld_restore_inner(ctx);
+                        return;
+                    }
+                    Ok(Err(error)) => format!("{error:#}"),
+                    Err(futures::channel::oneshot::Canceled) => {
+                        "The take-over stopped before the session ended".to_owned()
+                    }
+                };
+                terminal_manager.view.update(ctx, |view, ctx| {
+                    view.on_take_over_failed(error, ctx);
+                });
+            },
+        );
+        true
     }
 
     /// Returns the terminal model owned by this manager.
@@ -1194,6 +1301,14 @@ pub(crate) fn native_startup_directory(cwd: &Path, shell: &ShellLaunchData) -> O
     }
 }
 
+/// Ends the agent and then the session a take-over found held by another supervisor.
+fn end_held_session(restore: &WithheldRestore) -> anyhow::Result<()> {
+    if let Some(agent) = &restore.agent {
+        process_registry::terminate_agent_for_session(agent.agent, &agent.session_id)?;
+    }
+    session_holder::end_session(&restore.holder.channel, restore.session_id)
+}
+
 /// Callback invoked upon determining the shell to be spawned when starting the event loop.
 #[allow(clippy::too_many_arguments)]
 fn on_shell_determined<S: TerminalSurface>(
@@ -1419,9 +1534,41 @@ fn on_shell_determined<S: TerminalSurface>(
     if reattached {
         manager.cli_agent_resume_command = None;
     } else if let Some(command) = manager.cli_agent_resume_command.take() {
-        manager.view.update(ctx, |view, ctx| {
-            view.set_pending_restore_command(command, ctx);
-        });
+        let held = manager
+            .persistent_session_id
+            .zip(manager.session_holder.as_ref())
+            .filter(|(_, holder)| holder.channel != session_holder::current_channel())
+            .and_then(|(session_id, holder)| {
+                let verdict = match session_holder::verdict(&holder.channel, session_id) {
+                    HolderVerdict::Unknown => return None,
+                    HolderVerdict::HeldDetached => HeldVerdict::Detached,
+                    HolderVerdict::HeldAttached => HeldVerdict::Attached,
+                };
+                Some(WithheldRestore {
+                    command: command.clone(),
+                    holder: holder.clone(),
+                    session_id,
+                    agent: manager.held_agent.clone(),
+                    verdict,
+                })
+            });
+        match held {
+            Some(restore) => {
+                log::info!(
+                    "Withholding the resume command: session {} is still held by build {} (pid {})",
+                    restore.session_id.as_u64(),
+                    restore.holder.version,
+                    restore.holder.pid
+                );
+                manager.withheld_restore = Some(restore.clone());
+                manager
+                    .view
+                    .update(ctx, |view, ctx| view.withhold_restore_command(restore, ctx));
+            }
+            None => manager.view.update(ctx, |view, ctx| {
+                view.set_pending_restore_command(command, ctx);
+            }),
+        }
     }
 
     let active_session_id = pty.persistent_session_id().unwrap_or(generated_session_id);

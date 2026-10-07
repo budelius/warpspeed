@@ -469,6 +469,8 @@ use crate::terminal::shared_session::{
     SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
     SharedSessionStatus,
 };
+#[cfg(feature = "local_tty")]
+use crate::terminal::terminal_manager::WithheldRestore;
 use crate::terminal::view::block_onboarding::onboarding_prompt_block::OnboardingPromptBlock;
 use crate::terminal::view::init_environment::mode_selector::{
     EnvironmentSetupMode, EnvironmentSetupModeSelector, EnvironmentSetupModeSelectorEvent,
@@ -1102,6 +1104,17 @@ struct InlineBannersState {
     aws_bedrock_login_banner: Option<AwsBedrockLoginBannerState>,
 
     aws_cli_not_installed_banner: Option<AwsCliNotInstalledBannerState>,
+
+    #[cfg(feature = "local_tty")]
+    session_holder_banner: Option<SessionHolderBannerState>,
+}
+
+/// The prompt shown while a restore command is withheld for the build that still holds the
+/// session.
+#[cfg(feature = "local_tty")]
+#[derive(Default)]
+struct SessionHolderBannerState {
+    take_over_error: Option<String>,
 }
 
 impl InlineBannersState {
@@ -2499,6 +2512,9 @@ pub struct TerminalView {
     /// The process ID of the shell this view's PTY is running, once it has started.
     #[cfg(feature = "local_tty")]
     shell_pid: Option<u32>,
+    /// A restore command held back because another build's supervisor still holds the session.
+    #[cfg(feature = "local_tty")]
+    withheld_restore: Option<WithheldRestore>,
     #[cfg(feature = "local_tty")]
     agent_session_refresh_scheduled: bool,
     /// Whether this view's agent session was found under its shell rather than seen starting,
@@ -4434,6 +4450,8 @@ impl TerminalView {
             view_id: ctx.view_id(),
             #[cfg(feature = "local_tty")]
             shell_pid: None,
+            #[cfg(feature = "local_tty")]
+            withheld_restore: None,
             #[cfg(feature = "local_tty")]
             agent_session_refresh_scheduled: false,
             #[cfg(feature = "local_tty")]
@@ -13885,6 +13903,11 @@ impl TerminalView {
         self.is_login_shell_bootstrapped = true;
         self.hide_slow_bootstrap_banner(ctx);
 
+        #[cfg(feature = "local_tty")]
+        if self.withheld_restore.is_some() {
+            self.insert_session_holder_banner(ctx);
+        }
+
         if self.should_display_vim_banner(&session, ctx) {
             self.insert_vim_mode_banner(ctx);
         }
@@ -16425,6 +16448,30 @@ impl TerminalView {
     pub(crate) fn is_login_shell_bootstrapped_for_test(&self) -> bool {
         self.is_login_shell_bootstrapped
     }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn has_session_holder_banner_for_test(&self) -> bool {
+        self.inline_banners_state.session_holder_banner.is_some()
+    }
+
+    /// Test-only: the command waiting in the input editor to run once the shell can take it.
+    #[cfg(test)]
+    pub(crate) fn pending_command_for_test(&self, ctx: &AppContext) -> Option<String> {
+        let input = self.input.as_ref(ctx);
+        input
+            .has_pending_command()
+            .then(|| input.editor().as_ref(ctx).buffer_text(ctx))
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn insert_session_holder_banner(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.inline_banners_state.session_holder_banner.is_none() {
+            self.inline_banners_state.session_holder_banner =
+                Some(SessionHolderBannerState::default());
+            ctx.notify();
+        }
+    }
+
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
         self.awaiting_pending_command_completion
             || !self.pending_command_queue.is_empty()
@@ -26920,6 +26967,35 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn set_pending_restore_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
         self.execute_command_or_set_pending(&command, ctx);
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn withhold_restore_command(&mut self, restore: WithheldRestore, ctx: &mut ViewContext<Self>) {
+        self.withheld_restore = Some(restore);
+        if self.is_login_shell_bootstrapped {
+            self.insert_session_holder_banner(ctx);
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_take_over_failed(&mut self, error: String, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.take_over_error = Some(error);
+            ctx.notify();
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_withheld_restore_resolved(&mut self, ctx: &mut ViewContext<Self>) {
+        self.withheld_restore = None;
+        if self
+            .inline_banners_state
+            .session_holder_banner
+            .take()
+            .is_some()
+        {
+            ctx.notify();
+        }
     }
 
     fn on_active_shell_launch_data_updated(

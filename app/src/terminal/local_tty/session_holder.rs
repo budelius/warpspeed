@@ -1,9 +1,6 @@
 //! Asks the supervisor that last held a pane's session whether it still does, and ends the
 //! session there when the user takes it over.
 
-// Callers arrive with the restore guard and the takeover prompt.
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};

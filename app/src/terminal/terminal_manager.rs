@@ -18,9 +18,35 @@ use super::{BlockPadding, ShellLaunchData, ShellLaunchState, SizeInfo, TerminalM
 use crate::PrivacySettings;
 use crate::ai::blocklist::SerializedBlockListItem;
 use crate::ai::blocklist::telemetry_banner::should_collect_ai_ugc_telemetry;
+use crate::app_state::SessionHolder;
 use crate::appearance::Appearance;
 use crate::pane_group::pane::DetachType;
 use crate::settings::{BlockVisibilitySettings, DebugSettings, InputModeSettings};
+use crate::terminal::CLIAgent;
+
+/// What a restored pane was going to run before the guard found its session held elsewhere.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithheldRestore {
+    pub command: String,
+    pub holder: SessionHolder,
+    pub session_id: SessionId,
+    pub agent: Option<HeldAgent>,
+    pub verdict: HeldVerdict,
+}
+
+/// The agent a held session was running, identified the way its process registry records it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldAgent {
+    pub agent: CLIAgent,
+    pub session_id: String,
+}
+
+/// Whether a window of the holding build is attached to the held session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldVerdict {
+    Detached,
+    Attached,
+}
 
 pub trait TerminalManager: Any {
     /// Returns the backing terminal model.
@@ -83,6 +109,28 @@ pub trait TerminalManager: Any {
 
     /// Supplies a command to run only when a restored PTY cannot be reattached.
     fn restore_cli_agent_resume_command(&mut self, _command: String) {}
+
+    /// Supplies the supervisor that held this pane's session when it was saved, and the agent the
+    /// session was running, so a restore can tell whether that supervisor still holds it.
+    fn restore_session_holder(&mut self, _holder: SessionHolder, _agent: Option<HeldAgent>) {}
+
+    /// Ends the held session where it is and then runs the withheld command here.
+    #[must_use]
+    fn take_over_held_session(
+        &mut self,
+        _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
+    ) -> bool {
+        false
+    }
+
+    /// Runs the withheld command without touching the holder.
+    #[must_use]
+    fn run_withheld_restore(&mut self, _ctx: &mut ModelContext<Box<dyn TerminalManager>>) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn set_withheld_restore_for_test(&mut self, _restore: WithheldRestore) {}
 
     /// Replaces this manager's shell session in place, keeping the pane, its
     /// blocklist, and its agent conversation.

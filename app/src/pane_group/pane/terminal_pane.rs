@@ -674,6 +674,8 @@ impl PaneContent for TerminalPane {
             let persistent_session_id = self
                 .terminal_manager(app)
                 .read(app, |manager, _| manager.persistent_session_id());
+            let session_holder = persistent_session_id
+                .map(|_| crate::terminal::local_tty::session_holder::current_holder());
             let terminal_view_id = self.terminal_view(app).id();
             let cli_agent_sessions = CLIAgentSessionsModel::as_ref(app);
             let cli_agent_resume_descriptor = cli_agent_sessions
@@ -702,7 +704,7 @@ impl PaneContent for TerminalPane {
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id,
-                session_holder: None,
+                session_holder,
                 cli_agent_resume_descriptor,
                 cwd,
                 is_active,

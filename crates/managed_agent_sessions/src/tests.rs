@@ -1200,9 +1200,67 @@ fn run_control_summary_omits_an_absent_node() {
 #[test]
 fn run_control_summary_reports_an_empty_state_as_unknown() {
     assert_eq!(
-        run_control_summary("Paused", "job-1", &outcome("", Some("node-a"))),
-        "Paused job-1 (unknown) on node-a"
+        run_control_summary("Resumed", "job-1", &outcome("", Some("node-a"))),
+        "Resume requested for job-1; still unknown on node-a"
     );
+}
+
+#[test]
+fn a_pause_that_has_not_landed_says_the_run_is_still_running() {
+    assert_eq!(
+        run_control_summary("Paused", "job-1", &outcome("running", Some("node-a"))),
+        "Pause requested for job-1; still running on node-a"
+    );
+}
+
+#[test]
+fn a_resume_that_has_not_landed_says_the_run_is_still_paused() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("paused", None)),
+        "Resume requested for job-1; still paused"
+    );
+}
+
+#[test]
+fn failure_messages_never_show_url_credentials() {
+    let body = json!({
+        "error": "git fetch https://user:token@host/repo.git failed",
+        "code": "command_rejected"
+    })
+    .to_string();
+    let rejected = || {
+        anyhow::Error::new(HttpStatusError {
+            status: StatusCode::CONFLICT,
+            body: body.clone(),
+        })
+    };
+    for message in [
+        pause_failure_message(&rejected()),
+        resume_failure_message(&rejected()),
+        stop_failure_message(&rejected()),
+    ] {
+        assert!(!message.contains("token"), "{message}");
+        assert!(message.contains("https://host/repo.git"), "{message}");
+        assert!(!message.contains("command_rejected"), "{message}");
+    }
+    let unstructured = anyhow::anyhow!("failed: https://user:token@host/x");
+    assert!(!pause_failure_message(&unstructured).contains("token"));
+}
+
+#[test]
+fn a_resume_without_a_known_session_is_recognized() {
+    let error = anyhow::Error::new(HttpStatusError {
+        status: StatusCode::PRECONDITION_FAILED,
+        body: json!({ "error": "session id unknown", "code": "session_unknown" }).to_string(),
+    });
+    let message = resume_failure_message(&error);
+    assert!(message.contains("cannot be resumed"), "{message}");
+}
+
+#[test]
+fn a_failed_viewer_command_does_not_end_the_viewer() {
+    keep_viewing(Err(anyhow::anyhow!("dashboard returned 409")));
+    keep_viewing(Ok(()));
 }
 
 #[test]

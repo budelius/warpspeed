@@ -760,11 +760,11 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
             return Ok(());
         }
         if command == "close" {
-            input(environment, job_id, None, false)?;
+            keep_viewing(input(environment, job_id, None, false));
             continue;
         }
         if command == "stop" {
-            stop(environment, job_id, false, false)?;
+            keep_viewing(stop(environment, job_id, false, false));
             continue;
         }
         if command == "resume" {
@@ -775,10 +775,18 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
             continue;
         }
         if let Some(text) = command.strip_prefix("send ") {
-            input(environment, job_id, Some(text.trim()), false)?;
+            keep_viewing(input(environment, job_id, Some(text.trim()), false));
             continue;
         }
         println!("Unknown command. Use send <text>, close, resume, stop, refresh, or detach.");
+    }
+}
+
+/// Reports a failed viewer command and lets the viewer carry on, as a paused run refuses `send`,
+/// `close` and `stop`.
+fn keep_viewing(result: Result<()>) {
+    if let Err(error) = result {
+        println!("{}", failure_detail(&error));
     }
 }
 
@@ -942,9 +950,23 @@ fn run_control_summary(verb: &str, job_id: &str, outcome: &RunControlOutcome) ->
     } else {
         &outcome.state
     };
-    match &outcome.node_name {
-        Some(node) => format!("{verb} {job_id} ({state}) on {node}"),
-        None => format!("{verb} {job_id} ({state})"),
+    let expected = match verb {
+        "Paused" => "paused",
+        _ => "running",
+    };
+    let location = outcome
+        .node_name
+        .as_ref()
+        .map(|node| format!(" on {node}"))
+        .unwrap_or_default();
+    if state == expected {
+        format!("{verb} {job_id} ({state}){location}")
+    } else {
+        let request = match verb {
+            "Paused" => "Pause",
+            _ => "Resume",
+        };
+        format!("{request} requested for {job_id}; still {state}{location}")
     }
 }
 
@@ -1713,19 +1735,58 @@ fn has_error_code(error: &anyhow::Error, status: StatusCode, code: &str) -> bool
         })
 }
 
+/// Removes `user[:password]@` from every URL in `text`, since git and HTTP errors can echo a
+/// remote URL that embeds a token.
+pub fn redact_url_credentials(text: &str) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + 3;
+        redacted.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let authority_end = rest
+            .find(|c: char| matches!(c, '/' | '\'' | '"') || c.is_whitespace())
+            .unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            rest = &rest[at + 1..];
+        }
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+/// The dashboard's `error` text for a rejected request, or the whole error chain when the failure
+/// carries no such text; URL credentials are removed either way.
+fn failure_detail(error: &anyhow::Error) -> String {
+    let dashboard_text = error
+        .downcast_ref::<HttpStatusError>()
+        .and_then(|error| serde_json::from_str::<Value>(&error.body).ok())
+        .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_owned));
+    redact_url_credentials(&dashboard_text.unwrap_or_else(|| format!("{error:#}")))
+}
+
+/// The message shown when asking the dashboard to stop a run failed with `error`.
+pub fn stop_failure_message(error: &anyhow::Error) -> String {
+    format!("Could not stop the run: {}", failure_detail(error))
+}
+
+/// The message shown when asking the dashboard to pause a run failed with `error`.
 pub fn pause_failure_message(error: &anyhow::Error) -> String {
     if is_session_unknown(error) {
         "AgentCtrl does not know this run's agent session, so it cannot be paused".to_owned()
     } else {
-        format!("Could not pause the run: {error:#}")
+        format!("Could not pause the run: {}", failure_detail(error))
     }
 }
 
+/// The message shown when asking the dashboard to resume a run failed with `error`.
 pub fn resume_failure_message(error: &anyhow::Error) -> String {
     if is_node_at_capacity(error) {
         "Every AgentCtrl node is at capacity; stop or pause a run, then resume again".to_owned()
+    } else if is_session_unknown(error) {
+        "AgentCtrl does not know this run's agent session, so it cannot be resumed".to_owned()
     } else {
-        format!("Could not resume the run: {error:#}")
+        format!("Could not resume the run: {}", failure_detail(error))
     }
 }
 

@@ -266,7 +266,7 @@ impl FleetModel {
         self.run_command(
             job_id,
             stop,
-            |error| format!("Could not stop the run: {error:#}"),
+            managed_agent_sessions::stop_failure_message,
             ctx,
         );
     }

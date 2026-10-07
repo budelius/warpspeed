@@ -25,6 +25,16 @@ pub fn should_intercept_mouse(model: &TerminalModel, shift: bool, ctx: &AppConte
     !(model.is_term_mode_set(TermMode::SGR_MOUSE) && mouse_tracking && mouse_reporting_enabled)
 }
 
+/// Determines if a right-click is intercepted. Unlike other buttons, right-click stays with Warp
+/// unless right-click reporting is enabled, so its context menu keeps working inside full-screen
+/// applications (such as Pi) that track the mouse.
+pub fn should_intercept_right_click(model: &TerminalModel, shift: bool, ctx: &AppContext) -> bool {
+    let right_click_reporting_enabled = *AltScreenReporting::as_ref(ctx)
+        .right_click_reporting_enabled
+        .value();
+    !right_click_reporting_enabled || should_intercept_mouse(model, shift, ctx)
+}
+
 /// Determines if scroll event is intercepted. SGR_mouse and mouse reporting must be enabled to
 /// report scroll events, otherwise, always intercept scroll.
 pub fn should_intercept_scroll(model: &TerminalModel, ctx: &AppContext) -> bool {

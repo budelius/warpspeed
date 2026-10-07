@@ -2519,6 +2519,8 @@ pub struct TerminalView {
     /// which makes it this view's to forget once the agent exits.
     #[cfg(feature = "local_tty")]
     agent_session_discovered: bool,
+    #[cfg(feature = "local_tty")]
+    terminal_session_uuid_hex: Option<String>,
 
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
@@ -4454,6 +4456,8 @@ impl TerminalView {
             agent_session_refresh_scheduled: false,
             #[cfg(feature = "local_tty")]
             agent_session_discovered: false,
+            #[cfg(feature = "local_tty")]
+            terminal_session_uuid_hex: None,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,
@@ -26849,6 +26853,10 @@ impl TerminalView {
         );
     }
 
+    pub(crate) fn set_terminal_session_uuid(&mut self, uuid: &[u8]) {
+        self.terminal_session_uuid_hex = Some(hex::encode(uuid));
+    }
+
     /// Reads the session the agent running in this pane is writing to, so a snapshot can record
     /// what to resume.
     ///
@@ -26872,11 +26880,16 @@ impl TerminalView {
             Some(session) => Some(session.agent),
             None => None,
         };
+        let session_uuid_hex = self.terminal_session_uuid_hex.clone();
         if let (Some(agent), false) = (tracked_agent, self.agent_session_discovered) {
             let (sender, receiver) = futures::channel::oneshot::channel();
             ctx.background_executor()
                 .spawn(async move {
-                    let _ = sender.send(process_registry::resolve(agent, shell_pid));
+                    let _ = sender.send(process_registry::resolve(
+                        agent,
+                        shell_pid,
+                        session_uuid_hex.as_deref(),
+                    ));
                 })
                 .detach();
             let view_id = self.view_id;
@@ -26904,7 +26917,10 @@ impl TerminalView {
         let (sender, receiver) = futures::channel::oneshot::channel();
         ctx.background_executor()
             .spawn(async move {
-                let _ = sender.send(process_registry::discover(shell_pid));
+                let _ = sender.send(process_registry::discover(
+                    shell_pid,
+                    session_uuid_hex.as_deref(),
+                ));
             })
             .detach();
         ctx.spawn(receiver, move |me, discovered, ctx| {

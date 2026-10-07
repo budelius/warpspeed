@@ -48,6 +48,8 @@ struct RegistryEntry {
     session_id: String,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    warp_session_uuid: Option<String>,
 }
 
 /// Agents whose session can be read from a process registry.
@@ -58,18 +60,32 @@ pub(crate) fn supports(agent: CLIAgent) -> bool {
 /// The session of the `agent` process running under `shell_pid`, if it can be found.
 ///
 /// Blocks on process enumeration and file reads, so callers run it off the main thread.
-pub(crate) fn resolve(agent: CLIAgent, shell_pid: u32) -> Option<AgentProcessSession> {
+pub(crate) fn resolve(
+    agent: CLIAgent,
+    shell_pid: u32,
+    session_uuid_hex: Option<&str>,
+) -> Option<AgentProcessSession> {
     let directory = registry_directory(agent)?;
-    resolve_in(agent, shell_pid, &process_table(), &directory)
+    resolve_in(
+        agent,
+        shell_pid,
+        session_uuid_hex,
+        &process_table(),
+        &directory,
+    )
 }
 
 /// The agent running under `shell_pid`, for a pane that is already running one it did not see
 /// start -- a session reattached from the supervisor, say.
-pub(crate) fn discover(shell_pid: u32) -> Option<(CLIAgent, AgentProcessSession)> {
+pub(crate) fn discover(
+    shell_pid: u32,
+    session_uuid_hex: Option<&str>,
+) -> Option<(CLIAgent, AgentProcessSession)> {
     let processes = process_table();
     DISCOVERABLE_AGENTS.into_iter().find_map(|agent| {
         let directory = registry_directory(agent)?;
-        resolve_in(agent, shell_pid, &processes, &directory).map(|session| (agent, session))
+        resolve_in(agent, shell_pid, session_uuid_hex, &processes, &directory)
+            .map(|session| (agent, session))
     })
 }
 
@@ -78,9 +94,24 @@ const DISCOVERABLE_AGENTS: [CLIAgent; 2] = [CLIAgent::Claude, CLIAgent::Pi];
 pub(crate) fn resolve_in(
     agent: CLIAgent,
     shell_pid: u32,
+    session_uuid_hex: Option<&str>,
     processes: &[ProcessInfo],
     registry_directory: &Path,
 ) -> Option<AgentProcessSession> {
+    if let Some(uuid) = session_uuid_hex {
+        let by_uuid = processes
+            .iter()
+            .filter(|process| is_agent_process(agent, &process.name))
+            .find_map(|process| {
+                let (session, entry_uuid) = read_entry_with_uuid(
+                    &registry_directory.join(format!("{}.json", process.pid)),
+                )?;
+                (entry_uuid.as_deref() == Some(uuid)).then_some(session)
+            });
+        if by_uuid.is_some() {
+            return by_uuid;
+        }
+    }
     let names: HashMap<u32, &str> = processes
         .iter()
         .map(|process| (process.pid, process.name.as_str()))
@@ -223,12 +254,19 @@ fn is_script_runtime(name: &str) -> bool {
 }
 
 fn read_entry(path: &Path) -> Option<AgentProcessSession> {
+    read_entry_with_uuid(path).map(|(session, _)| session)
+}
+
+fn read_entry_with_uuid(path: &Path) -> Option<(AgentProcessSession, Option<String>)> {
     let contents = std::fs::read(path).ok()?;
     let entry: RegistryEntry = serde_json::from_slice(&contents).ok()?;
-    is_safe_session_id(&entry.session_id).then_some(AgentProcessSession {
-        session_id: entry.session_id,
-        cwd: entry.cwd.filter(|cwd| !cwd.is_empty()),
-    })
+    is_safe_session_id(&entry.session_id).then_some((
+        AgentProcessSession {
+            session_id: entry.session_id,
+            cwd: entry.cwd.filter(|cwd| !cwd.is_empty()),
+        },
+        entry.warp_session_uuid,
+    ))
 }
 
 /// The ID becomes an argument of a command typed into a shell, so it is held to the characters

@@ -34,6 +34,7 @@ function record(ctx: any) {
       pid: process.pid,
       sessionId: id,
       cwd: process.cwd(),
+      warpSessionUuid: process.env.WARP_TERMINAL_SESSION_UUID || undefined,
       updatedAt: Date.now(),
     };
     const temporary = `${entryPath}.${process.pid}.tmp`;

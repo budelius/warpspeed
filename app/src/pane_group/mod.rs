@@ -6425,6 +6425,7 @@ impl PaneGroup {
                 );
                 let terminal_manager = terminal_init.manager;
                 let terminal_view = terminal_init.surface;
+                terminal_view.update(ctx, |view, _| view.set_terminal_session_uuid(terminal_session_uuid));
             } else {
                 use crate::terminal::{ShellLaunchState, shell::{ShellName, ShellType}};
 

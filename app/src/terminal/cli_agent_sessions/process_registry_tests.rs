@@ -3,10 +3,15 @@ use command::blocking::Command;
 use super::*;
 
 fn process(pid: u32, parent: u32, name: &str) -> ProcessInfo {
+    started_process(pid, parent, name, 0)
+}
+
+fn started_process(pid: u32, parent: u32, name: &str, start_time: u64) -> ProcessInfo {
     ProcessInfo {
         pid,
         parent: Some(parent),
         name: name.to_owned(),
+        start_time,
     }
 }
 
@@ -226,9 +231,9 @@ fn pi_is_found_by_the_shell_uuid_when_the_process_tree_is_broken() {
     let registry = tempfile::tempdir().unwrap();
     write_entry_with_uuid(registry.path(), 300, "pi-1", "0a0b0c");
     let processes = [
-        process(100, 1, "bash.exe"),
-        process(200, 999, "sh.exe"),
-        process(300, 200, "node.exe"),
+        started_process(100, 1, "bash.exe", 1_000),
+        started_process(200, 999, "sh.exe", 1_005),
+        started_process(300, 200, "node.exe", 1_005),
     ];
 
     let found = resolve_in(
@@ -257,6 +262,77 @@ fn an_entry_for_another_pane_uuid_is_not_this_panes_pi() {
             registry.path()
         )
         .is_none()
+    );
+}
+
+/// A pane restored from a build whose shell still runs shares that shell's uuid. The Pi in the
+/// old shell started before this pane's shell did, so it cannot be this pane's.
+#[test]
+fn a_pi_that_started_before_the_shell_is_not_found_by_the_shell_uuid() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry_with_uuid(registry.path(), 300, "pi-1", "0a0b0c");
+    let processes = [
+        started_process(100, 1, "bash.exe", 2_000),
+        started_process(200, 999, "sh.exe", 1_000),
+        started_process(300, 200, "node.exe", 1_000),
+    ];
+
+    assert_eq!(
+        resolve_in(
+            CLIAgent::Pi,
+            100,
+            Some("0a0b0c"),
+            &processes,
+            registry.path()
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_entry_can_belong_only_to_a_process_that_started_before_it_was_written() {
+    assert!(entry_can_belong_to(1_000, 1_000));
+    assert!(entry_can_belong_to(999, 1_000));
+    assert!(!entry_can_belong_to(1_001, 1_000));
+}
+
+/// A crashed agent leaves its entry behind, and Windows hands its pid to a later process. A Node
+/// process that started after the entry was written did not write it.
+#[test]
+fn an_entry_older_than_the_process_with_its_pid_names_no_agent() {
+    let registry = tempfile::tempdir().unwrap();
+    std::fs::write(
+        registry.path().join("101.json"),
+        r#"{"pid":101,"sessionId":"aaaa-1111","cwd":"T:/p","startedAt":1000000}"#,
+    )
+    .unwrap();
+    let reused = [started_process(101, 1, "node.exe", 2_000)];
+    let original = [started_process(101, 1, "node.exe", 1_000)];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &reused, registry.path()),
+        None
+    );
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &original, registry.path()),
+        Some(101)
+    );
+}
+
+#[test]
+fn a_refreshed_process_reports_when_it_started() {
+    let mut system = System::new();
+    refresh_process(&mut system, std::process::id());
+    let process = system
+        .process(sysinfo::Pid::from_u32(std::process::id()))
+        .expect("the test process is running");
+
+    assert!(process.start_time() > 0);
+    assert!(
+        process_table()
+            .iter()
+            .find(|process| process.pid == std::process::id())
+            .is_some_and(|process| process.start_time > 0)
     );
 }
 

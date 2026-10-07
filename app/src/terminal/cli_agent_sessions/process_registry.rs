@@ -40,6 +40,8 @@ pub(crate) struct ProcessInfo {
     pub pid: u32,
     pub parent: Option<u32>,
     pub name: String,
+    /// When the process started, in seconds since the Unix epoch.
+    pub start_time: u64,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +52,21 @@ struct RegistryEntry {
     cwd: Option<String>,
     #[serde(default)]
     warp_session_uuid: Option<String>,
+    /// Claude's process start, in milliseconds since the Unix epoch.
+    #[serde(default)]
+    started_at: Option<u64>,
+    /// When the entry was last written, in milliseconds since the Unix epoch.
+    #[serde(default)]
+    updated_at: Option<u64>,
+}
+
+/// A registry entry as read from disk.
+struct StoredEntry {
+    session: AgentProcessSession,
+    warp_session_uuid: Option<String>,
+    /// The earliest moment the entry is known to have been written, in seconds since the Unix
+    /// epoch.
+    written_secs: u64,
 }
 
 /// Agents whose session can be read from a process registry.
@@ -98,32 +115,28 @@ pub(crate) fn resolve_in(
     processes: &[ProcessInfo],
     registry_directory: &Path,
 ) -> Option<AgentProcessSession> {
-    if let Some(uuid) = session_uuid_hex {
+    let by_pid: HashMap<u32, &ProcessInfo> = processes
+        .iter()
+        .map(|process| (process.pid, process))
+        .collect();
+    if let Some(uuid) = session_uuid_hex
+        && let Some(shell) = by_pid.get(&shell_pid)
+    {
         let by_uuid = processes
             .iter()
-            .filter(|process| is_agent_process(agent, &process.name))
-            .find_map(|process| {
-                let (session, entry_uuid) = read_entry_with_uuid(
-                    &registry_directory.join(format!("{}.json", process.pid)),
-                )?;
-                (entry_uuid.as_deref() == Some(uuid)).then_some(session)
-            });
+            .filter(|process| process.start_time >= shell.start_time)
+            .filter_map(|process| live_entry(agent, process, registry_directory))
+            .find(|entry| entry.warp_session_uuid.as_deref() == Some(uuid))
+            .map(|entry| entry.session);
         if by_uuid.is_some() {
             return by_uuid;
         }
     }
-    let names: HashMap<u32, &str> = processes
-        .iter()
-        .map(|process| (process.pid, process.name.as_str()))
-        .collect();
     descendants(shell_pid, processes)
         .into_iter()
-        .filter(|pid| {
-            names
-                .get(pid)
-                .is_some_and(|name| is_agent_process(agent, name))
-        })
-        .find_map(|pid| read_entry(&registry_directory.join(format!("{pid}.json"))))
+        .filter_map(|pid| by_pid.get(&pid))
+        .find_map(|process| live_entry(agent, process, registry_directory))
+        .map(|entry| entry.session)
 }
 
 /// The sessions agents on this machine are running right now, whichever pane or terminal they
@@ -136,11 +149,8 @@ pub(crate) fn running_session_ids() -> std::collections::HashSet<String> {
         .flat_map(|(agent, directory)| {
             processes
                 .iter()
-                .filter(move |process| is_agent_process(agent, &process.name))
-                .filter_map(move |process| {
-                    read_entry(&directory.join(format!("{}.json", process.pid)))
-                })
-                .map(|session| session.session_id)
+                .filter_map(|process| live_entry(agent, process, &directory))
+                .map(|entry| entry.session.session_id)
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -160,32 +170,57 @@ pub(crate) fn agent_pid_for_session_in(
 ) -> Option<u32> {
     processes
         .iter()
-        .filter(|process| is_agent_process(agent, &process.name))
         .find(|process| {
-            read_entry(&registry_directory.join(format!("{}.json", process.pid)))
-                .is_some_and(|entry| entry.session_id == session_id)
+            live_entry(agent, process, registry_directory)
+                .is_some_and(|entry| entry.session.session_id == session_id)
         })
         .map(|process| process.pid)
 }
 
 /// Ends the agent process holding `session_id`. `Ok(false)` when none is registered.
+///
+/// The pid comes from a cached table and an entry a crashed agent can leave behind, and Windows
+/// reuses pids, so the process is checked again, fresh, before it is ended.
 pub(crate) fn terminate_agent_for_session(agent: CLIAgent, session_id: &str) -> Result<bool> {
-    let Some(pid) = agent_pid_for_session(agent, session_id) else {
+    let Some(directory) = registry_directory(agent) else {
+        return Ok(false);
+    };
+    let Some(pid) = agent_pid_for_session_in(agent, session_id, &process_table(), &directory)
+    else {
         return Ok(false);
     };
     let mut system = System::new();
+    refresh_process(&mut system, pid);
+    let process = system
+        .process(sysinfo::Pid::from_u32(pid))
+        .with_context(|| format!("The {} process {pid} is already gone", agent.display_name()))?;
+    let still_the_agent = is_agent_process(agent, &process.name().to_string_lossy())
+        && read_stored_entry(&entry_path(&directory, pid)).is_some_and(|entry| {
+            entry.session.session_id == session_id
+                && entry_can_belong_to(process.start_time(), entry.written_secs)
+        });
+    if !still_the_agent {
+        return Ok(false);
+    }
+    if !process.kill() {
+        bail!("Could not end the {} process {pid}", agent.display_name());
+    }
+    Ok(true)
+}
+
+/// Whether a process that started at `process_start_secs` can have written a registry entry
+/// written at `entry_written_secs`, both in seconds since the Unix epoch. A process that started
+/// later received the pid of the agent that wrote the entry.
+pub(crate) fn entry_can_belong_to(process_start_secs: u64, entry_written_secs: u64) -> bool {
+    process_start_secs <= entry_written_secs
+}
+
+fn refresh_process(system: &mut System, pid: u32) {
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
         true,
         ProcessRefreshKind::nothing(),
     );
-    let process = system
-        .process(sysinfo::Pid::from_u32(pid))
-        .with_context(|| format!("The {} process {pid} is already gone", agent.display_name()))?;
-    if !process.kill() {
-        bail!("Could not end the {} process {pid}", agent.display_name());
-    }
-    Ok(true)
 }
 
 /// Whether any process is running under `pid`.
@@ -253,20 +288,46 @@ fn is_script_runtime(name: &str) -> bool {
     name.starts_with("node") || name.starts_with("bun")
 }
 
-fn read_entry(path: &Path) -> Option<AgentProcessSession> {
-    read_entry_with_uuid(path).map(|(session, _)| session)
+fn entry_path(registry_directory: &Path, pid: u32) -> PathBuf {
+    registry_directory.join(format!("{pid}.json"))
 }
 
-fn read_entry_with_uuid(path: &Path) -> Option<(AgentProcessSession, Option<String>)> {
+/// The entry `process` wrote, if it is the `agent` and can have written it.
+fn live_entry(
+    agent: CLIAgent,
+    process: &ProcessInfo,
+    registry_directory: &Path,
+) -> Option<StoredEntry> {
+    if !is_agent_process(agent, &process.name) {
+        return None;
+    }
+    read_stored_entry(&entry_path(registry_directory, process.pid))
+        .filter(|entry| entry_can_belong_to(process.start_time, entry.written_secs))
+}
+
+fn read_stored_entry(path: &Path) -> Option<StoredEntry> {
     let contents = std::fs::read(path).ok()?;
     let entry: RegistryEntry = serde_json::from_slice(&contents).ok()?;
-    is_safe_session_id(&entry.session_id).then_some((
-        AgentProcessSession {
+    if !is_safe_session_id(&entry.session_id) {
+        return None;
+    }
+    let written_secs = match entry.started_at.or(entry.updated_at) {
+        Some(millis) => millis / 1000,
+        None => std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs(),
+    };
+    Some(StoredEntry {
+        session: AgentProcessSession {
             session_id: entry.session_id,
             cwd: entry.cwd.filter(|cwd| !cwd.is_empty()),
         },
-        entry.warp_session_uuid,
-    ))
+        warp_session_uuid: entry.warp_session_uuid,
+        written_secs,
+    })
 }
 
 /// The ID becomes an argument of a command typed into a shell, so it is held to the characters
@@ -332,6 +393,7 @@ fn process_table() -> Arc<Vec<ProcessInfo>> {
                 pid: process.pid().as_u32(),
                 parent: process.parent().map(|parent| parent.as_u32()),
                 name: process.name().to_string_lossy().into_owned(),
+                start_time: process.start_time(),
             })
             .collect(),
     );

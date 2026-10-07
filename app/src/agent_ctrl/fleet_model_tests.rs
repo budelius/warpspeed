@@ -13,6 +13,8 @@ fn run(job_id: &str, state: &str, repo_url: Option<&str>) -> RunSummary {
         branch: Some(format!("agent/{job_id}")),
         interactive: true,
         last_activity_at: Some("2026-10-06T12:00:00Z".to_owned()),
+        node_name: None,
+        paused_at: None,
     }
 }
 

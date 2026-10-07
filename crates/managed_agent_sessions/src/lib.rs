@@ -424,6 +424,11 @@ pub struct RunSummary {
     pub interactive: bool,
     #[serde(default)]
     pub last_activity_at: Option<String>,
+    /// The AgentCtrl node the run is on, or last ran on while paused.
+    #[serde(default)]
+    pub node_name: Option<String>,
+    #[serde(default)]
+    pub paused_at: Option<String>,
 }
 
 pub fn list_repositories(environment: ManagedEnvironment) -> Result<Vec<RepositoryInfo>> {
@@ -827,11 +832,47 @@ fn stop_run_with(
     job_id: &str,
     force: bool,
 ) -> Result<Value> {
+    post_run_command_with(profile, token, job_id, "stop", &json!({ "force": force }))
+}
+
+/// Asks the dashboard to pause a live interactive run: its agent exits, its work is pushed to the
+/// run's branch, and it stops holding a node slot. A run whose agent session AgentCtrl does not
+/// know fails with an error [`is_session_unknown`] recognizes.
+pub fn pause_run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    pause_run_with(profile(environment), &token, job_id).map(drop)
+}
+
+/// Asks the dashboard to resume a paused run on a node with a free slot. With every node full it
+/// fails with an error [`is_node_at_capacity`] recognizes.
+pub fn resume_run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
+    validate_job_id(job_id)?;
+    let token = dashboard_token()?;
+    resume_run_with(profile(environment), &token, job_id).map(drop)
+}
+
+fn pause_run_with(profile: &EnvironmentProfile, token: &str, job_id: &str) -> Result<Value> {
+    post_run_command_with(profile, token, job_id, "pause", &json!({}))
+}
+
+fn resume_run_with(profile: &EnvironmentProfile, token: &str, job_id: &str) -> Result<Value> {
+    post_run_command_with(profile, token, job_id, "resume", &json!({}))
+}
+
+/// Posts `body` to the run's `command` route and requires the dashboard to accept it.
+fn post_run_command_with(
+    profile: &EnvironmentProfile,
+    token: &str,
+    job_id: &str,
+    command: &str,
+    body: &Value,
+) -> Result<Value> {
     let response = send(
         profile,
         Client::new()
             .post(format!(
-                "{}/api/agent-control/runs/{job_id}/stop",
+                "{}/api/agent-control/runs/{job_id}/{command}",
                 profile.base_url
             ))
             .bearer_auth(token)
@@ -840,9 +881,11 @@ fn stop_run_with(
                 "Idempotency-Key",
                 format!("warpspeed-{}", uuid::Uuid::new_v4()),
             )
-            .json(&json!({ "force": force })),
+            .json(body),
     )?;
-    let result: Value = response.json().context("invalid stop response")?;
+    let result: Value = response
+        .json()
+        .with_context(|| format!("invalid {command} response"))?;
     ensure_command_accepted(&result)?;
     Ok(result)
 }
@@ -1507,17 +1550,41 @@ fn http_error(response: Response) -> anyhow::Error {
     HttpStatusError { status, body }.into()
 }
 
-/// Whether the dashboard refused a launch because the node already runs its maximum number of
-/// interactive runs.
+/// Whether the dashboard refused a launch or resume because no node has a free interactive slot.
 pub fn is_node_at_capacity(error: &anyhow::Error) -> bool {
+    has_error_code(error, StatusCode::CONFLICT, "node_at_capacity")
+}
+
+/// Whether the dashboard refused a pause because AgentCtrl does not know the run's agent session,
+/// without which the run could never be resumed.
+pub fn is_session_unknown(error: &anyhow::Error) -> bool {
+    has_error_code(error, StatusCode::PRECONDITION_FAILED, "session_unknown")
+}
+
+fn has_error_code(error: &anyhow::Error, status: StatusCode, code: &str) -> bool {
     error
         .downcast_ref::<HttpStatusError>()
         .is_some_and(|error| {
-            error.status == StatusCode::CONFLICT
-                && serde_json::from_str::<Value>(&error.body).is_ok_and(|body| {
-                    body.get("code").and_then(Value::as_str) == Some("node_at_capacity")
-                })
+            error.status == status
+                && serde_json::from_str::<Value>(&error.body)
+                    .is_ok_and(|body| body.get("code").and_then(Value::as_str) == Some(code))
         })
+}
+
+pub fn pause_failure_message(error: &anyhow::Error) -> String {
+    if is_session_unknown(error) {
+        "AgentCtrl does not know this run's agent session, so it cannot be paused".to_owned()
+    } else {
+        format!("Could not pause the run: {error:#}")
+    }
+}
+
+pub fn resume_failure_message(error: &anyhow::Error) -> String {
+    if is_node_at_capacity(error) {
+        "Every AgentCtrl node is at capacity; stop or pause a run, then resume again".to_owned()
+    } else {
+        format!("Could not resume the run: {error:#}")
+    }
 }
 
 /// Whether retrying cannot help: the dashboard rejected the request itself (auth, a missing run,

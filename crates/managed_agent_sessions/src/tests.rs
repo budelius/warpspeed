@@ -363,6 +363,8 @@ fn full_managed_flow_has_dashboard_only_network_authority() {
         ("POST", "/api/agent-control/runs/job-123/input"),
         ("POST", "/api/agent-control/runs/job-123/close"),
         ("POST", "/api/agent-control/runs/job-123/stop"),
+        ("POST", "/api/agent-control/runs/job-123/pause"),
+        ("POST", "/api/agent-control/runs/job-123/resume"),
     ] {
         let request = client.request(
             reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
@@ -883,6 +885,8 @@ fn list_runs_parses_repo_and_branch() {
                 branch: Some("agent/job-repo".to_owned()),
                 interactive: true,
                 last_activity_at: Some("2026-10-05T10:00:00.000Z".to_owned()),
+                node_name: None,
+                paused_at: None,
             },
             RunSummary {
                 job_id: "job-plain".to_owned(),
@@ -892,6 +896,8 @@ fn list_runs_parses_repo_and_branch() {
                 branch: None,
                 interactive: false,
                 last_activity_at: None,
+                node_name: None,
+                paused_at: None,
             },
         ]
     );
@@ -955,4 +961,121 @@ fn stop_run_posts_a_stop_request() {
         "{raw}"
     );
     assert!(raw.contains("\"force\":true"), "{raw}");
+}
+
+#[test]
+fn pause_and_resume_post_to_the_run_routes() {
+    for (call, route) in [
+        (
+            pause_run_with as fn(&EnvironmentProfile, &str, &str) -> Result<Value>,
+            "pause",
+        ),
+        (resume_run_with, "resume"),
+    ] {
+        let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
+        call(&fixture_profile(base), "token", "job-1").unwrap();
+        let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+        assert!(
+            raw.starts_with(&format!("POST /api/agent-control/runs/job-1/{route} ")),
+            "{raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("idempotency-key: warpspeed-"),
+            "{raw}"
+        );
+        assert!(raw.ends_with("{}"), "{raw}");
+    }
+}
+
+#[test]
+fn a_rejected_pause_fails_with_the_dashboard_reason() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "status": "rejected", "error": { "error": "run is not interactive" } }),
+    );
+    let error = pause_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(
+        error.to_string().contains("run is not interactive"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pause_without_a_known_session_is_recognized() {
+    let base = http_fixture(
+        "412 Precondition Failed",
+        json!({ "error": "session id unknown", "code": "session_unknown" }),
+    );
+    let error = pause_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(is_session_unknown(&error), "{error:#}");
+    assert!(!is_node_at_capacity(&error));
+    let message = pause_failure_message(&error);
+    assert!(message.contains("cannot be paused"), "{message}");
+    assert!(!is_session_unknown(&anyhow::anyhow!("other")));
+}
+
+#[test]
+fn a_resume_with_every_node_full_is_recognized() {
+    let base = http_fixture(
+        "409 Conflict",
+        json!({ "error": "node at capacity", "code": "node_at_capacity" }),
+    );
+    let error = resume_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(is_node_at_capacity(&error), "{error:#}");
+    assert!(!is_session_unknown(&error));
+    let message = resume_failure_message(&error);
+    assert!(message.contains("at capacity"), "{message}");
+}
+
+#[test]
+fn other_pause_and_resume_failures_keep_their_cause() {
+    let error = anyhow::anyhow!("dashboard request failed");
+    assert_eq!(
+        pause_failure_message(&error),
+        "Could not pause the run: dashboard request failed"
+    );
+    assert_eq!(
+        resume_failure_message(&error),
+        "Could not resume the run: dashboard request failed"
+    );
+}
+
+#[test]
+fn pause_and_resume_reject_a_bad_job_id_before_any_request() {
+    for result in [
+        pause_run(ManagedEnvironment::Staging, "../x"),
+        resume_run(ManagedEnvironment::Staging, "job-a b"),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("invalid AgentCtrl job id"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn list_runs_parses_node_and_pause_time() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "items": [{
+            "job_id": "job-paused",
+            "state": "paused",
+            "agent_name": "staging-claude-interactive-rw",
+            "interactive": true,
+            "repo_url": "https://gitlab.com/pseekoo/kaizen",
+            "branch": "agent/job-paused",
+            "last_activity_at": "2026-10-07T09:00:00.000Z",
+            "node_name": "agent-ctrl-node-1",
+            "paused_at": "2026-10-07T09:05:00.000Z"
+        }] }),
+    );
+    let runs = list_runs_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(runs[0].state, "paused");
+    assert_eq!(runs[0].node_name.as_deref(), Some("agent-ctrl-node-1"));
+    assert_eq!(
+        runs[0].paused_at.as_deref(),
+        Some("2026-10-07T09:05:00.000Z")
+    );
 }

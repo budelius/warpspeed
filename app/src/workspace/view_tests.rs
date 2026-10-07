@@ -51,10 +51,12 @@ use crate::gpu_state::GPUState;
 use crate::launch_configs::launch_config::{
     LaunchConfigWindowSource, PaneMode, PaneTemplateType, TabTemplate, WindowTemplate,
 };
+use crate::menu::MenuAction;
 use crate::modal::ModalAction;
 use crate::network::NetworkStatus;
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::notebooks::notebook::NotebookView;
+use crate::pane_group::pane::view::PaneHeaderAction;
 use crate::pane_group::{BackingView, Direction, PaneGroupAction, PaneId};
 use crate::pricing::PricingInfoModel;
 #[cfg(not(target_family = "wasm"))]
@@ -8929,5 +8931,59 @@ fn agent_session_resume_in_a_folder_that_is_gone_opens_nothing() {
 
         assert_eq!(active_tab_pane_count(&workspace, &mut app), 1);
         assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+    });
+}
+
+/// Chooses "Agent sessions…" in the first pane's header menu the way a click does: the item's
+/// action fires, then the menu closes.
+fn choose_agent_sessions_in_pane_header_menu(workspace: &ViewHandle<Workspace>, app: &mut App) {
+    let (header, overflow_menu) = workspace.update(app, |workspace, ctx| {
+        let pane_view = workspace
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .terminal_pane_view_at_pane_index(0)
+            .expect("mock workspace has a terminal pane");
+        let header = pane_view.as_ref(ctx).header().clone();
+        let overflow_menu = header.as_ref(ctx).overflow_menu().clone();
+        (header, overflow_menu)
+    });
+    header.update(app, |header, ctx| {
+        header.handle_action(&PaneHeaderAction::OpenOverflowMenu, ctx);
+    });
+    overflow_menu.update(app, |menu, ctx| {
+        assert!(
+            menu.set_selected_by_name("Agent sessions…", ctx),
+            "the pane header menu offers agent sessions"
+        );
+        menu.mimic_confirm(ctx);
+        menu.handle_action(&MenuAction::Close(true), ctx);
+    });
+}
+
+#[test]
+fn the_pane_header_menu_opens_the_agent_sessions_view_again_after_it_was_closed() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        choose_agent_sessions_in_pane_header_menu(&workspace, &mut app);
+        workspace.read(&app, |workspace, _| {
+            assert!(workspace.is_agent_sessions_modal_open());
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_agent_sessions_modal(ctx);
+        });
+        workspace.read(&app, |workspace, _| {
+            assert!(!workspace.is_agent_sessions_modal_open());
+        });
+
+        choose_agent_sessions_in_pane_header_menu(&workspace, &mut app);
+        workspace.read(&app, |workspace, _| {
+            assert!(
+                workspace.is_agent_sessions_modal_open(),
+                "the view opens again from the pane header menu"
+            );
+        });
     });
 }

@@ -10,7 +10,7 @@ use super::{Event, OpenOverlay};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::CloudModel;
-use crate::menu::MenuItemFields;
+use crate::menu::{MenuAction, MenuItemFields};
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::pane_group::{BackingView, PaneConfiguration, PaneId, PaneView, TabBarHoverIndex};
 use crate::server::server_api::ServerApiProvider;
@@ -241,4 +241,55 @@ fn a_narrow_tab_keeps_a_merge_zone() {
         super::tab_hover_index_along_axis(110., 100., 120., 2),
         TabBarHoverIndex::OverTab(2)
     );
+}
+
+#[test]
+fn choosing_an_overflow_menu_item_leaves_focus_to_its_action() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let (_, pane_view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            let test_view = ctx.add_typed_action_view(|_| TestView::new());
+            let pane_config = ctx.add_model(|_| PaneConfiguration::new("Test"));
+            PaneView::new(PaneId::dummy_pane_id(), test_view, (), pane_config, ctx)
+        });
+        let test_view = pane_view.read(&app, |pane, ctx| pane.child(ctx));
+        let header = pane_view.read(&app, |pane, _ctx| pane.header().to_owned());
+        let overflow_menu = header.read(&app, |header, _ctx| header.overflow_menu.to_owned());
+        let menu_item_label = "Increment counter";
+        header.update(&mut app, |header, ctx| {
+            header.set_overflow_menu_items(
+                vec![
+                    MenuItemFields::new(menu_item_label)
+                        .with_on_select_action(TestViewAction::IncrementCounter)
+                        .into_item(),
+                ],
+                ctx,
+            );
+        });
+        app.read(|ctx| assert!(!test_view.is_focused(ctx)));
+
+        header.update(&mut app, |header, ctx| {
+            header.open_overlay = OpenOverlay::OverflowMenu;
+            ctx.notify();
+        });
+        overflow_menu.update(&mut app, |menu, ctx| {
+            menu.set_selected_by_name(menu_item_label, ctx);
+            menu.mimic_confirm(ctx);
+            menu.handle_action(&MenuAction::Close(true), ctx);
+        });
+        app.read(|ctx| assert!(!test_view.is_focused(ctx)));
+        header.read(&app, |header, _ctx| {
+            assert!(matches!(header.open_overlay, OpenOverlay::None));
+        });
+
+        header.update(&mut app, |header, ctx| {
+            header.open_overlay = OpenOverlay::OverflowMenu;
+            ctx.notify();
+        });
+        overflow_menu.update(&mut app, |menu, ctx| {
+            menu.handle_action(&MenuAction::Close(false), ctx);
+        });
+        app.read(|ctx| assert!(test_view.is_focused(ctx)));
+    })
 }

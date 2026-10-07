@@ -77,17 +77,17 @@ restore exactly as today.
 ## Part 2: the guard at restore
 
 In the restore path, a pane whose snapshot has both `persistent_session_id` and
-`session_holder` consults the holder before anything starts. The check runs off the UI thread
-and the pane stays empty until it answers, bounded by the same timeout the `sessions` CLI uses for
-a ping.
+`session_holder` consults the holder before anything starts. The check runs where the attach
+attempt already runs, bounded by a one-second budget shared by its two requests; a missing pipe
+fails at connect.
 
 The pane connects to `session_holder.channel`, pings, and lists sessions. The verdict is one of:
 
 | Holder says | Pane does |
 |---|---|
 | Unreachable, or the session is not listed | Today's path: fresh shell, queued resume command. |
-| Listed, detached, and `channel` is not ours | No shell, no resume. Banner: "Still running under build `<version>` (pid `<pid>`)" with **Take over** and **Start fresh**. |
-| Listed and attached | No shell, no resume. Banner: "Open in another window" with **Start fresh** only. |
+| Listed, detached, and `channel` is not ours | The shell starts as today; the resume command is withheld. Banner: "Still running under build `<version>` (pid `<pid>`)" with **Take over** and **Start fresh**. |
+| Listed and attached | The shell starts as today; the resume command is withheld. Banner: "Open in another window" with **Start fresh** only. |
 | Listed, detached, and `channel` is ours | Not reached: the pane attaches, as it does today. |
 
 **Start fresh** runs today's path. **Take over** runs Part 3, then today's path.
@@ -115,6 +115,9 @@ error:
 
 Step 1 happens before step 2 so a Claude process cannot outlive its shell and keep writing to the
 transcript the new process is about to resume.
+
+`Start fresh` and `Take over` both end by queueing the withheld command into the pane's
+already-running shell.
 
 ## Part 4: Pi session ids by shell uuid, not by process tree
 

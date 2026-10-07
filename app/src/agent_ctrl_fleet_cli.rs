@@ -180,7 +180,9 @@ pub(crate) fn move_all_request(args: &ManagedSessionsArgs) -> Option<MoveAllRequ
         | ManagedSessionsCommand::Attach { .. }
         | ManagedSessionsCommand::Input { .. }
         | ManagedSessionsCommand::Close { .. }
-        | ManagedSessionsCommand::Stop { .. } => None,
+        | ManagedSessionsCommand::Stop { .. }
+        | ManagedSessionsCommand::Pause { .. }
+        | ManagedSessionsCommand::Resume { .. } => None,
     }
 }
 

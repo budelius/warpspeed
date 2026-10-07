@@ -1097,3 +1097,27 @@ fn a_pause_or_resume_must_say_accepted_true() {
         assert!(resume_run_with(&fixture_profile(base), "token", "job-1").is_err());
     }
 }
+
+#[test]
+fn pause_and_resume_commands_check_the_job_id_before_any_request() {
+    for command in [
+        ManagedSessionsCommand::Pause {
+            job_id: "../x".to_owned(),
+            environment: ManagedEnvironment::Staging,
+        },
+        ManagedSessionsCommand::Resume {
+            job_id: "../x".to_owned(),
+            environment: ManagedEnvironment::Staging,
+        },
+    ] {
+        let error = run(&ManagedSessionsArgs {
+            command,
+            json: false,
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid AgentCtrl job id"),
+            "{error}"
+        );
+    }
+}

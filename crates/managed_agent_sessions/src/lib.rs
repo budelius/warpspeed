@@ -347,6 +347,14 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             force,
             environment,
         } => stop(*environment, job_id, *force, args.json),
+        ManagedSessionsCommand::Pause {
+            job_id,
+            environment,
+        } => pause(*environment, job_id, args.json),
+        ManagedSessionsCommand::Resume {
+            job_id,
+            environment,
+        } => resume(*environment, job_id, args.json),
     }
 }
 
@@ -815,6 +823,45 @@ fn stop(
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         println!("Stop request accepted for {job_id}.");
+    }
+    Ok(())
+}
+
+fn pause(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
+    let outcome = pause_run(environment, job_id)
+        .map_err(|error| anyhow::Error::msg(pause_failure_message(&error)))?;
+    print_run_control_outcome("Paused", job_id, &outcome, json_output)
+}
+
+fn resume(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
+    let outcome = resume_run(environment, job_id)
+        .map_err(|error| anyhow::Error::msg(resume_failure_message(&error)))?;
+    print_run_control_outcome("Resumed", job_id, &outcome, json_output)
+}
+
+fn print_run_control_outcome(
+    verb: &str,
+    job_id: &str,
+    outcome: &RunControlOutcome,
+    json_output: bool,
+) -> Result<()> {
+    if json_output {
+        let value = json!({
+            "job_id": job_id,
+            "state": outcome.state,
+            "node_name": outcome.node_name,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let state = if outcome.state.is_empty() {
+        "unknown"
+    } else {
+        &outcome.state
+    };
+    match &outcome.node_name {
+        Some(node) => println!("{verb} {job_id} ({state}) on {node}"),
+        None => println!("{verb} {job_id} ({state})"),
     }
     Ok(())
 }

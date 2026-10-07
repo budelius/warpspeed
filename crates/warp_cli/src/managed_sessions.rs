@@ -116,4 +116,21 @@ pub enum ManagedSessionsCommand {
         #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
         environment: ManagedEnvironment,
     },
+
+    /// Pause a live interactive run: its agent exits, its work is pushed to the run's branch, and
+    /// it frees its node slot until resumed.
+    Pause {
+        job_id: String,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
+    /// Resume a paused run, with its conversation, on a node with a free slot.
+    Resume {
+        job_id: String,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
 }

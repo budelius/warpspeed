@@ -72,9 +72,9 @@ use crate::ai_assistant::AskAIType;
 #[cfg(feature = "local_fs")]
 use crate::app_state::CodePaneSnapShot;
 use crate::app_state::{
-    self, AIFactPaneSnapshot, BranchSnapshot, EnvVarCollectionPaneSnapshot, LeafContents,
-    LeafSnapshot, NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot,
-    TerminalPaneSnapshot, WorkflowPaneSnapshot,
+    self, AIFactPaneSnapshot, BranchSnapshot, CliAgentResumeDescriptor,
+    EnvVarCollectionPaneSnapshot, LeafContents, LeafSnapshot, NotebookPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot, TerminalPaneSnapshot, WorkflowPaneSnapshot,
 };
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
@@ -2348,6 +2348,35 @@ impl PaneGroup {
                     contents,
                 })
             }
+        }
+    }
+
+    /// The agent a restored terminal pane has yet to resume, if it is one.
+    pub(crate) fn pending_agent_resume(
+        &self,
+        pane_id: PaneId,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
+        self.downcast_pane_by_id::<TerminalPane>(pane_id)?
+            .pending_agent_resume(app)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_restored_agent_for_test(
+        &mut self,
+        pane_id: PaneId,
+        descriptor: CliAgentResumeDescriptor,
+    ) {
+        if let Some(pane) = self
+            .pane_contents
+            .get_mut(&pane_id)
+            .and_then(|pane| pane.as_any_mut().downcast_mut::<TerminalPane>())
+        {
+            pane.set_restored_shell_snapshot_fields(RestoredShellSnapshotFields {
+                cwd: None,
+                shell_launch_data: None,
+                cli_agent_resume_descriptor: Some(descriptor),
+            });
         }
     }
 
@@ -6914,6 +6943,27 @@ impl PaneGroup {
         (pane_data, view)
     }
 
+    /// Splits a plain terminal pane to the right of `base`, starting its shell in `directory`.
+    pub fn split_terminal_in_directory(
+        &mut self,
+        base: PaneId,
+        directory: PathBuf,
+        ctx: &mut ViewContext<Self>,
+    ) -> TerminalPaneId {
+        // `Ignore`: the pane is about to run an agent CLI, so it must not open in agent view.
+        let new_pane_id = self.add_session_in_directory(
+            Direction::Right,
+            Some(base),
+            None, /* chosen_shell */
+            Some(directory),
+            None, /* conversation_restoration */
+            DefaultSessionModeBehavior::Ignore,
+            ctx,
+        );
+        ctx.emit(Event::AppStateChanged);
+        new_pane_id
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn add_session_in_directory(
         &mut self,
@@ -7328,16 +7378,6 @@ impl PaneGroup {
         self.pane_contents
             .get(&pane_id.into())
             .and_then(|contents| contents.as_any().downcast_ref::<TerminalPane>())
-    }
-
-    /// The agent the terminal pane `pane_id` was restored with, while it has yet to resume it.
-    pub(crate) fn restored_agent_still_resuming(
-        &self,
-        pane_id: impl Into<PaneId>,
-        app: &AppContext,
-    ) -> Option<crate::app_state::CliAgentResumeDescriptor> {
-        self.terminal_session_by_id(pane_id)?
-            .restored_agent_still_resuming(app)
     }
 
     pub fn terminal_manager_for_pane_id(

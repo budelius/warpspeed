@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    PastAgentSession, UnidentifiedAgent, describe, match_for_restore, pi_candidates, vibe_sessions,
+    PastAgentSession, ResolvedPath, UnidentifiedAgent, describe, is_within_known,
+    match_for_restore, pi_candidates, resolve_folders, vibe_sessions,
 };
 use crate::terminal::CLIAgent;
 
@@ -77,6 +78,7 @@ fn past(
         agent,
         session_id: id.to_owned(),
         cwd: PathBuf::from(cwd),
+        canonical_cwd: None,
         title: title.map(str::to_owned),
         modified: saved_at() - Duration::from_secs(hours_before * 60 * 60),
     }
@@ -218,4 +220,72 @@ fn plain_agent_commands_have_no_session_id() {
         None
     );
     assert_eq!(super::session_id_from_command(CLIAgent::Pi, "pi"), None);
+}
+
+#[test]
+fn is_within_matches_the_folder_and_its_subfolders() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join(".claude").join("worktrees").join("fix");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let is_within = |path: &Path, folder: &Path| {
+        is_within_known(
+            path,
+            path.canonicalize().ok().as_deref(),
+            &ResolvedPath::new(folder),
+        )
+    };
+    assert!(is_within(root.path(), root.path()));
+    assert!(is_within(&worktree, root.path()));
+    assert!(!is_within(root.path(), &worktree));
+    assert!(!is_within(Path::new("/elsewhere"), root.path()));
+}
+
+#[test]
+fn nothing_is_within_an_empty_folder_and_an_empty_path_is_within_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let empty = ResolvedPath::new(Path::new(""));
+    assert!(!is_within_known(root.path(), None, &empty));
+    assert!(!is_within_known(Path::new(""), None, &empty));
+    assert!(!is_within_known(
+        Path::new(""),
+        None,
+        &ResolvedPath::new(root.path())
+    ));
+}
+
+#[test]
+fn resolving_folders_stores_each_sessions_canonical_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let mut sessions = vec![
+        PastAgentSession {
+            cwd: project.join(".").join("..").join("project"),
+            ..past(CLIAgent::Claude, "here", "", None, 1)
+        },
+        past(CLIAgent::Claude, "gone", "/no/such/folder", None, 1),
+        past(CLIAgent::Claude, "unknown", "", None, 1),
+    ];
+
+    resolve_folders(&mut sessions);
+
+    assert_eq!(sessions[0].canonical_cwd, project.canonicalize().ok());
+    assert_eq!(sessions[1].canonical_cwd, None);
+    assert_eq!(sessions[2].canonical_cwd, None);
+}
+
+#[test]
+fn a_known_canonical_folder_decides_membership_without_the_raw_path() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let folder = ResolvedPath::new(root.path());
+
+    let alias = Path::new("Z:/an/alias/that/does/not/exist");
+    assert!(is_within_known(
+        alias,
+        nested.canonicalize().ok().as_deref(),
+        &folder
+    ));
+    assert!(!is_within_known(alias, None, &folder));
 }

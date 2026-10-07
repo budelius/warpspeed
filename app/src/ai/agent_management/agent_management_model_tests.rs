@@ -28,6 +28,9 @@ fn setup_app(
     // notifications model reads it to suppress completion notifications when a prompt is queued.
     app.add_singleton_model(crate::ai::blocklist::QueuedQueryModel::new);
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
     app.add_singleton_model(|_| ActiveAgentViewsModel::new());
     let notifications = app.add_singleton_model(AgentNotificationsModel::new);
     (history, notifications)

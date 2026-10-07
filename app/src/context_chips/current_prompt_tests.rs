@@ -661,6 +661,9 @@ fn test_cli_agent_footer_chips_require_a_visible_supported_footer() {
         app.update(crate::settings::AISettings::register_and_subscribe_to_events);
         app.add_singleton_model(crate::workspaces::user_workspaces::UserWorkspaces::default_mock);
         app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        app.add_singleton_model(|_| {
+            crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+        });
         #[cfg(windows)]
         app.add_singleton_model(SystemInfo::new);
 

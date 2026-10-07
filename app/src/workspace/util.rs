@@ -10,7 +10,7 @@ use crate::window_settings::WindowSettings;
 use crate::workspace::Workspace;
 use crate::workspace::tab_group::TabGroupId;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// What composes a pane (i.e. the pane group and the pane itself).
 pub struct PaneViewLocator {
     pub pane_group_id: EntityId,
@@ -117,6 +117,7 @@ pub struct WorkspaceState {
     pub is_new_worktree_modal_open: bool,
     pub is_remove_tab_config_dialog_open: bool,
     pub is_session_in_use_dialog_open: bool,
+    pub is_agent_sessions_modal_open: bool,
     /// Whether the transcript details panel is open (WASM only, for conversation transcript viewing).
     pub is_transcript_details_panel_open: bool,
     tab_being_renamed: Option<usize>, // The index of the tab being renamed
@@ -161,6 +162,7 @@ impl WorkspaceState {
             || self.is_new_worktree_modal_open
             || self.is_remove_tab_config_dialog_open
             || self.is_session_in_use_dialog_open
+            || self.is_agent_sessions_modal_open
             || {
                 let one_time_modal = OneTimeModalModel::as_ref(app);
                 one_time_modal.is_oz_launch_modal_open()
@@ -206,6 +208,7 @@ impl WorkspaceState {
         self.is_new_worktree_modal_open = false;
         self.is_remove_tab_config_dialog_open = false;
         self.is_session_in_use_dialog_open = false;
+        self.is_agent_sessions_modal_open = false;
     }
 
     pub fn is_right_panel_open(&self) -> bool {

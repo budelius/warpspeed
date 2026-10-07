@@ -208,6 +208,7 @@ pub enum TerminalAction {
     DetachSession,
     MoveSessionToAgentCtrl,
     StartAgentOnAgentCtrl,
+    ShowAgentSessions,
     SplitRight(Option<AvailableShell>),
     SplitLeft(Option<AvailableShell>),
     SplitDown(Option<AvailableShell>),
@@ -577,6 +578,7 @@ impl fmt::Debug for TerminalAction {
             DetachSession => f.write_str("DetachSession"),
             MoveSessionToAgentCtrl => f.write_str("MoveSessionToAgentCtrl"),
             StartAgentOnAgentCtrl => f.write_str("StartAgentOnAgentCtrl"),
+            ShowAgentSessions => f.write_str("ShowAgentSessions"),
             PromptContextMenu {
                 position_offset_from_prompt,
             } => write!(

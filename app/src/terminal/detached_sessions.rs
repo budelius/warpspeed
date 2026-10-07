@@ -8,6 +8,8 @@
 //! Everything here answers falsely -- unsupported, empty -- when there is no
 //! supervisor to talk to, so callers can ask unconditionally.
 
+use std::path::PathBuf;
+
 use warp_core::features::FeatureFlag;
 use warpui::{AppContext, SingletonEntity};
 
@@ -22,6 +24,21 @@ pub struct DetachedSession {
 
     /// What the session was running and where, for telling two apart.
     pub label: String,
+
+    pub cwd: PathBuf,
+
+    pub title: String,
+
+    pub detached_for_seconds: u64,
+}
+
+/// Why the detached sessions could not be listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DetachedListError {
+    /// This machine cannot detach sessions, so there is nothing to list.
+    Unsupported,
+    /// The supervisor that holds the sessions did not answer.
+    Unreachable(String),
 }
 
 /// Whether sessions can be detached and later found again on this machine.
@@ -46,8 +63,13 @@ pub fn are_supported(ctx: &AppContext) -> bool {
 
 /// The sessions currently available to attach, most recently detached first.
 pub fn list(ctx: &AppContext) -> Vec<DetachedSession> {
+    list_checked(ctx).unwrap_or_default()
+}
+
+/// Like [`list`], but says why the list is empty when the supervisor cannot be asked.
+pub fn list_checked(ctx: &AppContext) -> Result<Vec<DetachedSession>, DetachedListError> {
     if !are_supported(ctx) {
-        return Vec::new();
+        return Err(DetachedListError::Unsupported);
     }
     #[cfg(feature = "local_tty")]
     {
@@ -55,11 +77,11 @@ pub fn list(ctx: &AppContext) -> Vec<DetachedSession> {
             Ok(sessions) => sessions,
             Err(error) => {
                 log::warn!("Failed to list detached terminal sessions: {error:#}");
-                return Vec::new();
+                return Err(DetachedListError::Unreachable(format!("{error:#}")));
             }
         };
         sessions.sort_by_key(|session| session.detached_for_seconds);
-        sessions
+        Ok(sessions
             .into_iter()
             // A session another pane is already using would refuse a second
             // attach, so offering it would promise something that cannot happen.
@@ -72,12 +94,15 @@ pub fn list(ctx: &AppContext) -> Vec<DetachedSession> {
                     &session.metadata.working_directory,
                     session.detached_for_seconds,
                 ),
+                cwd: PathBuf::from(&session.metadata.working_directory),
+                title: session.metadata.title,
+                detached_for_seconds: session.detached_for_seconds,
             })
-            .collect()
+            .collect())
     }
     #[cfg(not(feature = "local_tty"))]
     {
-        Vec::new()
+        Err(DetachedListError::Unsupported)
     }
 }
 

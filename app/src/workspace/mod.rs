@@ -1,5 +1,7 @@
 mod action;
 mod active_session;
+pub mod agent_session_actions;
+pub(crate) mod agent_sessions_view;
 pub(crate) mod auto_handoff;
 pub mod bonus_grant_notification_model;
 #[cfg(target_os = "macos")]
@@ -104,6 +106,7 @@ pub fn init(app: &mut AppContext) {
     view::right_panel::RightPanelView::init(app);
     header_toolbar_editor::init(app);
     view::conversation_list::view::register_conversation_list_view_bindings(app);
+    agent_sessions_view::init(app);
 
     settings_view::init_actions_from_parent_view(app, &id!("Workspace"), |settings_action| {
         WorkspaceAction::DispatchToSettingsTab(settings_action)
@@ -1289,6 +1292,24 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Workspace"))
         .with_custom_action(CustomAction::SearchDrive),
+        EditableBinding::new(
+            "workspace:search_agent_sessions",
+            "Agent sessions: search",
+            WorkspaceAction::OpenPalette {
+                mode: PaletteMode::AgentSessions,
+                source: PaletteSource::Keybinding,
+                query: None,
+            },
+        )
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))
+        .with_enabled(|| cfg!(feature = "local_tty")),
+        EditableBinding::new(
+            "workspace:show_agent_sessions",
+            "Agent sessions: show window",
+            WorkspaceAction::ShowAgentSessions { focus: None },
+        )
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))
+        .with_enabled(|| cfg!(feature = "local_tty")),
     ]);
 
     if FeatureFlag::Autoupdate.is_enabled() {

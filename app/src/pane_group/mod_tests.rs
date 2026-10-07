@@ -198,6 +198,9 @@ fn initialize_app_with_history(app: &mut App, conversations: Vec<AgentConversati
         )
     });
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
     app.add_singleton_model(OrchestrationEventService::new);
     app.add_singleton_model(LocalAgentTaskSyncModel::new);
     app.add_singleton_model(OrchestrationEventStreamer::new);
@@ -4850,7 +4853,7 @@ fn test_parked_restored_pane_reports_the_agent_it_has_not_resumed() {
                 let pane_id = group
                     .pane_id_from_index(0)
                     .expect("the restored tab has a pane");
-                group.restored_agent_still_resuming(pane_id, ctx)
+                group.pending_agent_resume(pane_id, ctx)
             })
         });
         assert_eq!(restored, Some(descriptor));

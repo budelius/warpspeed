@@ -71,6 +71,9 @@ fn initialize_permissions_test_with_mode(
     app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
     let history = app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
     app.add_singleton_model(|_| ActiveAgentViewsModel::new());
     app.add_singleton_model(AgentNotificationsModel::new);
     let permissions = app.add_singleton_model(BlocklistAIPermissions::new);

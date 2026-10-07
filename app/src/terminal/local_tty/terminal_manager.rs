@@ -166,7 +166,7 @@ pub struct TerminalManager<S> {
     /// Whether the attach that claims [`Self::persistent_session_id`] should
     /// repaint the session's screen. Set only when the pane is opening onto a
     /// detached session, which leaves it with nothing else to show.
-    repaint_screen_on_attach: bool,
+    pub(super) repaint_screen_on_attach: bool,
     pub(super) cli_agent_resume_command: Option<String>,
     #[cfg(unix)]
     pub(super) persistent_server_client:
@@ -886,6 +886,12 @@ impl<S> TerminalManager<S> {
     #[cfg(test)]
     pub(crate) fn cli_agent_resume_command(&self) -> Option<&str> {
         self.cli_agent_resume_command.as_deref()
+    }
+
+    /// Whether the next attach repaints the session's screen.
+    #[cfg(test)]
+    pub(crate) fn repaint_screen_on_attach(&self) -> bool {
+        self.repaint_screen_on_attach
     }
 
     /// Returns the terminal model owned by this manager.

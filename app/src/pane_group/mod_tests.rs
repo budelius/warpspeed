@@ -4812,6 +4812,57 @@ fn test_restored_pane_hands_its_resume_command_to_the_terminal_manager() {
     });
 }
 
+/// A pane opened onto a detached supervisor session has no scrollback of its own, so the GUI
+/// terminal manager must repaint the session's screen when it attaches, as the TUI one does.
+#[test]
+fn test_detached_session_attach_repaints_on_the_gui_terminal_manager() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(terminal_leaf_snapshot(Some(cwd), None)),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+        let session_id = warp_core::SessionId::from(42_u64);
+
+        manager.update(&mut app, |manager, ctx| {
+            manager.attach_detached_session(session_id, ctx)
+        });
+
+        let (persistent_session_id, repaint) = app.read(|ctx| {
+            manager.read(ctx, |manager, _| {
+                let gui = manager
+                    .as_any()
+                    .downcast_ref::<TerminalManager<crate::terminal::TerminalView>>()
+                    .expect("the pane runs on the GUI terminal manager");
+                (
+                    manager.persistent_session_id(),
+                    gui.repaint_screen_on_attach(),
+                )
+            })
+        });
+        assert_eq!(persistent_session_id, Some(session_id));
+        assert!(
+            repaint,
+            "attaching a detached session must repaint its screen on the GUI manager"
+        );
+    });
+}
+
 /// A restored agent pane whose tab nobody has opened has no live agent session, so anything
 /// listing agents must ask for the restored one or report the pane as having none.
 #[test]

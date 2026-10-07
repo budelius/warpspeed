@@ -747,7 +747,7 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
             println!("Session finished with state {}.", descriptor.state);
             return Ok(());
         }
-        println!("\nCommands: Enter=refresh, send <text>, close, stop, detach");
+        println!("\n{}", viewer_commands(&descriptor.state));
         let command = read_line("> ")?;
         if command.is_empty() || command == "refresh" {
             continue;
@@ -764,16 +764,53 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
             stop(environment, job_id, false, false)?;
             continue;
         }
+        if command == "resume" {
+            match resume_run(environment, job_id) {
+                Ok(outcome) => println!("{}", run_control_summary("Resumed", job_id, &outcome)),
+                Err(error) => println!("{}", resume_failure_message(&error)),
+            }
+            continue;
+        }
         if let Some(text) = command.strip_prefix("send ") {
             input(environment, job_id, Some(text.trim()), false)?;
             continue;
         }
-        println!("Unknown command. Use send <text>, close, stop, refresh, or detach.");
+        println!("Unknown command. Use send <text>, close, resume, stop, refresh, or detach.");
     }
 }
 
 fn session_is_finished(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "stopped" | "interrupted")
+}
+
+/// A paused run is live (not finished) but runs no agent until it is resumed.
+pub fn is_paused_state(state: &str) -> bool {
+    state == "paused"
+}
+
+fn paused_notice(job_id: &str) -> String {
+    format!("Paused — resume with: warpspeed agent-ctrl resume {job_id}")
+}
+
+fn attach_banner(descriptor: &SessionDescriptor) -> String {
+    let capabilities = descriptor.capabilities.join(",");
+    let mut banner = format!(
+        "Attached to {} ({}, capabilities: {capabilities}). Closing this view does not stop the run.",
+        descriptor.display_name, descriptor.state
+    );
+    if is_paused_state(&descriptor.state) {
+        banner.push('\n');
+        banner.push_str(&paused_notice(&descriptor.job_id));
+    }
+    banner
+}
+
+fn viewer_commands(state: &str) -> &'static str {
+    if is_paused_state(state) {
+        "Commands: Enter=refresh, resume, stop, detach"
+    } else {
+        "Commands: Enter=refresh, send <text>, close, stop, detach"
+    }
 }
 
 fn read_line(prompt: &str) -> Result<String> {
@@ -1034,11 +1071,7 @@ fn attach(
     save_bookmarks(&bookmarks)?;
 
     if !json_output {
-        let capabilities = descriptor.capabilities.join(",");
-        println!(
-            "Attached to {} ({}, capabilities: {}). Closing this view does not stop the run.",
-            descriptor.display_name, descriptor.state, capabilities
-        );
+        println!("{}", attach_banner(&descriptor));
     }
 
     let mut cursor = existing_cursor;

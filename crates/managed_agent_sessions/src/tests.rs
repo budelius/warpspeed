@@ -113,6 +113,7 @@ fn stozn_login_state_requires_admin_and_visible_ascii_credentials() {
 fn waiting_input_remains_controllable_in_the_ui() {
     assert!(!session_is_finished("waiting_input"));
     assert!(!session_is_finished("running"));
+    assert!(!session_is_finished("paused"));
     assert!(session_is_finished("completed"));
     assert!(session_is_finished("interrupted"));
 }
@@ -1212,4 +1213,47 @@ fn run_control_json_has_exactly_job_id_state_and_node_name() {
         run_control_json("job-1", &outcome("", None)),
         json!({ "job_id": "job-1", "state": "", "node_name": null })
     );
+}
+
+#[test]
+fn a_paused_run_is_attached_with_a_resume_notice() {
+    let mut body = descriptor_json();
+    body["state"] = json!("paused");
+    let base = http_fixture("200 OK", body);
+    let descriptor = fetch_descriptor(
+        &Client::new(),
+        &fixture_profile(base),
+        "job-123",
+        "test-token",
+    )
+    .unwrap();
+
+    assert!(is_paused_state(&descriptor.state));
+    let banner = attach_banner(&descriptor);
+    assert!(
+        banner.contains("Paused — resume with: warpspeed agent-ctrl resume job-123"),
+        "{banner}"
+    );
+    let commands = viewer_commands(&descriptor.state);
+    assert!(commands.contains("resume"), "{commands}");
+    assert!(!commands.contains("send"), "{commands}");
+}
+
+#[test]
+fn a_running_run_is_attached_without_a_pause_notice() {
+    let base = http_fixture("200 OK", descriptor_json());
+    let descriptor = fetch_descriptor(
+        &Client::new(),
+        &fixture_profile(base),
+        "job-123",
+        "test-token",
+    )
+    .unwrap();
+
+    let banner = attach_banner(&descriptor);
+    assert!(
+        banner.starts_with("Attached to Inspector (running, capabilities: watch,input,close).")
+    );
+    assert!(!banner.contains("Paused"), "{banner}");
+    assert!(viewer_commands("running").contains("send <text>"));
 }

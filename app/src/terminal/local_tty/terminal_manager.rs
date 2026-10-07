@@ -349,6 +349,14 @@ where
         self.0.persistent_session_id
     }
 
+    fn session_holder(&self) -> Option<SessionHolder> {
+        self.0.session_holder.clone()
+    }
+
+    fn withheld_restore(&self) -> Option<WithheldRestore> {
+        self.0.withheld_restore.clone()
+    }
+
     fn restore_persistent_session(
         &mut self,
         session_id: SessionId,
@@ -1036,6 +1044,7 @@ impl<S> TerminalManager<S> {
         self.deferred_shell = None;
         self.shutdown_event_loop();
         self.persistent_session_id = None;
+        self.session_holder = None;
         self.repaint_screen_on_attach = false;
         #[cfg(unix)]
         {
@@ -1591,6 +1600,7 @@ fn on_shell_determined<S: TerminalSurface>(
 
     let active_session_id = pty.persistent_session_id().unwrap_or(generated_session_id);
     manager.persistent_session_id = pty.persistent_session_id();
+    manager.session_holder = Some(session_holder::current_holder());
     manager
         .model()
         .lock()

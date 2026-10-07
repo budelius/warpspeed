@@ -104,7 +104,7 @@ use crate::terminal::shared_session::{
 };
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
-use crate::terminal::terminal_manager::{HeldVerdict, WithheldRestore};
+use crate::terminal::terminal_manager::{HeldAgent, HeldVerdict, WithheldRestore};
 use crate::terminal::view::Event as TerminalViewEvent;
 use crate::terminal::{ShellLaunchData, TerminalSurface};
 use crate::test_util::assert_eventually_within;
@@ -4756,6 +4756,89 @@ fn test_parked_restored_pane_round_trips_its_agent() {
     });
 }
 
+/// A parked pane still names the session another build's supervisor holds. Saving it must keep
+/// that holder: recording this build would make the next restore skip the guard, or ask a
+/// supervisor that never had the session, and resume the agent a second time.
+#[test]
+fn test_a_parked_pane_keeps_its_foreign_holder_until_its_shell_starts() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let foreign_session = warp_core::SessionId::from(4242u64);
+        let foreign_holder = SessionHolder {
+            channel: format!(
+                r"\.\pipe\warp-terminal-supervisor-test-foreign-{}",
+                std::process::id()
+            ),
+            version: "20261004-173607861-268f56926594".to_owned(),
+            pid: 27784,
+        };
+        let mut snapshot = terminal_leaf_snapshot(Some(cwd), None);
+        if let PaneNodeSnapshot::Leaf(leaf) = &mut snapshot
+            && let LeafContents::Terminal(terminal) = &mut leaf.contents
+        {
+            terminal.persistent_session_id = Some(foreign_session);
+            terminal.session_holder = Some(foreign_holder.clone());
+        }
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored pane must be parked for this test to mean anything"
+        );
+
+        let terminal_snapshot = |app: &mut App| {
+            let saved = pane_group.update(app, |panes, ctx| panes.snapshot(ctx));
+            let PaneNodeSnapshot::Leaf(leaf) = saved else {
+                panic!("expected the restored tab to snapshot as a single leaf");
+            };
+            let LeafContents::Terminal(terminal) = leaf.contents else {
+                panic!("expected the restored leaf to snapshot as a terminal pane");
+            };
+            terminal
+        };
+        let parked = terminal_snapshot(&mut app);
+        assert_eq!(parked.persistent_session_id, Some(foreign_session));
+        assert_eq!(parked.session_holder, Some(foreign_holder));
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .established_session_count()
+                    == 1
+            })),
+            "the restored pane's shell never started"
+        );
+        let started = terminal_snapshot(&mut app);
+        assert_eq!(
+            started.session_holder,
+            Some(crate::terminal::local_tty::session_holder::current_holder())
+        );
+    });
+}
+
 /// The resume command a pane is restored with must reach its terminal manager, which runs it once
 /// the shell starts. A manager that drops it restores a plain shell and the agent never resumes.
 #[test]
@@ -5776,6 +5859,58 @@ fn test_restart_drops_the_withheld_restore_and_its_banner() {
                 assert!(!manager.run_withheld_restore(ctx))
             });
         });
+    });
+}
+
+/// Quitting with the banner up must bring the pane back to the same question: the held session,
+/// its holder and the agent, not this build's stand-in shell.
+#[test]
+fn test_a_withheld_restore_is_saved_as_the_held_session() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (pane_group, manager, view) = restartable_pane(&mut app);
+        let holder = SessionHolder {
+            channel: "x".into(),
+            version: "test".into(),
+            pid: 1,
+        };
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: holder.clone(),
+            session_id: warp_core::SessionId::from(4242u64),
+            agent: Some(HeldAgent {
+                agent: crate::terminal::CLIAgent::Claude,
+                session_id: "abc".to_owned(),
+            }),
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore.clone(), ctx);
+            });
+            manager.update(ctx, |manager, _| {
+                manager.set_withheld_restore_for_test(restore)
+            });
+        });
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected a terminal pane");
+        };
+        assert_eq!(
+            terminal.persistent_session_id,
+            Some(warp_core::SessionId::from(4242u64))
+        );
+        assert_eq!(terminal.session_holder, Some(holder));
+        let descriptor = terminal
+            .cli_agent_resume_descriptor
+            .expect("the held agent is saved");
+        assert_eq!(descriptor.agent, crate::terminal::CLIAgent::Claude);
+        assert_eq!(descriptor.session_id.as_deref(), Some("abc"));
     });
 }
 

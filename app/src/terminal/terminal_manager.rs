@@ -83,6 +83,17 @@ pub trait TerminalManager: Any {
         None
     }
 
+    /// The supervisor holding [`Self::persistent_session_id`]: the one the pane was restored with
+    /// until this manager's shell starts, then this build's.
+    fn session_holder(&self) -> Option<SessionHolder> {
+        None
+    }
+
+    /// The resume command the guard is holding back until the user decides what to do with it.
+    fn withheld_restore(&self) -> Option<WithheldRestore> {
+        None
+    }
+
     /// Stops this manager's local session before its pane moves to another process.
     fn shutdown_for_process_handoff(&mut self) {}
 

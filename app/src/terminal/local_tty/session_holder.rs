@@ -43,10 +43,6 @@ pub(crate) fn current_channel() -> String {
             .to_string_lossy()
             .into_owned()
     }
-    #[cfg(not(feature = "local_tty"))]
-    {
-        String::new()
-    }
 }
 
 pub(crate) fn current_holder() -> SessionHolder {
@@ -178,15 +174,6 @@ fn connect(channel: &str, timeout: Duration) -> Option<impl Transport> {
         std::path::Path::new(channel),
     )
     .ok()
-}
-
-#[cfg(not(feature = "local_tty"))]
-#[allow(unused_variables)]
-fn connect(
-    channel: &str,
-    timeout: Duration,
-) -> Option<warp_terminal::local_tty::supervisor::loopback::LoopbackTransport> {
-    None
 }
 
 #[cfg(test)]

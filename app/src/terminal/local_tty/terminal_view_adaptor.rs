@@ -2030,6 +2030,14 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.persistent_session_id
     }
 
+    fn session_holder(&self) -> Option<SessionHolder> {
+        self.session_holder.clone()
+    }
+
+    fn withheld_restore(&self) -> Option<crate::terminal::terminal_manager::WithheldRestore> {
+        self.withheld_restore.clone()
+    }
+
     fn restore_persistent_session(
         &mut self,
         session_id: warp_core::SessionId,

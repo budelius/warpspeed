@@ -838,18 +838,33 @@ fn stop_run_with(
 /// Asks the dashboard to pause a live interactive run: its agent exits, its work is pushed to the
 /// run's branch, and it stops holding a node slot. A run whose agent session AgentCtrl does not
 /// know fails with an error [`is_session_unknown`] recognizes.
-pub fn pause_run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
+pub fn pause_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunControlOutcome> {
     validate_job_id(job_id)?;
     let token = dashboard_token()?;
-    pause_run_with(profile(environment), &token, job_id).map(drop)
+    pause_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
 }
 
 /// Asks the dashboard to resume a paused run on a node with a free slot. With every node full it
 /// fails with an error [`is_node_at_capacity`] recognizes.
-pub fn resume_run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
+pub fn resume_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunControlOutcome> {
     validate_job_id(job_id)?;
     let token = dashboard_token()?;
-    resume_run_with(profile(environment), &token, job_id).map(drop)
+    resume_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
+}
+
+/// What the dashboard reports after accepting a pause or resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunControlOutcome {
+    pub state: String,
+    pub node_name: Option<String>,
+}
+
+fn run_control_outcome(result: &Value) -> RunControlOutcome {
+    let text = |key| result.get(key).and_then(Value::as_str).map(str::to_owned);
+    RunControlOutcome {
+        state: text("state").unwrap_or_default(),
+        node_name: text("node_name"),
+    }
 }
 
 fn pause_run_with(profile: &EnvironmentProfile, token: &str, job_id: &str) -> Result<Value> {
@@ -1480,7 +1495,9 @@ fn validate_verification_url(
 }
 
 fn ensure_command_accepted(result: &Value) -> Result<()> {
-    if result.get("status").and_then(Value::as_str) == Some("accepted") {
+    if result.get("status").and_then(Value::as_str) == Some("accepted")
+        || result.get("accepted").and_then(Value::as_bool) == Some(true)
+    {
         return Ok(());
     }
     let message = result

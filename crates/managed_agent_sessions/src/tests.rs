@@ -972,8 +972,13 @@ fn pause_and_resume_post_to_the_run_routes() {
         ),
         (resume_run_with, "resume"),
     ] {
-        let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
-        call(&fixture_profile(base), "token", "job-1").unwrap();
+        let (base, request) = capturing_fixture(
+            json!({ "job_id": "job-1", "state": "paused", "accepted": true, "node_name": "node-1" }),
+        );
+        let result = call(&fixture_profile(base), "token", "job-1").unwrap();
+        let outcome = run_control_outcome(&result);
+        assert_eq!(outcome.state, "paused");
+        assert_eq!(outcome.node_name.as_deref(), Some("node-1"));
         let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
         assert!(
             raw.starts_with(&format!("POST /api/agent-control/runs/job-1/{route} ")),
@@ -1078,4 +1083,17 @@ fn list_runs_parses_node_and_pause_time() {
         runs[0].paused_at.as_deref(),
         Some("2026-10-07T09:05:00.000Z")
     );
+}
+
+#[test]
+fn a_pause_or_resume_must_say_accepted_true() {
+    for body in [
+        json!({ "job_id": "job-1", "state": "running", "accepted": false }),
+        json!({ "job_id": "job-1", "state": "running" }),
+    ] {
+        let base = http_fixture("200 OK", body);
+        assert!(pause_run_with(&fixture_profile(base), "token", "job-1").is_err());
+        let base = http_fixture("200 OK", json!({ "state": "running" }));
+        assert!(resume_run_with(&fixture_profile(base), "token", "job-1").is_err());
+    }
 }

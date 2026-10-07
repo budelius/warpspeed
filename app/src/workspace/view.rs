@@ -13525,7 +13525,7 @@ impl Workspace {
             if take_over {
                 manager.take_over_held_session(ctx)
             } else {
-                manager.run_withheld_restore(ctx)
+                manager.discard_withheld_restore(ctx)
             }
         });
         if !handled {

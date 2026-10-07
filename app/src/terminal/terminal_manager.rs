@@ -28,8 +28,10 @@ use crate::terminal::CLIAgent;
 #[derive(Clone, Debug, PartialEq)]
 pub struct WithheldRestore {
     pub command: String,
-    pub holder: SessionHolder,
-    pub session_id: SessionId,
+    /// `None` when no supervisor is known to hold the session and only the agent's own registry
+    /// shows it still running.
+    pub holder: Option<SessionHolder>,
+    pub session_id: Option<SessionId>,
     pub agent: Option<HeldAgent>,
     pub verdict: HeldVerdict,
 }
@@ -41,11 +43,15 @@ pub struct HeldAgent {
     pub session_id: String,
 }
 
-/// Whether a window of the holding build is attached to the held session.
+/// Where the held session is running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeldVerdict {
+    /// The holder's supervisor has it and no window is attached.
     Detached,
+    /// A window of the holding build is attached to it.
     Attached,
+    /// No supervisor answers for it, but the agent's registry shows the agent still running.
+    HeldByUnknown,
 }
 
 pub trait TerminalManager: Any {
@@ -123,7 +129,12 @@ pub trait TerminalManager: Any {
 
     /// Supplies the supervisor that held this pane's session when it was saved, and the agent the
     /// session was running, so a restore can tell whether that supervisor still holds it.
-    fn restore_session_holder(&mut self, _holder: SessionHolder, _agent: Option<HeldAgent>) {}
+    fn restore_session_holder(
+        &mut self,
+        _holder: Option<SessionHolder>,
+        _agent: Option<HeldAgent>,
+    ) {
+    }
 
     /// Ends the held session where it is and then runs the withheld command here.
     #[must_use]
@@ -134,9 +145,13 @@ pub trait TerminalManager: Any {
         false
     }
 
-    /// Runs the withheld command without touching the holder.
+    /// Drops the withheld command and leaves this pane's shell as it is; the held session keeps
+    /// running where it is.
     #[must_use]
-    fn run_withheld_restore(&mut self, _ctx: &mut ModelContext<Box<dyn TerminalManager>>) -> bool {
+    fn discard_withheld_restore(
+        &mut self,
+        _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
+    ) -> bool {
         false
     }
 

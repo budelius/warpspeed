@@ -257,3 +257,27 @@ fn a_kill_the_holder_refuses_is_an_error() {
     assert!(error.to_string().contains("no such session"));
     holder.join().unwrap();
 }
+
+#[test]
+fn a_take_over_ends_the_session_only_while_it_is_still_held_detached() {
+    assert_eq!(
+        take_over_step(HolderVerdict::HeldDetached, false).unwrap(),
+        TakeOverStep::EndAgentAndSession
+    );
+    assert_eq!(
+        take_over_step(HolderVerdict::HeldAttached, true)
+            .unwrap_err()
+            .to_string(),
+        "A window is attached to that session now"
+    );
+    assert_eq!(
+        take_over_step(HolderVerdict::Unknown, true).unwrap(),
+        TakeOverStep::EndAgentOnly
+    );
+    assert_eq!(
+        take_over_step(HolderVerdict::Unknown, false)
+            .unwrap_err()
+            .to_string(),
+        "The session is no longer held"
+    );
+}

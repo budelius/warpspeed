@@ -27027,6 +27027,14 @@ impl TerminalSurface for TerminalView {
     }
 
     #[cfg(feature = "local_tty")]
+    fn on_take_over_started(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.set_in_flight();
+            ctx.notify();
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
     fn on_take_over_failed(&mut self, error: String, ctx: &mut ViewContext<Self>) {
         if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
             banner.set_error(error);

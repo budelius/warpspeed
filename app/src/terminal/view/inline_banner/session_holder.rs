@@ -31,6 +31,7 @@ pub struct SessionHolderBannerState {
     pub id: InlineBannerId,
     restore: WithheldRestore,
     error: Option<String>,
+    in_flight: bool,
     take_over_mouse_state: MouseStateHandle,
     start_fresh_mouse_state: MouseStateHandle,
 }
@@ -42,32 +43,76 @@ impl SessionHolderBannerState {
             id,
             restore,
             error: None,
+            in_flight: false,
             take_over_mouse_state: Default::default(),
             start_fresh_mouse_state: Default::default(),
         }
     }
 
+    pub fn set_in_flight(&mut self) {
+        self.in_flight = true;
+    }
+
     pub fn set_error(&mut self, error: String) {
+        self.in_flight = false;
         self.error = Some(error);
     }
 
+    #[cfg(test)]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    #[cfg(test)]
+    pub fn in_flight(&self) -> bool {
+        self.in_flight
+    }
+
     pub fn title(&self) -> String {
-        let holder = &self.restore.holder;
+        let (version, pid) = match &self.restore.holder {
+            Some(holder) => (holder.version.as_str(), holder.pid.to_string()),
+            None => ("unknown", "unknown".to_owned()),
+        };
         match self.restore.verdict {
-            HeldVerdict::Detached => format!(
-                "Still running under build {} (pid {})",
-                holder.version, holder.pid
-            ),
-            HeldVerdict::Attached => format!(
-                "Open in another window (build {}, pid {})",
-                holder.version, holder.pid
-            ),
+            HeldVerdict::Detached => format!("Still running under build {version} (pid {pid})"),
+            HeldVerdict::Attached => format!("Open in another window (build {version}, pid {pid})"),
+            HeldVerdict::HeldByUnknown => {
+                "Still running in another Warp (holder unknown)".to_owned()
+            }
         }
     }
 
     /// An attached holder has a window in use, so ending its session from here is not offered.
     pub fn offers_take_over(&self) -> bool {
-        self.restore.verdict == HeldVerdict::Detached
+        match self.restore.verdict {
+            HeldVerdict::Detached | HeldVerdict::HeldByUnknown => true,
+            HeldVerdict::Attached => false,
+        }
+    }
+
+    fn body(&self) -> String {
+        if self.in_flight {
+            return "Ending the session thereâ€¦".to_owned();
+        }
+        if let Some(error) = &self.error {
+            return format!("Taking over failed: {error}");
+        }
+        let command = &self.restore.command;
+        match self.restore.verdict {
+            HeldVerdict::Detached => format!(
+                "The agent and its shell are still alive in that build's session supervisor. Take \
+                 over ends them there and runs `{command}` here. Start fresh leaves this shell as \
+                 it is."
+            ),
+            HeldVerdict::Attached => "A window in that build is attached to this session. Start \
+                                      fresh leaves this shell as it is; use that window to \
+                                      continue."
+                .to_owned(),
+            HeldVerdict::HeldByUnknown => format!(
+                "The agent is still running in another Warp. Take over ends the agent there and \
+                 runs `{command}` here. Start fresh leaves this shell as it is."
+            ),
+        }
     }
 }
 
@@ -92,7 +137,7 @@ pub fn render_session_holder_banner(
         variant,
     };
     let mut buttons = Vec::new();
-    if state.offers_take_over() {
+    if !state.in_flight && state.offers_take_over() {
         buttons.push(button(
             "Take over",
             SessionHolderBannerAction::TakeOver,
@@ -100,26 +145,14 @@ pub fn render_session_holder_banner(
             InlineBannerTextButtonVariant::Primary,
         ));
     }
-    buttons.push(button(
-        "Start fresh",
-        SessionHolderBannerAction::StartFresh,
-        &state.start_fresh_mouse_state,
-        InlineBannerTextButtonVariant::Secondary,
-    ));
-
-    let body = match (&state.error, state.restore.verdict) {
-        (Some(error), _) => format!("Taking over failed: {error}"),
-        (None, HeldVerdict::Detached) => format!(
-            "The agent and its shell are still alive in that build's session supervisor. Take over \
-             ends them there and runs `{}` here.",
-            state.restore.command
-        ),
-        (None, HeldVerdict::Attached) => format!(
-            "A window in that build is attached to this session. Start fresh runs `{}` here \
-             without touching it.",
-            state.restore.command
-        ),
-    };
+    if !state.in_flight {
+        buttons.push(button(
+            "Start fresh",
+            SessionHolderBannerAction::StartFresh,
+            &state.start_fresh_mouse_state,
+            InlineBannerTextButtonVariant::Secondary,
+        ));
+    }
 
     render_inline_block_list_banner(
         InlineBannerStyle::CallToAction,
@@ -132,7 +165,7 @@ pub fn render_session_holder_banner(
                 color_override: Some(appearance.theme().foreground().into_solid()),
             }),
             content: Some(vec![Text::new(
-                body,
+                state.body(),
                 appearance.ui_font_family(),
                 appearance.ui_font_size(),
             )]),

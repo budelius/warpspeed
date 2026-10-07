@@ -92,6 +92,10 @@ where
     ) {
     }
 
+    /// Called when a take-over has started ending the held session.
+    #[cfg(feature = "local_tty")]
+    fn on_take_over_started(&mut self, _ctx: &mut ViewContext<Self>) {}
+
     /// Called when taking over a held session failed, with the reason.
     #[cfg(feature = "local_tty")]
     fn on_take_over_failed(&mut self, _error: String, _ctx: &mut ViewContext<Self>) {}

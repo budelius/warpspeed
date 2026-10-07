@@ -1841,18 +1841,16 @@ impl PaneGroup {
                     if let Some(command) = cli_agent_resume_command {
                         manager.restore_cli_agent_resume_command(command);
                     }
-                    if let Some(holder) = terminal_snapshot.session_holder.clone() {
-                        let agent = terminal_snapshot
-                            .cli_agent_resume_descriptor
-                            .as_ref()
-                            .and_then(|descriptor| {
-                                Some(HeldAgent {
-                                    agent: descriptor.agent,
-                                    session_id: descriptor.session_id.clone()?,
-                                })
-                            });
-                        manager.restore_session_holder(holder, agent);
-                    }
+                    let agent = terminal_snapshot
+                        .cli_agent_resume_descriptor
+                        .as_ref()
+                        .and_then(|descriptor| {
+                            Some(HeldAgent {
+                                agent: descriptor.agent,
+                                session_id: descriptor.session_id.clone()?,
+                            })
+                        });
+                    manager.restore_session_holder(terminal_snapshot.session_holder.clone(), agent);
                     if configure_before_start && shell_start == ShellStartPolicy::Eager {
                         manager.ensure_shell_started(ctx);
                     }

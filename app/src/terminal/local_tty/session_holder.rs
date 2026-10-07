@@ -32,6 +32,28 @@ pub(crate) enum HolderVerdict {
     HeldAttached,
 }
 
+/// What a take-over has to end, by what the holder says right before anything is ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TakeOverStep {
+    EndAgentAndSession,
+    /// The holder no longer has the session, but the agent is still running somewhere.
+    EndAgentOnly,
+}
+
+/// The holder is asked again at take-over rather than trusted from the restore: a window may have
+/// attached since, and a supervisor ends a session whether or not a window is attached to it.
+pub(crate) fn take_over_step(
+    verdict: HolderVerdict,
+    agent_registered: bool,
+) -> Result<TakeOverStep> {
+    match verdict {
+        HolderVerdict::HeldDetached => Ok(TakeOverStep::EndAgentAndSession),
+        HolderVerdict::HeldAttached => bail!("A window is attached to that session now"),
+        HolderVerdict::Unknown if agent_registered => Ok(TakeOverStep::EndAgentOnly),
+        HolderVerdict::Unknown => bail!("The session is no longer held"),
+    }
+}
+
 pub(crate) fn current_channel() -> String {
     #[cfg(all(feature = "local_tty", windows))]
     {

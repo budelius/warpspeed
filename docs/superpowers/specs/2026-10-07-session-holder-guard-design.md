@@ -85,12 +85,14 @@ The pane connects to `session_holder.channel`, pings, and lists sessions. The ve
 
 | Holder says | Pane does |
 |---|---|
-| Unreachable, or the session is not listed | Today's path: fresh shell, queued resume command. |
+| Unreachable, or the session is not listed, and the agent is not running | Today's path: fresh shell, queued resume command. |
+| No holder recorded, or unreachable, or the session is not listed, but the agent session id is in `process_registry::running_session_ids()` | The shell starts as today; the resume command is withheld. Banner: "Still running in another Warp (holder unknown)" with **Take over** and **Start fresh**. Take over ends only the agent process. |
 | Listed, detached, and `channel` is not ours | The shell starts as today; the resume command is withheld. Banner: "Still running under build `<version>` (pid `<pid>`)" with **Take over** and **Start fresh**. |
 | Listed and attached | The shell starts as today; the resume command is withheld. Banner: "Open in another window" with **Start fresh** only. |
 | Listed, detached, and `channel` is ours | Not reached: the pane attaches, as it does today. |
 
-**Start fresh** runs today's path. **Take over** runs Part 3, then today's path.
+**Start fresh** discards the withheld command and leaves the bare shell; it never resumes, and
+the session stays where it runs. **Take over** runs Part 3, then queues the command.
 
 The guard is one new function, `session_holder::verdict(holder, session_id) -> Verdict`, called
 from the restore code where `cli_agent_resume_command` is computed. It owns the connection; the
@@ -105,10 +107,16 @@ has been an orphaned `claude` since 2026-10-06 for exactly this reason.
 Take over therefore runs in this order, and stops at the first failure with the banner showing the
 error:
 
+0. Ask the holder again. A window may have attached since the restore, and the supervisor does
+   not refuse `Kill` on an attached session. Detached: go on. Attached: fail with "A window is
+   attached to that session now". No longer listed: end only the agent if it is still registered,
+   and fail with "The session is no longer held" otherwise. A session held by an unknown Warp has
+   no holder to ask and goes straight to step 1, skipping steps 2 and 3.
 1. Find the agent process by the agent session id in the pane's resume descriptor: Claude Code's
    `~/.claude/sessions/<pid>.json` and Pi's `warp-sessions/<pid>.json` both carry `sessionId`,
    so no shell pid or process tree is needed. Terminate it. If no live entry names that session,
-   skip this step.
+   skip this step. The pid is refreshed and checked once more before it is ended: it must still
+   be the agent's executable and must have started no later than the entry was written.
 2. Send `Kill { session_id }` to the holder.
 3. Wait until `ChildStatus` reports not running, bounded by a short timeout.
 4. Run today's path: fresh shell, queued resume command.
@@ -116,8 +124,8 @@ error:
 Step 1 happens before step 2 so a Claude process cannot outlive its shell and keep writing to the
 transcript the new process is about to resume.
 
-`Start fresh` and `Take over` both end by queueing the withheld command into the pane's
-already-running shell.
+Only `Take over` queues the withheld command, into the pane's already-running shell. `Start
+fresh` leaves that shell as it is.
 
 ## Part 4: Pi session ids by shell uuid, not by process tree
 
@@ -131,7 +139,9 @@ to the `<pid>.json` entry it already writes:
 ```
 
 `process_registry` looks Pi entries up by the uuid Warp exported into the pane's shell first and
-falls back to the tree walk only for entries written by an older extension that lack the field.
+falls back to the tree walk only for entries written by an older extension that lack the field. A uuid match counts only for a Pi process that started no earlier than
+the pane's shell: a pane restored while the old build's shell still runs shares its uuid, and the
+Pi in that shell is the old build's.
 The implementation plan verifies that this value is the pane's `TerminalPaneSnapshot::uuid`; if
 it is a different id, the pane records the exported value alongside it. Claude Code's own
 `~/.claude/sessions/<pid>.json` has no such field, so Claude keeps the tree walk, which works for
@@ -185,4 +195,5 @@ change.
 
 The snapshot field and the extension field are additive. Panes saved by this build and reopened on
 an older build ignore both. Panes saved by an older build and reopened here take today's path
-until they are saved again.
+until they are saved again, except that the running-session check of Part 2 still withholds a
+resume whose agent is running elsewhere.

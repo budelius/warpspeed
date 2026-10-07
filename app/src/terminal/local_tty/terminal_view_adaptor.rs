@@ -2058,8 +2058,8 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.cli_agent_resume_command = Some(command);
     }
 
-    fn restore_session_holder(&mut self, holder: SessionHolder, agent: Option<HeldAgent>) {
-        self.session_holder = Some(holder);
+    fn restore_session_holder(&mut self, holder: Option<SessionHolder>, agent: Option<HeldAgent>) {
+        self.session_holder = holder;
         self.held_agent = agent;
     }
 
@@ -2070,11 +2070,11 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.take_over_held_session_inner(ctx)
     }
 
-    fn run_withheld_restore(
+    fn discard_withheld_restore(
         &mut self,
         ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
     ) -> bool {
-        self.run_withheld_restore_inner(ctx)
+        self.discard_withheld_restore_inner(ctx)
     }
 
     #[cfg(test)]

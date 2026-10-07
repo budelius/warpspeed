@@ -734,8 +734,8 @@ impl PaneContent for TerminalPane {
             let (persistent_session_id, session_holder, cli_agent_resume_descriptor) =
                 match withheld_restore {
                     Some(restore) => (
-                        Some(restore.session_id),
-                        Some(restore.holder),
+                        restore.session_id,
+                        restore.holder,
                         self.withheld_agent_resume(restore.agent, cwd.clone(), app),
                     ),
                     None => (

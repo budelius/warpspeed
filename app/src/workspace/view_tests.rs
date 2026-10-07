@@ -7566,7 +7566,6 @@ fn agent_sessions_selected_pane(
     workspace.read(app, |workspace, ctx| {
         workspace
             .agent_sessions_modal
-            .view
             .as_ref(ctx)
             .body()
             .as_ref(ctx)
@@ -7590,12 +7589,12 @@ fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
         });
 
         workspace.update(&mut app, |workspace, ctx| {
-            assert!(!workspace.agent_sessions_modal.is_open());
+            assert!(!workspace.is_agent_sessions_modal_open());
             workspace.handle_action(
                 &WorkspaceAction::ShowAgentSessions { focus: Some(asked) },
                 ctx,
             );
-            assert!(workspace.agent_sessions_modal.is_open());
+            assert!(workspace.is_agent_sessions_modal_open());
             assert!(
                 workspace
                     .current_workspace_state
@@ -7611,7 +7610,6 @@ fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
         workspace.update(&mut app, |workspace, ctx| {
             workspace
                 .agent_sessions_modal
-                .view
                 .update(ctx, |modal, ctx| {
                     modal
                         .body()
@@ -7673,7 +7671,7 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
         });
 
         workspace.update(&mut app, |workspace, ctx| {
-            assert!(!workspace.agent_sessions_modal.is_open());
+            assert!(!workspace.is_agent_sessions_modal_open());
             assert_eq!(workspace.active_tab_index(), 0);
             assert_eq!(
                 workspace
@@ -7801,5 +7799,61 @@ fn a_history_update_keeps_the_palettes_selected_agent_session() {
             chosen,
             "a newer scan keeps the selection on the same conversation"
         );
+    });
+}
+
+fn open_agent_sessions(workspace: &ViewHandle<Workspace>, app: &mut App) {
+    workspace.update(app, |workspace, ctx| {
+        workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
+        assert!(workspace.is_agent_sessions_modal_open());
+    });
+}
+
+#[test]
+fn closing_all_modals_closes_the_agent_sessions_view() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        open_agent_sessions(&workspace, &mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_all_overlays(ctx);
+            assert!(!workspace.is_agent_sessions_modal_open());
+            assert!(
+                !workspace
+                    .current_workspace_state
+                    .is_any_non_palette_modal_open(ctx)
+            );
+        });
+    });
+}
+
+#[test]
+fn escape_closes_the_agent_sessions_view_with_focus_off_the_search_box() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        app.update(crate::workspace::agent_sessions_view::init);
+        let workspace = mock_workspace(&mut app);
+        open_agent_sessions(&workspace, &mut app);
+
+        let window_id = app.read(|ctx| workspace.window_id(ctx));
+        let responder_chain = workspace.read(&app, |view, ctx| {
+            let modal = view.agent_sessions_modal.clone();
+            let body = modal.as_ref(ctx).body().clone();
+            vec![workspace.id(), modal.id(), body.id()]
+        });
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &responder_chain,
+                &warpui::keymap::Keystroke::parse("escape").unwrap(),
+                false,
+            )
+            .unwrap();
+
+        assert!(handled, "the agent sessions view handles escape itself");
+        workspace.read(&app, |workspace, _| {
+            assert!(!workspace.is_agent_sessions_modal_open());
+        });
     });
 }

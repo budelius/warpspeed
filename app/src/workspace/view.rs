@@ -1167,8 +1167,9 @@ pub struct Workspace {
     /// them, opened by `ToggleAttachSessionMenu`; selecting an entry dispatches
     /// `AttachDetachedSession`.
     attach_session_menu_modal: ModalViewState<Modal<Menu<WorkspaceAction>>>,
-    /// The window's agent sessions by tab and pane, opened by `ShowAgentSessions`.
-    agent_sessions_modal: ModalViewState<Modal<AgentSessionsView>>,
+    /// The window's agent sessions by tab and pane, opened by `ShowAgentSessions`. Shown while
+    /// `current_workspace_state.is_agent_sessions_modal_open`, so closing all modals closes it.
+    agent_sessions_modal: ViewHandle<Modal<AgentSessionsView>>,
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
@@ -2260,7 +2261,7 @@ impl Workspace {
 
     fn build_agent_sessions_modal(
         ctx: &mut ViewContext<Self>,
-    ) -> ModalViewState<Modal<AgentSessionsView>> {
+    ) -> ViewHandle<Modal<AgentSessionsView>> {
         let body = ctx.add_typed_action_view(AgentSessionsView::new);
         ctx.subscribe_to_view(&body, |me, _, event, ctx| {
             me.handle_agent_sessions_view_event(event, ctx);
@@ -2268,6 +2269,7 @@ impl Workspace {
         let modal = ctx.add_typed_action_view(|ctx| {
             Modal::new(None, body, ctx)
                 .close_modal_button_disabled()
+                .with_dismiss_on_click()
                 .with_modal_style(UiComponentStyles {
                     width: Some(640.),
                     height: Some(520.),
@@ -2289,7 +2291,7 @@ impl Workspace {
                 me.close_agent_sessions_modal(ctx);
             }
         });
-        ModalViewState::new(modal)
+        modal
     }
 
     fn build_new_worktree_modal(
@@ -17093,14 +17095,13 @@ impl Workspace {
         let (panes, detached) = self.agent_session_inputs(ctx);
         let history = AgentSessionHistoryModel::as_ref(ctx);
         let (past, history_loaded) = (history.sessions().to_vec(), history.is_loaded());
-        self.agent_sessions_modal.view.update(ctx, |modal, ctx| {
+        self.agent_sessions_modal.update(ctx, |modal, ctx| {
             modal.body().update(ctx, |view, ctx| {
                 view.set_inputs(panes, detached, &past, history_loaded, focus, ctx);
             });
         });
-        self.agent_sessions_modal.open();
         self.current_workspace_state.is_agent_sessions_modal_open = true;
-        ctx.focus(&self.agent_sessions_modal.view);
+        ctx.focus(&self.agent_sessions_modal);
         AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
         ctx.notify();
     }
@@ -17125,6 +17126,10 @@ impl Workspace {
         self.show_agent_sessions(Some(locator), ctx);
     }
 
+    fn is_agent_sessions_modal_open(&self) -> bool {
+        self.current_workspace_state.is_agent_sessions_modal_open
+    }
+
     fn close_agent_sessions_modal(&mut self, ctx: &mut ViewContext<Self>) {
         self.hide_agent_sessions_modal(ctx);
         self.focus_active_tab(ctx);
@@ -17132,7 +17137,6 @@ impl Workspace {
 
     /// Closes the window view without handing focus back, for when something else takes it.
     fn hide_agent_sessions_modal(&mut self, ctx: &mut ViewContext<Self>) {
-        self.agent_sessions_modal.close();
         self.current_workspace_state.is_agent_sessions_modal_open = false;
         ctx.notify();
     }
@@ -17171,8 +17175,8 @@ impl Workspace {
         match event {
             AgentSessionHistoryEvent::Updated => {
                 let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
-                if self.agent_sessions_modal.is_open() {
-                    self.agent_sessions_modal.view.update(ctx, |modal, ctx| {
+                if self.is_agent_sessions_modal_open() {
+                    self.agent_sessions_modal.update(ctx, |modal, ctx| {
                         modal
                             .body()
                             .update(ctx, |view, ctx| view.refresh_past(&past, ctx));
@@ -30078,8 +30082,8 @@ impl View for Workspace {
             stack.add_child(self.attach_session_menu_modal.render());
         }
 
-        if self.agent_sessions_modal.is_open() {
-            stack.add_child(self.agent_sessions_modal.render());
+        if self.is_agent_sessions_modal_open() {
+            stack.add_child(ChildView::new(&self.agent_sessions_modal).finish());
         }
 
         if self.workflow_modal.as_ref(app).is_open() {

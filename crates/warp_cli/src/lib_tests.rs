@@ -3409,3 +3409,12 @@ fn report_external_reference_missing_reference_type_fails() {
         "missing --reference-type should fail to parse"
     );
 }
+
+#[test]
+fn managed_agent_start_takes_an_agent_kind() {
+    let command = agent_ctrl_command(&["start", "--agent", "claude", "--repo", "https://x/y"]);
+    let managed_sessions::ManagedSessionsCommand::Start { agent, .. } = command else {
+        panic!("expected start, got {command:?}");
+    };
+    assert_eq!(agent, "claude");
+}

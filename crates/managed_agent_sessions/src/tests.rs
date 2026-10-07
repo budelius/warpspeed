@@ -951,6 +951,55 @@ fn agent_ctrl_profiles_are_the_interactive_rw_profiles() {
 }
 
 #[test]
+fn agent_kinds_resolve_to_their_profiles_and_profile_names_pass_through() {
+    let resolve = |agent| resolve_agent_name(ManagedEnvironment::Staging, agent).unwrap();
+    assert_eq!(resolve("claude"), "staging-claude-interactive-rw");
+    assert_eq!(resolve("pi"), "staging-pi-interactive-rw");
+    assert_eq!(resolve("codex"), "staging-codex-interactive-rw");
+    assert_eq!(resolve("staging-pi-lander"), "staging-pi-lander");
+    assert_eq!(
+        resolve("staging-claude-interactive-rw"),
+        "staging-claude-interactive-rw"
+    );
+}
+
+#[test]
+fn an_unknown_agent_fails_with_the_accepted_values() {
+    for unknown in [
+        "gemini",
+        "Claude",
+        "staging-",
+        "prod-claude",
+        "staging-a b",
+        "",
+    ] {
+        let error = resolve_agent_name(ManagedEnvironment::Staging, unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("claude, pi, codex"), "{unknown:?}: {error}");
+        assert!(error.contains("staging-"), "{unknown:?}: {error}");
+    }
+}
+
+#[test]
+fn start_with_an_unknown_agent_fails_before_any_request() {
+    let error = run(&ManagedSessionsArgs {
+        command: ManagedSessionsCommand::Start {
+            agent: "gemini".to_owned(),
+            task: Some("task-1".to_owned()),
+            repo: None,
+            branch: None,
+            prompt: None,
+            interactive: false,
+            environment: ManagedEnvironment::Staging,
+        },
+        json: false,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown agent"), "{error}");
+}
+
+#[test]
 fn stop_run_posts_a_stop_request() {
     let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
     let profile = fixture_profile(base);

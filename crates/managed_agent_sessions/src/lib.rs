@@ -303,25 +303,28 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             prompt,
             interactive,
             environment,
-        } => match (repo, task) {
-            (Some(repo), _) => start_on_repo(
-                *environment,
-                agent,
-                repo,
-                branch.as_deref(),
-                prompt.as_deref(),
-                args.json,
-            ),
-            (None, Some(task)) => start(
-                *environment,
-                agent,
-                task,
-                prompt.as_deref(),
-                *interactive,
-                args.json,
-            ),
-            (None, None) => bail!("start requires --task or --repo"),
-        },
+        } => {
+            let agent = resolve_agent_name(*environment, agent)?;
+            match (repo, task) {
+                (Some(repo), _) => start_on_repo(
+                    *environment,
+                    &agent,
+                    repo,
+                    branch.as_deref(),
+                    prompt.as_deref(),
+                    args.json,
+                ),
+                (None, Some(task)) => start(
+                    *environment,
+                    &agent,
+                    task,
+                    prompt.as_deref(),
+                    *interactive,
+                    args.json,
+                ),
+                (None, None) => bail!("start requires --task or --repo"),
+            }
+        }
         ManagedSessionsCommand::Repos { environment } => repos(*environment, args.json),
         ManagedSessionsCommand::MoveAll { .. } => bail!("move-all is handled by the application"),
         ManagedSessionsCommand::Open {
@@ -501,6 +504,35 @@ pub fn agent_ctrl_profile(agent: &str) -> Option<&'static str> {
         "codex" => Some("staging-codex-interactive-rw"),
         _ => None,
     }
+}
+
+/// The CLI agent kinds that [`agent_ctrl_profile`] maps to an AgentCtrl profile.
+pub const AGENT_KINDS: [&str; 3] = ["claude", "pi", "codex"];
+
+/// The AgentCtrl profile that `agent` names: a CLI agent kind maps through
+/// [`agent_ctrl_profile`], and a name with the environment's profile prefix is taken as a
+/// configured profile. Anything else fails before any request, listing what is accepted.
+pub fn resolve_agent_name(environment: ManagedEnvironment, agent: &str) -> Result<String> {
+    if let Some(profile_name) = agent_ctrl_profile(agent) {
+        return Ok(profile_name.to_owned());
+    }
+    let alias = profile(environment).alias;
+    let is_profile_name = agent
+        .strip_prefix(alias)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        });
+    if is_profile_name {
+        return Ok(agent.to_owned());
+    }
+    bail!(
+        "unknown agent {agent:?}; use {} or a profile name starting with {alias}- (for example {alias}-claude-interactive-rw)",
+        AGENT_KINDS.join(", ")
+    )
 }
 
 /// Canonical form of a repository URL, identical to the AgentCtrl node's rule: scheme and host

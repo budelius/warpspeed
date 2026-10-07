@@ -106,6 +106,12 @@ pub trait SearchItem: Send + Sync {
         false
     }
 
+    /// Identifies the item across reruns of a query, so that a selection can stay on it when the
+    /// data behind the results changes. `None` when the item need not keep its selection.
+    fn selection_key(&self) -> Option<String> {
+        None
+    }
+
     /// Returns an optional tooltip string to display when hovering over this item.
     fn tooltip(&self) -> Option<String> {
         None

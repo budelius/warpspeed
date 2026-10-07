@@ -338,7 +338,7 @@ impl View {
             .map(|item| &item.search_result)
     }
 
-    #[cfg(feature = "integration_tests")]
+    #[cfg(any(test, feature = "integration_tests"))]
     pub fn selected_search_result<'a>(
         &'a self,
         app: &'a AppContext,
@@ -354,10 +354,12 @@ impl View {
         ctx.notify();
     }
 
-    /// Re-runs the current query, for when a data source's contents changed under it.
+    /// Re-runs the current query, for when a data source's contents changed under it, keeping
+    /// the selected result selected while it is still listed.
     pub fn rerun_query(&mut self, ctx: &mut ViewContext<Self>) {
-        self.search_bar
-            .update(ctx, |search_bar, ctx| search_bar.run_query(ctx));
+        self.search_bar.update(ctx, |search_bar, ctx| {
+            search_bar.rerun_query_keeping_selection(ctx)
+        });
     }
 
     pub fn set_initial_selection_offset(&mut self, offset: isize, ctx: &mut ViewContext<Self>) {

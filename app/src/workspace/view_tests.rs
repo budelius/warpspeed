@@ -7727,3 +7727,79 @@ fn agent_session_inputs_lists_a_tabs_visible_panes_as_laid_out() {
         assert_eq!(numbers, vec![1, 2, 3]);
     });
 }
+
+fn past_conversation(
+    id: &str,
+    title: &str,
+    age_secs: u64,
+) -> crate::terminal::agent_session_history::PastAgentSession {
+    crate::terminal::agent_session_history::PastAgentSession {
+        agent: crate::terminal::CLIAgent::Claude,
+        session_id: id.to_owned(),
+        cwd: PathBuf::from("Z:/somewhere/else"),
+        canonical_cwd: None,
+        title: Some(title.to_owned()),
+        modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 - age_secs),
+    }
+}
+
+fn selected_palette_label(workspace: &ViewHandle<Workspace>, app: &mut App) -> Option<String> {
+    workspace.read(app, |workspace, ctx| {
+        workspace
+            .palette
+            .as_ref(ctx)
+            .selected_search_result(ctx)
+            .map(|result| result.accessibility_label())
+    })
+}
+
+#[test]
+fn a_history_update_keeps_the_palettes_selected_agent_session() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
+        app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
+        let workspace = mock_workspace(&mut app);
+        let history = AgentSessionHistoryModel::handle(&app);
+        let conversations = |alpha_age| {
+            vec![
+                past_conversation("a1", "alpha", alpha_age),
+                past_conversation("b2", "beta", 20),
+                past_conversation("c3", "gamma", 30),
+            ]
+        };
+        history.update(&mut app, |history, ctx| {
+            history.set_sessions_for_test(conversations(10), ctx)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::OpenPalette {
+                    mode: PaletteMode::AgentSessions,
+                    source: PaletteSource::Keybinding,
+                    query: None,
+                },
+                ctx,
+            );
+        });
+        let opened_on = selected_palette_label(&workspace, &mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace
+                .palette
+                .update(ctx, |palette, ctx| palette.select_prev_item(ctx));
+        });
+        let chosen = selected_palette_label(&workspace, &mut app);
+        assert!(chosen.is_some());
+        assert_ne!(chosen, opened_on, "the user moved the selection");
+
+        history.update(&mut app, |history, ctx| {
+            history.set_sessions_for_test(conversations(11), ctx)
+        });
+
+        assert_eq!(
+            selected_palette_label(&workspace, &mut app),
+            chosen,
+            "a newer scan keeps the selection on the same conversation"
+        );
+    });
+}

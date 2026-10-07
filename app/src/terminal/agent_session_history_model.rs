@@ -47,14 +47,35 @@ impl AgentSessionHistoryModel {
         ctx.spawn(receiver, move |model, sessions, ctx| {
             model.refreshing = false;
             if let Ok(sessions) = sessions {
-                model.sessions = sessions;
-                model.loaded = true;
-                ctx.emit(AgentSessionHistoryEvent::Updated);
+                model.apply(sessions, ctx);
             }
             if std::mem::take(&mut model.refresh_again) {
                 model.refresh_with(load, ctx);
             }
         });
+    }
+
+    /// Announces the scan only when it found something new: an update reruns the open pickers'
+    /// queries, which would otherwise disturb them for nothing.
+    fn apply(&mut self, sessions: Vec<PastAgentSession>, ctx: &mut ModelContext<Self>) {
+        let changed = !self.loaded || self.sessions != sessions;
+        self.sessions = sessions;
+        self.loaded = true;
+        if changed {
+            ctx.emit(AgentSessionHistoryEvent::Updated);
+        }
+    }
+
+    /// Replaces the scanned sessions, and holds back the scans pickers start on opening so they
+    /// cannot replace them with what is on this machine's disk.
+    #[cfg(test)]
+    pub(crate) fn set_sessions_for_test(
+        &mut self,
+        sessions: Vec<PastAgentSession>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.refreshing = true;
+        self.apply(sessions, ctx);
     }
 }
 

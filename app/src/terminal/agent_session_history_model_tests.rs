@@ -102,3 +102,49 @@ fn refreshes_requested_during_a_load_trigger_exactly_one_more_load() {
         assert!(updates.try_next().is_err(), "no third load should run");
     });
 }
+
+#[test]
+fn a_refresh_that_finds_nothing_new_announces_nothing() {
+    fn load() -> Vec<PastAgentSession> {
+        vec![PastAgentSession {
+            agent: CLIAgent::Pi,
+            session_id: "unchanged".into(),
+            cwd: std::path::PathBuf::new(),
+            canonical_cwd: None,
+            title: None,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        }]
+    }
+
+    App::test((), |mut app| async move {
+        let model = app.add_singleton_model(|_| AgentSessionHistoryModel::new());
+        let (sender, mut updates) = futures::channel::mpsc::unbounded();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&model, move |_, event, _| match event {
+                AgentSessionHistoryEvent::Updated => {
+                    let _ = sender.unbounded_send(());
+                }
+            });
+        });
+
+        model.update(&mut app, |model, ctx| model.refresh_with(load, ctx));
+        updates.next().await.expect("the first load announces itself");
+
+        model.update(&mut app, |model, ctx| model.refresh_with(load, ctx));
+        for _ in 0..500 {
+            if !model.read(&app, |model, _| model.refreshing) {
+                break;
+            }
+            warpui::r#async::Timer::after(std::time::Duration::from_millis(2)).await;
+        }
+        assert!(
+            !model.read(&app, |model, _| model.refreshing),
+            "the second load should finish"
+        );
+
+        assert!(
+            updates.try_next().is_err(),
+            "an identical scan should not announce an update"
+        );
+    });
+}

@@ -467,6 +467,10 @@ impl<T: Action + Clone> QueryResult<T> {
         self.item.accessibility_label()
     }
 
+    pub fn selection_key(&self) -> Option<String> {
+        self.item.selection_key()
+    }
+
     pub fn accessibility_help_message(&self) -> Option<String> {
         self.item.accessibility_help_message()
     }

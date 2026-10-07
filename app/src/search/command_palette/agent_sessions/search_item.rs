@@ -182,6 +182,13 @@ impl SearchItem for AgentSessionSearchItem {
         format!("Agent session: {}", row_title(&self.row))
     }
 
+    fn selection_key(&self) -> Option<String> {
+        Some(format!(
+            "{:?} {:?} {:?}",
+            self.row.state, self.row.agent, self.row.session_id
+        ))
+    }
+
     fn accessibility_help_message(&self) -> Option<String> {
         self.action_hint().map(|hint| {
             format!(

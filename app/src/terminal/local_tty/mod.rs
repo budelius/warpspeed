@@ -1,4 +1,5 @@
 pub mod docker_sandbox;
+pub(crate) mod session_holder;
 pub mod terminal_manager;
 mod terminal_view_adaptor;
 

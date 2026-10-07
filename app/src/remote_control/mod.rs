@@ -80,7 +80,7 @@ pub(crate) fn program_name() -> String {
 
 /// Which build this process is, for telling an installed Warp apart from one
 /// started out of a build directory.
-fn build_identity() -> String {
+pub(crate) fn build_identity() -> String {
     crate::build_info::changelog_version().unwrap_or_else(|| "unknown".to_owned())
 }
 

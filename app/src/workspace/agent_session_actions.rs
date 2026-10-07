@@ -26,6 +26,18 @@ pub enum AgentSessionAction {
     },
 }
 
+impl AgentSessionAction {
+    /// The verb a row shows for this action.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            AgentSessionAction::Focus(_) => "Focus",
+            AgentSessionAction::Start(_) => "Start",
+            AgentSessionAction::Attach(_) => "Attach",
+            AgentSessionAction::Resume { .. } => "Resume",
+        }
+    }
+}
+
 /// The action for `row`, or `None` when nothing can reopen it.
 pub(crate) fn action_for(
     row: &AgentSessionRow,
@@ -63,30 +75,25 @@ pub(crate) fn resume_descriptor(
     }
 }
 
-/// Where to resume: the conversation's own folder while it exists, else `fallback`, else
-/// nowhere -- a resume in the wrong folder starts the agent against the wrong project.
-pub(crate) fn resume_directory(
-    cwd: &Path,
-    fallback: Option<PathBuf>,
-    is_dir: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let usable = |path: &Path| !path.as_os_str().is_empty() && is_dir(path);
-    if usable(cwd) {
-        return Some(cwd.to_path_buf());
-    }
-    fallback.filter(|path| usable(path))
+/// The conversation's own folder while it exists, else `None`: agents such as Claude look a
+/// conversation up by the folder it was recorded in, so resuming it anywhere else fails.
+pub(crate) fn resume_directory(cwd: &Path, is_dir: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    (!cwd.as_os_str().is_empty() && is_dir(cwd)).then(|| cwd.to_path_buf())
 }
 
-/// `cd <cwd>` joined to `resume` with the shell's separator.
+/// A change to `cwd` joined to `resume` so that `resume` runs only once the change succeeded.
 pub(crate) fn resume_command_line(cwd: &Path, resume: &str, shell: ShellKind) -> String {
     let cwd = cwd.to_string_lossy();
-    let cwd = shell.family().shell_escape(&cwd);
-    let separator = match shell {
-        ShellKind::Posix => " && ",
-        ShellKind::Fish => "; and ",
-        ShellKind::PowerShell => "; ",
-    };
-    format!("cd {cwd}{separator}{resume}")
+    match shell {
+        ShellKind::Posix => format!("cd {} && {resume}", ShellFamily::Posix.shell_escape(&cwd)),
+        ShellKind::Fish => format!("cd {}; and {resume}", ShellFamily::Posix.shell_escape(&cwd)),
+        // `-LiteralPath` keeps `[` and `]` from being read as wildcards, and a terminating error
+        // stops the line before the agent starts in the wrong folder.
+        ShellKind::PowerShell => format!(
+            "Set-Location -LiteralPath '{}' -ErrorAction Stop; {resume}",
+            cwd.replace('\'', "''")
+        ),
+    }
 }
 
 /// The shells as far as joining two commands goes.
@@ -95,15 +102,6 @@ pub(crate) enum ShellKind {
     Posix,
     Fish,
     PowerShell,
-}
-
-impl ShellKind {
-    fn family(self) -> ShellFamily {
-        match self {
-            ShellKind::Posix | ShellKind::Fish => ShellFamily::Posix,
-            ShellKind::PowerShell => ShellFamily::PowerShell,
-        }
-    }
 }
 
 impl From<ShellType> for ShellKind {

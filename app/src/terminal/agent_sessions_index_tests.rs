@@ -207,3 +207,18 @@ fn a_conversation_restored_into_two_panes_is_listed_once_under_the_first() {
         }
     );
 }
+
+#[test]
+fn each_state_has_its_label() {
+    let locator = pane_at(0, "/p").locator;
+    assert_eq!(AgentSessionState::Running { locator }.label(), "● running");
+    assert_eq!(AgentSessionState::Pending { locator }.label(), "○ pending");
+    assert_eq!(
+        AgentSessionState::Detached {
+            session_id: SessionId::from(1)
+        }
+        .label(),
+        "detached"
+    );
+    assert_eq!(AgentSessionState::Past.label(), "past");
+}

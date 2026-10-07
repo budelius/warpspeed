@@ -19,6 +19,18 @@ pub(crate) enum AgentSessionState {
     Past,
 }
 
+impl AgentSessionState {
+    /// How a row names its state.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            AgentSessionState::Running { .. } => "● running",
+            AgentSessionState::Pending { .. } => "○ pending",
+            AgentSessionState::Detached { .. } => "detached",
+            AgentSessionState::Past => "past",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentSessionRow {
     /// `None` for a detached shell whose agent is unknown.

@@ -14,7 +14,7 @@ use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::render_util::render_search_item_icon;
 use crate::search::item::IconLocation;
 use crate::search::result_renderer::ItemHighlightState;
-use crate::terminal::agent_sessions_index::AgentSessionRow;
+use crate::terminal::agent_sessions_index::{AgentSessionRow, AgentSessionState};
 use crate::util::time_format::format_approx_duration_from_now;
 use crate::workspace::agent_session_actions::AgentSessionAction;
 
@@ -40,20 +40,26 @@ impl AgentSessionSearchItem {
     }
 
     fn action_hint(&self) -> Option<&'static str> {
-        self.action.as_ref().map(|action| match action {
-            AgentSessionAction::Focus(_) => "Focus",
-            AgentSessionAction::Start(_) => "Start",
-            AgentSessionAction::Attach(_) => "Attach",
-            AgentSessionAction::Resume { .. } => "Resume",
-        })
+        self.action.as_ref().map(AgentSessionAction::label)
     }
 
-    fn trailing_text(&self) -> String {
+    /// Names a live row's state, so that a pane restored but not yet started does not read as
+    /// running.
+    fn state_hint(&self) -> Option<&'static str> {
+        match self.row.state {
+            AgentSessionState::Running { .. } | AgentSessionState::Pending { .. } => {
+                Some(self.row.state.label())
+            }
+            AgentSessionState::Detached { .. } | AgentSessionState::Past => None,
+        }
+    }
+
+    pub(super) fn trailing_text(&self) -> String {
         let last_used = self
             .row
             .last_used
             .map(|last_used| format_approx_duration_from_now(DateTime::<Local>::from(last_used)));
-        [last_used.as_deref(), self.action_hint()]
+        [last_used.as_deref(), self.state_hint(), self.action_hint()]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()

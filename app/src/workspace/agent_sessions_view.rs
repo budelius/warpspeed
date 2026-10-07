@@ -517,7 +517,50 @@ impl AgentSessionsView {
             EditorEvent::Navigate(NavigationKey::Up) => self.move_selection(false, ctx),
             EditorEvent::Enter => self.activate_selected(ctx),
             EditorEvent::Escape => ctx.emit(AgentSessionsViewEvent::Close),
-            _ => {}
+            EditorEvent::Navigate(
+                NavigationKey::Tab
+                | NavigationKey::ShiftTab
+                | NavigationKey::PageUp
+                | NavigationKey::PageDown
+                | NavigationKey::Left
+                | NavigationKey::Right,
+            )
+            | EditorEvent::Activate
+            | EditorEvent::Blurred
+            | EditorEvent::Focused
+            | EditorEvent::SelectionChanged
+            | EditorEvent::AutosuggestionAccepted { .. }
+            | EditorEvent::ShiftEnter
+            | EditorEvent::AltEnter
+            | EditorEvent::CtrlEnter
+            | EditorEvent::BackspaceAtBeginningOfBuffer
+            | EditorEvent::BackspaceOnEmptyBuffer
+            | EditorEvent::CtrlC { .. }
+            | EditorEvent::BufferReplaced
+            | EditorEvent::BufferReinitialized
+            | EditorEvent::CmdUpOnFirstRow
+            | EditorEvent::Copy
+            | EditorEvent::UnhandledModifierKeyOnEditor(_)
+            | EditorEvent::ClearParentSelections
+            | EditorEvent::CmdEnter
+            | EditorEvent::TryToShowXRay(_)
+            | EditorEvent::HideXRay
+            | EditorEvent::InsertLastWordPrevCommand
+            | EditorEvent::Search { .. }
+            | EditorEvent::ExCommand
+            | EditorEvent::VimStatusUpdate
+            | EditorEvent::Paste
+            | EditorEvent::MiddleClickPaste
+            | EditorEvent::DeleteAllLeft
+            | EditorEvent::EmacsBindingUsed
+            | EditorEvent::UpdatePeers { .. }
+            | EditorEvent::SetAIContextMenuOpen(_)
+            | EditorEvent::AcceptAIContextMenuItem(_)
+            | EditorEvent::SelectAIContextMenuCategory(_)
+            | EditorEvent::ProcessingAttachedImages(_)
+            | EditorEvent::VoiceStateUpdated { .. }
+            | EditorEvent::DroppedImageFiles(_)
+            | EditorEvent::IgnoreAutosuggestion { .. } => {}
         }
     }
 
@@ -653,15 +696,6 @@ impl AgentSessionsView {
     }
 }
 
-fn action_label(action: &AgentSessionAction) -> &'static str {
-    match action {
-        AgentSessionAction::Focus(_) => "Focus",
-        AgentSessionAction::Start(_) => "Start",
-        AgentSessionAction::Attach(_) => "Attach",
-        AgentSessionAction::Resume { .. } => "Resume",
-    }
-}
-
 fn session_label(row: &AgentSessionRow) -> String {
     let title = row_title(row);
     match row.agent.map(|agent| agent.display_name()) {
@@ -686,11 +720,17 @@ fn render_row(
     let text = |text: String, color| Text::new_inline(text, font, font_size).with_color(color);
     let bold = || Properties::default().weight(Weight::Bold);
 
-    let (indent, label, detail, button): (f32, Box<dyn Element>, Option<String>, Option<&str>) =
-        match row {
+    let (indent, label, detail, state, button): (
+        f32,
+        Box<dyn Element>,
+        Option<String>,
+        Option<&str>,
+        Option<&str>,
+    ) = match row {
             ViewRow::TabHeader { title, .. } => (
                 12.,
                 text(title.clone(), main_color).with_style(bold()).finish(),
+                None,
                 None,
                 None,
             ),
@@ -699,10 +739,11 @@ fn render_row(
                     .as_ref()
                     .map_or_else(|| "Shell".to_owned(), session_label);
                 let button = match action {
-                    ViewRowAction::Act(action) => Some(action_label(action)),
+                    ViewRowAction::Act(action) => Some(action.label()),
                     ViewRowAction::ResumeInFolder { .. } => Some("Resume…"),
                     ViewRowAction::None => None,
                 };
+                let state = row.as_ref().map_or("—", |row| row.state.label());
                 let label = Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_spacing(8.)
@@ -713,6 +754,7 @@ fn render_row(
                     PANE_INDENT,
                     label,
                     input.cwd.as_ref().map(|cwd| cwd.display().to_string()),
+                    Some(state),
                     button,
                 )
             }
@@ -735,7 +777,7 @@ fn render_row(
                     )
                     .with_child(text(format!("Past in this folder ({count})"), sub_color).finish())
                     .finish();
-                (PANE_INDENT, label, None, None)
+                (PANE_INDENT, label, None, None, None)
             }
             ViewRow::Past { row, .. } => (
                 PAST_INDENT,
@@ -743,7 +785,8 @@ fn render_row(
                 row.last_used.map(|last_used| {
                     format_approx_duration_from_now(DateTime::<Local>::from(last_used))
                 }),
-                action_for(row, None).map(|action| action_label(&action)),
+                Some(row.state.label()),
+                action_for(row, None).map(|action| action.label()),
             ),
             ViewRow::DetachedHeader { count } => {
                 let title = match count {
@@ -755,17 +798,20 @@ fn render_row(
                     text(title, main_color).with_style(bold()).finish(),
                     None,
                     None,
+                    None,
                 )
             }
             ViewRow::Detached { row } => (
                 PANE_INDENT,
                 text(session_label(row), main_color).finish(),
                 Some(row.cwd.display().to_string()).filter(|cwd| !cwd.is_empty()),
+                Some(row.state.label()),
                 Some("Attach"),
             ),
             ViewRow::SupervisorUnreachable => (
                 PANE_INDENT,
                 text("Supervisor unreachable".to_owned(), sub_color).finish(),
+                None,
                 None,
                 None,
             ),
@@ -782,6 +828,9 @@ fn render_row(
         .with_child(label)
         .with_child(Shrinkable::new(1.0, detail).finish());
     let is_toggle = matches!(row, ViewRow::PastToggle { .. });
+    if let Some(state) = state {
+        line = line.with_child(text(state.to_owned(), sub_color).finish());
+    }
     if let Some(button) = button {
         line = line.with_child(render_button(button, key.clone(), button_state.clone(), app));
     }

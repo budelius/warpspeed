@@ -36,7 +36,7 @@ fn resume_command_line_uses_each_shells_separator() {
     );
     assert_eq!(
         resume_command_line(cwd, "pi --session 1", ShellKind::PowerShell),
-        "cd T:/p/x; pi --session 1"
+        "Set-Location -LiteralPath 'T:/p/x' -ErrorAction Stop; pi --session 1"
     );
     assert_eq!(
         resume_command_line(cwd, "pi --session 1", ShellKind::Fish),
@@ -57,7 +57,40 @@ fn a_path_with_spaces_is_escaped() {
     );
     assert_eq!(
         resume_command_line(cwd, "claude --resume 1", ShellKind::PowerShell),
-        "cd T:/my` dir; claude --resume 1"
+        "Set-Location -LiteralPath 'T:/my dir' -ErrorAction Stop; claude --resume 1"
+    );
+}
+
+#[test]
+fn powershell_takes_brackets_literally_and_doubles_single_quotes() {
+    assert_eq!(
+        resume_command_line(
+            Path::new("T:/a[1]/it's"),
+            "claude --resume 1",
+            ShellKind::PowerShell
+        ),
+        "Set-Location -LiteralPath 'T:/a[1]/it''s' -ErrorAction Stop; claude --resume 1"
+    );
+}
+
+#[test]
+fn each_action_has_its_label() {
+    let locator = locator(1);
+    assert_eq!(AgentSessionAction::Focus(locator).label(), "Focus");
+    assert_eq!(AgentSessionAction::Start(locator).label(), "Start");
+    assert_eq!(
+        AgentSessionAction::Attach(warp_core::SessionId::from(1)).label(),
+        "Attach"
+    );
+    assert_eq!(
+        AgentSessionAction::Resume {
+            agent: CLIAgent::Claude,
+            session_id: "abc".into(),
+            cwd: PathBuf::from("T:/p/x"),
+            target: None,
+        }
+        .label(),
+        "Resume"
     );
 }
 
@@ -148,23 +181,12 @@ fn a_past_row_with_an_unsafe_session_id_has_no_action() {
 }
 
 #[test]
-fn resume_directory_prefers_the_conversations_folder_then_the_panes() {
+fn resume_directory_is_the_conversations_folder_or_nothing() {
     let exists = |path: &Path| path != Path::new("T:/gone");
     assert_eq!(
-        resume_directory(Path::new("T:/p/x"), Some("T:/pane".into()), exists),
+        resume_directory(Path::new("T:/p/x"), exists),
         Some(PathBuf::from("T:/p/x"))
     );
-    assert_eq!(
-        resume_directory(Path::new("T:/gone"), Some("T:/pane".into()), exists),
-        Some(PathBuf::from("T:/pane"))
-    );
-    assert_eq!(
-        resume_directory(Path::new(""), Some("T:/pane".into()), exists),
-        Some(PathBuf::from("T:/pane"))
-    );
-    assert_eq!(
-        resume_directory(Path::new("T:/gone"), Some("T:/gone".into()), exists),
-        None
-    );
-    assert_eq!(resume_directory(Path::new(""), None, exists), None);
+    assert_eq!(resume_directory(Path::new("T:/gone"), exists), None);
+    assert_eq!(resume_directory(Path::new(""), exists), None);
 }

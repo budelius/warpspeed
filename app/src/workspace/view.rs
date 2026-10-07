@@ -14870,8 +14870,9 @@ impl Workspace {
         );
     }
 
-    /// Reopens a past conversation in `target` when its shell sits idle at a prompt, otherwise in
-    /// a new pane split beside it, so nothing the user is running gets typed over.
+    /// Reopens a past conversation in `target` when its shell sits idle at an empty prompt,
+    /// otherwise in a new pane split beside it, so nothing the user is running or typing gets
+    /// overwritten.
     fn resume_agent_session(
         &mut self,
         agent: CLIAgent,
@@ -14920,15 +14921,16 @@ impl Workspace {
         else {
             return;
         };
-        let pane_cwd = pane_group
-            .as_ref(ctx)
-            .terminal_working_directory(target.pane_id, ctx)
-            .map(PathBuf::from);
-        let Some(cwd) = resume_directory(cwd, pane_cwd, Path::is_dir) else {
-            self.show_agent_session_error(
-                "Couldn't resume the conversation: its folder no longer exists".to_owned(),
-                ctx,
-            );
+        let Some(cwd) = resume_directory(cwd, Path::is_dir) else {
+            let message = if cwd.as_os_str().is_empty() {
+                "Couldn't resume the conversation: it recorded no folder".to_owned()
+            } else {
+                format!(
+                    "The folder of this conversation no longer exists: {}",
+                    cwd.display()
+                )
+            };
+            self.show_agent_session_error(message, ctx);
             return;
         };
         let cwd = cwd.as_path();
@@ -14944,6 +14946,12 @@ impl Workspace {
                 terminal.is_login_shell_bootstrapped()
                     && !terminal.is_long_running()
                     && !terminal.has_pending_command_or_awaiting_completion(ctx)
+                    && terminal
+                        .input()
+                        .as_ref(ctx)
+                        .editor()
+                        .as_ref(ctx)
+                        .is_empty(ctx)
                     && CLIAgentSessionsModel::as_ref(ctx)
                         .session(view.id())
                         .is_none()

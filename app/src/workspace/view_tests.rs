@@ -7985,3 +7985,65 @@ fn resuming_a_conversation_running_in_another_window_does_not_start_it_again() {
         assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
     });
 }
+
+#[test]
+fn agent_session_resume_splits_beside_a_shell_with_typed_input() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let view = workspace.read(&app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .expect("workspace should start with a terminal view")
+        });
+        view.update(&mut app, |view, ctx| {
+            view.set_login_shell_bootstrapped_for_test();
+            view.input().update(ctx, |input, ctx| {
+                input.replace_buffer_content("git commit -m 'half typed", ctx)
+            });
+        });
+
+        let target = resume_into_focused_pane(&workspace, &mut app);
+
+        assert_eq!(active_tab_pane_count(&workspace, &mut app), 2);
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+        view.read(&app, |view, ctx| {
+            assert_eq!(
+                view.input().as_ref(ctx).buffer_text(ctx),
+                "git commit -m 'half typed",
+                "what the user typed is left alone"
+            );
+        });
+    });
+}
+
+#[test]
+fn agent_session_resume_in_a_folder_that_is_gone_opens_nothing() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let target = workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group();
+            let target = PaneViewLocator {
+                pane_group_id: pane_group.id(),
+                pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+            };
+            workspace.perform_agent_session_action(
+                &AgentSessionAction::Resume {
+                    agent: crate::terminal::CLIAgent::Claude,
+                    session_id: uuid::Uuid::new_v4().to_string(),
+                    cwd: std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()),
+                    target: Some(target),
+                },
+                ctx,
+            );
+            target
+        });
+
+        assert_eq!(active_tab_pane_count(&workspace, &mut app), 1);
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+    });
+}

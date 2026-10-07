@@ -362,3 +362,46 @@ fn search_results_put_the_best_match_on_top() {
         },
     );
 }
+
+#[test]
+fn a_pending_row_reads_as_pending_not_running() {
+    use crate::search::command_palette::agent_sessions::search::RowMatch;
+    use crate::search::command_palette::agent_sessions::search_item::AgentSessionSearchItem;
+
+    let pending = row(
+        None,
+        "/x",
+        AgentSessionState::Pending {
+            locator: locator(1),
+        },
+    );
+    let running = row(
+        None,
+        "/x",
+        AgentSessionState::Running {
+            locator: locator(1),
+        },
+    );
+    let start = AgentSessionSearchItem::new(
+        pending,
+        Some(AgentSessionAction::Start(locator(1))),
+        RowMatch::default(),
+    );
+    let focus = AgentSessionSearchItem::new(
+        running,
+        Some(AgentSessionAction::Focus(locator(1))),
+        RowMatch::default(),
+    );
+
+    assert_eq!(start.trailing_text(), "○ pending · Start");
+    assert_eq!(focus.trailing_text(), "● running · Focus");
+    assert_eq!(
+        AgentSessionSearchItem::new(
+            past_row("a", "/x"),
+            None,
+            RowMatch::default()
+        )
+        .trailing_text(),
+        ""
+    );
+}

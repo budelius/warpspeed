@@ -440,6 +440,9 @@ pub struct RunSummary {
     pub node_name: Option<String>,
     #[serde(default)]
     pub paused_at: Option<String>,
+    /// Whether the dashboard would accept a pause now; absent from dashboards that predate it.
+    #[serde(default)]
+    pub pause_allowed: Option<bool>,
 }
 
 pub fn list_repositories(environment: ManagedEnvironment) -> Result<Vec<RepositoryInfo>> {

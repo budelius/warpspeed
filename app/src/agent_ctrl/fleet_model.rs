@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use managed_agent_sessions::{RepositoryInfo, RunSummary, normalize_repo_url};
+use managed_agent_sessions::{RepositoryInfo, RunSummary, is_paused_state, normalize_repo_url};
 use warp_cli::managed_sessions::ManagedEnvironment;
 use warpui::{Entity, EntityId, ModelContext, SingletonEntity};
 
@@ -29,6 +29,8 @@ pub struct FleetBackend {
     /// returning its job id.
     pub start: fn(&str, &str) -> anyhow::Result<String>,
     pub stop: fn(&str) -> anyhow::Result<()>,
+    pub pause: fn(&str) -> anyhow::Result<()>,
+    pub resume: fn(&str) -> anyhow::Result<()>,
 }
 
 impl FleetBackend {
@@ -52,6 +54,12 @@ impl FleetBackend {
             stop: |job_id| {
                 managed_agent_sessions::stop_run(ManagedEnvironment::Staging, job_id, false)
             },
+            pause: |job_id| {
+                managed_agent_sessions::pause_run(ManagedEnvironment::Staging, job_id).map(drop)
+            },
+            resume: |job_id| {
+                managed_agent_sessions::resume_run(ManagedEnvironment::Staging, job_id).map(drop)
+            },
         }
     }
 }
@@ -69,6 +77,11 @@ pub struct FleetRow {
     pub job_id: String,
     pub state: String,
     pub agent: String,
+    /// The AgentCtrl node the run is on, or last ran on while paused.
+    pub node_name: Option<String>,
+    pub interactive: bool,
+    /// Whether the dashboard reports that the run can be paused now.
+    pub pause_allowed: bool,
     pub branch: Option<String>,
     /// The branch's page on the repository's web UI, for hosts whose layout is known.
     pub branch_url: Option<String>,
@@ -78,6 +91,43 @@ pub struct FleetRow {
 impl FleetRow {
     pub fn is_finished(&self) -> bool {
         is_finished_state(&self.state)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        is_paused_state(&self.state)
+    }
+
+    /// Only a run the dashboard reports as pausable has an agent session AgentCtrl can resume.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the fleet view offers these once it renders pause and resume"
+        )
+    )]
+    pub fn can_pause(&self) -> bool {
+        self.pause_allowed && self.state == "running"
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the fleet view offers these once it renders pause and resume"
+        )
+    )]
+    pub fn can_resume(&self) -> bool {
+        self.is_paused()
+    }
+
+    fn display_rank(&self) -> u8 {
+        if self.is_finished() {
+            2
+        } else if self.is_paused() {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -91,7 +141,7 @@ pub struct FleetModel {
     repos: Vec<RepositoryInfo>,
     /// Why the last refresh failed; cleared by the next successful one.
     last_error: Option<String>,
-    /// Why the last start or stop failed; kept across refreshes until the next start or stop, or
+    /// Why the last start, stop, pause or resume failed; kept across refreshes until the next start or stop, or
     /// until dismissed.
     action_error: Option<String>,
     refreshing: bool,
@@ -227,13 +277,64 @@ impl FleetModel {
 
     /// Asks AgentCtrl to stop `job_id` gracefully, then refreshes.
     pub fn stop(&mut self, job_id: String, ctx: &mut ModelContext<Self>) {
-        self.action_error = None;
         let stop = self.backend.stop;
+        self.run_command(
+            job_id,
+            stop,
+            |error| format!("Could not stop the run: {error:#}"),
+            ctx,
+        );
+    }
+
+    /// Asks AgentCtrl to pause `job_id`, then refreshes.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the fleet view offers these once it renders pause and resume"
+        )
+    )]
+    pub fn pause(&mut self, job_id: String, ctx: &mut ModelContext<Self>) {
+        let pause = self.backend.pause;
+        self.run_command(
+            job_id,
+            pause,
+            managed_agent_sessions::pause_failure_message,
+            ctx,
+        );
+    }
+
+    /// Asks AgentCtrl to resume `job_id`, then refreshes.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the fleet view offers these once it renders pause and resume"
+        )
+    )]
+    pub fn resume(&mut self, job_id: String, ctx: &mut ModelContext<Self>) {
+        let resume = self.backend.resume;
+        self.run_command(
+            job_id,
+            resume,
+            managed_agent_sessions::resume_failure_message,
+            ctx,
+        );
+    }
+
+    fn run_command(
+        &mut self,
+        job_id: String,
+        command: fn(&str) -> anyhow::Result<()>,
+        failure_message: fn(&anyhow::Error) -> String,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.action_error = None;
         ctx.spawn(
-            async move { blocking::unblock(move || stop(&job_id)).await },
-            |me, result, ctx| {
+            async move { blocking::unblock(move || command(&job_id)).await },
+            move |me, result, ctx| {
                 if let Err(error) = result {
-                    me.action_error = Some(format!("Could not stop the run: {error:#}"));
+                    me.action_error = Some(failure_message(&error));
                     ctx.emit(FleetModelEvent::Updated);
                 }
                 me.refresh(ctx);
@@ -302,7 +403,7 @@ fn start_failure_message(error: &anyhow::Error) -> String {
 }
 
 /// `runs` grouped by repository, the groups sorted by name with [`NO_REPOSITORY`] last and the
-/// live runs of each group before the finished ones.
+/// live runs of each group first, then the paused ones, then the finished ones.
 pub(crate) fn group_runs(runs: &[RunSummary], repos: &[RepositoryInfo]) -> Vec<FleetGroup> {
     let mut groups: Vec<FleetGroup> = Vec::new();
     let mut unattributed = Vec::new();
@@ -334,7 +435,7 @@ pub(crate) fn group_runs(runs: &[RunSummary], repos: &[RepositoryInfo]) -> Vec<F
         });
     }
     for group in &mut groups {
-        group.rows.sort_by_key(FleetRow::is_finished);
+        group.rows.sort_by_key(FleetRow::display_rank);
     }
     groups
 }
@@ -344,6 +445,9 @@ fn fleet_row(run: &RunSummary, repo_url: Option<&str>) -> FleetRow {
         job_id: run.job_id.clone(),
         state: run.state.clone(),
         agent: run.agent_name.clone(),
+        node_name: run.node_name.clone(),
+        interactive: run.interactive,
+        pause_allowed: run.pause_allowed.unwrap_or(false),
         branch: run.branch.clone(),
         branch_url: repo_url
             .zip(run.branch.as_deref())

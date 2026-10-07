@@ -13,8 +13,9 @@ fn run(job_id: &str, state: &str, repo_url: Option<&str>) -> RunSummary {
         branch: Some(format!("agent/{job_id}")),
         interactive: true,
         last_activity_at: Some("2026-10-06T12:00:00Z".to_owned()),
-        node_name: None,
+        node_name: Some("agent-ctrl-node-0".to_owned()),
         paused_at: None,
+        pause_allowed: Some(true),
     }
 }
 
@@ -169,11 +170,21 @@ fn no_stop(_: &str) -> anyhow::Result<()> {
     panic!("not stopped in these tests")
 }
 
+fn no_pause(_: &str) -> anyhow::Result<()> {
+    panic!("not paused in these tests")
+}
+
+fn no_resume(_: &str) -> anyhow::Result<()> {
+    panic!("not resumed in these tests")
+}
+
 fn backend(list: fn() -> anyhow::Result<FleetSnapshot>) -> FleetBackend {
     FleetBackend {
         list,
         start: no_start,
         stop: no_stop,
+        pause: no_pause,
+        resume: no_resume,
     }
 }
 
@@ -309,4 +320,149 @@ fn a_refresh_asked_for_during_one_runs_after_it() {
             "the second refresh never ran"
         );
     });
+}
+
+#[test]
+fn paused_runs_follow_the_running_ones_and_precede_the_finished_ones() {
+    let groups = group_runs(
+        &[
+            run("job-done", "completed", Some(WARP)),
+            run("job-paused", "paused", Some(WARP)),
+            run("job-live", "running", Some(WARP)),
+        ],
+        &[repository("warp", WARP)],
+    );
+
+    assert_eq!(job_ids(&groups[0]), ["job-live", "job-paused", "job-done"]);
+    assert!(!groups[0].rows[1].is_finished());
+}
+
+#[test]
+fn rows_carry_the_node_name() {
+    let mut on_second_node = run("job-a", "running", Some(WARP));
+    on_second_node.node_name = Some("agent-ctrl-node-1".to_owned());
+    let groups = group_runs(&[on_second_node], &[]);
+
+    assert_eq!(
+        groups[0].rows[0].node_name.as_deref(),
+        Some("agent-ctrl-node-1")
+    );
+}
+
+#[test]
+fn only_runs_the_dashboard_allows_pausing_can_be_paused_and_only_paused_ones_resumed() {
+    let mut worker = run("job-worker", "running", None);
+    worker.interactive = false;
+    worker.pause_allowed = Some(false);
+    let mut task_bound = run("job-task-bound", "running", None);
+    task_bound.pause_allowed = Some(false);
+    let mut old_dashboard = run("job-old-dashboard", "running", None);
+    old_dashboard.pause_allowed = None;
+    let groups = group_runs(
+        &[
+            run("job-live", "running", None),
+            run("job-paused", "paused", None),
+            run("job-waiting", "waiting_input", None),
+            worker,
+            task_bound,
+            old_dashboard,
+        ],
+        &[],
+    );
+    let row = |job_id: &str| {
+        groups[0]
+            .rows
+            .iter()
+            .find(|row| row.job_id == job_id)
+            .unwrap()
+            .clone()
+    };
+
+    assert!(row("job-live").can_pause() && !row("job-live").can_resume());
+    assert!(row("job-paused").can_resume() && !row("job-paused").can_pause());
+    assert!(!row("job-waiting").can_pause());
+    assert!(!row("job-worker").can_pause());
+    assert!(!row("job-task-bound").can_pause());
+    assert!(!row("job-old-dashboard").can_pause());
+}
+
+fn pause_unknown_session(_: &str) -> anyhow::Result<()> {
+    Err(managed_agent_sessions::HttpStatusError {
+        status: reqwest::StatusCode::PRECONDITION_FAILED,
+        body: r#"{"error":"session id unknown","code":"session_unknown"}"#.to_owned(),
+    }
+    .into())
+}
+
+fn resume_at_capacity(_: &str) -> anyhow::Result<()> {
+    Err(managed_agent_sessions::HttpStatusError {
+        status: reqwest::StatusCode::CONFLICT,
+        body: r#"{"error":"node at capacity","code":"node_at_capacity"}"#.to_owned(),
+    }
+    .into())
+}
+
+/// Runs `act` on a model whose backend is `backend`, waits for the refresh that follows, and
+/// returns the action error it leaves.
+fn action_error_after(
+    backend: FleetBackend,
+    act: fn(&mut FleetModel, &mut ModelContext<FleetModel>),
+) -> Option<String> {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| FleetModel::with_backend(backend));
+        model.update(&mut app, act);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => model.read(&app, |model, _| {
+                model.runs.len() == 2 && !model.is_refreshing()
+            }),
+            "the refresh after the action never landed"
+        );
+        model.read(&app, |model, _| model.action_error().map(str::to_owned))
+    })
+}
+
+#[test]
+fn a_pause_refused_for_an_unknown_session_says_why() {
+    let error = action_error_after(
+        FleetBackend {
+            pause: pause_unknown_session,
+            ..backend(list_two_runs)
+        },
+        |model, ctx| model.pause("job-a".to_owned(), ctx),
+    )
+    .expect("the pause failure is kept");
+    assert!(error.contains("cannot be paused"), "{error}");
+}
+
+#[test]
+fn a_resume_with_every_node_full_says_so() {
+    let error = action_error_after(
+        FleetBackend {
+            resume: resume_at_capacity,
+            ..backend(list_two_runs)
+        },
+        |model, ctx| model.resume("job-a".to_owned(), ctx),
+    )
+    .expect("the resume failure is kept");
+    assert!(error.contains("at capacity"), "{error}");
+}
+
+#[test]
+fn a_successful_pause_and_resume_leave_no_error() {
+    let accept: fn(&str) -> anyhow::Result<()> = |_| Ok(());
+    let paused = action_error_after(
+        FleetBackend {
+            pause: accept,
+            ..backend(list_two_runs)
+        },
+        |model, ctx| model.pause("job-a".to_owned(), ctx),
+    );
+    let resumed = action_error_after(
+        FleetBackend {
+            resume: accept,
+            ..backend(list_two_runs)
+        },
+        |model, ctx| model.resume("job-a".to_owned(), ctx),
+    );
+    assert_eq!((paused, resumed), (None, None));
 }

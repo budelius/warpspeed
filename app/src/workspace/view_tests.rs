@@ -8066,6 +8066,14 @@ fn stop_nothing(_: &str) -> anyhow::Result<()> {
     anyhow::bail!("tests never stop a run")
 }
 
+fn pause_nothing(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("tests never pause a run")
+}
+
+fn resume_nothing(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("tests never resume a run")
+}
+
 /// Registers the fleet singletons with a backend that never reaches the dashboard.
 fn initialize_app_for_fleet(app: &mut App) {
     use crate::agent_ctrl::FleetPaneManager;
@@ -8077,6 +8085,8 @@ fn initialize_app_for_fleet(app: &mut App) {
             list: list_no_runs,
             start: start_nothing,
             stop: stop_nothing,
+            pause: pause_nothing,
+            resume: resume_nothing,
         })
     });
     app.add_singleton_model(|_| FleetPaneManager::default());

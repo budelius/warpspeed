@@ -888,6 +888,7 @@ fn list_runs_parses_repo_and_branch() {
                 last_activity_at: Some("2026-10-05T10:00:00.000Z".to_owned()),
                 node_name: None,
                 paused_at: None,
+                pause_allowed: None,
             },
             RunSummary {
                 job_id: "job-plain".to_owned(),
@@ -899,6 +900,7 @@ fn list_runs_parses_repo_and_branch() {
                 last_activity_at: None,
                 node_name: None,
                 paused_at: None,
+                pause_allowed: None,
             },
         ]
     );

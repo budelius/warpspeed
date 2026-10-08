@@ -1153,7 +1153,7 @@ mod tests {
         cfg.env_vars
             .insert("OPENAI_API_KEY".to_string(), "sk-gateway".to_string());
         let mut cmd = tokio::process::Command::new("kimi");
-        KimiAdapter.configure_command(&mut cmd, &cfg).unwrap();
+        KimiAdapter.apply_env(&mut cmd, &cfg, &|_| None).unwrap();
         let home = run_dir.path().join("kimi-home");
         assert!(home.is_dir());
         assert_eq!(env_of(&cmd, "KIMI_CODE_HOME"), Some(home.display().to_string()));
@@ -1161,21 +1161,43 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_kimi_key_is_kept() {
+    fn an_explicit_kimi_key_is_left_alone() {
         let mut cfg = config(true, None);
         cfg.env_vars
             .insert("OPENAI_API_KEY".to_string(), "sk-gateway".to_string());
         cfg.env_vars
             .insert("KIMI_MODEL_API_KEY".to_string(), "sk-kimi".to_string());
         let mut cmd = tokio::process::Command::new("kimi");
-        KimiAdapter.configure_command(&mut cmd, &cfg).unwrap();
+        KimiAdapter.apply_env(&mut cmd, &cfg, &|_| None).unwrap();
         assert_eq!(env_of(&cmd, "KIMI_MODEL_API_KEY"), None);
         assert_eq!(env_of(&cmd, "KIMI_CODE_HOME"), None);
+    }
+
+    #[test]
+    fn the_gateway_key_is_copied_from_the_node_environment() {
+        let cfg = config(true, None);
+        let node_env = |key: &str| (key == "OPENAI_API_KEY").then(|| "sk-node".to_string());
+        let mut cmd = tokio::process::Command::new("kimi");
+        KimiAdapter.apply_env(&mut cmd, &cfg, &node_env).unwrap();
+        assert_eq!(env_of(&cmd, "KIMI_MODEL_API_KEY").as_deref(), Some("sk-node"));
+    }
+
+    #[test]
+    fn a_node_level_kimi_key_suppresses_the_copy() {
+        let cfg = config(true, None);
+        let node_env = |key: &str| match key {
+            "OPENAI_API_KEY" => Some("sk-node".to_string()),
+            "KIMI_MODEL_API_KEY" => Some("sk-kimi-node".to_string()),
+            _ => None,
+        };
+        let mut cmd = tokio::process::Command::new("kimi");
+        KimiAdapter.apply_env(&mut cmd, &cfg, &node_env).unwrap();
+        assert_eq!(env_of(&cmd, "KIMI_MODEL_API_KEY"), None);
     }
 }
 ```
 
-(`an_explicit_kimi_key_is_kept` checks that the adapter sets nothing: `launch` already applied `cfg.env_vars`, so the configured `sk-kimi` reaches the child.)
+(`an_explicit_kimi_key_is_left_alone` checks that the adapter does not override a key already in the run's env: `launch` applies `cfg.env_vars` itself, so the configured `sk-kimi` reaches the child. The tests inject the node environment through `apply_env`, so they do not depend on the machine running them.)
 
 Add to `src/agent/mod.rs`: `pub mod kimi;` (alphabetical, after `pub mod gemini;`) and `pub use kimi::KimiBackend;` (after `pub use gemini::GeminiBackend;`).
 
@@ -1214,12 +1236,38 @@ fn never_asks(cfg: &SpawnConfig) -> bool {
     )
 }
 
-/// Non-empty value of `key` from the run's env map, else the node's environment.
-fn env_value(env: &HashMap<String, String>, key: &str) -> Option<String> {
+/// Non-empty value of `key` from the run's env map, else from `process_env` (the node's
+/// environment in production).
+fn env_value(
+    env: &HashMap<String, String>,
+    process_env: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+) -> Option<String> {
     env.get(key)
         .filter(|value| !value.is_empty())
         .cloned()
-        .or_else(|| std::env::var(key).ok().filter(|value| !value.is_empty()))
+        .or_else(|| process_env(key).filter(|value| !value.is_empty()))
+}
+
+impl KimiAdapter {
+    fn apply_env(
+        &self,
+        cmd: &mut tokio::process::Command,
+        cfg: &SpawnConfig,
+        process_env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(), BackendError> {
+        if let Some(home) = run_home(cfg, "kimi-home")? {
+            cmd.env("KIMI_CODE_HOME", home);
+        }
+        // The gateway key reaches the node as OPENAI_API_KEY; Kimi's env provider reads its own
+        // variable.
+        if env_value(&cfg.env_vars, process_env, "KIMI_MODEL_API_KEY").is_none() {
+            if let Some(key) = env_value(&cfg.env_vars, process_env, "OPENAI_API_KEY") {
+                cmd.env("KIMI_MODEL_API_KEY", key);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl CliAdapter for KimiAdapter {
@@ -1251,17 +1299,7 @@ impl CliAdapter for KimiAdapter {
         cmd: &mut tokio::process::Command,
         cfg: &SpawnConfig,
     ) -> Result<(), BackendError> {
-        if let Some(home) = run_home(cfg, "kimi-home")? {
-            cmd.env("KIMI_CODE_HOME", home);
-        }
-        // The gateway key reaches the node as OPENAI_API_KEY; Kimi's env provider reads its own
-        // variable.
-        if env_value(&cfg.env_vars, "KIMI_MODEL_API_KEY").is_none() {
-            if let Some(key) = env_value(&cfg.env_vars, "OPENAI_API_KEY") {
-                cmd.env("KIMI_MODEL_API_KEY", key);
-            }
-        }
-        Ok(())
+        self.apply_env(cmd, cfg, &|key| std::env::var(key).ok())
     }
 
     fn supports_resume(&self) -> bool {

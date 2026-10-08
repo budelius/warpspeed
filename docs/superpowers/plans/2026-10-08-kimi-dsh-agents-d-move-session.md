@@ -48,7 +48,7 @@
 
 **From Plan B (agent-ctrl adapters; D's node tasks need B merged into `feat/kimi-dsh-agents` first):**
 - `src/agent/kimi.rs`: `KimiAdapter` (`CliAdapter`, `name() = "kimi"`, `supports_resume() = true`, `interactive_protocol() = Acp`). It launches with `KIMI_CODE_HOME=<run_dir>/kimi-home`, where `<run_dir>` is the same path `place_session` receives.
-- `src/agent/dsh.rs`: `DshAdapter` (`name() = "dsh"`). It launches with `DSH_HOME=<run_dir>/dsh-home`, seeded from the node's `~/.dsh` template. **Seeding must not delete an existing `<run_dir>/dsh-home/sessions`.**
+- `src/agent/dsh.rs`: `DshAdapter` (`name() = "dsh"`). It launches with `DSH_HOME=<run_dir>/dsh-home`; nothing is seeded into that directory (B passes its config with `--patch` files).
 - B's ACP driver sends `session/resume {sessionId: <resume_ref>, cwd: <SpawnConfig.working_directory>}`. On a moved run, `working_directory` is the `cwd` that `place_session` received (`handoff.worktree`).
 - `Backend::Kimi` (`"kimi"`) and `Backend::Dsh` (`"dsh"`) in `src/config/types.rs`.
 
@@ -78,10 +78,9 @@
 6. **`projectKey` wrapping.** dsh's own `projectKey()` already returns `--<slug>--`. The spec's `--<projectKey(cwd)>--` would double the dashes. `project_key` here returns the wrapped form, matching the source.
 7. **zstd frame layout.** dsh refuses a file whose first frame is not exactly the header line (`assertZstdHeaderFrame`), and every complete frame must end on a record boundary. The node writes the layout of dsh's `encodeMaterialization`: one checksummed frame with the header line, then one with all event rows.
 8. **Kimi tar contents.** The spec lists `state.json` + `agents/**`. The session directory can also hold the legacy `session-meta/state.json` and per-session stores, so every regular file in the session directory is packed. Symlinks are skipped.
-9. **`read_session` signature.** The spec says `read_session(session_id, run_dir)`. Both CLIs key the session directory by `cwd`, and the home may come from `env`, so the signature follows the pause branch's `locate_session(session_id, cwd, run_dir, env)`.
+9. **`read_session` signature.** The spec says `read_session(session_id, run_dir)`. Both CLIs key the session directory by `cwd`, so the signature follows the pause branch's `locate_session(session_id, cwd, run_dir, env)`.
 10. **The pause branch reads `located.file` as bytes.** For Kimi that path is a directory, so `tokio::fs::read` fails, `session_file` is empty, and the run would be pinned to its node. Task 12 hooks `read_session` into both reads, at pause and at the reconnect snapshot.
-11. **B has no `run_dir` at launch.** `SpawnConfig` carries no `run_dir`. B must derive `<run_dir>` exactly as `Handoff::run_dir()` does (`working_directory.with_extension("session")`), or the placed session sits where the CLI never looks. Tasks 9 and 11 verify this before wiring.
-12. **Test vectors "computed by the CLIs' own code".** The CLI sources were read but not run. The vectors in `tests/fixtures/session_keys.json` come from a line-by-line Python port of `workdir-slug.ts` and `format.ts` (sha256 checked with `sha256sum`). Task 13 cross-checks the real CLIs' directory names on staging.
+11. **Test vectors "computed by the CLIs' own code".** The CLI sources were read but not run. The vectors in `tests/fixtures/session_keys.json` come from a line-by-line Python port of `workdir-slug.ts` and `format.ts` (sha256 checked with `sha256sum`). Task 13 cross-checks the real CLIs' directory names on staging.
 
 ## File Structure
 
@@ -119,7 +118,7 @@ agent-ctrl (`T:\projects\SOTZ3N\stoz3n-agent-ctrl-kimi-dsh`):
 - `tests/fixtures/dsh/session.v4.jsonl` (new): plaintext dsh session fixture.
 
 
-> **Cross-plan note (2026-10-08):** Plan A already adds `agent_session_history::{kimi_home, dsh_home, kimi_indexed_session_dirs}` (Plan A Task 5). Task 3 here must call those for the Kimi index lookup and the data roots instead of re-implementing them; `AgentSessionRoots.kimi_home`/`dsh_home` are filled from them. Keep only the handoff-specific pieces (`dsh_generation`, packing, size).
+> **Cross-plan note (2026-10-08):** Plan A adds `crate::terminal::agent_session_paths::{kimi_home, kimi_indexed_session_dirs}` (A Task 5) and `agent_session_paths::dsh_home` plus `agent_session_history::current_dsh_log` (A Task 6, `pub(crate)`). Task 3 here calls `kimi_indexed_session_dirs` for the Kimi index lookup and `current_dsh_log` for the dsh generation, and does not re-implement either. `AgentSessionRoots` keeps its own `kimi_home`/`dsh_home` fields (they follow the `KIMI_CODE_HOME` / `DSH_HOME` env through `from_env`, like the other roots). Only the handoff-specific pieces remain here (the directory scan fallback, packing, size).
 
 ---
 
@@ -416,16 +415,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `session_file_path` (:176-234)
   - `agent_session_root` (:237-262)
   - `is_reported_session_file` (:267-282)
-  - new helpers `kimi_session_dir`, `dsh_session_file`, `dsh_generation`, `dsh_current_generation`
+  - new helpers `kimi_session_dir`, `dsh_session_file`
 - Test: `app/src/terminal/agent_session_handoff_tests.rs`
 
 **Interfaces:**
-- Consumes: `transcript_path` semantics from Plan A (Kimi: directory; dsh: file).
+- Consumes: `transcript_path` semantics from Plan A (Kimi: directory; dsh: file); A's `agent_session_paths::kimi_indexed_session_dirs` and `agent_session_history::current_dsh_log`.
 - Produces:
   - `AgentSessionRoots { …, pub kimi_home: PathBuf, pub dsh_home: PathBuf }`
   - `session_file_path(CLIAgent::Kimi, …)` → the session **directory**.
-  - `session_file_path(CLIAgent::DeepSeekHarness, …)` → the current generation file.
-  - `pub(crate) fn dsh_generation(name: &str) -> Option<(u64, bool)>`, giving (version, zstd).
+  - `session_file_path(CLIAgent::DeepSeekHarness, …)` → the current generation file (A's `current_dsh_log`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -486,25 +484,6 @@ fn kimi_session_dir_is_scanned_for_without_an_index_or_with_an_outside_entry() {
         dir
     );
     assert!(session_file_path(CLIAgent::Kimi, "session_missing", Path::new("/app"), &roots).is_err());
-}
-
-#[test]
-fn dsh_generation_names_follow_the_canonical_pattern() {
-    assert_eq!(dsh_generation("session.jsonl"), Some((0, false)));
-    assert_eq!(dsh_generation("session.jsonl.zstd"), Some((0, true)));
-    assert_eq!(dsh_generation("session.v4.jsonl.zstd"), Some((4, true)));
-    assert_eq!(dsh_generation("session.v12.jsonl"), Some((12, false)));
-    for name in [
-        "session.v0.jsonl",
-        "session.v04.jsonl.zstd",
-        "session.V4.jsonl",
-        "session.v4.jsonl.zst",
-        "session.v4.jsonl.tmp",
-        "session.v.jsonl",
-        "other.jsonl",
-    ] {
-        assert_eq!(dsh_generation(name), None, "{name}");
-    }
 }
 
 #[test]
@@ -577,8 +556,8 @@ fn session_roots_default_under_home() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo nextest run -p warp --lib kimi_session_dir dsh_generation dsh_session_file reported_kimi session_roots_default`
-Expected: compile errors (`no field kimi_home`, `cannot find function dsh_generation`).
+Run: `cargo nextest run -p warp --lib kimi_session_dir dsh_session_file reported_kimi session_roots_default`
+Expected: compile errors (`no field kimi_home`).
 
 - [ ] **Step 3: Implement**
 
@@ -598,7 +577,7 @@ In `under_home` add `kimi_home: home.join(".kimi-code"), dsh_home: home.join(".d
             dsh_home: env_dir("DSH_HOME").unwrap_or(defaults.dsh_home),
 ```
 
-Add `use serde_json::Value;` to the imports. Then add these helpers after `file_under_ending_with`:
+Add `use super::agent_session_history::current_dsh_log;` and `use super::agent_session_paths::kimi_indexed_session_dirs;` to the imports. Then add these helpers after `file_under_ending_with`:
 
 ```rust
 fn has_parent_dir(path: &Path) -> bool {
@@ -610,82 +589,35 @@ fn is_named(path: &Path, name: &str) -> bool {
     path.file_name().and_then(OsStr::to_str) == Some(name)
 }
 
-/// Kimi's directory for session `session_id`: the last `session_index.jsonl` entry for it, else
-/// the workspace directory under `sessions/` that holds it.
+/// Kimi's directory for session `session_id`: the one Kimi's `session_index.jsonl` records for it
+/// when that is under `sessions/`, else the workspace directory under `sessions/` that holds it.
 fn kimi_session_dir(kimi_home: &Path, session_id: &str) -> Option<PathBuf> {
     let sessions = kimi_home.join("sessions");
     let is_session_dir = |dir: &Path| {
         !has_parent_dir(dir) && dir.starts_with(&sessions) && is_named(dir, session_id) && dir.is_dir()
     };
-    let indexed = fs::read_to_string(kimi_home.join("session_index.jsonl"))
-        .ok()
-        .and_then(|index| {
-            index
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-                .filter(|entry| entry.get("sessionId").and_then(Value::as_str) == Some(session_id))
-                .filter_map(|entry| {
-                    entry
-                        .get("sessionDir")
-                        .and_then(Value::as_str)
-                        .map(PathBuf::from)
-                })
-                .last()
-        })
-        .filter(|dir| is_session_dir(dir));
-    indexed.or_else(|| {
-        fs::read_dir(&sessions)
-            .ok()?
-            .flatten()
-            .map(|workspace| workspace.path().join(session_id))
-            .find(|dir| dir.is_dir())
-    })
-}
-
-/// The format version and compression of a canonical dsh generation file name,
-/// `session[.v<N>].jsonl[.zstd]` with N ≥ 1 and no leading zero.
-pub(crate) fn dsh_generation(name: &str) -> Option<(u64, bool)> {
-    let (stem, zstd) = match name.strip_suffix(".zstd") {
-        Some(stem) => (stem, true),
-        None => (name, false),
-    };
-    let version = stem.strip_prefix("session")?.strip_suffix(".jsonl")?;
-    if version.is_empty() {
-        return Some((0, zstd));
-    }
-    let digits = version.strip_prefix(".v")?;
-    let canonical = !digits.is_empty()
-        && !digits.starts_with('0')
-        && digits.bytes().all(|byte| byte.is_ascii_digit());
-    canonical
-        .then(|| digits.parse().ok())
+    kimi_indexed_session_dirs(kimi_home)
+        .into_iter()
         .flatten()
-        .map(|version| (version, zstd))
-}
-
-/// The highest generation in a dsh session directory; dsh reads only that one.
-fn dsh_current_generation(dir: &Path) -> Option<PathBuf> {
-    fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-        .filter_map(|entry| {
-            let generation = dsh_generation(entry.file_name().to_str()?)?;
-            Some((generation, entry.path()))
+        .find_map(|(id, dir)| (id == session_id && is_session_dir(&dir)).then_some(dir))
+        .or_else(|| {
+            fs::read_dir(&sessions)
+                .ok()?
+                .flatten()
+                .map(|workspace| workspace.path().join(session_id))
+                .find(|dir| dir.is_dir())
         })
-        .max_by_key(|(generation, _)| *generation)
-        .map(|(_, path)| path)
 }
 
 /// dsh keeps a session at `sessions/<project key>/<id>/`, and the project key is lossy, so the
-/// directory is found by id under any project.
+/// directory is found by id under any project. dsh reads only the highest generation there.
 fn dsh_session_file(dsh_home: &Path, session_id: &str) -> Option<PathBuf> {
     fs::read_dir(dsh_home.join("sessions"))
         .ok()?
         .flatten()
         .map(|project| project.path().join(session_id))
         .filter(|dir| dir.is_dir())
-        .find_map(|dir| dsh_current_generation(&dir))
+        .find_map(|dir| current_dsh_log(&dir).map(|(path, _)| path))
 }
 ```
 
@@ -731,9 +663,9 @@ fn is_reported_session_file(
         CLIAgent::DeepSeekHarness => {
             path.parent().is_some_and(|dir| is_named(dir, id))
                 && path
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .is_some_and(|name| dsh_generation(name).is_some())
+                    .parent()
+                    .and_then(current_dsh_log)
+                    .is_some_and(|(current, _)| current == path)
                 && path.is_file()
         }
         CLIAgent::Claude
@@ -1239,7 +1171,7 @@ Create `app/src/agent_ctrl_move_session_cli.rs`:
 ```rust
 //! `<warp binary> agent-ctrl move-session` -- moving a recorded agent session that no pane holds.
 //!
-//! A dsh headless run has ended by the time it can be moved, and its pane drops the agent session
+//! A `dsh --profile headless` run has ended by the time it can be moved, and its pane drops the agent session
 //! when the command finishes, so the pane's "Move session" never sees it.
 
 use std::time::Duration;
@@ -1413,6 +1345,8 @@ git -C T:/projects/dev-ops/warp-kimi-dsh push gitlab feat/kimi-dsh-agents
 
 ### Task 6: The import accepts Kimi session ids
 
+This is one more commit on `feat/kimi-dsh-agents`, the branch and PR Plan C opens (Part C's worktree is this one). Do it before Plan C Task 4 Step 3 (the go-ahead to merge): commit and push it as below, so the single PR carries it and the merge deploys it with Plan C. It touches the same two files as Plan C Task 1, so do it after Plan C Task 1 is committed. Do not give it its own branch or PR.
+
 **Files:**
 - Modify: `server/agent-control.ts:19`
 - Test: `scripts/check-agent-control.mjs` (after the import checks, ~:752)
@@ -1444,11 +1378,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git -C T:/projects/SOTZ3N/stoz3n-agent-dash-kimi-dsh push origin feat/kimi-dsh-agents
 ```
 
+If Plan C's PR is already open, this push updates it; wait for its CI before the merge.
+
 ---
 
 ## Part N — AgentCtrl node (`T:\projects\SOTZ3N\stoz3n-agent-ctrl-kimi-dsh`)
 
-Before Task 7: `git -C T:/projects/SOTZ3N/stoz3n-agent-ctrl-kimi-dsh status` → branch `feat/kimi-dsh-agents`. Tasks 7, 8, 9 and 11 do not need B. Task 10 does: `src/agent/kimi.rs` and `src/agent/dsh.rs` must exist.
+Before Task 7: `git -C T:/projects/SOTZ3N/stoz3n-agent-ctrl-kimi-dsh status` → branch `feat/kimi-dsh-agents`. Tasks 7, 8 and 9 do not need B. Tasks 10 and 11 do: Task 10 edits `src/agent/kimi.rs` and Task 11 edits `src/agent/dsh.rs`, so both files must exist.
 
 ### Task 7: Dependencies and session ids with `_`
 
@@ -2030,7 +1966,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `unpack_session`, `pack_session`, `work_dir_key` (Task 9); `KimiAdapter` (Plan B); `CliAdapter::read_session` (Task 8).
 - Produces:
-  - `pub(crate) fn kimi_home(env: &HashMap<String, String>, run_dir: &Path) -> PathBuf`
+  - `pub(crate) fn kimi_home(run_dir: &Path) -> PathBuf` (`<run_dir>/kimi-home`)
   - `pub(crate) fn place(archive: &[u8], session_id: &str, cwd: &Path, kimi_home: &Path) -> Result<PlacedSession, BackendError>`
   - `pub(crate) fn read(session_id: &str, cwd: &Path, kimi_home: &Path) -> Result<Option<Vec<u8>>, BackendError>`
   - `KimiAdapter::{place_session, read_session}`
@@ -2135,35 +2071,30 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     }
 
     #[test]
-    fn kimi_home_prefers_the_env_then_the_run_dir() {
+    fn kimi_home_is_inside_the_run_dir() {
         let run_dir = Path::new("/w/.runs/job.session");
-        assert_eq!(kimi_home(&HashMap::new(), run_dir), run_dir.join("kimi-home"));
-        let env = HashMap::from([("KIMI_CODE_HOME".to_string(), "/k".to_string())]);
-        assert_eq!(kimi_home(&env, run_dir), PathBuf::from("/k"));
+        assert_eq!(kimi_home(run_dir), run_dir.join("kimi-home"));
     }
 ```
-
-Add `use std::collections::HashMap;` to the test module.
 
 - [ ] **Step 3: Run** `cargo test --lib kimi_session` → compile errors (`place`, `read`, `kimi_home` missing).
 
 - [ ] **Step 4: Implement** (add to `kimi_session.rs` above the tests):
 
 ```rust
-use std::collections::HashMap;
 use std::io::Write as _;
 
 use serde_json::Value;
 
 use crate::agent::backend::PlacedSession;
-use crate::agent::process::{env_path, validate_session_id};
+use crate::agent::process::validate_session_id;
 
 const INDEX_FILE: &str = "session_index.jsonl";
 
-/// The run's Kimi home: `KIMI_CODE_HOME` from the run's env, else `<run_dir>/kimi-home`, where
-/// the adapter points Kimi at launch.
-pub(crate) fn kimi_home(env: &HashMap<String, String>, run_dir: &Path) -> PathBuf {
-    env_path(env, "KIMI_CODE_HOME").unwrap_or_else(|| run_dir.join("kimi-home"))
+/// The run's Kimi home, where the adapter points `KIMI_CODE_HOME` at launch. It never depends on
+/// the run's env: the adapter overrides `KIMI_CODE_HOME` whenever a run dir is set.
+pub(crate) fn kimi_home(run_dir: &Path) -> PathBuf {
+    run_dir.join("kimi-home")
 }
 
 fn is_plain_name(name: &str) -> bool {
@@ -2283,9 +2214,9 @@ In `src/agent/kimi.rs` (`impl CliAdapter for KimiAdapter`):
         session_id: &str,
         cwd: &Path,
         run_dir: &Path,
-        env: &HashMap<String, String>,
+        _env: &HashMap<String, String>,
     ) -> Result<PlacedSession, BackendError> {
-        kimi_session::place(file, session_id, cwd, &kimi_session::kimi_home(env, run_dir))
+        kimi_session::place(file, session_id, cwd, &kimi_session::kimi_home(run_dir))
     }
 
     fn read_session(
@@ -2293,11 +2224,12 @@ In `src/agent/kimi.rs` (`impl CliAdapter for KimiAdapter`):
         session_id: &str,
         cwd: &Path,
         run_dir: &Path,
-        env: &HashMap<String, String>,
+        _env: &HashMap<String, String>,
     ) -> Result<Option<Vec<u8>>, BackendError> {
-        kimi_session::read(session_id, cwd, &kimi_session::kimi_home(env, run_dir))
+        kimi_session::read(session_id, cwd, &kimi_session::kimi_home(run_dir))
     }
 ```
+(`_env` is the trait's signature; the home comes from the run dir alone.)
 
 Add `use crate::agent::kimi_session;` plus whatever of `PlacedSession`, `HashMap` and `Path` `kimi.rs` does not import yet. If B already wrote a stub `place_session` in `kimi.rs`, replace it.
 
@@ -2356,7 +2288,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `pub(crate) fn project_key(cwd: &str) -> String` (returns `--<slug>--`)
   - `pub(crate) fn encode_segment(raw: &str) -> String`
   - `pub(crate) fn generation_file_name(version: u64) -> String`
-  - `pub(crate) fn dsh_home(env, run_dir) -> PathBuf`
+  - `pub(crate) fn dsh_home(run_dir: &Path) -> PathBuf` (`<run_dir>/dsh-home`)
   - `pub(crate) fn place(file: &[u8], session_id: &str, cwd: &Path, dsh_home: &Path) -> Result<PlacedSession, BackendError>`
   - `pub(crate) fn read(session_id: &str, cwd: &Path, dsh_home: &Path) -> Result<Option<Vec<u8>>, BackendError>`
 
@@ -2366,7 +2298,7 @@ Source: deepseek-harness `packages/session/session-persistence-jsonl/src/`:
 - `zstd.ts`: frames are compressed with `ZSTD_c_checksumFlag = 1`.
 - `session-format/src/filename.ts`: `session.jsonl` for version 0, otherwise `session.v<N>.jsonl`; `.zstd` is appended when compressed.
 
-- [ ] **Step 1: Interface check against Plan B.** Open `src/agent/dsh.rs`. Confirm launch sets `DSH_HOME=<run_dir>/dsh-home` with the same `run_dir` `place_session` receives. Confirm the template seeding copies files into that directory without deleting it (a `remove_dir_all` before the copy would delete the placed session). If B exposes a helper for the home, make `dsh_home` below call it. Reconcile with B's owner before going on if either check fails.
+- [ ] **Step 1: Interface check against Plan B.** Open `src/agent/dsh.rs`. Confirm launch sets `DSH_HOME=<run_dir>/dsh-home` with the same `run_dir` `place_session` receives. If B exposes a helper for the home, make `dsh_home` below call it. Reconcile with B's owner before going on if the check fails.
 
 - [ ] **Step 2: Write the fixture and the failing tests**
 
@@ -2434,7 +2366,8 @@ mod tests {
     fn place_rewrites_the_header_cwd_into_two_checksummed_frames() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("dsh-home");
-        let uploaded = compress(&FIXTURE[..FIXTURE.iter().position(|&b| b == b'\n').unwrap() + 1], &FIXTURE[FIXTURE.iter().position(|&b| b == b'\n').unwrap() + 1..]).unwrap();
+        let header_end = FIXTURE.iter().position(|&b| b == b'\n').unwrap();
+        let uploaded = compress(&FIXTURE[..=header_end], &FIXTURE[header_end + 1..]).unwrap();
         let placed = place(&uploaded, ID, Path::new(NODE_CWD), &home).unwrap();
 
         let session_dir = home.join("sessions/--workspaces-.runs-job-abc123--").join(ID);
@@ -2448,15 +2381,13 @@ mod tests {
         assert_eq!(header.iter().filter(|&&b| b == b'\n').count(), 1);
         assert!(header.ends_with(b"\n"));
         let header: serde_json::Value = serde_json::from_slice(header).unwrap();
-        let original: serde_json::Value =
-            serde_json::from_slice(&FIXTURE[..FIXTURE.iter().position(|&b| b == b'\n').unwrap()]).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&FIXTURE[..header_end]).unwrap();
         assert_eq!(header["cwd"], NODE_CWD);
         for key in ["type", "version", "id", "createdAt", "isSeeded", "delegationDepth"] {
             assert_eq!(header[key], original[key], "{key}");
         }
         assert_eq!(header.as_object().unwrap().len(), original.as_object().unwrap().len());
-        let body_start = FIXTURE.iter().position(|&b| b == b'\n').unwrap() + 1;
-        assert_eq!(frames[1].0, &FIXTURE[body_start..]);
+        assert_eq!(frames[1].0, &FIXTURE[header_end + 1..]);
     }
 
     #[test]
@@ -2512,7 +2443,7 @@ mod tests {
 }
 ```
 
-`cargo fmt` reflows the long lines. Pull `FIXTURE.iter().position(…)` into a `let header_end` in the implementation pass if clippy flags the repetition.
+`cargo fmt` reflows the long lines.
 
 - [ ] **Step 3: Run** `cargo test --lib dsh_session` → compile errors.
 
@@ -2521,14 +2452,13 @@ mod tests {
 ```rust
 //! DeepSeek Harness's on-disk sessions under `DSH_HOME`, for moving one between machines.
 
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::agent::backend::{BackendError, PlacedSession};
-use crate::agent::process::{env_path, validate_session_id, write_placed_file};
+use crate::agent::process::{validate_session_id, write_placed_file};
 use crate::remote::MAX_SESSION_FILE_BYTES;
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
@@ -2616,10 +2546,10 @@ fn generation_of(name: &str) -> Option<(u64, bool)> {
         .map(|version| (version, zstd))
 }
 
-/// The run's dsh home: `DSH_HOME` from the run's env, else `<run_dir>/dsh-home`, where the
-/// adapter points dsh at launch.
-pub(crate) fn dsh_home(env: &HashMap<String, String>, run_dir: &Path) -> PathBuf {
-    env_path(env, "DSH_HOME").unwrap_or_else(|| run_dir.join("dsh-home"))
+/// The run's dsh home, where the adapter points `DSH_HOME` at launch. It never depends on the
+/// run's env: the adapter overrides `DSH_HOME` whenever a run dir is set.
+pub(crate) fn dsh_home(run_dir: &Path) -> PathBuf {
+    run_dir.join("dsh-home")
 }
 
 fn session_dir(dsh_home: &Path, cwd: &str, session_id: &str) -> PathBuf {
@@ -2739,7 +2669,7 @@ pub(crate) fn read(
 }
 ```
 
-`src/agent/dsh.rs` (`impl CliAdapter for DshAdapter`): the same two methods as Kimi's, calling `dsh_session::place(file, session_id, cwd, &dsh_session::dsh_home(env, run_dir))` and `dsh_session::read(session_id, cwd, &dsh_session::dsh_home(env, run_dir))`. Add an adapter-level test like Task 10 Step 5: place `tests/fixtures/dsh/session.v4.jsonl` and assert `placed.cleanup == run_dir.join("dsh-home/sessions/--workspaces-.runs-job-abc123--").join("0b6c1234-5678-4abc-8def-1234567890ab")`.
+`src/agent/dsh.rs` (`impl CliAdapter for DshAdapter`): the same two methods as Kimi's (with `_env`), calling `dsh_session::place(file, session_id, cwd, &dsh_session::dsh_home(run_dir))` and `dsh_session::read(session_id, cwd, &dsh_session::dsh_home(run_dir))`. Add an adapter-level test like Task 10 Step 5: place `tests/fixtures/dsh/session.v4.jsonl` and assert `placed.cleanup == run_dir.join("dsh-home/sessions/--workspaces-.runs-job-abc123--").join("0b6c1234-5678-4abc-8def-1234567890ab")`.
 
 - [ ] **Step 5: Run** `cargo test --lib dsh` → PASS. Run the whole suite with `cargo test`, then `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`.
 
@@ -2795,7 +2725,7 @@ Do this when both `feat/pause-and-second-node` and `feat/kimi-dsh-agents` are on
     }
 ```
 
-- [ ] **Step 3: Add `locate_session` for kimi and dsh** so the paused marker and same-node resume work:
+- [ ] **Step 3: Add `locate_session` for kimi and dsh** so the paused marker and same-node resume work. First read the pause path in `node.rs` (B's gap 6 left this open): does a pause keep `<worktree>.session` (`Handoff::run_dir()`), where `kimi-home` / `dsh-home` live? If the pause removes it, `locate_session` finds nothing on resume and the run restarts as a new conversation. In that case also route the resume through `place_session` with the bytes Step 4 reads, and tell the user before going on. Then:
   - kimi: `LocatedSession { resume_ref: session_id, file: <session dir> }` when `<session dir>/state.json` exists. Find the directory as `kimi_session::read` does; factor out a `pub(crate) fn find_session_dir(session_id, cwd, kimi_home) -> Option<PathBuf>` and have `read` call it.
   - dsh: `LocatedSession { resume_ref: session_id, file: <current generation> }`. Factor out `pub(crate) fn current_generation(session_id, cwd, dsh_home) -> Option<PathBuf>` and have `read` call it.
 - [ ] **Step 4: Replace both `read_session_file(&located.file)` byte reads in `node.rs`** (pause ~:1001, snapshot ~:1178) with `runner.read_session(self.backend, id, &self.worktree, &self.run_dir(), &self.env)`, run through `tokio::task::spawn_blocking`.
@@ -2816,10 +2746,10 @@ Do this when both `feat/pause-and-second-node` and `feat/kimi-dsh-agents` are on
   - The node image has `kimi` 2.1.1 and `dsh` 0.2.1-alpha.1.
   - The profiles `staging-kimi-interactive-rw` and `staging-dsh-interactive-rw` exist.
   - The LiteLLM aliases `kimi-k2` and `deepseek-v4` answer.
-- Tasks 7–11 merged into agent-ctrl `dev` and deployed. Task 6 merged into agent-dash `dev` and deployed.
+- Tasks 7–11 merged into agent-ctrl `dev` and deployed. Task 6 merged into agent-dash `dev` and deployed (it rides in Plan C's PR).
 - Plan A and Tasks 1–5 installed locally: `powershell -ExecutionPolicy Bypass -File ./script/windows/install-warpspeed.ps1` from `T:\projects\dev-ops\warp-kimi-dsh`. Do not restart running WarpSpeed windows; open a **new** window from the Start Menu shortcut.
 - `kimi` and `dsh` installed locally (A·6), and the dsh Warp plugin installed.
-- kubectl reaches staging through `--context admin@obachan-staging --server https://10.10.1.5:6443 --tls-server-name 10.96.0.1` (alias it `K` below; pass `--context` every time).
+- kubectl reaches staging as in Plan B Task 8: `export KUBECONFIG=~/.kube/obachan-staging` and `K="kubectl --server https://staging-gateway:6443 --tls-server-name 10.96.0.1 -n agent-ctrl"`. The node is the Deployment `deploy/agent-ctrl-node` (container `node`) on `dev`; a StatefulSet pod `agent-ctrl-node-0` exists only once the pause branch is deployed, and then `K exec agent-ctrl-node-0 -c node` replaces the `deploy/` target below.
 
 Scratch checkout (the repo must be configured on staging; `warpspeed` is):
 
@@ -2828,9 +2758,9 @@ git clone --depth 1 --origin gitea https://git-dev.obachan.dev/stozn/warpspeed.g
 ```
 
 - [ ] **Step 1: Fresh kimi run.** Run `warpspeed agent-ctrl start --agent kimi --repo https://git-dev.obachan.dev/stozn/warpspeed.git` and note `<job>`. Then send `warpspeed agent-ctrl input <job> "Reply with the single word PONG."` and run `warpspeed agent-ctrl attach <job> --once`. Expected: an assistant event containing `PONG`. If the input returns 409 `input_not_allowed`, the agent is still answering; retry.
-- [ ] **Step 2: Real-CLI key check (spec gap 12).** List the run's Kimi home on the node:
+- [ ] **Step 2: Real-CLI key check (spec gap 11).** List the run's Kimi home on the node:
 
-  `K -n agent-ctrl exec agent-ctrl-node-0 -- sh -c 'ls -d /workspace*/.runs/<job>; ls /workspace*/.runs/<job>.session/kimi-home/sessions/'`
+  `K exec deploy/agent-ctrl-node -c node -- sh -c 'ls -d /workspace*/.runs/<job>; ls /workspace*/.runs/<job>.session/kimi-home/sessions/'`
 
   Compute the expected key from the printed worktree path:
 
@@ -2856,11 +2786,11 @@ git clone --depth 1 --origin gitea https://git-dev.obachan.dev/stozn/warpspeed.g
   Expected: the commit `agent-ctrl run <job> end` with `e2e-kimi.txt`, and `e2e-kimi-local.txt` in its parent handoff commit.
 - [ ] **Step 5: Fresh dsh run.** Same as Step 1 with `--agent dsh` (expect `PONG`). Then the key check:
 
-  `K … exec agent-ctrl-node-0 -- sh -c 'ls /workspace*/.runs/<job>.session/dsh-home/sessions/'`
+  `K exec deploy/agent-ctrl-node -c node -- sh -c 'ls /workspace*/.runs/<job>.session/dsh-home/sessions/'`
 
   Expected: `--` + the worktree path with `/` replaced by `-`, leading `-` dropped, + `--` (for example `--workspace-.runs-<job>--`).
 - [ ] **Step 6: Move a finished dsh session.**
-  1. In a pane in the scratch checkout, run `dsh headless "The codeword is OBSIDIAN-17. Reply OK."` and wait for it to end.
+  1. In a pane in the scratch checkout, run `dsh --profile headless "The codeword is OBSIDIAN-17. Reply OK."` and wait for it to end.
   2. Take the session id from the picker (A·3) or from `ls ~/.dsh/sessions/--*e2e-warpspeed--/`.
   3. Run `warpspeed agent-ctrl move-session --agent dsh --session <id>`.
 
@@ -2870,7 +2800,7 @@ git clone --depth 1 --origin gitea https://git-dev.obachan.dev/stozn/warpspeed.g
 - [ ] **Step 7: dsh push-back.** `input <job> "Create a file e2e-dsh.txt containing moved, then stop."` → `close <job>` → fetch the handoff branch. Expected: an `agent-ctrl run <job> end` commit with `e2e-dsh.txt`.
 - [ ] **Step 8: Refusal drill.** `warpspeed agent-ctrl move-session --agent kimi --session x` → error `move-session moves dsh sessions; move a kimi session from its pane`, and no branch is pushed.
 - [ ] **Step 9: Clean up and record.**
-  - Check `K … exec agent-ctrl-node-0 -- ls /workspace*/.runs` shows no leftover `<job>` or `<job>.session` for the four runs.
+  - Check `K exec deploy/agent-ctrl-node -c node -- ls /workspace*/.runs` shows no leftover `<job>` or `<job>.session` for the four runs.
   - Delete the scratch clone.
   - List the handoff branches the E2E left on gitea in the report; delete them only if the user asks.
   - Update the memory note on the feature status (moved kimi/dsh E2E passed, date, job ids).
@@ -2902,4 +2832,4 @@ git clone --depth 1 --origin gitea https://git-dev.obachan.dev/stozn/warpspeed.g
 
   `move-all` needs no change (spec D·1). Only the `MoveSession` arm is added to its exhaustive match.
 - **Placeholder scan:** runtime values in Task 13 (`<job>`, `<id>`, `<worktree>`) come from earlier steps of the same task. Task 12 gives code for the trait default and exact instructions for the two `node.rs` call sites. Its test is described rather than written out, because the fake backend's shape exists only on the pause branch.
-- **Type consistency:** `read_session(&self, session_id: &str, cwd: &Path, run_dir: &Path, env: &HashMap<String, String>) -> Result<Option<Vec<u8>>, BackendError>` is used in Tasks 8, 10, 11 and 12. `PlacedSession { resume_ref, cleanup }` matches `backend.rs`. `PreparedHandoff::session_len: u64` feeds `UploadedSession::file_len: u64`. `dsh_generation` (warp) and `generation_of` (agent-ctrl) implement the same rule in two repos.
+- **Type consistency:** `read_session(&self, session_id: &str, cwd: &Path, run_dir: &Path, env: &HashMap<String, String>) -> Result<Option<Vec<u8>>, BackendError>` is used in Tasks 8, 10, 11 and 12. `PlacedSession { resume_ref, cleanup }` matches `backend.rs`. `PreparedHandoff::session_len: u64` feeds `UploadedSession::file_len: u64`. warp reuses Plan A's `current_dsh_log` for the dsh generation rule and agent-ctrl has `generation_of`; both accept only `session[.v<N>].jsonl[.zstd]` with N ≥ 1 and no leading zero.

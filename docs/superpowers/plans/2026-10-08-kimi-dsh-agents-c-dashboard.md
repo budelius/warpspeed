@@ -196,7 +196,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `session.agent` values as stoz3n-hooks reports them (`kimi`, `dsh`, plus the existing `claude`, `pi`, `codex`).
-- Produces: badge label "Kimi" in `#1783FF`, "DeepSeek" in `#4D6BFE`; other agents unchanged.
+- Produces: badge label "Kimi" on a 10 % tint of `#1783FF` with text `#0B5FCC` (5.31:1), "DeepSeek" on a 10 % tint of `#4D6BFE` with text `#3348D9` (6.03:1); other agents unchanged. Ratios are WCAG contrast of the text on its tint blended over a white page (checked with a short script), above the 4.5:1 that `text-xs` needs.
 
 There is no component test harness for this page (`CLAUDE.md`: no unit test runner; the Playwright harnesses cover other pages). This task is verified by typecheck, lint, the client build and a visual check.
 
@@ -205,10 +205,15 @@ There is no component test harness for this page (`CLAUDE.md`: no unit test runn
 Replace lines 38-46 with:
 
 ```tsx
-/** Agents with a brand colour Tailwind's palette lacks, and a display label unlike their id. */
+/**
+ * Agents with a brand colour Tailwind's palette lacks, and a display label unlike their id. The
+ * background is a 10 % tint of the brand colour; the text is a darker shade of it, because the
+ * brand colour itself is under 4.5:1 on its own tint (Kimi 3.26:1, DeepSeek 3.82:1). Text on tint:
+ * Kimi #0B5FCC 5.31:1, DeepSeek #3348D9 6.03:1.
+ */
 const AGENT_BRANDS: Record<string, { label: string; className: string }> = {
-  kimi: { label: "Kimi", className: "bg-[#1783FF]/10 text-[#1783FF]" },
-  dsh: { label: "DeepSeek", className: "bg-[#4D6BFE]/10 text-[#4D6BFE]" },
+  kimi: { label: "Kimi", className: "bg-[#1783FF]/10 text-[#0B5FCC]" },
+  dsh: { label: "DeepSeek", className: "bg-[#4D6BFE]/10 text-[#3348D9]" },
 };
 
 function AgentBadge({ agent }: { agent: string }) {
@@ -295,9 +300,13 @@ EOF
 
 Expected: a PR URL; its CI run (lint, check, build:server) passes.
 
+- [ ] **Step 2b: Add Plan D Task 6's commit to this PR**
+
+Plan D Task 6 (the import accepts `session_`-prefixed Kimi ids) is one more commit on this same branch, `feat/kimi-dsh-agents`, in this worktree, touching `server/agent-control.ts` and `scripts/check-agent-control.mjs` as Task 1 did. Do it now, after Step 2 and before Step 3, and push it so the PR carries it (`git push origin feat/kimi-dsh-agents`). Its CI run must pass before the merge. The PR is the only route into `dev`, so the merge that follows Step 3 deploys both parts at once.
+
 - [ ] **Step 3: STOP — ask the user for the go-ahead to merge**
 
-Preconditions to state: Plan B is merged and deployed on staging (its Task 8 smoke passed); this PR's CI is green. Merging into `dev` deploys the staging dashboard. Do not merge without an explicit yes.
+Preconditions to state: Plan B is merged and deployed on staging (its Task 8 smoke passed); this PR's CI is green and includes Plan D Task 6's commit. Merging into `dev` deploys the staging dashboard. Do not merge without an explicit yes.
 
 - [ ] **Step 4: After the merge, verify on staging**
 
@@ -309,5 +318,5 @@ Watch the dashboard deploy workflow in Gitea until it finishes. Then open the st
 
 1. `AgentBadge` renders the raw agent id, so `dsh` would show as "Dsh". The plan gives both new badges a label ("Kimi", "DeepSeek") matching `backendLabel`. The other agents are unchanged.
 2. `backendLabel` and `canonicalAgentRunnerSessionId` are module-private. The plan exports them so the existing check script can test them, because fixture runs for kimi/dsh would change the counts other checks assert.
-3. The brand colours as text on a 10 % tint of themselves have low contrast (about 3.5:1 for `#1783FF`). The spec fixes the colours; a darker text shade would need the spec changed.
+3. The brand colours as text on a 10 % tint of themselves have low contrast (3.26:1 for `#1783FF`, 3.82:1 for `#4D6BFE`). The tints stay; the text uses darker shades (`#0B5FCC` at 5.31:1, `#3348D9` at 6.03:1), and the spec's amendments record the change.
 4. The Agent Sessions page shows what stoz3n-hooks reports. Whether stoz3n-hooks reports Kimi or dsh sessions at all is outside this spec. The page text now names them anyway, as the spec asks.

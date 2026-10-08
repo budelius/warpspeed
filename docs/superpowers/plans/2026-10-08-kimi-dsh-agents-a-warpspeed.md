@@ -128,10 +128,10 @@ fn test_detect_kimi_and_deepseek_harness() {
                     "kimi --session session_0b6c1234-ffff-4a4a-8b8b-0123456789ab",
                     CLIAgent::Kimi,
                 ),
-                ("dsh headless \"fix the build\"", CLIAgent::DeepSeekHarness),
-                ("npx @deepseek-ai/dsh headless hi", CLIAgent::DeepSeekHarness),
+                ("dsh --profile headless \"fix the build\"", CLIAgent::DeepSeekHarness),
+                ("npx @deepseek-ai/dsh --profile headless hi", CLIAgent::DeepSeekHarness),
                 (
-                    "npx -y @deepseek-ai/dsh@0.2.1-alpha.1 headless hi",
+                    "npx -y @deepseek-ai/dsh@0.2.1-alpha.1 --profile headless hi",
                     CLIAgent::DeepSeekHarness,
                 ),
                 ("npx --yes @deepseek-ai/dsh", CLIAgent::DeepSeekHarness),
@@ -518,10 +518,25 @@ and add after it:
                         CLIAgent::Codex => "Notification from Codex",
                         CLIAgent::Kimi => "Notification from Kimi Code",
                         CLIAgent::DeepSeekHarness => "Notification from DeepSeek Harness",
-                        _ => "Task completed.",
+                        CLIAgent::Claude
+                        | CLIAgent::Pi
+                        | CLIAgent::Gemini
+                        | CLIAgent::Amp
+                        | CLIAgent::Droid
+                        | CLIAgent::OpenCode
+                        | CLIAgent::Copilot
+                        | CLIAgent::OhMyPi
+                        | CLIAgent::Auggie
+                        | CLIAgent::CursorCli
+                        | CLIAgent::Goose
+                        | CLIAgent::Hermes
+                        | CLIAgent::Vibe
+                        | CLIAgent::Antigravity
+                        | CLIAgent::WarpTui
+                        | CLIAgent::Unknown => "Task completed.",
                     };
 ```
-(The existing `_` arm stays; this match was non-exhaustive before.)
+(The `_` arm is replaced by the remaining variants, as Global Constraints require. If the compiler reports a variant this list misses or repeats, adjust the list.)
 
 - [ ] **Step 4: Run the tests**
 
@@ -901,7 +916,6 @@ Kimi on disk (`kimi-code/packages/agent-core-v2/src/…`): data root `$KIMI_CODE
 **Interfaces:**
 - Produces (`crate::terminal::agent_session_paths`, all `pub(crate)`):
   - `fn kimi_home() -> Option<PathBuf>`
-  - `fn dsh_home() -> Option<PathBuf>`
   - `fn kimi_indexed_session_dirs(home: &Path) -> Option<Vec<(String, PathBuf)>>` — `None` when there is no index; deleted ids omitted; the last line for an id wins
 - Produces (`agent_session_history`, private, used in tests): `fn kimi_sessions(home: &Path) -> Vec<PastAgentSession>`; `fn directory_sessions(agent: CLIAgent) -> Option<Vec<PastAgentSession>>`
 - `RESUMABLE_AGENTS` becomes `[CLIAgent; 5]` = Claude, Codex, Pi, Kimi, DeepSeekHarness (dsh rows show without a Resume action, Decision 8).
@@ -1065,15 +1079,6 @@ pub(crate) fn kimi_home() -> Option<PathBuf> {
         .or_else(|| dirs::home_dir().map(|home| home.join(".kimi-code")))
 }
 
-/// DeepSeek Harness's data root: `$DSH_HOME`, else `~/.dsh`. dsh treats a blank value as unset.
-pub(crate) fn dsh_home() -> Option<PathBuf> {
-    std::env::var("DSH_HOME")
-        .ok()
-        .filter(|home| !home.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".dsh")))
-}
-
 /// Each live session's directory from Kimi's `session_index.jsonl`, or `None` without an index.
 /// Kimi appends a line per created session and a `deleted` tombstone per deletion, so the last
 /// line for an id wins.
@@ -1177,7 +1182,11 @@ fn epoch_millis_or_rfc3339(value: &Value) -> Option<SystemTime> {
 Replace the Vibe special case in `scan` (lines 389-408) with:
 ```rust
 fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession> {
-    let mut sessions = directory_sessions(agent).unwrap_or_else(|| {
+    #[cfg(not(target_family = "wasm"))]
+    let listed = directory_sessions(agent);
+    #[cfg(target_family = "wasm")]
+    let listed = None;
+    let mut sessions = listed.unwrap_or_else(|| {
         let mut candidates = candidates(agent)
             .into_iter()
             .filter(|candidate| not_before.is_none_or(|time| candidate.modified >= time))
@@ -1219,11 +1228,6 @@ fn directory_sessions(agent: CLIAgent) -> Option<Vec<PastAgentSession>> {
         | CLIAgent::Unknown => None,
     }
 }
-
-#[cfg(target_family = "wasm")]
-fn directory_sessions(_agent: CLIAgent) -> Option<Vec<PastAgentSession>> {
-    None
-}
 ```
 Replace `RESUMABLE_AGENTS` with:
 ```rust
@@ -1259,12 +1263,13 @@ dsh on disk (`deepseek-harness/packages/session/session-persistence-jsonl/src/{f
 
 **Files:**
 - Modify: `app/Cargo.toml:354` (add `zstd = "0.13.3"` after `warp_files.workspace = true` in the non-wasm section)
+- Modify: `app/src/terminal/agent_session_paths.rs` (`dsh_home`, added here because nothing calls it before this task)
 - Modify: `app/src/terminal/agent_session_history.rs` (dsh functions, `directory_sessions` arm)
 - Test: `app/src/terminal/agent_session_history_tests.rs`
 
 **Interfaces:**
-- Consumes: Task 5 `agent_session_paths::dsh_home`, `directory_sessions`.
-- Produces (private): `fn dsh_sessions(root: &Path) -> Vec<PastAgentSession>` (`root` = `<DSH_HOME>/sessions`), `fn current_dsh_log(dir: &Path) -> Option<(PathBuf, bool)>` (path, is zstd).
+- Consumes: Task 5 `directory_sessions`, `agent_session_paths` (the module Task 5 creates).
+- Produces: `agent_session_paths::dsh_home() -> Option<PathBuf>` (`pub(crate)`); `agent_session_history::current_dsh_log(dir: &Path) -> Option<(PathBuf, bool)>` (`pub(crate)`; path and is-zstd; Plan D's handoff code locates a dsh session file with it, so the generation rule has one parser); private `fn dsh_sessions(root: &Path) -> Vec<PastAgentSession>` (`root` = `<DSH_HOME>/sessions`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1359,6 +1364,8 @@ fn dsh_current_log_is_the_highest_generation() {
         "session.v2.jsonl.zstd",
         "session.v10.jsonl.zstd",
         "session.v9.jsonl",
+        "session.v011.jsonl",
+        "session.v0.jsonl",
         "session.lock",
         "notes.jsonl",
     ] {
@@ -1379,6 +1386,18 @@ Expected: compile error.
 - [ ] **Step 3: Implement**
 
 `app/Cargo.toml`: add `zstd = "0.13.3"` after `warp_files.workspace = true` (line 354, inside `[target.'cfg(not(target_family = "wasm"))'.dependencies]`).
+
+`agent_session_paths.rs`: add after `kimi_home`:
+```rust
+/// DeepSeek Harness's data root: `$DSH_HOME`, else `~/.dsh`. dsh treats a blank value as unset.
+pub(crate) fn dsh_home() -> Option<PathBuf> {
+    std::env::var("DSH_HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".dsh")))
+}
+```
 
 `agent_session_history.rs`: extend the (non-wasm) import to `use super::agent_session_paths::{dsh_home, kimi_home, kimi_indexed_session_dirs};`, add `#[cfg(not(target_family = "wasm"))] use std::io::Read;`, add `#[cfg(not(target_family = "wasm"))] const DSH_HEAD_BYTES: u64 = 64 * 1024;` after `TITLE_MAX_CHARS`, and add after `kimi_session` (every item below is `#[cfg(not(target_family = "wasm"))]`, including `current_dsh_log`):
 ```rust
@@ -1433,9 +1452,10 @@ fn dsh_session(dir: &Path) -> Option<PastAgentSession> {
     })
 }
 
-/// The session's current log, the highest generation of `session[.vN].jsonl[.zstd]` in `dir`,
-/// and whether it is zstd-compressed.
-fn current_dsh_log(dir: &Path) -> Option<(PathBuf, bool)> {
+/// The session's current log, the highest generation of `session[.vN].jsonl[.zstd]` in `dir`
+/// (N has no leading zero, as dsh writes it), and whether it is zstd-compressed.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn current_dsh_log(dir: &Path) -> Option<(PathBuf, bool)> {
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -1447,7 +1467,12 @@ fn current_dsh_log(dir: &Path) -> Option<(PathBuf, bool)> {
             };
             let generation = match stem.strip_prefix("session")?.strip_suffix(".jsonl")? {
                 "" => 0,
-                version => version.strip_prefix(".v")?.parse::<u32>().ok()?,
+                version => {
+                    let digits = version.strip_prefix(".v")?;
+                    let canonical = !digits.starts_with('0')
+                        && digits.bytes().all(|byte| byte.is_ascii_digit());
+                    canonical.then(|| digits.parse::<u32>().ok()).flatten()?
+                }
             };
             Some((generation, entry.path(), compressed))
         })
@@ -1489,7 +1514,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/Cargo.toml Cargo.lock app/src/terminal/agent_session_history.rs app/src/terminal/agent_session_history_tests.rs
+git add app/Cargo.toml Cargo.lock app/src/terminal/agent_session_paths.rs app/src/terminal/agent_session_history.rs app/src/terminal/agent_session_history_tests.rs
 git commit -m "feat(cli-agent): list DeepSeek Harness sessions from their zstd logs" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -1923,10 +1948,15 @@ Expected: compile error (`no variant CliAgentEvent`).
 ```
 `handler.rs` `handle`: add
 ```rust
+        #[cfg(feature = "local_tty")]
         Request::CliAgentEvent {
             token,
             notification,
         } => deliver_cli_agent_event(&token, notification, ctx),
+        #[cfg(not(feature = "local_tty"))]
+        Request::CliAgentEvent { .. } => Response::Failed {
+            error: "This build has no local terminals".to_owned(),
+        },
 ```
 and the functions:
 ```rust
@@ -1957,15 +1987,8 @@ fn deliver_cli_agent_event(token: &str, notification: String, ctx: &mut AppConte
     });
     Response::Done
 }
-
-#[cfg(not(feature = "local_tty"))]
-fn deliver_cli_agent_event(_token: &str, _notification: String, _ctx: &mut AppContext) -> Response {
-    Response::Failed {
-        error: "This build has no local terminals".to_owned(),
-    }
-}
 ```
-(The `_`-prefixed parameters follow the file's existing `not(local_tty)` stubs.)
+(Without `local_tty` the request is answered by the cfg-gated arm in `handle`, so no stub function with unused parameters exists.)
 
 `model_events.rs`, after `request_remote_server_block`:
 ```rust
@@ -2789,12 +2812,12 @@ Expected: PASS.
 
 - [ ] **Step 8: Check the command is silent**
 
-Run (Git Bash, from the worktree, debug build):
+Run (Git Bash, from the worktree; `cargo run` starts the CLI, and nothing runs from `target/`):
 ```bash
 cargo build -p warp --bin warpspeed
-printf '%s' '{"hook_event_name":"Stop","session_id":"session_x"}' | WARP_AGENT_EVENT_TOKEN=00000000000000000000000000000000 ./target/debug/warpspeed agent-event --format kimi-hook 2>/dev/null | wc -c; echo "exit ${PIPESTATUS[1]}"
+printf '%s' '{"hook_event_name":"Stop","session_id":"session_x"}' | WARP_AGENT_EVENT_TOKEN=00000000000000000000000000000000 cargo run -q -p warp --bin warpspeed -- agent-event --format kimi-hook 2>/dev/null | wc -c; echo "exit ${PIPESTATUS[1]}"
 ```
-(With `CARGO_TARGET_DIR` set, use that directory instead of `./target`.)
+(The build first makes `cargo run` start at once, so the timing below measures the command, not the compile.)
 Expected: `0` bytes on stdout, `exit 0`, returns in under 3 s. stderr carries only the `WarpSpeed starting:` banner.
 
 - [ ] **Step 9: Commit**
@@ -2993,12 +3016,10 @@ fn the_manual_example_is_the_installed_command() {
 Append to `plugin_manager/mod_tests.rs`:
 ```rust
 #[test]
-fn returns_manager_for_kimi_and_deepseek_harness() {
+fn returns_manager_for_kimi() {
     let _hoa_guard = crate::features::FeatureFlag::HOANotifications.override_enabled(true);
     let _kimi_guard = crate::features::FeatureFlag::KimiNotifications.override_enabled(true);
-    let _dsh_guard = crate::features::FeatureFlag::DshNotifications.override_enabled(true);
     assert!(plugin_manager_for(CLIAgent::Kimi).is_some());
-    assert!(plugin_manager_for(CLIAgent::DeepSeekHarness).is_some());
 }
 
 #[test]
@@ -3010,7 +3031,7 @@ fn returns_none_for_kimi_and_deepseek_harness_without_their_flags() {
     assert!(plugin_manager_for(CLIAgent::DeepSeekHarness).is_none());
 }
 ```
-(The DeepSeek Harness half of the first test passes only after Task 12; run it then.)
+(The DeepSeek Harness manager is asserted in Task 12, where it is created.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -3051,8 +3072,33 @@ use super::{
 };
 use crate::terminal::agent_session_paths::kimi_home;
 
+// The command's pieces are macros so `MANUAL_HOOK_EXAMPLE` can `concat!` them: one spelling of the
+// command serves both the installed hooks and the manual instructions.
+macro_rules! hooks_version {
+    () => {
+        "1.0.0"
+    };
+}
+macro_rules! command_marker {
+    () => {
+        "agent-event --format kimi-hook"
+    };
+}
+#[cfg(windows)]
+macro_rules! agent_event_variable {
+    () => {
+        "%WARP_AGENT_EVENT_BIN%"
+    };
+}
+#[cfg(not(windows))]
+macro_rules! agent_event_variable {
+    () => {
+        "$WARP_AGENT_EVENT_BIN"
+    };
+}
+
 /// Bumped whenever the hook entries change. Each hook reports it as its plugin version.
-const HOOKS_VERSION: &str = "1.0.0";
+const HOOKS_VERSION: &str = hooks_version!();
 
 const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
@@ -3066,21 +3112,24 @@ const HOOK_EVENTS: &[&str] = &[
 ];
 
 /// What marks a hook entry as Warp's, whichever version wrote it.
-const COMMAND_MARKER: &str = "agent-event --format kimi-hook";
+const COMMAND_MARKER: &str = command_marker!();
 
 const HOOK_TIMEOUT_SECONDS: i64 = 5;
 
 /// Kimi runs hook commands through `cmd.exe` on Windows and `/bin/sh` elsewhere. The variable is
 /// empty outside a Warp pane, so the hook fails there and Kimi carries on.
-#[cfg(windows)]
-const AGENT_EVENT_BIN: &str = "\"%WARP_AGENT_EVENT_BIN%\"";
-#[cfg(not(windows))]
-const AGENT_EVENT_BIN: &str = "\"$WARP_AGENT_EVENT_BIN\"";
+const AGENT_EVENT_BIN: &str = concat!("\"", agent_event_variable!(), "\"");
 
-#[cfg(windows)]
-const MANUAL_HOOK_EXAMPLE: &str = "[[hooks]]\nevent = \"Stop\"\ncommand = \"\\\"%WARP_AGENT_EVENT_BIN%\\\" agent-event --format kimi-hook --hooks-version 1.0.0\"\ntimeout = 5";
-#[cfg(not(windows))]
-const MANUAL_HOOK_EXAMPLE: &str = "[[hooks]]\nevent = \"Stop\"\ncommand = \"\\\"$WARP_AGENT_EVENT_BIN\\\" agent-event --format kimi-hook --hooks-version 1.0.0\"\ntimeout = 5";
+/// The same command as [`hook_command`], as a TOML entry for the manual instructions.
+const MANUAL_HOOK_EXAMPLE: &str = concat!(
+    "[[hooks]]\nevent = \"Stop\"\ncommand = \"\\\"",
+    agent_event_variable!(),
+    "\\\" ",
+    command_marker!(),
+    " --hooks-version ",
+    hooks_version!(),
+    "\"\ntimeout = 5"
+);
 
 fn hook_command() -> String {
     format!("{AGENT_EVENT_BIN} {COMMAND_MARKER} --hooks-version {HOOKS_VERSION}")
@@ -3282,7 +3331,7 @@ mod tests;
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo nextest run -p warp plugin_manager::kimi plugin_manager::tests::returns_none_for_kimi`
+Run: `cargo nextest run -p warp plugin_manager::kimi plugin_manager::tests::returns_manager_for_kimi plugin_manager::tests::returns_none_for_kimi`
 Expected: PASS. If `installing_twice_changes_nothing` fails only on blank-line decor between tables, normalise the pushed tables' decor (`hook.decor_mut().set_prefix("\n")`) rather than weakening the test.
 
 - [ ] **Step 6: Commit**
@@ -3809,10 +3858,10 @@ Expected: `0.1.0`. Without a token, stop here and report; Task 12's unit tests d
 
 **Files:**
 - Create: `app/src/terminal/cli_agent_sessions/plugin_manager/dsh.rs`, `.../plugin_manager/dsh_tests.rs`
-- Modify: `app/src/terminal/cli_agent_sessions/plugin_manager/mod.rs`
+- Modify: `app/src/terminal/cli_agent_sessions/plugin_manager/mod.rs`, `.../plugin_manager/mod_tests.rs`
 
 **Interfaces:**
-- Consumes: Task 5 `dsh_home`; Task 10 `FeatureFlag::DshNotifications`; Task 11 package `@stozn/dsh-warp`.
+- Consumes: Task 6 `dsh_home`; Task 10 `FeatureFlag::DshNotifications`; Task 11 package `@stozn/dsh-warp`.
 - Produces: `plugin_manager_for_with_shell(CLIAgent::DeepSeekHarness, …)` → `DshPluginManager::new(shell_path, shell_type, path_env_var)` when `DshNotifications && HOANotifications`; private fns `profiles(home: &Path) -> Vec<String>`, `with_registry_line(existing: &str) -> Option<String>`, `installed_version(profile_dir: &Path) -> Option<String>`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -3822,7 +3871,10 @@ Expected: `0.1.0`. Without a token, stop here and report; Task 12's unit tests d
 use std::fs;
 use std::path::Path;
 
-use super::{MINIMUM_PLUGIN_VERSION, REGISTRY_LINE, installed_version, profiles, with_registry_line};
+use super::{
+    INSTRUCTIONS, MINIMUM_PLUGIN_VERSION, PACKAGE, REGISTRY_LINE, installed_version, profiles,
+    with_registry_line,
+};
 
 fn write(path: &Path, contents: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -3852,6 +3904,20 @@ fn registry_line_is_added_once() {
     assert_eq!(
         with_registry_line("  @stozn:registry=https://mirror.example/npm/\n"),
         None
+    );
+}
+
+#[test]
+fn the_manual_install_command_pins_the_installers_version() {
+    let manual = INSTRUCTIONS
+        .steps
+        .iter()
+        .map(|step| step.command)
+        .find(|command| command.starts_with("dsh plugin"))
+        .expect("the instructions show the install command");
+    assert_eq!(
+        manual,
+        format!("dsh plugin --profile headless add {PACKAGE}@{MINIMUM_PLUGIN_VERSION}")
     );
 }
 
@@ -3917,7 +3983,9 @@ use crate::terminal::model::session::LocalCommandExecutor;
 use crate::terminal::shell::ShellType;
 
 const PACKAGE: &str = "@stozn/dsh-warp";
-// Keep in sync with app/resources/dsh-warp/package.json.
+/// The release the installer pins (`dsh plugin add @stozn/dsh-warp@<version>`), so a newer publish
+/// is never pulled in unreviewed, and the oldest one the footer treats as up to date. Keep in
+/// sync with app/resources/dsh-warp/package.json and bump them together.
 const MINIMUM_PLUGIN_VERSION: &str = "0.1.0";
 const REGISTRY_LINE: &str = "@stozn:registry=https://git-dev.obachan.dev/api/packages/stozn/npm/";
 /// The profile `dsh --profile headless` uses, which is how dsh runs in a pane.
@@ -3967,7 +4035,7 @@ impl DshPluginManager {
                 log: error.log,
             });
         }
-        let spec = format!("{PACKAGE}@latest");
+        let spec = format!("{PACKAGE}@{MINIMUM_PLUGIN_VERSION}");
         for profile in profiles(&home) {
             ensure_registry(&home.join("profiles").join(&profile))?;
             self.run_logged(
@@ -4046,7 +4114,7 @@ static INSTRUCTIONS: LazyLock<PluginInstructions> = LazyLock::new(|| PluginInstr
         },
         PluginInstructionStep {
             description: "Install the plugin into the profile (repeat for each profile you use)",
-            command: "dsh plugin --profile headless add @stozn/dsh-warp@latest",
+            command: "dsh plugin --profile headless add @stozn/dsh-warp@0.1.0",
             executable: true,
             link: None,
         },
@@ -4153,6 +4221,15 @@ fn installed_versions() -> Vec<String> {
 #[path = "dsh_tests.rs"]
 mod tests;
 ```
+`plugin_manager/mod_tests.rs`: append
+```rust
+#[test]
+fn returns_manager_for_deepseek_harness() {
+    let _hoa_guard = crate::features::FeatureFlag::HOANotifications.override_enabled(true);
+    let _dsh_guard = crate::features::FeatureFlag::DshNotifications.override_enabled(true);
+    assert!(plugin_manager_for(CLIAgent::DeepSeekHarness).is_some());
+}
+```
 `plugin_manager/mod.rs`: add `pub(crate) mod dsh;`, `use dsh::DshPluginManager;`, and before the unsupported group:
 ```rust
         CLIAgent::DeepSeekHarness
@@ -4170,12 +4247,12 @@ mod tests;
 - [ ] **Step 4: Run the tests**
 
 Run: `cargo nextest run -p warp plugin_manager`
-Expected: PASS, including Task 10's `returns_manager_for_kimi_and_deepseek_harness`.
+Expected: PASS, including Task 10's `returns_manager_for_kimi` and the `returns_manager_for_deepseek_harness` test added in Step 3.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/terminal/cli_agent_sessions/plugin_manager/mod.rs app/src/terminal/cli_agent_sessions/plugin_manager/dsh.rs app/src/terminal/cli_agent_sessions/plugin_manager/dsh_tests.rs
+git add app/src/terminal/cli_agent_sessions/plugin_manager/mod.rs app/src/terminal/cli_agent_sessions/plugin_manager/mod_tests.rs app/src/terminal/cli_agent_sessions/plugin_manager/dsh.rs app/src/terminal/cli_agent_sessions/plugin_manager/dsh_tests.rs
 git commit -m "feat(cli-agent): install the Warp plugin into DeepSeek Harness profiles" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 

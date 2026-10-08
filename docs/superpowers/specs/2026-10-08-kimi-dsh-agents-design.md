@@ -373,8 +373,9 @@ they supersede the sections above where they differ.
   sessions are ignored; the plugin computes its session file path.
 - **dsh command form:** `dsh --profile headless …` (not `dsh headless`).
 - **dsh config on nodes (B·3–B·5):** dsh never reads `$DSH_HOME/cordis.patch.yml`; the adapter passes
-  `--patch /agent-config/dsh-{acp,headless}.patch.yml` from the ConfigMap (two files: the `acp` row
-  exists only in the ACP profile). No `~/.dsh` seeding.
+  `--patch` files from the ConfigMap: `/agent-config/dsh-passiv.patch.yml` for every dsh run (passiv
+  route, default model, telemetry opt-outs) and `/agent-config/dsh-acp.patch.yml` for ACP runs (the
+  `acp` row override; that row exists only in the ACP profile). No `~/.dsh` seeding.
 - **Run home (B·2):** the node exports `AGENT_CTRL_RUN_DIR=<worktree>.session` to isolated runs; the
   adapters create `kimi-home` / `dsh-home` inside it. Kimi profiles also set `KIMI_DISABLE_TELEMETRY=1`.
   Ticket workers use `kimi [--auto] -p …` and `dsh --profile headless … <task>`.
@@ -391,4 +392,8 @@ they supersede the sections above where they differ.
   `version`; the file is written as dsh does (first frame = header line, frames end on record
   boundaries). `read_session` takes `cwd` and `env` as well, matching the pause branch's
   `locate_session`; on that branch a Kimi pause needs the located path read as a directory tar.
-- **Dashboard (C):** dsh badge label "DeepSeek"; badge colours checked for contrast.
+- **Dashboard (C):** dsh badge label "DeepSeek". The brand colours stay as fills (10 % tints), but the
+  badge text uses darker shades for WCAG AA: Kimi `#0B5FCC` on its `#1783FF` tint (5.31:1), DeepSeek
+  `#3348D9` on its `#4D6BFE` tint (6.03:1), both computed on a white page background.
+- **Icons (A·1):** the enum variants are `Icon::KimiLogo` and `Icon::DeepSeekLogo` (the enum's `*Logo`
+  convention), not `Icon::Kimi` / `Icon::DeepSeek`; the SVG file names are unchanged.

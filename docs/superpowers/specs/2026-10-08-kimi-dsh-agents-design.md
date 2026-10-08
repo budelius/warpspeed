@@ -351,3 +351,44 @@ that lands; on `dev` it is implemented and unit-tested but unused.
   unverified; the path note covers it either way.
 - **pnpm requirement** for installing the dsh plugin locally.
 - **Model ids** on OpenRouter for Kimi K2 and DeepSeek are looked up at apply time.
+
+---
+
+## Amendments from planning (2026-10-08)
+
+Found while writing the plans against the code and the CLI sources; the plans implement these, and
+they supersede the sections above where they differ.
+
+- **Pane token (A·4):** the token is derived from the shell's session id and a per-profile secret
+  file (hash), not stored with the pane, so it survives detach, attach and crashes without a
+  supervisor protocol change. Env vars are set in `create_pty`. Remote-control protocol v2 → v3; the
+  event travels as a JSON string.
+- **Kimi hooks (A·4):** payloads carry no `transcript_path`; WarpSpeed resolves the session dir from
+  Kimi's index. `prompt` is an array of content parts; `StopFailure` uses `error_message`. The hook
+  version rides on the command (`--hooks-version`). `SessionEnd` sends nothing. `agent-event` must
+  print nothing to stdout (Kimi appends `UserPromptSubmit` hook stdout to the prompt).
+- **Kimi OSC 9 (A·4):** mapped by title (approval / question / task done), not all to `stop`.
+- **dsh plugin (A·5):** approvals are observed through `session/event` log entries
+  (`approval/asked|decided` are not Cordis events); tool completion through `tools/result`; subagent
+  sessions are ignored; the plugin computes its session file path.
+- **dsh command form:** `dsh --profile headless …` (not `dsh headless`).
+- **dsh config on nodes (B·3–B·5):** dsh never reads `$DSH_HOME/cordis.patch.yml`; the adapter passes
+  `--patch /agent-config/dsh-{acp,headless}.patch.yml` from the ConfigMap (two files: the `acp` row
+  exists only in the ACP profile). No `~/.dsh` seeding.
+- **Run home (B·2):** the node exports `AGENT_CTRL_RUN_DIR=<worktree>.session` to isolated runs; the
+  adapters create `kimi-home` / `dsh-home` inside it. Kimi profiles also set `KIMI_DISABLE_TELEMETRY=1`.
+  Ticket workers use `kimi [--auto] -p …` and `dsh --profile headless … <task>`.
+- **No resume capability (B·1):** the run fails immediately rather than opening a `session/new`.
+  Gemini/OpenCode resume is not enabled in this work.
+- **Kimi session ids** (`session_<uuid>`) need `_` accepted in four validators (warp handoff,
+  dashboard import regex, controller `ImportSession`, node `validate_session_id`); handoff branch short
+  ids strip the `session_` prefix.
+- **Move (D·1):** Kimi packs its whole session dir (not only `state.json` + `agents/**`); the cut-over
+  check compares `session_content_len`. A finished `dsh --profile headless` pane drops its agent
+  session, so dsh sessions are moved with a new command
+  `warpspeed agent-ctrl move-session --agent dsh --session <id>` (uses the session picker's history).
+- **Placement (D·2):** dsh's `projectKey` already returns `--slug--`; N is taken from the header's
+  `version`; the file is written as dsh does (first frame = header line, frames end on record
+  boundaries). `read_session` takes `cwd` and `env` as well, matching the pause branch's
+  `locate_session`; on that branch a Kimi pause needs the located path read as a directory tar.
+- **Dashboard (C):** dsh badge label "DeepSeek"; badge colours checked for contrast.

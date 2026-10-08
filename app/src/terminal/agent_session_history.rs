@@ -259,6 +259,8 @@ pub(super) fn describe(candidate: Candidate) -> PastAgentSession {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => (candidate.session_id, PathBuf::new(), None),
     };
@@ -302,6 +304,8 @@ fn candidates(agent: CLIAgent) -> Vec<Candidate> {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => Vec::new(),
     }
@@ -481,6 +485,8 @@ pub(crate) fn session_id_from_command(agent: CLIAgent, command: &str) -> Option<
         | CLIAgent::Goose
         | CLIAgent::Hermes
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }

@@ -13708,6 +13708,8 @@ impl Workspace {
             | crate::terminal::CLIAgent::Hermes
             | crate::terminal::CLIAgent::Vibe
             | crate::terminal::CLIAgent::Antigravity
+            | crate::terminal::CLIAgent::Kimi
+            | crate::terminal::CLIAgent::DeepSeekHarness
             | crate::terminal::CLIAgent::WarpTui
             | crate::terminal::CLIAgent::Unknown => return None,
         }

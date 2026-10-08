@@ -118,6 +118,8 @@ pub(crate) fn agent_ctrl_profile(agent: CLIAgent) -> Option<&'static str> {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }
@@ -228,6 +230,8 @@ pub(crate) fn session_file_path(
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => bail!("{agent:?} sessions cannot be moved"),
     }
@@ -256,6 +260,8 @@ fn agent_session_root(agent: CLIAgent, roots: &AgentSessionRoots) -> Option<Path
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }
@@ -650,6 +656,8 @@ pub(crate) fn agent_exit_command(agent: CLIAgent) -> Option<&'static str> {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }

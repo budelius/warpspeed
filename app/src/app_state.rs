@@ -318,6 +318,8 @@ impl CliAgentResumeDescriptor {
             | CLIAgent::Goose
             | CLIAgent::Hermes
             | CLIAgent::Antigravity
+            | CLIAgent::Kimi
+            | CLIAgent::DeepSeekHarness
             | CLIAgent::WarpTui
             | CLIAgent::Unknown => None,
         }

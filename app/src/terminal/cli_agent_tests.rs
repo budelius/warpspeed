@@ -661,3 +661,99 @@ fn test_warp_tui_variant_properties() {
         CLIAgent::WarpTui
     );
 }
+
+#[test]
+fn test_detect_kimi_and_deepseek_harness() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            for (command, expected) in [
+                ("kimi", CLIAgent::Kimi),
+                ("kimi -c", CLIAgent::Kimi),
+                (
+                    "kimi --session session_0b6c1234-ffff-4a4a-8b8b-0123456789ab",
+                    CLIAgent::Kimi,
+                ),
+                (
+                    "dsh --profile headless \"fix the build\"",
+                    CLIAgent::DeepSeekHarness,
+                ),
+                (
+                    "npx @deepseek-ai/dsh --profile headless hi",
+                    CLIAgent::DeepSeekHarness,
+                ),
+                (
+                    "npx -y @deepseek-ai/dsh@0.2.1-alpha.1 --profile headless hi",
+                    CLIAgent::DeepSeekHarness,
+                ),
+                ("npx --yes @deepseek-ai/dsh", CLIAgent::DeepSeekHarness),
+                ("FOO=1 npx -y @deepseek-ai/dsh", CLIAgent::DeepSeekHarness),
+                (
+                    r"C:\nodejs\npx.cmd @deepseek-ai/dsh",
+                    CLIAgent::DeepSeekHarness,
+                ),
+            ] {
+                assert_eq!(
+                    CLIAgent::detect(command, None, None, ctx),
+                    Some(expected),
+                    "failed to detect {command}",
+                );
+            }
+            for command in [
+                "npx",
+                "npx prettier --write .",
+                "npx -y @deepseek-ai/dsh-other",
+                "kimichanga",
+            ] {
+                assert_eq!(
+                    CLIAgent::detect(command, None, None, ctx),
+                    None,
+                    "{command} is not an agent"
+                );
+            }
+        });
+    });
+}
+
+#[test]
+fn test_kimi_and_deepseek_harness_identity() {
+    use ai::skills::SkillProvider;
+
+    assert_eq!(CLIAgent::Kimi.display_name(), "Kimi Code");
+    assert_eq!(CLIAgent::DeepSeekHarness.display_name(), "DeepSeek Harness");
+    assert_eq!(CLIAgent::Kimi.command_prefix(), "kimi");
+    assert_eq!(CLIAgent::DeepSeekHarness.command_prefix(), "dsh");
+    assert_eq!(CLIAgent::Kimi.icon(), Some(Icon::KimiLogo));
+    assert_eq!(CLIAgent::DeepSeekHarness.icon(), Some(Icon::DeepSeekLogo));
+    assert_eq!(
+        CLIAgent::Kimi.supported_skill_providers(),
+        &[SkillProvider::Agents]
+    );
+    assert!(
+        CLIAgent::DeepSeekHarness
+            .supported_skill_providers()
+            .is_empty()
+    );
+    assert_eq!(CLIAgent::Kimi.skill_command_prefix(), "/");
+    assert_eq!(CLIAgent::DeepSeekHarness.skill_command_prefix(), "/");
+    assert_eq!(
+        CLIAgent::Kimi.brand_color(),
+        Some(ColorU::new(0x17, 0x83, 0xFF, 0xFF))
+    );
+    assert_eq!(
+        CLIAgent::DeepSeekHarness.brand_color(),
+        Some(ColorU::new(0x4D, 0x6B, 0xFE, 0xFF))
+    );
+    assert_eq!(CLIAgent::Kimi.brand_icon_color(), ColorU::white());
+    assert_eq!(
+        CLIAgent::DeepSeekHarness.brand_icon_color(),
+        ColorU::white()
+    );
+    assert!(matches!(
+        crate::server::telemetry::CLIAgentType::from(CLIAgent::Kimi),
+        crate::server::telemetry::CLIAgentType::Kimi
+    ));
+    assert!(matches!(
+        crate::server::telemetry::CLIAgentType::from(CLIAgent::DeepSeekHarness),
+        crate::server::telemetry::CLIAgentType::DeepSeekHarness
+    ));
+}

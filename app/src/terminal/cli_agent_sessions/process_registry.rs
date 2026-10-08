@@ -279,6 +279,8 @@ fn is_agent_process(agent: CLIAgent, name: &str) -> bool {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => false,
     }
@@ -361,6 +363,8 @@ fn registry_directory(agent: CLIAgent) -> Option<PathBuf> {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }

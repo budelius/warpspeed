@@ -135,7 +135,26 @@ const MISTRAL_ORANGE: ColorU = ColorU {
     a: 255,
 };
 
-/// Represents a CLI agent (e.g., Claude Code, Gemini CLI, Codex, Amp, Droid, OpenCode, Copilot, Pi, Auggie, Cursor, Goose, Hermes, Mistral Vibe)
+/// Kimi brand blue (#1783FF)
+const KIMI_BLUE: ColorU = ColorU {
+    r: 0x17,
+    g: 0x83,
+    b: 0xFF,
+    a: 255,
+};
+
+/// DeepSeek brand indigo (#4D6BFE)
+const DEEPSEEK_INDIGO: ColorU = ColorU {
+    r: 0x4D,
+    g: 0x6B,
+    b: 0xFE,
+    a: 255,
+};
+
+/// The npm package `npx` runs DeepSeek Harness from.
+const DSH_NPM_PACKAGE: &str = "@deepseek-ai/dsh";
+
+/// Represents a CLI agent (e.g., Claude Code, Gemini CLI, Codex, Amp, Droid, OpenCode, Copilot, Pi, Auggie, Cursor, Goose, Hermes, Mistral Vibe, Kimi Code, DeepSeek Harness)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Sequence, Serialize, Deserialize)]
 pub enum CLIAgent {
     Claude,
@@ -153,6 +172,8 @@ pub enum CLIAgent {
     Hermes,
     Vibe,
     Antigravity,
+    Kimi,
+    DeepSeekHarness,
     /// Warp's own headless TUI.
     WarpTui,
     /// Represents an unknown/custom CLI agent matched by user-configured regex patterns.
@@ -178,6 +199,8 @@ impl CLIAgent {
             CLIAgent::Hermes => &["hermes"],
             CLIAgent::Vibe => &["vibe", "vibe-acp"],
             CLIAgent::Antigravity => &["agy"],
+            CLIAgent::Kimi => &["kimi"],
+            CLIAgent::DeepSeekHarness => &["dsh"],
             CLIAgent::WarpTui => &[
                 "warp",
                 "warp-preview",
@@ -241,6 +264,8 @@ impl CLIAgent {
             CLIAgent::Hermes => "Hermes",
             CLIAgent::Vibe => "Mistral Vibe",
             CLIAgent::Antigravity => "Antigravity",
+            CLIAgent::Kimi => "Kimi Code",
+            CLIAgent::DeepSeekHarness => "DeepSeek Harness",
             CLIAgent::WarpTui => "Warp TUI",
             CLIAgent::Unknown => "CLI Agent",
         }
@@ -267,6 +292,8 @@ impl CLIAgent {
             // up in a follow-up once an officially licensed SVG is available.
             CLIAgent::Vibe => None,
             CLIAgent::Antigravity => Some(Icon::AntigravityLogo),
+            CLIAgent::Kimi => Some(Icon::KimiLogo),
+            CLIAgent::DeepSeekHarness => Some(Icon::DeepSeekLogo),
             CLIAgent::WarpTui => Some(Icon::Warp),
             CLIAgent::Unknown => None,
         }
@@ -300,6 +327,8 @@ impl CLIAgent {
             CLIAgent::Hermes => &[SkillProvider::Agents],
             CLIAgent::Vibe => &[SkillProvider::Agents],
             CLIAgent::Antigravity => &[],
+            CLIAgent::Kimi => &[SkillProvider::Agents],
+            CLIAgent::DeepSeekHarness => &[],
             CLIAgent::WarpTui => &[],
             CLIAgent::Unknown => &[],
         }
@@ -350,6 +379,8 @@ impl CLIAgent {
             CLIAgent::Hermes => Some(HERMES_PURPLE),
             CLIAgent::Vibe => Some(MISTRAL_ORANGE),
             CLIAgent::Antigravity => Some(ANTIGRAVITY_COLOR),
+            CLIAgent::Kimi => Some(KIMI_BLUE),
+            CLIAgent::DeepSeekHarness => Some(DEEPSEEK_INDIGO),
             CLIAgent::WarpTui => Some(ColorU::black()),
             CLIAgent::Unknown => None,
         }
@@ -382,8 +413,11 @@ impl CLIAgent {
 
     /// Returns whether the command's executable name identifies this CLI agent.
     pub(super) fn matches_command(&self, command: &str, escape_char: Option<EscapeChar>) -> bool {
-        let Some(first_word) = Self::extract_first_command(command.trim_start(), escape_char)
-        else {
+        let command = command.trim_start();
+        if matches!(self, CLIAgent::DeepSeekHarness) && is_npx_launch_of(command, DSH_NPM_PACKAGE) {
+            return true;
+        }
+        let Some(first_word) = Self::extract_first_command(command, escape_char) else {
             return false;
         };
         let basename = first_word.rsplit(['/', '\\']).next().unwrap_or(&first_word);
@@ -450,6 +484,29 @@ impl CLIAgent {
             .flat_map(|workspace| workspace.teams.iter())
             .any(|team| team.uid.uid() == UBER_TEAM_UID)
     }
+}
+
+/// Whether `command` runs `package` (optionally `package@version`) through `npx`, after any
+/// leading `NAME=value` assignments and `npx` flags such as `-y`.
+fn is_npx_launch_of(command: &str, package: &str) -> bool {
+    let mut words = command
+        .split_whitespace()
+        .skip_while(|word| word.contains('='));
+    let Some(runner) = words.next() else {
+        return false;
+    };
+    let runner = runner.rsplit(['/', '\\']).next().unwrap_or(runner);
+    if !matches!(runner, "npx" | "npx.cmd") {
+        return false;
+    }
+    words
+        .find(|word| !word.starts_with('-'))
+        .is_some_and(|word| {
+            word == package
+                || word
+                    .strip_prefix(package)
+                    .is_some_and(|version| version.starts_with('@'))
+        })
 }
 
 /// Builds a prompt string from a batch of code review comments suitable for
@@ -626,6 +683,8 @@ impl From<CLIAgent> for CLIAgentType {
             CLIAgent::Hermes => CLIAgentType::Hermes,
             CLIAgent::Vibe => CLIAgentType::Vibe,
             CLIAgent::Antigravity => CLIAgentType::Antigravity,
+            CLIAgent::Kimi => CLIAgentType::Kimi,
+            CLIAgent::DeepSeekHarness => CLIAgentType::DeepSeekHarness,
             CLIAgent::WarpTui => CLIAgentType::WarpTui,
             CLIAgent::Unknown => CLIAgentType::Unknown,
         }

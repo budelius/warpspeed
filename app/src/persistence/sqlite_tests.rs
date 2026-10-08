@@ -18,8 +18,8 @@ use super::{
 };
 use crate::app_state::{
     AppState, CliAgentResumeDescriptor, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents,
-    LeafSnapshot, PaneNodeSnapshot, TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot,
-    WindowSnapshot,
+    LeafSnapshot, PaneNodeSnapshot, SessionHolder, TabGroupSnapshot, TabSnapshot,
+    TerminalPaneSnapshot, WindowSnapshot,
 };
 use crate::auth::UserUid;
 use crate::cloud_object::{CloudObjectPermissions, Owner};
@@ -457,6 +457,7 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
                 contents: LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: vec![u8::from(vertical_tabs_panel_open) + 1],
                     persistent_session_id: None,
+                    session_holder: None,
                     cli_agent_resume_descriptor: None,
                     cwd: Some("/tmp".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {
@@ -627,6 +628,51 @@ fn test_sqlite_round_trips_cli_agent_resume_descriptor() {
 }
 
 #[test]
+fn test_sqlite_round_trips_session_holder() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let mut window = test_terminal_window_snapshot(false);
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &mut window.tabs[0].root
+    else {
+        panic!("expected terminal pane");
+    };
+    let holder = SessionHolder {
+        channel: r"\\.\pipe\warp-terminal-supervisor-v6-abcdef0123456789".to_owned(),
+        version: "20261004-173607861-268f56926594".to_owned(),
+        pid: 27784,
+    };
+    terminal.session_holder = Some(holder.clone());
+    terminal.persistent_session_id = Some(SessionId::from(42u64));
+    let app_state = AppState {
+        windows: vec![window],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+    let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::Full)
+        .expect("app state should load")
+        .app_state
+        .expect("app state should be present for the full scope");
+
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &restored.windows[0].tabs[0].root
+    else {
+        panic!("expected restored terminal pane");
+    };
+    assert_eq!(terminal.session_holder, Some(holder));
+    assert_eq!(terminal.persistent_session_id, Some(SessionId::from(42u64)));
+}
+
+#[test]
 fn test_sqlite_round_trips_window_team_uid() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let database_path = tempdir.path().join("warp.sqlite");
@@ -669,6 +715,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
                     contents: LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: vec![42],
                         persistent_session_id: None,
+                        session_holder: None,
                         cli_agent_resume_descriptor: None,
                         cwd: Some("/tmp".to_string()),
                         shell_launch_data: Some(ShellLaunchData::Executable {
@@ -839,6 +886,7 @@ fn test_sqlite_round_trips_tab_groups() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![1],
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/grouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
@@ -869,6 +917,7 @@ fn test_sqlite_round_trips_tab_groups() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![2],
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/ungrouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
@@ -968,6 +1017,7 @@ fn test_sqlite_round_trips_pinned_state() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![10],
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/pinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
@@ -998,6 +1048,7 @@ fn test_sqlite_round_trips_pinned_state() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![11],
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/unpinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
@@ -1028,6 +1079,7 @@ fn test_sqlite_round_trips_pinned_state() {
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: vec![12],
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: Some("/tmp/pinned-group".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {

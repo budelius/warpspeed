@@ -16,7 +16,7 @@ use warpui::units::Lines;
 
 use super::inline_banner::{
     AwsBedrockLoginBannerAction, AwsCliNotInstalledBannerAction, OpenInWarpBannerAction,
-    VimModeBannerAction,
+    SessionHolderBannerAction, VimModeBannerAction,
 };
 use super::{
     AliasExpansionBannerAction, ContextMenuAction, GridHighlightedLink, InputContextMenuAction,
@@ -204,6 +204,8 @@ pub enum TerminalAction {
     RestartShell,
     /// Attaches this pane again to the shell it lost the connection to.
     ReattachShell,
+    /// Resolves a restore command withheld because another build still holds the session.
+    SessionHolderBanner(SessionHolderBannerAction),
     ChangeShell,
     DetachSession,
     MoveSessionToAgentCtrl,
@@ -574,6 +576,7 @@ impl fmt::Debug for TerminalAction {
             ToggleMaximizePane => f.write_str("ToggleMaximizeActivePane"),
             RestartShell => f.write_str("RestartShell"),
             ReattachShell => f.write_str("ReattachShell"),
+            SessionHolderBanner(action) => write!(f, "SessionHolderBanner({action:?})"),
             ChangeShell => f.write_str("ChangeShell"),
             DetachSession => f.write_str("DetachSession"),
             MoveSessionToAgentCtrl => f.write_str("MoveSessionToAgentCtrl"),

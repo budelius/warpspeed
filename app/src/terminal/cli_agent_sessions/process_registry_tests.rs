@@ -1,10 +1,17 @@
+use command::blocking::Command;
+
 use super::*;
 
 fn process(pid: u32, parent: u32, name: &str) -> ProcessInfo {
+    started_process(pid, parent, name, 0)
+}
+
+fn started_process(pid: u32, parent: u32, name: &str, start_time: u64) -> ProcessInfo {
     ProcessInfo {
         pid,
         parent: Some(parent),
         name: name.to_owned(),
+        start_time,
     }
 }
 
@@ -50,8 +57,8 @@ fn each_shell_resolves_the_claude_running_under_it() {
         process(201, 200, "claude.exe"),
     ];
 
-    let first = resolve_in(CLIAgent::Claude, 100, &processes, registry.path()).unwrap();
-    let second = resolve_in(CLIAgent::Claude, 200, &processes, registry.path()).unwrap();
+    let first = resolve_in(CLIAgent::Claude, 100, None, &processes, registry.path()).unwrap();
+    let second = resolve_in(CLIAgent::Claude, 200, None, &processes, registry.path()).unwrap();
 
     assert_eq!(first.session_id, "aaaa-1111");
     assert_eq!(first.cwd.as_deref(), Some(r"T:\projects\obachan"));
@@ -68,7 +75,7 @@ fn pi_is_found_through_its_launcher_script() {
         process(302, 301, "node.exe"),
     ];
 
-    let session = resolve_in(CLIAgent::Pi, 300, &processes, registry.path()).unwrap();
+    let session = resolve_in(CLIAgent::Pi, 300, None, &processes, registry.path()).unwrap();
 
     assert_eq!(session.session_id, "01a0e78c-324d");
 }
@@ -80,7 +87,7 @@ fn a_stale_entry_is_not_credited_to_an_unrelated_process_with_the_same_id() {
     let processes = [process(100, 1, "bash.exe"), process(101, 100, "git.exe")];
 
     assert_eq!(
-        resolve_in(CLIAgent::Claude, 100, &processes, registry.path()),
+        resolve_in(CLIAgent::Claude, 100, None, &processes, registry.path()),
         None
     );
 }
@@ -92,7 +99,7 @@ fn an_id_that_is_unsafe_to_type_into_a_shell_is_rejected() {
     let processes = [process(100, 1, "bash.exe"), process(101, 100, "claude.exe")];
 
     assert_eq!(
-        resolve_in(CLIAgent::Claude, 100, &processes, registry.path()),
+        resolve_in(CLIAgent::Claude, 100, None, &processes, registry.path()),
         None
     );
 }
@@ -103,7 +110,7 @@ fn a_shell_without_an_agent_resolves_to_nothing() {
     let processes = [process(100, 1, "bash.exe"), process(101, 100, "vim.exe")];
 
     assert_eq!(
-        resolve_in(CLIAgent::Claude, 100, &processes, registry.path()),
+        resolve_in(CLIAgent::Claude, 100, None, &processes, registry.path()),
         None
     );
 }
@@ -142,7 +149,7 @@ fn claude_installed_through_npm_is_found_as_node() {
         process(102, 101, "node.exe"),
     ];
 
-    let session = resolve_in(CLIAgent::Claude, 100, &processes, registry.path()).unwrap();
+    let session = resolve_in(CLIAgent::Claude, 100, None, &processes, registry.path()).unwrap();
 
     assert_eq!(session.session_id, "npm-claude");
 }
@@ -164,4 +171,206 @@ fn a_shell_running_a_program_has_a_child_process_and_an_idle_one_does_not() {
     assert!(has_child_process_in(100, &processes));
     assert!(!has_child_process_in(200, &processes));
     assert!(!has_child_process_in(4, &processes));
+}
+
+#[test]
+fn an_agent_is_found_by_the_session_its_registry_entry_names() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry(registry.path(), 101, "aaaa-1111", r"T:\projects\warp");
+    write_entry(registry.path(), 201, "bbbb-2222", r"T:\projects\warp");
+    let processes = [
+        process(100, 1, "bash.exe"),
+        process(101, 100, "claude.exe"),
+        process(201, 1, "claude.exe"),
+    ];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "bbbb-2222", &processes, registry.path()),
+        Some(201)
+    );
+}
+
+#[test]
+fn a_registry_entry_whose_process_is_gone_does_not_name_an_agent() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry(registry.path(), 101, "aaaa-1111", r"T:\projects\warp");
+    let processes = [process(100, 1, "bash.exe")];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &processes, registry.path()),
+        None
+    );
+}
+
+#[test]
+fn a_registry_entry_for_another_kind_of_process_does_not_name_an_agent() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry(registry.path(), 101, "aaaa-1111", r"T:\projects\warp");
+    let processes = [process(101, 1, "notepad.exe")];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &processes, registry.path()),
+        None
+    );
+}
+
+fn write_entry_with_uuid(dir: &Path, pid: u32, session_id: &str, uuid: &str) {
+    std::fs::write(
+        dir.join(format!("{pid}.json")),
+        format!(
+            r#"{{"pid":{pid},"sessionId":"{session_id}","cwd":"T:/p","warpSessionUuid":"{uuid}"}}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Pi under Git Bash: the `sh` shim's parent is already gone, so the tree from the shell never
+/// reaches Node. The uuid Warp exported into the shell still identifies the pane.
+#[test]
+fn pi_is_found_by_the_shell_uuid_when_the_process_tree_is_broken() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry_with_uuid(registry.path(), 300, "pi-1", "0a0b0c");
+    let processes = [
+        started_process(100, 1, "bash.exe", 1_000),
+        started_process(200, 999, "sh.exe", 1_005),
+        started_process(300, 200, "node.exe", 1_005),
+    ];
+
+    let found = resolve_in(
+        CLIAgent::Pi,
+        100,
+        Some("0a0b0c"),
+        &processes,
+        registry.path(),
+    )
+    .unwrap();
+    assert_eq!(found.session_id, "pi-1");
+}
+
+#[test]
+fn an_entry_for_another_pane_uuid_is_not_this_panes_pi() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry_with_uuid(registry.path(), 300, "pi-1", "ffffff");
+    let processes = [process(100, 1, "bash.exe"), process(300, 999, "node.exe")];
+
+    assert!(
+        resolve_in(
+            CLIAgent::Pi,
+            100,
+            Some("0a0b0c"),
+            &processes,
+            registry.path()
+        )
+        .is_none()
+    );
+}
+
+/// A pane restored from a build whose shell still runs shares that shell's uuid. The Pi in the
+/// old shell started before this pane's shell did, so it cannot be this pane's.
+#[test]
+fn a_pi_that_started_before_the_shell_is_not_found_by_the_shell_uuid() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry_with_uuid(registry.path(), 300, "pi-1", "0a0b0c");
+    let processes = [
+        started_process(100, 1, "bash.exe", 2_000),
+        started_process(200, 999, "sh.exe", 1_000),
+        started_process(300, 200, "node.exe", 1_000),
+    ];
+
+    assert_eq!(
+        resolve_in(
+            CLIAgent::Pi,
+            100,
+            Some("0a0b0c"),
+            &processes,
+            registry.path()
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_entry_can_belong_only_to_a_process_that_started_before_it_was_written() {
+    assert!(entry_can_belong_to(1_000, 1_000));
+    assert!(entry_can_belong_to(999, 1_000));
+    assert!(!entry_can_belong_to(1_001, 1_000));
+}
+
+/// A crashed agent leaves its entry behind, and Windows hands its pid to a later process. A Node
+/// process that started after the entry was written did not write it.
+#[test]
+fn an_entry_older_than_the_process_with_its_pid_names_no_agent() {
+    let registry = tempfile::tempdir().unwrap();
+    std::fs::write(
+        registry.path().join("101.json"),
+        r#"{"pid":101,"sessionId":"aaaa-1111","cwd":"T:/p","startedAt":1000000}"#,
+    )
+    .unwrap();
+    let reused = [started_process(101, 1, "node.exe", 2_000)];
+    let original = [started_process(101, 1, "node.exe", 1_000)];
+
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &reused, registry.path()),
+        None
+    );
+    assert_eq!(
+        agent_pid_for_session_in(CLIAgent::Claude, "aaaa-1111", &original, registry.path()),
+        Some(101)
+    );
+}
+
+#[test]
+fn a_refreshed_process_reports_when_it_started() {
+    let mut system = System::new();
+    refresh_process(&mut system, std::process::id());
+    let process = system
+        .process(sysinfo::Pid::from_u32(std::process::id()))
+        .expect("the test process is running");
+
+    assert!(process.start_time() > 0);
+    assert!(
+        process_table()
+            .iter()
+            .find(|process| process.pid == std::process::id())
+            .is_some_and(|process| process.start_time > 0)
+    );
+}
+
+#[test]
+fn the_tree_walk_still_works_for_entries_without_a_uuid() {
+    let registry = tempfile::tempdir().unwrap();
+    write_entry(registry.path(), 300, "pi-1", r"T:\p");
+    let processes = [
+        process(100, 1, "bash.exe"),
+        process(200, 100, "sh.exe"),
+        process(300, 200, "node.exe"),
+    ];
+
+    let found = resolve_in(
+        CLIAgent::Pi,
+        100,
+        Some("0a0b0c"),
+        &processes,
+        registry.path(),
+    )
+    .unwrap();
+    assert_eq!(found.session_id, "pi-1");
+}
+
+/// The extension's own tests run under Node; skipped where Node is not installed.
+#[test]
+fn the_pi_extension_passes_its_node_tests() {
+    let test_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/terminal/cli_agent_sessions/process_registry/warp-session-registry.test.mjs");
+    let output = match Command::new("node").arg("--test").arg(&test_file).output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("could not run node: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "node --test failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

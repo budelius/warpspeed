@@ -147,6 +147,7 @@ use crate::terminal::shared_session::{
     self, IsSharedSessionCreator, SharedSessionActionSource, SharedSessionSource,
 };
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::terminal::view::inline_banner::{
     ZeroStatePromptSuggestionTriggeredFrom, ZeroStatePromptSuggestionType,
 };
@@ -1840,6 +1841,16 @@ impl PaneGroup {
                     if let Some(command) = cli_agent_resume_command {
                         manager.restore_cli_agent_resume_command(command);
                     }
+                    let agent = terminal_snapshot
+                        .cli_agent_resume_descriptor
+                        .as_ref()
+                        .and_then(|descriptor| {
+                            Some(HeldAgent {
+                                agent: descriptor.agent,
+                                session_id: descriptor.session_id.clone()?,
+                            })
+                        });
+                    manager.restore_session_holder(terminal_snapshot.session_holder.clone(), agent);
                     if configure_before_start && shell_start == ShellStartPolicy::Eager {
                         manager.ensure_shell_started(ctx);
                     }
@@ -2310,6 +2321,7 @@ impl PaneGroup {
                         LeafContents::Terminal(TerminalPaneSnapshot {
                             uuid: Uuid::new_v4().as_bytes().to_vec(),
                             persistent_session_id: None,
+                            session_holder: None,
                             cli_agent_resume_descriptor: None,
                             cwd: None,
                             is_active: visible_leaf_is_active_session,
@@ -6411,6 +6423,7 @@ impl PaneGroup {
                 );
                 let terminal_manager = terminal_init.manager;
                 let terminal_view = terminal_init.surface;
+                terminal_view.update(ctx, |view, _| view.set_terminal_session_uuid(terminal_session_uuid));
             } else {
                 use crate::terminal::{ShellLaunchState, shell::{ShellName, ShellType}};
 

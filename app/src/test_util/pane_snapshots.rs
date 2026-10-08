@@ -18,6 +18,7 @@ pub fn terminal_leaf_snapshot(
         contents: LeafContents::Terminal(TerminalPaneSnapshot {
             uuid: Uuid::new_v4().as_bytes().to_vec(),
             persistent_session_id: None,
+            session_holder: None,
             cli_agent_resume_descriptor: None,
             cwd,
             shell_launch_data,

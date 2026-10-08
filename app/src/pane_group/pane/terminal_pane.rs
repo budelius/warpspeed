@@ -62,6 +62,7 @@ use crate::terminal::shared_session::SharedSessionSource;
 use crate::terminal::shared_session::manager::{Manager, ManagerEvent};
 use crate::terminal::shared_session::role_change_modal::RoleChangeOpenSource;
 use crate::terminal::shared_session::{SharedSessionStatus, join_link};
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::terminal::view::Event;
 use crate::terminal::{ShellLaunchData, TerminalManager, TerminalView};
 use crate::view_components::ToastFlavor;
@@ -260,6 +261,30 @@ impl TerminalPane {
             .as_ref(app)
             .has_pending_command_or_awaiting_completion(app);
         (shell_parked || resume_pending).then_some(descriptor)
+    }
+
+    /// The agent a withheld resume would reopen: the descriptor the pane was restored with, or
+    /// one rebuilt from the held agent.
+    fn withheld_agent_resume(
+        &self,
+        agent: Option<HeldAgent>,
+        cwd: Option<String>,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
+        let restored = self
+            .restored_shell_snapshot_fields
+            .as_ref()
+            .and_then(|fields| fields.cli_agent_resume_descriptor.clone());
+        restored.or_else(|| {
+            let agent = agent?;
+            Some(CliAgentResumeDescriptor {
+                agent: agent.agent,
+                session_id: Some(agent.session_id),
+                cwd: cwd.or_else(|| self.working_directory(app))?.into(),
+                title: None,
+                captured_unix_seconds: Some(Utc::now().timestamp()),
+            })
+        })
     }
 
     fn deferred_shell_startup_directory(&self, app: &AppContext) -> Option<String> {
@@ -583,6 +608,7 @@ impl PaneContent for TerminalPane {
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: None,
                 is_active,
@@ -615,6 +641,7 @@ impl PaneContent for TerminalPane {
                 LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: self.uuid.clone(),
                     persistent_session_id: None,
+                    session_holder: None,
                     cli_agent_resume_descriptor: None,
                     cwd: None,
                     is_active,
@@ -669,9 +696,14 @@ impl PaneContent for TerminalPane {
                 ),
             };
 
-            let persistent_session_id = self
-                .terminal_manager(app)
-                .read(app, |manager, _| manager.persistent_session_id());
+            let (persistent_session_id, session_holder, withheld_restore) =
+                self.terminal_manager(app).read(app, |manager, _| {
+                    (
+                        manager.persistent_session_id(),
+                        manager.session_holder(),
+                        manager.withheld_restore(),
+                    )
+                });
             let terminal_view_id = self.terminal_view(app).id();
             let cli_agent_sessions = CLIAgentSessionsModel::as_ref(app);
             let cli_agent_resume_descriptor = cli_agent_sessions
@@ -697,9 +729,26 @@ impl PaneContent for TerminalPane {
             let cli_agent_resume_descriptor =
                 cli_agent_resume_descriptor.or_else(|| self.pending_agent_resume(app));
 
+            // While the resume is withheld this pane's shell is a stand-in: the agent still runs in
+            // the held session, which is what the next restore must find again.
+            let (persistent_session_id, session_holder, cli_agent_resume_descriptor) =
+                match withheld_restore {
+                    Some(restore) => (
+                        restore.session_id,
+                        restore.holder,
+                        self.withheld_agent_resume(restore.agent, cwd.clone(), app),
+                    ),
+                    None => (
+                        persistent_session_id,
+                        session_holder,
+                        cli_agent_resume_descriptor,
+                    ),
+                };
+
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id,
+                session_holder,
                 cli_agent_resume_descriptor,
                 cwd,
                 is_active,

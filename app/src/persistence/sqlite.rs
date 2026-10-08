@@ -1385,6 +1385,18 @@ fn save_pane_state(
                             None
                         }
                     }),
+                session_holder: terminal_snapshot
+                    .session_holder
+                    .as_ref()
+                    .and_then(|holder| match serde_json::to_string(holder) {
+                        Ok(serialized) => Some(serialized),
+                        Err(error) => {
+                            log::warn!(
+                                "Dropping the session holder from a persisted terminal pane: {error}"
+                            );
+                            None
+                        }
+                    }),
             };
 
             diesel::insert_into(schema::terminal_panes::dsl::terminal_panes)
@@ -2382,6 +2394,17 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                                     // fix.
                                     log::warn!(
                                         "Ignoring an unreadable CLI agent resume descriptor for a restored terminal pane: {error}"
+                                    );
+                                    None
+                                }
+                            }),
+                        session_holder: terminal_pane
+                            .session_holder
+                            .and_then(|serialized| match serde_json::from_str(&serialized) {
+                                Ok(holder) => Some(holder),
+                                Err(error) => {
+                                    log::warn!(
+                                        "Ignoring an unreadable session holder for a restored terminal pane: {error}"
                                     );
                                     None
                                 }

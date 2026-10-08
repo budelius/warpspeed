@@ -65,19 +65,11 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
 /// for" is the question a failed detach actually raises -- most often the
 /// answer is that `WARPSPEED_PROFILE` differs between the shell and the window.
 fn supervisor_channel() -> String {
-    #[cfg(all(feature = "local_tty", windows))]
-    {
-        warp_terminal::local_tty::windows::pipe_transport::supervisor_pipe_name()
-    }
-    #[cfg(all(feature = "local_tty", unix))]
-    {
-        warp_terminal::local_tty::unix_supervisor::socket::socket_path()
-            .to_string_lossy()
-            .into_owned()
-    }
-    #[cfg(not(feature = "local_tty"))]
-    {
+    let channel = crate::terminal::local_tty::session_holder::current_channel();
+    if channel.is_empty() {
         "none (this build has no local terminals)".to_owned()
+    } else {
+        channel
     }
 }
 

@@ -193,6 +193,7 @@ pub struct LeafSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum LeafContents {
     Terminal(TerminalPaneSnapshot),
     Notebook(NotebookPaneSnapshot),
@@ -323,12 +324,25 @@ impl CliAgentResumeDescriptor {
     }
 }
 
+/// The supervisor that was holding a pane's shell when the pane was saved.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionHolder {
+    /// The supervisor's pipe or socket name.
+    pub channel: String,
+    /// The build that started that supervisor, as its instance marker records it.
+    pub version: String,
+    /// The instance that saved the pane.
+    pub pid: u32,
+}
+
 /// Snapshot of the contents of a terminal pane.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalPaneSnapshot {
     pub uuid: Vec<u8>,
     #[serde(default)]
     pub persistent_session_id: Option<SessionId>,
+    #[serde(default)]
+    pub session_holder: Option<SessionHolder>,
     #[serde(default)]
     pub cli_agent_resume_descriptor: Option<CliAgentResumeDescriptor>,
     pub cwd: Option<String>,

@@ -90,14 +90,17 @@ use init::{INPUT_BOX_VISIBLE_KEY, TOGGLE_BLOCK_FILTER_KEYBINDING};
 use inline_banner::{
     AliasExpansionBanner, AliasExpansionBannerAction, AwsBedrockLoginBannerAction,
     AwsBedrockLoginBannerState, AwsCliNotInstalledBannerAction, AwsCliNotInstalledBannerState,
-    ByoLlmAuthBannerSessionState, OpenInWarpBannerState, ShellDetachedBannerState,
-    VimModeBannerAction, render_alias_expansion_banner, render_aws_bedrock_login_banner,
-    render_aws_cli_not_installed_banner, render_inline_notifications_discovery_banner,
-    render_inline_notifications_error_banner, render_inline_shared_session_ended_banner,
-    render_inline_shared_session_started_banner, render_open_in_warp_banner,
-    render_shell_detached_banner, render_shell_process_terminated_banner, render_vim_mode_banner,
+    ByoLlmAuthBannerSessionState, OpenInWarpBannerState, SessionHolderBannerAction,
+    ShellDetachedBannerState, VimModeBannerAction, render_alias_expansion_banner,
+    render_aws_bedrock_login_banner, render_aws_cli_not_installed_banner,
+    render_inline_notifications_discovery_banner, render_inline_notifications_error_banner,
+    render_inline_shared_session_ended_banner, render_inline_shared_session_started_banner,
+    render_open_in_warp_banner, render_shell_detached_banner,
+    render_shell_process_terminated_banner, render_vim_mode_banner,
 };
 pub use inline_banner::{NotificationsDiscoveryBannerAction, NotificationsErrorBannerAction};
+#[cfg(feature = "local_tty")]
+use inline_banner::{SessionHolderBannerState, render_session_holder_banner};
 use instant::Instant;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -469,6 +472,8 @@ use crate::terminal::shared_session::{
     SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
     SharedSessionStatus,
 };
+#[cfg(feature = "local_tty")]
+use crate::terminal::terminal_manager::WithheldRestore;
 use crate::terminal::view::block_onboarding::onboarding_prompt_block::OnboardingPromptBlock;
 use crate::terminal::view::init_environment::mode_selector::{
     EnvironmentSetupMode, EnvironmentSetupModeSelector, EnvironmentSetupModeSelectorEvent,
@@ -1020,6 +1025,7 @@ pub enum InlineBannerType {
     SharedSessionEnd,
     ShellProcessTerminated,
     ShellDetached,
+    SessionHolder,
     OpenInWarp,
     VimMode,
     CodebaseIndexSpeedbump,
@@ -1047,6 +1053,7 @@ impl InlineBannerType {
             | Self::SharedSessionEnd
             | Self::ShellProcessTerminated
             | Self::ShellDetached
+            | Self::SessionHolder
             | Self::OpenInWarp
             | Self::VimMode => false,
         }
@@ -1102,6 +1109,9 @@ struct InlineBannersState {
     aws_bedrock_login_banner: Option<AwsBedrockLoginBannerState>,
 
     aws_cli_not_installed_banner: Option<AwsCliNotInstalledBannerState>,
+
+    #[cfg(feature = "local_tty")]
+    session_holder_banner: Option<SessionHolderBannerState>,
 }
 
 impl InlineBannersState {
@@ -2499,12 +2509,18 @@ pub struct TerminalView {
     /// The process ID of the shell this view's PTY is running, once it has started.
     #[cfg(feature = "local_tty")]
     shell_pid: Option<u32>,
+    /// A restore command withheld because another build's supervisor still holds the session,
+    /// kept until the shell bootstraps and its banner can be shown.
+    #[cfg(feature = "local_tty")]
+    withheld_restore: Option<WithheldRestore>,
     #[cfg(feature = "local_tty")]
     agent_session_refresh_scheduled: bool,
     /// Whether this view's agent session was found under its shell rather than seen starting,
     /// which makes it this view's to forget once the agent exits.
     #[cfg(feature = "local_tty")]
     agent_session_discovered: bool,
+    #[cfg(feature = "local_tty")]
+    terminal_session_uuid_hex: Option<String>,
 
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
@@ -4435,9 +4451,13 @@ impl TerminalView {
             #[cfg(feature = "local_tty")]
             shell_pid: None,
             #[cfg(feature = "local_tty")]
+            withheld_restore: None,
+            #[cfg(feature = "local_tty")]
             agent_session_refresh_scheduled: false,
             #[cfg(feature = "local_tty")]
             agent_session_discovered: false,
+            #[cfg(feature = "local_tty")]
+            terminal_session_uuid_hex: None,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,
@@ -13885,6 +13905,11 @@ impl TerminalView {
         self.is_login_shell_bootstrapped = true;
         self.hide_slow_bootstrap_banner(ctx);
 
+        #[cfg(feature = "local_tty")]
+        if let Some(restore) = self.withheld_restore.take() {
+            self.insert_session_holder_banner(restore, ctx);
+        }
+
         if self.should_display_vim_banner(&session, ctx) {
             self.insert_vim_mode_banner(ctx);
         }
@@ -16425,6 +16450,59 @@ impl TerminalView {
     pub(crate) fn is_login_shell_bootstrapped_for_test(&self) -> bool {
         self.is_login_shell_bootstrapped
     }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn session_holder_banner_for_test(&self) -> Option<&SessionHolderBannerState> {
+        self.inline_banners_state.session_holder_banner.as_ref()
+    }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn has_session_holder_banner_for_test(&self) -> bool {
+        self.session_holder_banner_for_test().is_some()
+    }
+
+    /// Test-only: the command waiting in the input editor to run once the shell can take it.
+    #[cfg(test)]
+    pub(crate) fn pending_command_for_test(&self, ctx: &AppContext) -> Option<String> {
+        let input = self.input.as_ref(ctx);
+        input
+            .has_pending_command()
+            .then(|| input.editor().as_ref(ctx).buffer_text(ctx))
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn insert_session_holder_banner(
+        &mut self,
+        restore: WithheldRestore,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.remove_session_holder_banner();
+        let banner_id = self.inline_banners_state.next_banner_id();
+        self.inline_banners_state.session_holder_banner =
+            Some(SessionHolderBannerState::new(banner_id, restore));
+        let active_block_index = self.model.lock().block_list().active_block_index();
+        self.model
+            .lock()
+            .block_list_mut()
+            .insert_inline_banner_after_block(
+                active_block_index,
+                InlineBannerItem::new(banner_id, InlineBannerType::SessionHolder),
+            );
+        ctx.notify();
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn remove_session_holder_banner(&mut self) -> bool {
+        let Some(banner) = self.inline_banners_state.session_holder_banner.take() else {
+            return false;
+        };
+        self.model
+            .lock()
+            .block_list_mut()
+            .remove_inline_banner(banner.id);
+        true
+    }
+
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
         self.awaiting_pending_command_completion
             || !self.pending_command_queue.is_empty()
@@ -24575,6 +24653,11 @@ impl TerminalView {
             );
         }
 
+        #[cfg(feature = "local_tty")]
+        if let Some(state) = &self.inline_banners_state.session_holder_banner {
+            inline_banners.insert(state.id, render_session_holder_banner(state, appearance));
+        }
+
         if (FeatureFlag::CreatingSharedSessions.is_enabled()
             && ContextFlag::CreateSharedSession.is_enabled())
             || FeatureFlag::ViewingSharedSessions.is_enabled()
@@ -26770,6 +26853,10 @@ impl TerminalView {
         );
     }
 
+    pub(crate) fn set_terminal_session_uuid(&mut self, uuid: &[u8]) {
+        self.terminal_session_uuid_hex = Some(hex::encode(uuid));
+    }
+
     /// Reads the session the agent running in this pane is writing to, so a snapshot can record
     /// what to resume.
     ///
@@ -26793,11 +26880,16 @@ impl TerminalView {
             Some(session) => Some(session.agent),
             None => None,
         };
+        let session_uuid_hex = self.terminal_session_uuid_hex.clone();
         if let (Some(agent), false) = (tracked_agent, self.agent_session_discovered) {
             let (sender, receiver) = futures::channel::oneshot::channel();
             ctx.background_executor()
                 .spawn(async move {
-                    let _ = sender.send(process_registry::resolve(agent, shell_pid));
+                    let _ = sender.send(process_registry::resolve(
+                        agent,
+                        shell_pid,
+                        session_uuid_hex.as_deref(),
+                    ));
                 })
                 .detach();
             let view_id = self.view_id;
@@ -26825,7 +26917,10 @@ impl TerminalView {
         let (sender, receiver) = futures::channel::oneshot::channel();
         ctx.background_executor()
             .spawn(async move {
-                let _ = sender.send(process_registry::discover(shell_pid));
+                let _ = sender.send(process_registry::discover(
+                    shell_pid,
+                    session_uuid_hex.as_deref(),
+                ));
             })
             .detach();
         ctx.spawn(receiver, move |me, discovered, ctx| {
@@ -26920,6 +27015,39 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn set_pending_restore_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
         self.execute_command_or_set_pending(&command, ctx);
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn withhold_restore_command(&mut self, restore: WithheldRestore, ctx: &mut ViewContext<Self>) {
+        if self.is_login_shell_bootstrapped {
+            self.insert_session_holder_banner(restore, ctx);
+        } else {
+            self.withheld_restore = Some(restore);
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_take_over_started(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.set_in_flight();
+            ctx.notify();
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_take_over_failed(&mut self, error: String, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.set_error(error);
+            ctx.notify();
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_withheld_restore_resolved(&mut self, ctx: &mut ViewContext<Self>) {
+        self.withheld_restore = None;
+        if self.remove_session_holder_banner() {
+            ctx.notify();
+        }
     }
 
     fn on_active_shell_launch_data_updated(
@@ -27376,6 +27504,7 @@ impl TypedActionView for TerminalView {
             | ToggleMaximizePane
             | RestartShell
             | ReattachShell
+            | SessionHolderBanner(_)
             | ChangeShell
             | DetachSession
             | MoveSessionToAgentCtrl
@@ -27714,6 +27843,18 @@ impl TypedActionView for TerminalView {
             }
             ReattachShell => {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::ReattachShellForTerminalView {
+                    terminal_view_id: self.view_id,
+                });
+            }
+            SessionHolderBanner(SessionHolderBannerAction::TakeOver) => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::TakeOverHeldSessionForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
+            }
+            SessionHolderBanner(SessionHolderBannerAction::StartFresh) => {
+                ctx.dispatch_typed_action_deferred(WorkspaceAction::StartFreshForTerminalView {
                     terminal_view_id: self.view_id,
                 });
             }

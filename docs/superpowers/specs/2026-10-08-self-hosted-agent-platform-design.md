@@ -158,8 +158,8 @@ lands before P2.
 - Application `warpspeed`: native, PKCE, grant types authorization code, **device code** and refresh
   token; access token type JWT. Redirect URI `http://127.0.0.1/callback` (loopback, any port) for
   the browser flow fallback.
-- Application `agent-gateway`: API app (client secret / JWT profile) used by APISIX for introspection
-  in P1 and P4.
+- Application `agent-gateway` (API app for APISIX introspection) moves to P1, where APISIX first
+  needs it (revised 2026-10-09).
 - Tokens requested with scopes `openid profile email offline_access
   urn:zitadel:iam:org:project:id:<agent-platform>:aud urn:zitadel:iam:org:projects:roles`.
 - Staging users and grants: the current dashboard admins get `agent-admin`.
@@ -172,12 +172,12 @@ lands before P2.
   `stored_stozn_identity`, `logout_stozn`) but implements it with the OAuth 2.0 device authorization
   grant against the environment's Zitadel issuer. The existing framed-browser opener shows the
   verification URL.
-- Stored per environment: refresh token in the OS credential store, access token and expiry in
-  memory. A request helper refreshes when fewer than 60 s remain; a failed refresh marks the identity
+- Stored per environment: refresh token, access token and expiry in WarpSpeed's DPAPI-protected
+  `stozn-auth.bin` (format 2; revised 2026-10-09: same OS-user protection, no new dependency). A request helper refreshes when fewer than 60 s remain; a failed refresh marks the identity
   signed out and the UI offers sign-in again.
-- Environment config: issuer, client id, project id, API base URLs. Staging is the default; prod is
-  selectable in settings and with `--agent-env prod` on the CLI. `STOZN_TOKEN` keeps working as an
-  override for scripts.
+- Environment config: issuer, client id, project id, API base URLs, compiled into the single
+  `staging` profile (revised 2026-10-09: WarpSpeed stays staging-only per the 2026-10-07 decision; no
+  prod selector). `STOZN_TOKEN` keeps working as an override for scripts.
 - `managed_agent_sessions` sends the Zitadel access token to the dashboard until P3 moves it.
 - Done when: sign-in, restart (silent refresh), sign-out and expired refresh all behave as above;
   unit tests cover token refresh timing and storage per environment.

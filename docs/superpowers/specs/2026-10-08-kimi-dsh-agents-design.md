@@ -378,7 +378,7 @@ they supersede the sections above where they differ.
   `acp` row override; that row exists only in the ACP profile). No `~/.dsh` seeding.
 - **Run home (B·2):** the node exports `AGENT_CTRL_RUN_DIR=<worktree>.session` to isolated runs; the
   adapters create `kimi-home` / `dsh-home` inside it. Kimi profiles also set `KIMI_DISABLE_TELEMETRY=1`.
-  Ticket workers use `kimi [--auto] -p …` and `dsh --profile headless … <task>`.
+  Ticket workers use `kimi -p …` (Kimi rejects `--auto` with `-p`; `-p` never asks) and `dsh --profile headless … <task>`.
 - **No resume capability (B·1):** the run fails immediately rather than opening a `session/new`.
   Gemini/OpenCode resume is not enabled in this work.
 - **Kimi session ids** (`session_<uuid>`) need `_` accepted in four validators (warp handoff,

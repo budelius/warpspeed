@@ -9,7 +9,7 @@ use instant::Instant;
 use warp_core::SessionId;
 
 use super::daemon_spawn::spawn_detached_supervisor;
-use super::pipe_transport::{PipeTransport, supervisor_pipe_name};
+use super::pipe_transport::{PipeTransport, supervisor_pipe_name_for};
 use crate::local_tty::PtyOptions;
 use crate::local_tty::screen::ScreenSnapshot;
 use crate::local_tty::supervisor::message::{
@@ -31,10 +31,25 @@ pub struct WindowsTerminalSupervisorClient {
 
 impl WindowsTerminalSupervisorClient {
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            executable: std::env::current_exe().context("Failed to locate the Warp executable")?,
+        Ok(Self::for_executable(
+            std::env::current_exe().context("Failed to locate the Warp executable")?,
+        ))
+    }
+
+    /// A client for the supervisor belonging to `executable`, which is also what
+    /// gets started when no supervisor answers.
+    ///
+    /// Every build has its own supervisor, so a process other than the Warp
+    /// executable itself must name the build whose sessions it wants.
+    pub fn for_executable(executable: PathBuf) -> Self {
+        Self {
+            executable,
             current_handles: Mutex::new(HashMap::new()),
-        })
+        }
+    }
+
+    fn pipe_name(&self) -> String {
+        supervisor_pipe_name_for(&warp_core::paths::state_dir(), &self.executable)
     }
 
     pub fn spawn(&self, session_id: SessionId, options: &PtyOptions) -> Result<Endpoint> {
@@ -158,7 +173,7 @@ impl WindowsTerminalSupervisorClient {
 
     fn request(&self, message: Message) -> Result<Message> {
         let mut transport =
-            match PipeTransport::connect_waiting(&supervisor_pipe_name(), CONTROL_TIMEOUT)? {
+            match PipeTransport::connect_waiting(&self.pipe_name(), CONTROL_TIMEOUT)? {
                 Some(transport) => transport,
                 None => {
                     self.start_supervisor()?;
@@ -180,9 +195,7 @@ impl WindowsTerminalSupervisorClient {
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Some(transport) =
-                PipeTransport::connect_waiting(&supervisor_pipe_name(), remaining)?
-            {
+            if let Some(transport) = PipeTransport::connect_waiting(&self.pipe_name(), remaining)? {
                 return Ok(transport);
             }
             if remaining.is_zero() {

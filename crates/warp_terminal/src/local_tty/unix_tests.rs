@@ -136,3 +136,44 @@ fn docker_sandbox_command_sets_history_size_sentinels() {
         Some(Some(BASH_HISTORY_SIZE_SENTINEL.to_owned()))
     );
 }
+
+#[test]
+fn host_shell_does_not_inherit_agent_event_vars() {
+    let command = build_host_shell_command(
+        shell_starter(ShellType::Bash, "/bin/bash"),
+        None,
+        HashMap::new(),
+        None,
+        false,
+        false,
+        false,
+        false,
+        true,
+    );
+
+    assert_eq!(env_value(&command, WARP_AGENT_EVENT_TOKEN_ENV), Some(None));
+    assert_eq!(env_value(&command, WARP_AGENT_EVENT_BIN_ENV), Some(None));
+}
+
+#[test]
+fn host_shell_passes_the_callers_agent_event_token() {
+    let command = build_host_shell_command(
+        shell_starter(ShellType::Bash, "/bin/bash"),
+        None,
+        HashMap::from([(
+            OsString::from(WARP_AGENT_EVENT_TOKEN_ENV),
+            OsString::from("0123456789abcdef0123456789abcdef"),
+        )]),
+        None,
+        false,
+        false,
+        false,
+        false,
+        true,
+    );
+
+    assert_eq!(
+        env_value(&command, WARP_AGENT_EVENT_TOKEN_ENV),
+        Some(Some("0123456789abcdef0123456789abcdef".to_owned()))
+    );
+}

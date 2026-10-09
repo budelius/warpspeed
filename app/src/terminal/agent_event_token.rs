@@ -78,7 +78,8 @@ fn load_or_create_secret(dir: &Path) -> io::Result<Vec<u8>> {
     let mut secret = vec![0u8; SECRET_LEN];
     rand::thread_rng().fill_bytes(&mut secret);
     let temporary = dir.join(format!("{SECRET_FILE_NAME}.{}.tmp", std::process::id()));
-    let written = create_user_only(&temporary).and_then(|mut file| file.write_all(&secret));
+    let written = create_user_only(&temporary)
+        .and_then(|mut file| file.write_all(&secret).and_then(|()| file.sync_all()));
     let linked = written.and_then(|()| std::fs::hard_link(&temporary, &path));
     let _ = std::fs::remove_file(&temporary);
     match linked {

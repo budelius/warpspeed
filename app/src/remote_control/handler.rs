@@ -33,7 +33,7 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
         Request::CliAgentEvent {
             token,
             notification,
-        } => deliver_cli_agent_event(&token, notification, ctx),
+        } => deliver_cli_agent_event(token.as_str(), notification, ctx),
         #[cfg(not(feature = "local_tty"))]
         Request::CliAgentEvent { .. } => Response::Failed {
             error: "This build has no local terminals".to_owned(),
@@ -318,8 +318,22 @@ fn move_step_pushed_branch(
 /// Hands an out-of-band agent event to the pane whose shell carries `token`.
 #[cfg(feature = "local_tty")]
 fn deliver_cli_agent_event(token: &str, notification: String, ctx: &mut AppContext) -> Response {
+    use warp_core::features::FeatureFlag;
     use warpui::SingletonEntity;
 
+    use super::protocol::MAX_CLI_AGENT_EVENT_BYTES;
+
+    // The same events written as OSC 777 are dropped with this flag off.
+    if !FeatureFlag::PluggableNotifications.is_enabled() {
+        return Response::Failed {
+            error: "This build does not accept CLI agent notifications".to_owned(),
+        };
+    }
+    if notification.len() > MAX_CLI_AGENT_EVENT_BYTES {
+        return Response::Failed {
+            error: format!("The notification is larger than {MAX_CLI_AGENT_EVENT_BYTES} bytes"),
+        };
+    }
     let view = (!token.is_empty())
         .then(|| {
             crate::workspace::WorkspaceRegistry::as_ref(ctx)

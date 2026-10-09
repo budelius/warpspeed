@@ -3,6 +3,8 @@ use serde::de::DeserializeOwned;
 
 use super::*;
 
+const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
 /// Round-trips `value` through bincode, the encoding the channel uses, and compares the debug
 /// form, since the protocol types deliberately do not implement `PartialEq`.
 fn assert_round_trips<T: Serialize + DeserializeOwned + std::fmt::Debug>(value: T) {
@@ -18,10 +20,41 @@ fn protocol_version_is_three() {
 
 #[test]
 fn cli_agent_event_round_trips() {
-    assert_round_trips(Request::CliAgentEvent {
-        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    let request = Request::CliAgentEvent {
+        token: AgentEventToken::from(TOKEN.to_owned()),
         notification: r#"{"v":1,"agent":"kimi","event":"stop"}"#.to_owned(),
-    });
+    };
+    let bytes = bincode::serialize(&request).expect("serializes");
+    let decoded: Request = bincode::deserialize(&bytes).expect("deserializes");
+    let Request::CliAgentEvent {
+        token,
+        notification,
+    } = decoded
+    else {
+        panic!("expected a CLI agent event, got {decoded:?}");
+    };
+    assert_eq!(token.as_str(), TOKEN);
+    assert_eq!(notification, r#"{"v":1,"agent":"kimi","event":"stop"}"#);
+}
+
+#[test]
+fn cli_agent_event_token_is_left_out_of_debug_output() {
+    let request = Request::CliAgentEvent {
+        token: AgentEventToken::from(TOKEN.to_owned()),
+        notification: r#"{"v":1,"agent":"kimi","event":"stop"}"#.to_owned(),
+    };
+    let debug = format!("{request:?}");
+    assert!(!debug.contains(TOKEN), "{debug}");
+    assert!(debug.contains("CliAgentEvent"), "{debug}");
+    assert!(!format!("{request:#?}").contains(TOKEN));
+}
+
+#[test]
+fn agent_event_token_serializes_as_a_plain_string() {
+    assert_eq!(
+        bincode::serialize(&AgentEventToken::from(TOKEN.to_owned())).unwrap(),
+        bincode::serialize(TOKEN).unwrap()
+    );
 }
 
 #[test]

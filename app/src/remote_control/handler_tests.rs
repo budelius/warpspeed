@@ -1,7 +1,9 @@
 use tempfile::TempDir;
+use warp_core::features::FeatureFlag;
 use warpui::{App, EntityId, SingletonEntity, ViewHandle};
 
 use super::*;
+use crate::remote_control::protocol::MAX_CLI_AGENT_EVENT_BYTES;
 use crate::terminal::agent_session_handoff::MoveStep;
 use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus,
@@ -402,7 +404,7 @@ fn deliver(token: &str, notification: &str, app: &mut App) -> Response {
     app.update(|ctx| {
         handle(
             Request::CliAgentEvent {
-                token: token.to_owned(),
+                token: token.to_owned().into(),
                 notification: notification.to_owned(),
             },
             ctx,
@@ -412,6 +414,7 @@ fn deliver(token: &str, notification: &str, app: &mut App) -> Response {
 
 #[test]
 fn cli_agent_event_reaches_the_pane_that_owns_the_token() {
+    let _flag = FeatureFlag::PluggableNotifications.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
         let workspace = mock_workspace(&mut app);
@@ -489,5 +492,56 @@ fn cli_agent_event_without_any_tokened_pane_is_refused() {
         let _workspace = mock_workspace(&mut app);
         let response = deliver("", r#"{"v":1,"agent":"kimi","event":"stop"}"#, &mut app);
         assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+    });
+}
+
+#[test]
+fn cli_agent_event_is_refused_while_pluggable_notifications_are_off() {
+    let _flag = FeatureFlag::PluggableNotifications.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        terminal_view.update(&mut app, |view, _| {
+            view.set_agent_event_token(TOKEN.to_owned())
+        });
+
+        let response = deliver(TOKEN, r#"{"v":1,"agent":"kimi","event":"stop"}"#, &mut app);
+
+        assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+        app.read(|ctx| {
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(terminal_view.id())
+                    .is_none()
+            );
+        });
+    });
+}
+
+#[test]
+fn oversized_cli_agent_event_is_refused() {
+    let _flag = FeatureFlag::PluggableNotifications.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        terminal_view.update(&mut app, |view, _| {
+            view.set_agent_event_token(TOKEN.to_owned())
+        });
+        let query = "x".repeat(MAX_CLI_AGENT_EVENT_BYTES);
+        let notification =
+            format!(r#"{{"v":1,"agent":"kimi","event":"prompt_submit","query":"{query}"}}"#);
+
+        let response = deliver(TOKEN, &notification, &mut app);
+
+        assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+        app.read(|ctx| {
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(terminal_view.id())
+                    .is_none()
+            );
+        });
     });
 }

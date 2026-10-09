@@ -3418,3 +3418,37 @@ fn managed_agent_start_takes_an_agent_kind() {
     };
     assert_eq!(agent, "claude");
 }
+
+#[test]
+fn agent_event_takes_one_of_two_formats() {
+    for (spelling, expected) in [
+        ("kimi-hook", agent_event::AgentEventFormat::KimiHook),
+        ("protocol", agent_event::AgentEventFormat::Protocol),
+    ] {
+        let args =
+            Args::try_parse_from(["warpspeed", "agent-event", "--format", spelling]).unwrap();
+        match args.command() {
+            Some(Command::AgentEvent(event)) => {
+                assert_eq!(event.format, expected);
+                assert_eq!(event.hooks_version, None);
+                assert!(!Command::AgentEvent(event.clone()).prints_to_stdout());
+            }
+            other => panic!("expected agent-event, got {other:?}"),
+        }
+    }
+    let versioned = Args::try_parse_from([
+        "warpspeed",
+        "agent-event",
+        "--format",
+        "kimi-hook",
+        "--hooks-version",
+        "1.0.0",
+    ])
+    .unwrap();
+    let Some(Command::AgentEvent(event)) = versioned.command() else {
+        panic!("expected agent-event");
+    };
+    assert_eq!(event.hooks_version.as_deref(), Some("1.0.0"));
+    assert!(Args::try_parse_from(["warpspeed", "agent-event"]).is_err());
+    assert!(Args::try_parse_from(["warpspeed", "agent-event", "--format", "osc"]).is_err());
+}

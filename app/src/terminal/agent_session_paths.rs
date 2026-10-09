@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::agent_session_history::is_safe_session_id;
 
@@ -58,6 +59,42 @@ pub(crate) fn kimi_indexed_session_dirs(home: &Path) -> Option<Vec<(String, Path
             .filter_map(|(session_id, dir)| Some((session_id, dir?)))
             .collect(),
     )
+}
+
+/// The directory Kimi names a working directory's sessions after (`encodeWorkDirKey` in
+/// `agent-core-v2/src/_base/utils/workdir-slug.ts`): `wd_<slug>_<first 12 hex of sha256>`.
+/// Kimi reuses an existing workspace whose root differs only in case, so its session index is
+/// the better source when it has the session.
+pub(crate) fn kimi_work_dir_key(work_dir: &str) -> String {
+    let normalized = work_dir.replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/');
+    let base = normalized.rsplit('/').next().unwrap_or(normalized);
+    let hash = hex::encode(Sha256::digest(normalized.as_bytes()));
+    format!("wd_{}_{}", kimi_work_dir_slug(base), &hash[..12])
+}
+
+fn kimi_work_dir_slug(name: &str) -> String {
+    const MAX_SLUG_LEN: usize = 40;
+    let mut slug = String::new();
+    let mut in_replaced_run = false;
+    for character in name.to_lowercase().chars() {
+        if character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '.' | '_' | '-')
+        {
+            slug.push(character);
+            in_replaced_run = false;
+        } else if !in_replaced_run {
+            slug.push('-');
+            in_replaced_run = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = slug.get(..MAX_SLUG_LEN).unwrap_or(slug).trim_matches('-');
+    match slug {
+        "" | "." | ".." => "workspace".to_owned(),
+        slug => slug.to_owned(),
+    }
 }
 
 #[cfg(test)]

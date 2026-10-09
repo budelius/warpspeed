@@ -3,6 +3,8 @@
 mod agent_ctrl;
 #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
 mod agent_ctrl_fleet_cli;
+#[cfg(not(target_family = "wasm"))]
+mod agent_event_cli;
 #[cfg(feature = "local_fs")]
 mod agent_session_registry;
 mod ai;
@@ -862,6 +864,11 @@ pub fn run() -> Result<()> {
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::Sessions(args) => {
                 return sessions_cli::run(args);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::AgentEvent(args) => {
+                agent_event_cli::run(args);
+                return Ok(());
             }
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::AgentCtrl(args) => {

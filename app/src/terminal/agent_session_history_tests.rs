@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    PastAgentSession, ResolvedPath, UnidentifiedAgent, describe, is_within_known, kimi_sessions,
-    match_for_restore, pi_candidates, resolve_folders, vibe_sessions,
+    PastAgentSession, ResolvedPath, UnidentifiedAgent, current_dsh_log, describe, dsh_sessions,
+    is_within_known, kimi_sessions, match_for_restore, pi_candidates, resolve_folders,
+    vibe_sessions,
 };
 use crate::terminal::CLIAgent;
 
@@ -407,4 +408,110 @@ fn kimi_archived_and_unreadable_sessions_are_skipped() {
     fs::create_dir_all(workspace.join("session_empty")).unwrap();
 
     assert!(kimi_sessions(home.path()).is_empty());
+}
+
+const DSH_ID: &str = "session-0b6c1234-ffff-4a4a-8b8b-0123456789ab";
+
+fn dsh_header(id: &str) -> String {
+    format!(
+        r#"{{"type":"session","version":4,"id":"{id}","createdAt":1788240666255,"cwd":"C:\\Users\\me\\proj","isSeeded":false,"delegationDepth":0,"agentPreset":"standard"}}"#
+    )
+}
+
+const DSH_RUNTIME_CONTEXT: &str = r#"{"type":"user/message","data":{"content":[{"type":"text","text":"<environment>"}],"source":{"kind":"runtime-context"},"role":"user","id":"m0"},"surfaceOp":"append","seq":1,"time":1788240666300}"#;
+const DSH_USER: &str = r#"{"type":"user/message","data":{"content":[{"type":"text","text":"Fix the reboot bug"}],"source":{"kind":"user","rpcId":"r1","clientTimeZone":"Europe/Vienna"},"role":"user","id":"m1"},"surfaceOp":"append","seq":2,"time":1788240666400}"#;
+
+#[test]
+fn dsh_compressed_log_supplies_identity_directory_and_title() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("--C-Users-me-proj--").join(DSH_ID);
+    fs::create_dir_all(&dir).unwrap();
+    // One frame for the header and one for the appended batch, as dsh writes them.
+    let mut log = zstd::encode_all(format!("{}\n", dsh_header(DSH_ID)).as_bytes(), 3).unwrap();
+    log.extend(
+        zstd::encode_all(format!("{DSH_RUNTIME_CONTEXT}\n{DSH_USER}\n").as_bytes(), 3).unwrap(),
+    );
+    fs::write(dir.join("session.v4.jsonl.zstd"), log).unwrap();
+    fs::write(
+        dir.join("session.v3.jsonl.zstd"),
+        zstd::encode_all(format!("{}\n", dsh_header("stale")).as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+
+    let sessions = dsh_sessions(root.path());
+
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.agent, CLIAgent::DeepSeekHarness);
+    assert_eq!(session.session_id, DSH_ID);
+    assert_eq!(session.cwd, Path::new(r"C:\Users\me\proj"));
+    assert_eq!(session.title.as_deref(), Some("Fix the reboot bug"));
+}
+
+#[test]
+fn dsh_plain_generation_zero_log_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("--home-me-proj--").join(DSH_ID);
+    write_file(
+        &dir.join("session.jsonl"),
+        &format!("{}\n{DSH_USER}\n", dsh_header(DSH_ID)),
+    );
+
+    let sessions = dsh_sessions(root.path());
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title.as_deref(), Some("Fix the reboot bug"));
+}
+
+#[test]
+fn dsh_log_being_written_still_yields_its_header() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("--home-me-proj--").join(DSH_ID);
+    fs::create_dir_all(&dir).unwrap();
+    let mut log = zstd::encode_all(format!("{}\n", dsh_header(DSH_ID)).as_bytes(), 3).unwrap();
+    let batch = zstd::encode_all(format!("{DSH_USER}\n").as_bytes(), 3).unwrap();
+    log.extend(&batch[..batch.len() / 2]);
+    fs::write(dir.join("session.v4.jsonl.zstd"), log).unwrap();
+
+    let sessions = dsh_sessions(root.path());
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, DSH_ID);
+    assert_eq!(sessions[0].title, None);
+}
+
+#[test]
+fn dsh_directories_without_a_log_or_outside_project_keys_are_skipped() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("--home-me-proj--").join(DSH_ID)).unwrap();
+    write_file(
+        &root
+            .path()
+            .join("_no-cwd")
+            .join(DSH_ID)
+            .join("session.jsonl"),
+        &format!("{}\n", dsh_header(DSH_ID)),
+    );
+    assert!(dsh_sessions(root.path()).is_empty());
+}
+
+#[test]
+fn dsh_current_log_is_the_highest_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in [
+        "session.jsonl",
+        "session.v2.jsonl.zstd",
+        "session.v10.jsonl.zstd",
+        "session.v9.jsonl",
+        "session.v011.jsonl",
+        "session.v0.jsonl",
+        "session.lock",
+        "notes.jsonl",
+    ] {
+        fs::write(dir.path().join(name), b"").unwrap();
+    }
+    assert_eq!(
+        current_dsh_log(dir.path()),
+        Some((dir.path().join("session.v10.jsonl.zstd"), true))
+    );
 }

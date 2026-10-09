@@ -18,6 +18,15 @@ pub(crate) fn kimi_home() -> Option<PathBuf> {
         .or_else(|| dirs::home_dir().map(|home| home.join(".kimi-code")))
 }
 
+/// DeepSeek Harness's data root: `$DSH_HOME`, else `~/.dsh`. dsh treats a blank value as unset.
+pub(crate) fn dsh_home() -> Option<PathBuf> {
+    std::env::var("DSH_HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".dsh")))
+}
+
 /// Each live session's directory from Kimi's `session_index.jsonl`, or `None` without an index.
 /// Kimi appends a line per created session and a `deleted` tombstone per deletion, so the last
 /// line for an id wins.

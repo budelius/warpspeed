@@ -15448,6 +15448,7 @@ dependencies = [
  "winreg",
  "x11rb",
  "zbus",
+ "zstd",
 ]
 
 [[package]]

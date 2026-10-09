@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::fs::File;
+#[cfg(not(target_family = "wasm"))]
+use std::io::Read;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -7,13 +9,15 @@ use std::time::{Duration, SystemTime};
 use serde_json::Value;
 
 #[cfg(not(target_family = "wasm"))]
-use super::agent_session_paths::{kimi_home, kimi_indexed_session_dirs};
+use super::agent_session_paths::{dsh_home, kimi_home, kimi_indexed_session_dirs};
 use crate::terminal::CLIAgent;
 
 const MAX_CANDIDATES: usize = 200;
 const MAX_HEAD_LINES: usize = 200;
 const MAX_HEAD_BYTES: usize = 256 * 1024;
 const TITLE_MAX_CHARS: usize = 80;
+#[cfg(not(target_family = "wasm"))]
+const DSH_HEAD_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PastAgentSession {
@@ -208,6 +212,106 @@ fn kimi_session(session_id: String, dir: &Path) -> Option<PastAgentSession> {
         title,
         modified,
     })
+}
+
+/// DeepSeek Harness's sessions under `root` (`<DSH_HOME>/sessions`), each described by the head
+/// of its current log.
+#[cfg(not(target_family = "wasm"))]
+fn dsh_sessions(root: &Path) -> Vec<PastAgentSession> {
+    directories(root)
+        .into_iter()
+        .filter(|project| {
+            project
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.len() > 4 && name.starts_with("--") && name.ends_with("--")
+                })
+        })
+        .flat_map(|project| directories(&project))
+        .filter_map(|dir| dsh_session(&dir))
+        .collect()
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn dsh_session(dir: &Path) -> Option<PastAgentSession> {
+    let (path, compressed) = current_dsh_log(dir)?;
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    let head = read_dsh_head(&path, compressed);
+    let mut rows = head
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok());
+    let header = rows.next().filter(|header| header["type"] == "session")?;
+    let session_id = header["id"]
+        .as_str()
+        .filter(|id| is_safe_session_id(id))?
+        .to_owned();
+    let cwd = header["cwd"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let title = rows
+        .find(|row| row["type"] == "user/message" && row["data"]["source"]["kind"] == "user")
+        .and_then(|row| {
+            row["data"]["content"]
+                .as_array()?
+                .iter()
+                .find(|part| part["type"] == "text")?["text"]
+                .as_str()
+                .and_then(title)
+        });
+    Some(PastAgentSession {
+        agent: CLIAgent::DeepSeekHarness,
+        session_id,
+        cwd,
+        canonical_cwd: None,
+        title,
+        modified,
+    })
+}
+
+/// The session's current log, the highest generation of `session[.vN].jsonl[.zstd]` in `dir`
+/// (N has no leading zero, as dsh writes it), and whether it is zstd-compressed.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn current_dsh_log(dir: &Path) -> Option<(PathBuf, bool)> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let (stem, compressed) = match name.strip_suffix(".zstd") {
+                Some(stem) => (stem, true),
+                None => (name.as_str(), false),
+            };
+            let generation = match stem.strip_prefix("session")?.strip_suffix(".jsonl")? {
+                "" => 0,
+                version => {
+                    let digits = version.strip_prefix(".v")?;
+                    let canonical = !digits.starts_with('0')
+                        && digits.bytes().all(|byte| byte.is_ascii_digit());
+                    canonical.then(|| digits.parse::<u32>().ok()).flatten()?
+                }
+            };
+            Some((generation, entry.path(), compressed))
+        })
+        .max_by_key(|(generation, _, _)| *generation)
+        .map(|(_, path, compressed)| (path, compressed))
+}
+
+/// Up to [`DSH_HEAD_BYTES`] of the log's text. A log dsh is still appending to can end in a
+/// partial frame; what decoded before it is kept.
+#[cfg(not(target_family = "wasm"))]
+fn read_dsh_head(path: &Path, compressed: bool) -> String {
+    let mut head = Vec::new();
+    if let Ok(file) = File::open(path) {
+        let _ = if compressed {
+            zstd::stream::read::Decoder::new(file)
+                .and_then(|decoder| decoder.take(DSH_HEAD_BYTES).read_to_end(&mut head))
+        } else {
+            file.take(DSH_HEAD_BYTES).read_to_end(&mut head)
+        };
+    }
+    String::from_utf8_lossy(&head).into_owned()
 }
 
 /// A timestamp Kimi wrote as epoch milliseconds, or as an RFC 3339 string in older versions.
@@ -469,6 +573,11 @@ fn directory_sessions(agent: CLIAgent) -> Option<Vec<PastAgentSession>> {
                 .map(|home| kimi_sessions(&home))
                 .unwrap_or_default(),
         ),
+        CLIAgent::DeepSeekHarness => Some(
+            dsh_home()
+                .map(|home| dsh_sessions(&home.join("sessions")))
+                .unwrap_or_default(),
+        ),
         CLIAgent::Claude
         | CLIAgent::Gemini
         | CLIAgent::Codex
@@ -483,7 +592,6 @@ fn directory_sessions(agent: CLIAgent) -> Option<Vec<PastAgentSession>> {
         | CLIAgent::Goose
         | CLIAgent::Hermes
         | CLIAgent::Antigravity
-        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }

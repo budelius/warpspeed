@@ -12415,13 +12415,14 @@ impl TerminalView {
                                     #[cfg(feature = "local_tty")]
                                     me.refresh_agent_session(ctx);
 
-                                    // Codex doesn't use the sentinel-based plugin protocol,
-                                    // so create the listener proactively on command detection
+                                    // Codex and Kimi Code have native OSC 9 notifications, so
+                                    // create the listener proactively on command detection
                                     // (rather than waiting for a SessionStart event).
-                                    if matches!(detection, Some((CLIAgent::Codex, _))) {
+                                    if let Some((agent @ (CLIAgent::Codex | CLIAgent::Kimi), _)) =
+                                        &detection
+                                    {
                                         me.register_cli_agent_listener_without_session_start_event(
-                                            CLIAgent::Codex,
-                                            ctx,
+                                            *agent, ctx,
                                         );
                                     }
 
@@ -13178,13 +13179,16 @@ impl TerminalView {
                     return;
                 }
 
-                // Suppress OSC 9 notifications when a Codex listener is active.
-                // The listener's subscription handles these via CodexSessionHandler.
+                // Suppress OSC 9 notifications when a Codex or Kimi listener is active.
+                // The listener's subscription handles these via its session handler.
                 if title.is_none() {
-                    let has_codex_listener = CLIAgentSessionsModel::as_ref(ctx)
+                    let has_osc9_listener = CLIAgentSessionsModel::as_ref(ctx)
                         .session(self.view_id)
-                        .is_some_and(|s| s.agent == CLIAgent::Codex && s.listener.is_some());
-                    if has_codex_listener {
+                        .is_some_and(|s| {
+                            matches!(s.agent, CLIAgent::Codex | CLIAgent::Kimi)
+                                && s.listener.is_some()
+                        });
+                    if has_osc9_listener {
                         return;
                     }
                 }
@@ -13633,9 +13637,8 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         #[cfg(not(target_family = "wasm"))]
-        let plugin_version = if matches!(agent, CLIAgent::Codex) {
-            // We use the lack of a plugin version for codex to differentiate between
-            // OSC 9 notification fallback and real plugin.
+        let plugin_version = if matches!(agent, CLIAgent::Codex | CLIAgent::Kimi) {
+            // No plugin version distinguishes the OSC 9 fallback of Codex and Kimi from their hooks.
             None
         } else {
             // No SessionStart event in this path (mid-session install/update).
@@ -16957,11 +16960,11 @@ impl TerminalView {
                     return;
                 }
 
-                // On Windows, Claude Code uses Alt+V for native image paste.
-                let is_claude = CLIAgentSessionsModel::as_ref(ctx)
+                // On Windows, Claude Code and Kimi Code read a clipboard image on Alt+V.
+                let uses_alt_v = CLIAgentSessionsModel::as_ref(ctx)
                     .session(self.view_id)
-                    .is_some_and(|s| s.agent == CLIAgent::Claude);
-                if is_claude {
+                    .is_some_and(|s| s.agent.uses_alt_v_image_paste());
+                if uses_alt_v {
                     self.write_user_bytes_to_pty(vec![escape_sequences::C0::ESC, b'v'], ctx);
                     return;
                 }

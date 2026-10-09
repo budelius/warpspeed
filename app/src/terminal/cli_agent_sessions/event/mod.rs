@@ -31,6 +31,8 @@ pub enum CLIAgentEventSource {
     RichPlugin,
     /// Native Codex OSC 9 fallback notification.
     CodexOsc9Fallback,
+    /// Kimi Code's own OSC 9 notification, used until its hooks report.
+    KimiOsc9Fallback,
 }
 
 /// Event-specific fields that vary by event type.

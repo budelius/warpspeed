@@ -428,7 +428,7 @@ impl CLIAgentSessionsModel {
             return;
         }
         let agent = session.agent;
-        if !matches!(agent, CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Pi) {
+        if !agent.supports_history_recovery() {
             return;
         }
         let Some(cwd) = session.session_context.cwd.as_deref().map(PathBuf::from) else {

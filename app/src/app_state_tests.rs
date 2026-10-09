@@ -19,6 +19,7 @@ fn agents_with_verified_syntax_generate_a_resume_command() {
         (CLIAgent::Codex, "codex resume session-1"),
         (CLIAgent::Vibe, "vibe --resume session-1"),
         (CLIAgent::Pi, "pi --session session-1"),
+        (CLIAgent::Kimi, "kimi --session session-1"),
     ] {
         assert_eq!(
             descriptor(agent, Some("session-1"))
@@ -29,6 +30,15 @@ fn agents_with_verified_syntax_generate_a_resume_command() {
             agent.display_name()
         );
     }
+}
+
+/// DeepSeek Harness ships no interactive terminal UI to reopen a session in.
+#[test]
+fn deepseek_harness_has_no_resume_command() {
+    assert_eq!(
+        descriptor(CLIAgent::DeepSeekHarness, Some("session-1")).resume_command(),
+        None
+    );
 }
 
 /// `gemini --resume` takes "latest" or a per-project index, and `opencode session` can list and

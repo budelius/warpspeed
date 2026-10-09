@@ -289,3 +289,37 @@ fn a_known_canonical_folder_decides_membership_without_the_raw_path() {
     ));
     assert!(!is_within_known(alias, None, &folder));
 }
+
+#[test]
+fn kimi_and_dsh_commands_name_their_session() {
+    let id = "session_0b6c1234-ffff-4a4a-8b8b-0123456789ab";
+    for (command, expected) in [
+        (format!("kimi --session {id}"), Some(id)),
+        (format!("kimi -S {id}"), Some(id)),
+        (format!("kimi -r {id}"), Some(id)),
+        (format!("kimi --resume {id} --yolo"), Some(id)),
+        (format!("kimi --session={id}"), Some(id)),
+        ("kimi -c".to_owned(), None),
+        ("kimi --session".to_owned(), None),
+        ("kimi --session --yolo".to_owned(), None),
+        ("kimi".to_owned(), None),
+    ] {
+        assert_eq!(
+            super::session_id_from_command(CLIAgent::Kimi, &command).as_deref(),
+            expected,
+            "{command}"
+        );
+    }
+    assert_eq!(
+        super::session_id_from_command(
+            CLIAgent::DeepSeekHarness,
+            "dsh --profile headless --session-id session-0b6c1234-ffff-4a4a-8b8b-0123456789ab \"go on\"",
+        )
+        .as_deref(),
+        Some("session-0b6c1234-ffff-4a4a-8b8b-0123456789ab")
+    );
+    assert_eq!(
+        super::session_id_from_command(CLIAgent::DeepSeekHarness, "dsh --profile headless \"hi\""),
+        None
+    );
+}

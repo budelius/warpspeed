@@ -305,6 +305,7 @@ impl CliAgentResumeDescriptor {
             CLIAgent::Codex => Some(format!("codex resume {session_id}")),
             CLIAgent::Vibe => Some(format!("vibe --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi --session {session_id}")),
+            CLIAgent::Kimi => Some(format!("kimi --session {session_id}")),
             // `gemini --resume` takes "latest" or a per-project index, never a session ID.
             CLIAgent::Gemini
             // `opencode session` can list and delete by ID but cannot open one.
@@ -318,6 +319,8 @@ impl CliAgentResumeDescriptor {
             | CLIAgent::Goose
             | CLIAgent::Hermes
             | CLIAgent::Antigravity
+            // DeepSeek Harness has no interactive surface to resume into.
+            | CLIAgent::DeepSeekHarness
             | CLIAgent::WarpTui
             | CLIAgent::Unknown => None,
         }

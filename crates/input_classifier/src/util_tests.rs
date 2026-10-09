@@ -250,3 +250,9 @@ fn test_is_likely_shell_command_downloads_log_path_false_for_nld_heuristic_v2() 
 // No inverse section is expected: nld_heuristic_v2 only removes shell-syntax
 // voting and raises the command threshold, so it should not mark an input as
 // shell when nld_heuristic_v1 does not.
+
+#[test]
+fn kimi_and_dsh_are_one_off_shell_command_keywords() {
+    assert!(is_one_off_shell_command_keyword("kimi"));
+    assert!(is_one_off_shell_command_keyword("dsh"));
+}

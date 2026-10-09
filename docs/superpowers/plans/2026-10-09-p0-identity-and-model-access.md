@@ -22,7 +22,7 @@ Spec: `docs/superpowers/specs/2026-10-08-self-hosted-agent-platform-design.md` �
 
 ## Deviations from the spec (recorded here and in the spec)
 
-- Refresh token storage reuses WarpSpeed's DPAPI-protected `stozn-auth.bin` (format 2) instead of a new OS credential-store dependency: same OS-user protection on Windows, no new crate.
+- Refresh token storage uses a DPAPI-protected `stozn-zitadel-auth.bin` (format 2; separate from the old `stozn-auth.bin` so older builds keep working) instead of a new OS credential-store dependency: same OS-user protection on Windows, no new crate.
 - No `agent-gateway` introspection app in P0; APISIX is P1 and creates it there.
 - passiv's internal endpoint takes the user identity in the request body from an authenticated service, not from forward-auth headers.
 
@@ -1640,7 +1640,7 @@ git push gitea feat/p0-zitadel-login && git push gitlab feat/p0-zitadel-login
 - [ ] **Step 2: Install WarpSpeed** from `feat/p0-zitadel-login` via `powershell -ExecutionPolicy Bypass -File ./script/windows/install-warpspeed.ps1` (never restart running WarpSpeed windows; open a new window on the new build).
 - [ ] **Step 3: Sign in** from the new window: "Sign in with STOZN" opens the Zitadel device page; approve; status shows "Signed in to STOZN as …".
 - [ ] **Step 4: Use AgentCtrl** — `warpspeed agent-ctrl list` and `agent-ctrl repos` from a shell, and the fleet pane, all succeed with only the Zitadel sign-in (`STOZN_TOKEN` unset, `~/.stozn.json` absent or renamed).
-- [ ] **Step 5: Refresh** — force expiry by editing nothing: wait for the access token lifetime, or temporarily set the Zitadel app's access token lifetime to 5 minutes in the console, then run `agent-ctrl list` again; it succeeds and `stozn-auth.bin` changes on disk.
+- [ ] **Step 5: Refresh** — force expiry by editing nothing: wait for the access token lifetime, or temporarily set the Zitadel app's access token lifetime to 5 minutes in the console, then run `agent-ctrl list` again; it succeeds and `stozn-zitadel-auth.bin` changes on disk.
 - [ ] **Step 6: Sign out** from settings; `agent-ctrl list` fails with the "not signed in" message.
 - [ ] **Step 7: Merge** `feat/p0-zitadel-login` into `dev` via PR on git-dev.obachan.dev (stozn/warpspeed), and the obachan and passiv PRs into their base branches. Update the `self-hosted-agent-platform` memory with P0 status and the provisioned ids.
 

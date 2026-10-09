@@ -15136,6 +15136,24 @@ impl Workspace {
         panes
     }
 
+    /// The terminal view whose shell was given `token` as its agent-event token, in any tab of
+    /// this window.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn terminal_view_with_agent_event_token(
+        &self,
+        token: &str,
+        ctx: &AppContext,
+    ) -> Option<ViewHandle<TerminalView>> {
+        self.tabs.iter().find_map(|tab| {
+            let pane_group = tab.pane_group.as_ref(ctx);
+            pane_group.pane_ids().find_map(|pane_id| {
+                pane_group
+                    .terminal_view_from_pane_id(pane_id, ctx)
+                    .filter(|view| view.as_ref(ctx).agent_event_token() == Some(token))
+            })
+        })
+    }
+
     /// Reads one pane's screen and identity into a handover for the supervisor.
     ///
     /// `None` when the pane's shell is not the supervisor's to keep, which is

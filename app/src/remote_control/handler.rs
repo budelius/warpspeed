@@ -29,6 +29,15 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
             cwd,
         } => move_session_to_agent_ctrl(terminal_view_id, cwd.map(PathBuf::from), ctx),
         Request::MoveStatus { terminal_view_id } => move_status(terminal_view_id, ctx),
+        #[cfg(feature = "local_tty")]
+        Request::CliAgentEvent {
+            token,
+            notification,
+        } => deliver_cli_agent_event(&token, notification, ctx),
+        #[cfg(not(feature = "local_tty"))]
+        Request::CliAgentEvent { .. } => Response::Failed {
+            error: "This build has no local terminals".to_owned(),
+        },
     }
 }
 
@@ -304,6 +313,34 @@ fn move_step_pushed_branch(
         }
         MoveStep::Failed { pushed_branch, .. } => pushed_branch,
     }
+}
+
+/// Hands an out-of-band agent event to the pane whose shell carries `token`.
+#[cfg(feature = "local_tty")]
+fn deliver_cli_agent_event(token: &str, notification: String, ctx: &mut AppContext) -> Response {
+    use warpui::SingletonEntity;
+
+    let view = (!token.is_empty())
+        .then(|| {
+            crate::workspace::WorkspaceRegistry::as_ref(ctx)
+                .all_workspaces(ctx)
+                .into_iter()
+                .find_map(|(_, workspace)| {
+                    workspace
+                        .as_ref(ctx)
+                        .terminal_view_with_agent_event_token(token, ctx)
+                })
+        })
+        .flatten();
+    let Some(view) = view else {
+        return Response::Failed {
+            error: "No pane in this instance owns that agent-event token".to_owned(),
+        };
+    };
+    view.update(ctx, |view, ctx| {
+        view.receive_out_of_band_cli_agent_event(notification, ctx)
+    });
+    Response::Done
 }
 
 /// Quits, the way a user quitting would.

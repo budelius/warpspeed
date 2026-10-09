@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Adding a variant at the end of an enum is safe for bincode only in one
 /// direction, and the two ends here can be either older or newer than one
 /// another, so treat any change as a bump.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A request from the `sessions` command to a running window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +67,16 @@ pub enum Request {
 
     /// How far the move of a pane's session to AgentCtrl has got.
     MoveStatus { terminal_view_id: u64 },
+
+    /// Delivers a CLI agent event that could not be written to its terminal, to the pane whose
+    /// shell was given `token` as `WARP_AGENT_EVENT_TOKEN`.
+    CliAgentEvent {
+        token: String,
+        /// One protocol v1 notification as JSON, exactly what would follow the OSC 777
+        /// `warp://cli-agent` title. A string because the notification's `serde_json::Value`
+        /// fields do not survive bincode.
+        notification: String,
+    },
 }
 
 /// A running window's answer.

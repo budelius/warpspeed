@@ -13552,6 +13552,18 @@ impl TerminalView {
         ctx.notify();
     }
 
+    /// Takes a CLI agent event that `warp agent-event` delivered for this pane and feeds it in
+    /// where an OSC 777 event from the PTY would enter.
+    pub(crate) fn receive_out_of_band_cli_agent_event(
+        &mut self,
+        notification: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.model_events_handle.update(ctx, |dispatcher, ctx| {
+            dispatcher.emit_out_of_band_cli_agent_notification(notification, ctx);
+        });
+    }
+
     /// Handles an OSC 777 event with the `warp://cli-agent` sentinel title.
     /// On `session_start`, creates a `CLIAgentSessionListener` that subscribes
     /// to subsequent events from this terminal's PTY.
@@ -26866,7 +26878,6 @@ impl TerminalView {
     }
 
     #[cfg(feature = "local_tty")]
-    #[expect(dead_code, reason = "read once agent events are delivered by token")]
     pub(crate) fn agent_event_token(&self) -> Option<&str> {
         self.agent_event_token.as_deref()
     }

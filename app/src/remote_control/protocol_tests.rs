@@ -12,8 +12,16 @@ fn assert_round_trips<T: Serialize + DeserializeOwned + std::fmt::Debug>(value: 
 }
 
 #[test]
-fn protocol_version_is_two() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+fn protocol_version_is_three() {
+    assert_eq!(PROTOCOL_VERSION, 3);
+}
+
+#[test]
+fn cli_agent_event_round_trips() {
+    assert_round_trips(Request::CliAgentEvent {
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+        notification: r#"{"v":1,"agent":"kimi","event":"stop"}"#.to_owned(),
+    });
 }
 
 #[test]

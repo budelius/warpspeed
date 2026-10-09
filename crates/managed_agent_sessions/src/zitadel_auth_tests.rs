@@ -50,16 +50,23 @@ fn token_server_with_hook(
     (Box::leak(format!("http://{address}").into_boxed_str()), log)
 }
 
-fn access_token(roles: &[&str], exp_in: i64) -> String {
-    let role_map: serde_json::Map<String, serde_json::Value> = roles
+fn role_map(roles: &[&str]) -> serde_json::Map<String, serde_json::Value> {
+    roles
         .iter()
         .map(|role| ((*role).to_owned(), json!({ "org": "obachan" })))
-        .collect();
-    let payload = json!({
+        .collect()
+}
+
+fn access_token(roles: &[&str], exp_in: i64) -> String {
+    jwt(json!({
         "sub": "2847",
+        "aud": ["client-1", "proj-1"],
         "exp": chrono::Utc::now().timestamp() + exp_in,
-        "urn:zitadel:iam:org:project:proj-1:roles": role_map,
-    });
+        "urn:zitadel:iam:org:project:proj-1:roles": role_map(roles),
+    }))
+}
+
+fn jwt(payload: serde_json::Value) -> String {
     format!(
         "{}.{}.sig",
         URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#),
@@ -154,7 +161,13 @@ fn polling_stops_on_access_denied() {
         Duration::from_secs(10),
     )
     .unwrap_err();
-    assert!(format!("{error:#}").contains("denied"));
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "STOZN login was denied. If you approved it, your account may have no access to the agent platform ({})",
+            issuer.trim_start_matches("http://")
+        )
+    );
 }
 
 #[test]
@@ -180,6 +193,52 @@ fn roles_map_to_admin_user_or_no_access() {
         format!("{error}"),
         "Your account has no access to the agent platform (id-dev.obachan.dev)"
     );
+}
+
+#[test]
+fn audience_may_be_a_single_string() {
+    let token = jwt(json!({
+        "sub": "2847",
+        "aud": "proj-1",
+        "urn:zitadel:iam:org:project:proj-1:roles": role_map(&["agent-user"]),
+    }));
+    let identity = identity_from_access_token(&token, "proj-1", "id-dev.obachan.dev").unwrap();
+    assert_eq!(identity.role, "user");
+}
+
+#[test]
+fn roles_outside_the_project_claim_or_audience_grant_no_access() {
+    let no_access = "Your account has no access to the agent platform (id-dev.obachan.dev)";
+    let generic_only = jwt(json!({
+        "sub": "2847",
+        "aud": ["client-1", "proj-1"],
+        "urn:zitadel:iam:org:project:roles": role_map(&["agent-admin"]),
+    }));
+    let missing_aud = jwt(json!({
+        "sub": "2847",
+        "urn:zitadel:iam:org:project:proj-1:roles": role_map(&["agent-admin"]),
+    }));
+    let other_aud = jwt(json!({
+        "sub": "2847",
+        "aud": ["client-1", "proj-2"],
+        "urn:zitadel:iam:org:project:proj-1:roles": role_map(&["agent-admin"]),
+    }));
+    for token in [generic_only, missing_aud, other_aud] {
+        let error = identity_from_access_token(&token, "proj-1", "id-dev.obachan.dev").unwrap_err();
+        assert_eq!(format!("{error}"), no_access);
+    }
+}
+
+#[test]
+fn token_set_debug_redacts_tokens() {
+    let tokens = TokenSet {
+        access_token: "secret-access".to_owned(),
+        access_expires_at: chrono::Utc::now(),
+        refresh_token: "secret-refresh".to_owned(),
+    };
+    let debug = format!("{tokens:?}");
+    assert!(!debug.contains("secret-access"));
+    assert!(!debug.contains("secret-refresh"));
 }
 
 #[test]
@@ -254,13 +313,14 @@ mod stored_sign_in {
 
     use super::*;
     use crate::{
-        STOZN_AUTH_FORMAT, StoredStoznAuth, access_token_at, load_stozn_auth_at, save_stozn_auth_at,
+        STOZN_AUTH_FORMAT, StoredStoznAuth, StoznLoginFlow, access_token_at, dashboard_token_from,
+        load_stozn_auth_at, save_stozn_auth_at, stozn_auth_path,
     };
 
     fn temp_auth_path() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("stozn-auth-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("stozn-auth.bin")
+        dir.join("stozn-zitadel-auth.bin")
     }
 
     fn save(path: &Path, access_token: String, expires_in: i64, refresh_token: &str) {
@@ -368,5 +428,70 @@ mod stored_sign_in {
         assert!(error.downcast_ref::<RefreshRejected>().is_none());
         assert_eq!(load_stozn_auth_at(&path).unwrap().refresh_token, "ref-1");
         cleanup(&path);
+    }
+
+    #[test]
+    fn zitadel_sign_in_does_not_share_the_old_auth_file() {
+        assert_eq!(
+            stozn_auth_path().file_name().unwrap(),
+            "stozn-zitadel-auth.bin"
+        );
+    }
+
+    #[test]
+    fn dashboard_token_prefers_env_then_zitadel_sign_in_then_stozn_json() {
+        let path = temp_auth_path();
+        let home = path.parent().unwrap().to_path_buf();
+        std::fs::write(home.join(".stozn.json"), r#"{"token":"json-token"}"#).unwrap();
+        // An old build's file in the same directory must not shadow ~/.stozn.json.
+        std::fs::write(home.join("stozn-auth.bin"), b"format-1").unwrap();
+        let offline = profile("http://127.0.0.1:1");
+
+        let token = dashboard_token_from(None, &path, Some(home.clone()), &offline).unwrap();
+        assert_eq!(token, "json-token");
+        assert_eq!(
+            std::fs::read(home.join("stozn-auth.bin")).unwrap(),
+            b"format-1"
+        );
+
+        save(&path, "stored-access".to_owned(), 3600, "ref-1");
+        let token = dashboard_token_from(None, &path, Some(home.clone()), &offline).unwrap();
+        assert_eq!(token, "stored-access");
+
+        let token = dashboard_token_from(Some("env-token".to_owned()), &path, Some(home), &offline)
+            .unwrap();
+        assert_eq!(token, "env-token");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_readers_never_see_the_sign_in_missing_while_it_is_replaced() {
+        let path = temp_auth_path();
+        save(&path, "access-0".to_owned(), 3600, "ref-0");
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            for _ in 0..200 {
+                assert!(reader_path.exists());
+            }
+        });
+        for round in 1..=50 {
+            save(&path, format!("access-{round}"), 3600, "ref-0");
+        }
+        reader.join().unwrap();
+        cleanup(&path);
+    }
+
+    #[test]
+    fn login_flow_debug_redacts_the_device_code() {
+        let flow = StoznLoginFlow {
+            device_code: "secret-device-code".to_owned(),
+            verification_url: "https://id-dev.obachan.dev/device".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            expires_at: Utc::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+        let debug = format!("{flow:?}");
+        assert!(!debug.contains("secret-device-code"));
+        assert!(debug.contains("ABCD-EFGH"));
     }
 }

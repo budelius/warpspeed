@@ -104,12 +104,19 @@ impl StoznAuthManager {
         &self.state
     }
 
-    pub fn is_signed_in(&self) -> bool {
+    /// Whether a stored sign-in exists. A cached sign-in whose credential was removed (for example
+    /// after the issuer rejected a refresh) drops to signed out.
+    pub fn is_signed_in(&mut self, ctx: &mut ModelContext<Self>) -> bool {
+        if matches!(self.state, StoznAuthState::SignedIn(_)) && stored_stozn_identity().is_none() {
+            self.state = StoznAuthState::SignedOut;
+            ctx.emit(StoznAuthEvent::StateChanged);
+            ctx.notify();
+        }
         matches!(self.state, StoznAuthState::SignedIn(_))
     }
 
     pub fn start_login(&mut self, ctx: &mut ModelContext<Self>) {
-        if self.is_signed_in() {
+        if self.is_signed_in(ctx) {
             ctx.emit(StoznAuthEvent::LoginCompleted);
             return;
         }

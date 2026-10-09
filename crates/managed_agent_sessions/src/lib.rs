@@ -89,13 +89,25 @@ pub fn parse_managed_session_deep_link(url: &reqwest::Url) -> Result<ManagedSess
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StoznLoginFlow {
     device_code: String,
     verification_url: String,
     user_code: String,
     expires_at: DateTime<Utc>,
     poll_interval: Duration,
+}
+
+impl std::fmt::Debug for StoznLoginFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoznLoginFlow")
+            .field("device_code", &"<redacted>")
+            .field("verification_url", &self.verification_url)
+            .field("user_code", &self.user_code)
+            .field("expires_at", &self.expires_at)
+            .field("poll_interval", &self.poll_interval)
+            .finish()
+    }
 }
 
 impl StoznLoginFlow {
@@ -116,7 +128,7 @@ pub struct StoznIdentity {
     pub display_name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct StoredStoznAuth {
     format_version: u32,
     environment_alias: String,
@@ -124,6 +136,19 @@ struct StoredStoznAuth {
     access_expires_at: String,
     refresh_token: String,
     user: StoznIdentity,
+}
+
+impl std::fmt::Debug for StoredStoznAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredStoznAuth")
+            .field("format_version", &self.format_version)
+            .field("environment_alias", &self.environment_alias)
+            .field("access_token", &"<redacted>")
+            .field("access_expires_at", &self.access_expires_at)
+            .field("refresh_token", &"<redacted>")
+            .field("user", &self.user)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1419,16 +1444,32 @@ fn valid_dashboard_token(token: &str) -> bool {
 }
 
 fn dashboard_token() -> Result<String> {
-    if let Ok(token) = std::env::var("STOZN_TOKEN") {
+    dashboard_token_from(
+        std::env::var("STOZN_TOKEN").ok(),
+        &stozn_auth_path(),
+        dirs::home_dir(),
+        profile(ManagedEnvironment::Staging).zitadel,
+    )
+}
+
+/// Resolves the dashboard token from `STOZN_TOKEN`, then the Zitadel sign-in at `auth_path`,
+/// then `~/.stozn.json`.
+fn dashboard_token_from(
+    env_token: Option<String>,
+    auth_path: &Path,
+    home: Option<PathBuf>,
+    zitadel: &ZitadelProfile,
+) -> Result<String> {
+    if let Some(token) = env_token {
         if valid_dashboard_token(&token) {
             return Ok(token);
         }
         bail!("STOZN_TOKEN must contain 1 to 8192 visible ASCII bytes");
     }
-    if stozn_auth_path().exists() {
-        return stored_access_token();
+    if auth_path.exists() {
+        return access_token_at(auth_path, zitadel);
     }
-    let path = dirs::home_dir()
+    let path = home
         .context("home directory is unavailable")?
         .join(".stozn.json");
     let value: Value = serde_json::from_slice(&fs::read(&path).with_context(|| {
@@ -1445,8 +1486,10 @@ fn dashboard_token() -> Result<String> {
     Ok(token.to_owned())
 }
 
+/// Older WarpSpeed builds keep a different format in `stozn-auth.bin` in the same directory, and
+/// they keep running alongside this build, so the Zitadel sign-in lives in its own file.
 fn stozn_auth_path() -> PathBuf {
-    warp_core::paths::state_dir().join("stozn-auth.bin")
+    warp_core::paths::state_dir().join("stozn-zitadel-auth.bin")
 }
 
 fn load_stozn_auth_at(path: &Path) -> Result<StoredStoznAuth> {
@@ -1465,13 +1508,6 @@ fn load_stozn_auth_at(path: &Path) -> Result<StoredStoznAuth> {
 
 fn load_stozn_auth() -> Result<StoredStoznAuth> {
     load_stozn_auth_at(&stozn_auth_path())
-}
-
-fn stored_access_token() -> Result<String> {
-    access_token_at(
-        &stozn_auth_path(),
-        profile(ManagedEnvironment::Staging).zitadel,
-    )
 }
 
 /// Returns a current access token, refreshing and re-saving the stored sign-in when needed.
@@ -1546,9 +1582,8 @@ fn save_stozn_auth_at(path: &Path, auth: &StoredStoznAuth) -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
     }
-    if cfg!(windows) && path.exists() {
-        fs::remove_file(path)?;
-    }
+    // Replaces an existing file atomically on Windows too (MoveFileExW with REPLACE_EXISTING), so
+    // concurrent readers never see the file missing.
     fs::rename(&temp, path)?;
     Ok(())
 }

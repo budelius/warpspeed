@@ -45,11 +45,20 @@ pub(crate) struct DeviceStart {
     pub interval: Duration,
 }
 
-#[derive(Debug)]
 pub(crate) struct TokenSet {
     pub access_token: String,
     pub access_expires_at: DateTime<Utc>,
     pub refresh_token: String,
+}
+
+impl std::fmt::Debug for TokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenSet")
+            .field("access_token", &"<redacted>")
+            .field("access_expires_at", &self.access_expires_at)
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
@@ -142,7 +151,11 @@ pub(crate) fn poll_device_login(
         match error.error.as_str() {
             "authorization_pending" => {}
             "slow_down" => interval = (interval + Duration::from_secs(5)).min(MAX_POLL_INTERVAL),
-            "access_denied" => bail!("STOZN login was denied in the browser"),
+            // Zitadel also denies the device grant when the account has no agent-platform role.
+            "access_denied" => bail!(
+                "STOZN login was denied. If you approved it, your account may have no access to the agent platform ({})",
+                profile.issuer_host()
+            ),
             "expired_token" => bail!("STOZN login request expired"),
             other => bail!("STOZN login failed: {other}"),
         }
@@ -224,14 +237,17 @@ pub(crate) fn identity_from_access_token(
             .context("STOZN sign-in returned a malformed access token")?,
     )
     .context("STOZN sign-in returned a malformed access token")?;
-    let roles: Vec<&str> = [
-        format!("urn:zitadel:iam:org:project:{project_id}:roles"),
-        "urn:zitadel:iam:org:project:roles".to_owned(),
-    ]
-    .iter()
-    .filter_map(|key| claims.get(key).and_then(Value::as_object))
-    .flat_map(|roles| roles.keys().map(String::as_str))
-    .collect();
+    let for_project = match claims.get("aud") {
+        Some(Value::String(aud)) => aud == project_id,
+        Some(Value::Array(aud)) => aud.iter().any(|aud| aud.as_str() == Some(project_id)),
+        _ => false,
+    };
+    let roles: Vec<&str> = claims
+        .get(format!("urn:zitadel:iam:org:project:{project_id}:roles"))
+        .and_then(Value::as_object)
+        .filter(|_| for_project)
+        .map(|roles| roles.keys().map(String::as_str).collect())
+        .unwrap_or_default();
     let role = if roles.contains(&"agent-admin") {
         "admin"
     } else if roles.contains(&"agent-user") {

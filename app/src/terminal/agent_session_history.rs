@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
+#[cfg(not(target_family = "wasm"))]
+use super::agent_session_paths::{kimi_home, kimi_indexed_session_dirs};
 use crate::terminal::CLIAgent;
 
 const MAX_CANDIDATES: usize = 200;
@@ -158,6 +160,69 @@ fn vibe_sessions(root: &Path) -> Vec<PastAgentSession> {
             })
         })
         .collect()
+}
+
+/// Kimi Code's sessions: directories from its index, or every `sessions/*/*` directory when the
+/// index is gone, each described by its `state.json`.
+#[cfg(not(target_family = "wasm"))]
+fn kimi_sessions(home: &Path) -> Vec<PastAgentSession> {
+    let dirs = kimi_indexed_session_dirs(home).unwrap_or_else(|| {
+        directories(&home.join("sessions"))
+            .into_iter()
+            .flat_map(|workspace| directories(&workspace))
+            .filter_map(|dir| {
+                let session_id = dir.file_name()?.to_str()?.to_owned();
+                is_safe_session_id(&session_id).then_some((session_id, dir))
+            })
+            .collect()
+    });
+    dirs.into_iter()
+        .filter_map(|(session_id, dir)| kimi_session(session_id, &dir))
+        .collect()
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn kimi_session(session_id: String, dir: &Path) -> Option<PastAgentSession> {
+    let state_path = dir.join("state.json");
+    let state: Value =
+        serde_json::from_reader(BufReader::new(File::open(&state_path).ok()?)).ok()?;
+    if state["archived"] == true {
+        return None;
+    }
+    let cwd = state["cwd"]
+        .as_str()
+        .or_else(|| state["workDir"].as_str())
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let modified = epoch_millis_or_rfc3339(&state["updatedAt"])
+        .or_else(|| std::fs::metadata(&state_path).ok()?.modified().ok())?;
+    let title = state["title"]
+        .as_str()
+        .or_else(|| state["lastPrompt"].as_str())
+        .and_then(title);
+    Some(PastAgentSession {
+        agent: CLIAgent::Kimi,
+        session_id,
+        cwd,
+        canonical_cwd: None,
+        title,
+        modified,
+    })
+}
+
+/// A timestamp Kimi wrote as epoch milliseconds, or as an RFC 3339 string in older versions.
+#[cfg(not(target_family = "wasm"))]
+fn epoch_millis_or_rfc3339(value: &Value) -> Option<SystemTime> {
+    let millis = match value.as_u64() {
+        Some(millis) => millis,
+        None => u64::try_from(
+            chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+                .ok()?
+                .timestamp_millis(),
+        )
+        .ok()?,
+    };
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis))
 }
 
 fn codex_session_id(path: &Path) -> Option<String> {
@@ -389,19 +454,47 @@ pub(crate) fn is_within_known(
     }
 }
 
-fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession> {
-    let mut sessions = if agent == CLIAgent::Vibe {
-        #[cfg(not(target_family = "wasm"))]
-        {
+/// The sessions of agents that keep an index or a directory per session, read whole instead of
+/// through [`candidates`] and [`describe`]. `None` for every other agent.
+#[cfg(not(target_family = "wasm"))]
+fn directory_sessions(agent: CLIAgent) -> Option<Vec<PastAgentSession>> {
+    match agent {
+        CLIAgent::Vibe => Some(
             dirs::home_dir()
                 .map(|home| vibe_sessions(&home.join(".vibe").join("logs").join("session")))
-                .unwrap_or_default()
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            Vec::new()
-        }
-    } else {
+                .unwrap_or_default(),
+        ),
+        CLIAgent::Kimi => Some(
+            kimi_home()
+                .map(|home| kimi_sessions(&home))
+                .unwrap_or_default(),
+        ),
+        CLIAgent::Claude
+        | CLIAgent::Gemini
+        | CLIAgent::Codex
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::Pi
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Antigravity
+        | CLIAgent::DeepSeekHarness
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => None,
+    }
+}
+
+fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession> {
+    #[cfg(not(target_family = "wasm"))]
+    let listed = directory_sessions(agent);
+    #[cfg(target_family = "wasm")]
+    let listed = None;
+    let mut sessions = listed.unwrap_or_else(|| {
         let mut candidates = candidates(agent)
             .into_iter()
             .filter(|candidate| not_before.is_none_or(|time| candidate.modified >= time))
@@ -409,7 +502,7 @@ fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession
         candidates.sort_by(|left, right| right.modified.cmp(&left.modified));
         candidates.truncate(MAX_CANDIDATES);
         candidates.into_iter().map(describe).collect()
-    };
+    });
     sessions.retain(|session| not_before.is_none_or(|time| session.modified >= time));
     sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
     sessions.truncate(MAX_CANDIDATES);
@@ -428,8 +521,15 @@ pub(crate) fn find_all(agent: CLIAgent) -> Vec<PastAgentSession> {
     scan(agent, None)
 }
 
-pub(crate) const RESUMABLE_AGENTS: [CLIAgent; 3] =
-    [CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Pi];
+/// The agents whose past sessions the session picker lists. An agent without a resume command
+/// is listed without a Resume action.
+pub(crate) const RESUMABLE_AGENTS: [CLIAgent; 5] = [
+    CLIAgent::Claude,
+    CLIAgent::Codex,
+    CLIAgent::Pi,
+    CLIAgent::Kimi,
+    CLIAgent::DeepSeekHarness,
+];
 
 /// Every resumable agent's past sessions, newest first.
 pub(crate) fn find_all_resumable() -> Vec<PastAgentSession> {

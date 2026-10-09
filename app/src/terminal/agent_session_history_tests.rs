@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    PastAgentSession, ResolvedPath, UnidentifiedAgent, describe, is_within_known,
+    PastAgentSession, ResolvedPath, UnidentifiedAgent, describe, is_within_known, kimi_sessions,
     match_for_restore, pi_candidates, resolve_folders, vibe_sessions,
 };
 use crate::terminal::CLIAgent;
@@ -322,4 +322,89 @@ fn kimi_and_dsh_commands_name_their_session() {
         super::session_id_from_command(CLIAgent::DeepSeekHarness, "dsh --profile headless \"hi\""),
         None
     );
+}
+
+fn write_file(path: &Path, contents: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+const KIMI_ID: &str = "session_0b6c1234-ffff-4a4a-8b8b-0123456789ab";
+
+#[test]
+fn kimi_index_supplies_the_directory_and_state_the_details() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home
+        .path()
+        .join("sessions")
+        .join("wd_proj_4045ff9b01fe")
+        .join(KIMI_ID);
+    write_file(
+        &dir.join("state.json"),
+        &format!(
+            r#"{{"id":"{KIMI_ID}","version":2,"cwd":"C:/Users/me/proj","createdAt":1788240000000,"updatedAt":1788240666255,"archived":false,"agents":{{}},"custom":{{}},"title":"Fix the reboot bug","titleKind":"generated","lastPrompt":"and the tests too","isCustomTitle":false}}"#
+        ),
+    );
+    let line =
+        serde_json::json!({"sessionId": KIMI_ID, "sessionDir": dir, "workDir": "C:/Users/me/proj"});
+    write_file(
+        &home.path().join("session_index.jsonl"),
+        &format!("{line}\n"),
+    );
+
+    let sessions = kimi_sessions(home.path());
+
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.agent, CLIAgent::Kimi);
+    assert_eq!(session.session_id, KIMI_ID);
+    assert_eq!(session.cwd, Path::new("C:/Users/me/proj"));
+    assert_eq!(session.title.as_deref(), Some("Fix the reboot bug"));
+    assert_eq!(
+        session.modified,
+        SystemTime::UNIX_EPOCH + Duration::from_millis(1_788_240_666_255)
+    );
+}
+
+#[test]
+fn kimi_sessions_are_found_without_an_index() {
+    let home = tempfile::tempdir().unwrap();
+    write_file(
+        &home
+            .path()
+            .join("sessions")
+            .join("wd_my-project_123dafdbc83f")
+            .join(KIMI_ID)
+            .join("state.json"),
+        &format!(
+            r#"{{"id":"{KIMI_ID}","version":2,"workDir":"/home/me/my project","createdAt":"2026-09-01T09:00:00.000Z","updatedAt":"2026-09-01T10:00:00.000Z","archived":false,"lastPrompt":"Write the release notes"}}"#
+        ),
+    );
+
+    let sessions = kimi_sessions(home.path());
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].cwd, Path::new("/home/me/my project"));
+    assert_eq!(
+        sessions[0].title.as_deref(),
+        Some("Write the release notes")
+    );
+    assert_eq!(
+        sessions[0].modified,
+        SystemTime::UNIX_EPOCH + Duration::from_millis(1_788_256_800_000)
+    );
+}
+
+#[test]
+fn kimi_archived_and_unreadable_sessions_are_skipped() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = home.path().join("sessions").join("wd_proj_4045ff9b01fe");
+    write_file(
+        &workspace.join("session_archived").join("state.json"),
+        r#"{"id":"session_archived","version":2,"cwd":"/p","updatedAt":1,"archived":true}"#,
+    );
+    write_file(&workspace.join("session_broken").join("state.json"), "{");
+    fs::create_dir_all(workspace.join("session_empty")).unwrap();
+
+    assert!(kimi_sessions(home.path()).is_empty());
 }

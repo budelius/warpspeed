@@ -47,6 +47,7 @@ use crate::persistence::ModelEvent;
 use crate::send_telemetry_on_executor;
 use crate::server::telemetry::{PtySpawnMode as TelemetryPtySpawnMode, TelemetryEvent};
 use crate::settings::{DebugSettings, PrivacySettings, SshSettings};
+use crate::terminal::agent_event_token;
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 use crate::terminal::cli_agent_sessions::process_registry;
 use crate::terminal::color::List as ColorList;
@@ -1709,6 +1710,13 @@ fn on_shell_determined<S: TerminalSurface>(
     }
 
     let active_session_id = pty.persistent_session_id().unwrap_or(generated_session_id);
+    if FeatureFlag::HOANotifications.is_enabled()
+        && let Some(token) = agent_event_token::token_for(active_session_id)
+    {
+        manager.view.update(ctx, |surface, ctx| {
+            surface.on_agent_event_token_determined(token, ctx);
+        });
+    }
     manager.persistent_session_id = pty.persistent_session_id();
     manager.session_holder = Some(session_holder::current_holder());
     manager
@@ -1854,6 +1862,10 @@ impl<S> TerminalManager<S> {
                 .value();
 
         let size: SizeInfo = model.lock().block_list().size().to_owned();
+        let mut env_vars = env_vars;
+        if FeatureFlag::HOANotifications.is_enabled() {
+            agent_event_token::add_env_vars(&mut env_vars, persistent_session_id);
+        }
         let options = PtyOptions {
             size,
             window_id: None,

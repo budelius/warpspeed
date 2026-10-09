@@ -83,6 +83,11 @@ where
     #[cfg(feature = "local_tty")]
     fn set_pending_restore_command(&mut self, _command: String, _ctx: &mut ViewContext<Self>) {}
 
+    /// Called with the token the shell's agent hooks address this pane by, once the session the
+    /// pane runs (or adopted) is known.
+    #[cfg(feature = "local_tty")]
+    fn on_agent_event_token_determined(&mut self, _token: String, _ctx: &mut ViewContext<Self>) {}
+
     /// Holds a restore command back because another build's supervisor still holds the session.
     #[cfg(feature = "local_tty")]
     fn withhold_restore_command(

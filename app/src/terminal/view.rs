@@ -2521,6 +2521,9 @@ pub struct TerminalView {
     agent_session_discovered: bool,
     #[cfg(feature = "local_tty")]
     terminal_session_uuid_hex: Option<String>,
+    /// What this pane's shell was given as `WARP_AGENT_EVENT_TOKEN`.
+    #[cfg(feature = "local_tty")]
+    agent_event_token: Option<String>,
 
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
@@ -4458,6 +4461,8 @@ impl TerminalView {
             agent_session_discovered: false,
             #[cfg(feature = "local_tty")]
             terminal_session_uuid_hex: None,
+            #[cfg(feature = "local_tty")]
+            agent_event_token: None,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,
@@ -26860,6 +26865,17 @@ impl TerminalView {
         self.terminal_session_uuid_hex = Some(hex::encode(uuid));
     }
 
+    #[cfg(feature = "local_tty")]
+    #[expect(dead_code, reason = "read once agent events are delivered by token")]
+    pub(crate) fn agent_event_token(&self) -> Option<&str> {
+        self.agent_event_token.as_deref()
+    }
+
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn set_agent_event_token(&mut self, token: String) {
+        self.agent_event_token = Some(token);
+    }
+
     /// Reads the session the agent running in this pane is writing to, so a snapshot can record
     /// what to resume.
     ///
@@ -27018,6 +27034,11 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn set_pending_restore_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
         self.execute_command_or_set_pending(&command, ctx);
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_agent_event_token_determined(&mut self, token: String, _ctx: &mut ViewContext<Self>) {
+        self.set_agent_event_token(token);
     }
 
     #[cfg(feature = "local_tty")]

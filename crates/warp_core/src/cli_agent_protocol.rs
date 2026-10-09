@@ -13,6 +13,13 @@ pub const WARP_CLI_AGENT_PROTOCOL_VERSION_ENV: &str = "WARP_CLI_AGENT_PROTOCOL_V
 /// Environment variable that identifies the hosting Warp client version.
 pub const WARP_CLIENT_VERSION_ENV: &str = "WARP_CLIENT_VERSION";
 
+/// Environment variable carrying the token that addresses this pane for `warp agent-event`.
+pub const WARP_AGENT_EVENT_TOKEN_ENV: &str = "WARP_AGENT_EVENT_TOKEN";
+
+/// Environment variable carrying the absolute path of the Warp binary that accepts
+/// `agent-event`, so hooks never hard-code an install path.
+pub const WARP_AGENT_EVENT_BIN_ENV: &str = "WARP_AGENT_EVENT_BIN";
+
 /// Wire representation of a structured CLI-agent notification.
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]

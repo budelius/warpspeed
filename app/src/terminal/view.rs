@@ -16957,11 +16957,11 @@ impl TerminalView {
                     return;
                 }
 
-                // On Windows, Claude Code uses Alt+V for native image paste.
-                let is_claude = CLIAgentSessionsModel::as_ref(ctx)
+                // On Windows, Claude Code and Kimi Code read a clipboard image on Alt+V.
+                let uses_alt_v = CLIAgentSessionsModel::as_ref(ctx)
                     .session(self.view_id)
-                    .is_some_and(|s| s.agent == CLIAgent::Claude);
-                if is_claude {
+                    .is_some_and(|s| s.agent.uses_alt_v_image_paste());
+                if uses_alt_v {
                     self.write_user_bytes_to_pty(vec![escape_sequences::C0::ESC, b'v'], ctx);
                     return;
                 }

@@ -757,3 +757,31 @@ fn test_kimi_and_deepseek_harness_identity() {
         crate::server::telemetry::CLIAgentType::DeepSeekHarness
     ));
 }
+
+#[test]
+fn test_kimi_supports_bash_mode_and_deepseek_harness_does_not() {
+    assert!(CLIAgent::Kimi.supports_bash_mode());
+    assert!(!CLIAgent::DeepSeekHarness.supports_bash_mode());
+}
+
+#[test]
+fn test_alt_v_image_paste_agents() {
+    assert!(CLIAgent::Claude.uses_alt_v_image_paste());
+    assert!(CLIAgent::Kimi.uses_alt_v_image_paste());
+    assert!(!CLIAgent::DeepSeekHarness.uses_alt_v_image_paste());
+    assert!(!CLIAgent::Codex.uses_alt_v_image_paste());
+}
+
+#[test]
+fn test_history_recovery_agents() {
+    for agent in [
+        CLIAgent::Claude,
+        CLIAgent::Codex,
+        CLIAgent::Pi,
+        CLIAgent::Kimi,
+        CLIAgent::DeepSeekHarness,
+    ] {
+        assert!(agent.supports_history_recovery(), "{agent:?}");
+    }
+    assert!(!CLIAgent::Gemini.supports_history_recovery());
+}

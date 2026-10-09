@@ -285,3 +285,36 @@ fn oh_my_pi_end_to_end_parsing_and_handling() {
     assert_eq!(handled_stop.agent, CLIAgent::OhMyPi);
     assert_eq!(handled_stop.event, CLIAgentEventType::Stop);
 }
+
+#[test]
+fn kimi_and_deepseek_harness_are_supported() {
+    assert!(is_agent_supported(&CLIAgent::Kimi));
+    assert!(is_agent_supported(&CLIAgent::DeepSeekHarness));
+    assert!(create_handler(&CLIAgent::Kimi).is_some());
+    assert!(create_handler(&CLIAgent::DeepSeekHarness).is_some());
+}
+
+#[test]
+fn deepseek_harness_end_to_end_parsing_and_handling() {
+    let mut handler = create_handler(&CLIAgent::DeepSeekHarness).expect("should create handler");
+    let start = handler
+        .try_parse(
+            Some(CLI_AGENT_NOTIFICATION_SENTINEL),
+            r#"{"v":1,"agent":"dsh","event":"session_start","session_id":"0b6c1234-ffff-4a4a-8b8b-0123456789ab"}"#,
+            false,
+        )
+        .expect("session_start parses");
+    assert_eq!(start.agent, CLIAgent::DeepSeekHarness);
+    assert!(handler.handle_event(start).is_none());
+
+    let stop = handler
+        .try_parse(
+            Some(CLI_AGENT_NOTIFICATION_SENTINEL),
+            r#"{"v":1,"agent":"dsh","event":"stop"}"#,
+            false,
+        )
+        .expect("stop parses");
+    let handled = handler.handle_event(stop).expect("stop is forwarded");
+    assert_eq!(handled.agent, CLIAgent::DeepSeekHarness);
+    assert_eq!(handled.event, CLIAgentEventType::Stop);
+}

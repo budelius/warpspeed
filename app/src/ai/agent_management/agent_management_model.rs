@@ -159,7 +159,24 @@ impl AgentNotificationsModel {
                         .unwrap_or_else(|| format!("{} completed", agent.display_name()));
                     let message = match agent {
                         CLIAgent::Codex => "Notification from Codex",
-                        _ => "Task completed.",
+                        CLIAgent::Kimi => "Notification from Kimi Code",
+                        CLIAgent::DeepSeekHarness => "Notification from DeepSeek Harness",
+                        CLIAgent::Claude
+                        | CLIAgent::Pi
+                        | CLIAgent::Gemini
+                        | CLIAgent::Amp
+                        | CLIAgent::Droid
+                        | CLIAgent::OpenCode
+                        | CLIAgent::Copilot
+                        | CLIAgent::OhMyPi
+                        | CLIAgent::Auggie
+                        | CLIAgent::CursorCli
+                        | CLIAgent::Goose
+                        | CLIAgent::Hermes
+                        | CLIAgent::Vibe
+                        | CLIAgent::Antigravity
+                        | CLIAgent::WarpTui
+                        | CLIAgent::Unknown => "Task completed.",
                     };
                     let metadata = TerminalViewMetadata::lookup(*terminal_view_id, ctx);
                     self.add_notification(

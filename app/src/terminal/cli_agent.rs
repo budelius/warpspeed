@@ -352,7 +352,30 @@ impl CLIAgent {
     pub fn supports_bash_mode(&self) -> bool {
         matches!(
             self,
-            CLIAgent::Claude | CLIAgent::Codex | CLIAgent::OpenCode | CLIAgent::OhMyPi
+            CLIAgent::Claude
+                | CLIAgent::Codex
+                | CLIAgent::OpenCode
+                | CLIAgent::OhMyPi
+                | CLIAgent::Kimi
+        )
+    }
+
+    /// Whether this CLI agent reads a clipboard image on Alt+V, which Warp sends on Windows when
+    /// an image is pasted into the agent.
+    pub(crate) fn uses_alt_v_image_paste(&self) -> bool {
+        matches!(self, CLIAgent::Claude | CLIAgent::Kimi)
+    }
+
+    /// Whether a session id this agent did not report can be recovered from its session history
+    /// on disk.
+    pub(crate) fn supports_history_recovery(&self) -> bool {
+        matches!(
+            self,
+            CLIAgent::Claude
+                | CLIAgent::Codex
+                | CLIAgent::Pi
+                | CLIAgent::Kimi
+                | CLIAgent::DeepSeekHarness
         )
     }
 

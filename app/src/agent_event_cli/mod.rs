@@ -11,6 +11,7 @@ use std::io::Read;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use instant::Instant;
 use warp_cli::agent_event::{AgentEventArgs, AgentEventFormat};
 use warp_core::cli_agent_protocol::{CLIAgentNotification, WARP_AGENT_EVENT_TOKEN_ENV};
 
@@ -19,7 +20,8 @@ use crate::remote_control::client::Instance;
 use crate::remote_control::protocol::{MAX_CLI_AGENT_EVENT_BYTES, Request, Response};
 use crate::terminal::agent_session_paths::kimi_home;
 
-const DEADLINE: Duration = Duration::from_secs(2);
+/// Leaves room for process startup inside the 2 s a hook may take.
+const DEADLINE: Duration = Duration::from_millis(1500);
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 /// How much of each free-text field an oversized notification keeps.
 const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -101,20 +103,48 @@ fn truncate_at_char_boundary(text: &mut String, max_bytes: usize) {
     }
 }
 
-/// Offers the notification to each running instance until one owns the token.
+/// Offers the notification to every running instance at once, so one that never answers cannot
+/// keep it from the instance that owns the token.
 fn deliver(token: &str, notification: &str) {
-    for marker in address::read_markers() {
-        let Ok(instance) = Instance::connect(marker) else {
-            continue;
-        };
+    let attempts = address::read_markers().into_iter().map(|marker| {
         let request = Request::CliAgentEvent {
             token: token.to_owned().into(),
             notification: notification.to_owned(),
         };
-        if matches!(instance.call_within(request, DEADLINE), Ok(Response::Done)) {
-            return;
+        move || {
+            Instance::connect(marker).is_ok_and(|instance| {
+                matches!(instance.call_within(request, DEADLINE), Ok(Response::Done))
+            })
+        }
+    });
+    first_success(attempts, DEADLINE);
+}
+
+/// Runs each attempt on its own thread and returns whether one succeeded, as soon as one does,
+/// all have failed, or `deadline` has passed.
+fn first_success<F>(attempts: impl IntoIterator<Item = F>, deadline: Duration) -> bool
+where
+    F: FnOnce() -> bool + Send + 'static,
+{
+    let end = Instant::now() + deadline;
+    let (results, outcomes) = mpsc::channel();
+    let mut pending = 0;
+    for attempt in attempts {
+        let results = results.clone();
+        std::thread::spawn(move || {
+            let _ = results.send(attempt());
+        });
+        pending += 1;
+    }
+    while pending > 0 {
+        let remaining = end.saturating_duration_since(Instant::now());
+        match outcomes.recv_timeout(remaining) {
+            Ok(true) => return true,
+            Ok(false) => pending -= 1,
+            Err(_) => return false,
         }
     }
+    false
 }
 
 #[cfg(test)]

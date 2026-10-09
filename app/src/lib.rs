@@ -793,6 +793,14 @@ pub fn run() -> Result<()> {
         warp_cli::local_control::run_and_exit(args);
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(parsed) = warp_cli::agent_event::from_argv(std::env::args_os()) {
+        if let Ok(args) = parsed {
+            agent_event_cli::run(&args);
+        }
+        return Ok(());
+    }
+
     // Parse command-line arguments.
     let args = warp_cli::Args::from_env();
 

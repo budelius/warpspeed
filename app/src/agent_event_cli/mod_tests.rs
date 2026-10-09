@@ -1,6 +1,10 @@
+use std::thread::sleep;
+use std::time::Duration;
+
+use instant::Instant;
 use warp_cli::agent_event::AgentEventFormat;
 
-use super::notification_json;
+use super::{first_success, notification_json};
 use crate::remote_control::protocol::MAX_CLI_AGENT_EVENT_BYTES;
 use crate::terminal::CLIAgent;
 use crate::terminal::cli_agent_sessions::event::{
@@ -92,4 +96,58 @@ fn a_notification_that_cannot_be_cut_to_fit_sends_nothing() {
     })
     .to_string();
     assert!(notification_json(AgentEventFormat::Protocol, &input, None).is_none());
+}
+
+fn attempt(delay_ms: u64, succeeds: bool) -> Box<dyn FnOnce() -> bool + Send> {
+    Box::new(move || {
+        sleep(Duration::from_millis(delay_ms));
+        succeeds
+    })
+}
+
+#[test]
+fn delivery_does_not_wait_for_an_instance_that_never_answers() {
+    let started = Instant::now();
+    let delivered = first_success(
+        [attempt(10_000, false), attempt(50, true)],
+        Duration::from_secs(5),
+    );
+    assert!(delivered);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn delivery_gives_up_at_the_deadline() {
+    let started = Instant::now();
+    assert!(!first_success(
+        [attempt(10_000, true)],
+        Duration::from_millis(200)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn delivery_ends_once_every_instance_has_refused() {
+    let started = Instant::now();
+    assert!(!first_success(
+        [attempt(10, false), attempt(20, false)],
+        Duration::from_secs(5)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!first_success(
+        Vec::<Box<dyn FnOnce() -> bool + Send>>::new(),
+        Duration::from_secs(5)
+    ));
 }

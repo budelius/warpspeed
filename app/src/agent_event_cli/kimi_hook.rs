@@ -41,8 +41,8 @@ pub(super) fn to_notification(
     };
     let notification = match payload["hook_event_name"].as_str()? {
         "SessionStart" => {
-            // Only session-level hooks carry the session's directory; the others carry the
-            // directory Kimi itself runs in.
+            // Only `SessionStart` and `SessionEnd` carry the session's directory; agent-level
+            // hooks send an empty `cwd`.
             let cwd = text(payload, "cwd");
             let transcript_path = kimi_home
                 .zip(text(payload, "session_id"))

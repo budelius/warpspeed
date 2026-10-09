@@ -3452,3 +3452,42 @@ fn agent_event_takes_one_of_two_formats() {
     assert!(Args::try_parse_from(["warpspeed", "agent-event"]).is_err());
     assert!(Args::try_parse_from(["warpspeed", "agent-event", "--format", "osc"]).is_err());
 }
+
+#[test]
+fn agent_event_argv_is_parsed_apart_from_the_rest_of_the_cli() {
+    let parsed = agent_event::from_argv([
+        "warpspeed",
+        "agent-event",
+        "--format",
+        "protocol",
+        "--hooks-version",
+        "2.0.0",
+    ])
+    .expect("it is agent-event")
+    .expect("it parses");
+    assert_eq!(parsed.format, agent_event::AgentEventFormat::Protocol);
+    assert_eq!(parsed.hooks_version.as_deref(), Some("2.0.0"));
+
+    for bad in [
+        vec!["warpspeed", "agent-event", "--format", "osc"],
+        vec![
+            "warpspeed",
+            "agent-event",
+            "--format",
+            "kimi-hook",
+            "--from-the-future",
+        ],
+        vec!["warpspeed", "agent-event", "--format"],
+        vec!["warpspeed", "agent-event"],
+        vec!["warpspeed", "agent-event", "--help"],
+    ] {
+        assert!(
+            matches!(agent_event::from_argv(bad.clone()), Some(Err(_))),
+            "{bad:?}"
+        );
+    }
+
+    assert!(agent_event::from_argv(["warpspeed"]).is_none());
+    assert!(agent_event::from_argv(["warpspeed", "sessions", "panes"]).is_none());
+    assert!(agent_event::from_argv(["warpspeed", "--format", "agent-event"]).is_none());
+}

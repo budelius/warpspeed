@@ -3,7 +3,9 @@
 //!
 //! Only the argument shapes live here; the app crate maps and delivers the event.
 
-use clap::{Args, ValueEnum};
+use std::ffi::OsString;
+
+use clap::{Args, FromArgMatches, ValueEnum};
 
 /// `agent-event --format <FORMAT>`, reading one JSON object from standard input.
 #[derive(Debug, Clone, Args)]
@@ -23,4 +25,22 @@ pub enum AgentEventFormat {
     KimiHook,
     /// A Warp CLI agent protocol v1 notification.
     Protocol,
+}
+
+/// `agent-event`'s arguments when `argv` invokes it, parsed apart from the rest of the CLI so a
+/// parse error never reaches clap's exit: Kimi Code reads exit code 2 as the hook blocking the
+/// agent. `None` when `argv` is some other command.
+pub fn from_argv(
+    argv: impl IntoIterator<Item = impl Into<OsString>>,
+) -> Option<Result<AgentEventArgs, clap::Error>> {
+    let mut argv = argv.into_iter().map(Into::into).skip(1).peekable();
+    if argv.peek().is_none_or(|command| command != "agent-event") {
+        return None;
+    }
+    let command = AgentEventArgs::augment_args(clap::Command::new("agent-event"));
+    Some(
+        command
+            .try_get_matches_from(argv)
+            .and_then(|matches| AgentEventArgs::from_arg_matches(&matches)),
+    )
 }

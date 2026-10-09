@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io::{self, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{fs, thread};
 
@@ -220,12 +220,7 @@ pub fn stored_stozn_identity() -> Option<StoznIdentity> {
 }
 
 pub fn logout_stozn() -> Result<()> {
-    let path = stozn_auth_path();
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
-    }
+    remove_auth_file(&stozn_auth_path())
 }
 
 pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
@@ -1173,15 +1168,19 @@ fn wait_until_resumed_with(
     let started = Instant::now();
     let mut cursor: Option<String> = None;
     loop {
-        let access_token = token()?;
-        let (idle, last_error) = match fetch_event_page(
-            client,
-            profile,
-            job_id,
-            &access_token,
-            cursor.as_deref(),
-            15_000,
-        ) {
+        let fetched = match token() {
+            Ok(access_token) => fetch_event_page(
+                client,
+                profile,
+                job_id,
+                &access_token,
+                cursor.as_deref(),
+                15_000,
+            ),
+            Err(error) if error.downcast_ref::<RefreshRejected>().is_some() => return Err(error),
+            Err(error) => Err(error),
+        };
+        let (idle, last_error) = match fetched {
             Ok((page, history_gap)) => {
                 if page
                     .items
@@ -1450,10 +1449,8 @@ fn stozn_auth_path() -> PathBuf {
     warp_core::paths::state_dir().join("stozn-auth.bin")
 }
 
-fn load_stozn_auth() -> Result<StoredStoznAuth> {
-    let path = stozn_auth_path();
-    let protected =
-        fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+fn load_stozn_auth_at(path: &Path) -> Result<StoredStoznAuth> {
+    let protected = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let auth: StoredStoznAuth = serde_json::from_slice(&unprotect_auth_bytes(protected)?)
         .context("invalid WarpSpeed STOZN authentication state")?;
     if auth.format_version != STOZN_AUTH_FORMAT
@@ -1466,47 +1463,79 @@ fn load_stozn_auth() -> Result<StoredStoznAuth> {
     Ok(auth)
 }
 
-/// Returns a current access token, refreshing and re-saving the stored sign-in when needed.
+fn load_stozn_auth() -> Result<StoredStoznAuth> {
+    load_stozn_auth_at(&stozn_auth_path())
+}
+
 fn stored_access_token() -> Result<String> {
-    let auth = load_stozn_auth()?;
+    access_token_at(
+        &stozn_auth_path(),
+        profile(ManagedEnvironment::Staging).zitadel,
+    )
+}
+
+/// Returns a current access token, refreshing and re-saving the stored sign-in when needed.
+fn access_token_at(path: &Path, zitadel: &ZitadelProfile) -> Result<String> {
+    let auth = load_stozn_auth_at(path)?;
     let expires_at = DateTime::parse_from_rfc3339(&auth.access_expires_at)
         .context("invalid WarpSpeed STOZN authentication expiry")?
         .with_timezone(&Utc);
     if !zitadel_auth::needs_refresh(expires_at, Utc::now()) {
         return Ok(auth.access_token);
     }
-    let zitadel = profile(ManagedEnvironment::Staging).zitadel;
     match zitadel_auth::refresh(zitadel, &auth.refresh_token) {
         Ok(tokens) => {
-            let user = zitadel_auth::identity_from_access_token(
+            let identity = zitadel_auth::identity_from_access_token(
                 &tokens.access_token,
                 zitadel.project_id,
                 zitadel.issuer_host(),
+            );
+            let user = identity
+                .as_ref()
+                .map_or_else(|_| auth.user.clone(), StoznIdentity::clone);
+            save_stozn_auth_at(
+                path,
+                &StoredStoznAuth {
+                    access_token: tokens.access_token.clone(),
+                    access_expires_at: tokens.access_expires_at.to_rfc3339(),
+                    refresh_token: tokens.refresh_token,
+                    user,
+                    ..auth
+                },
             )?;
-            save_stozn_auth(&StoredStoznAuth {
-                access_token: tokens.access_token.clone(),
-                access_expires_at: tokens.access_expires_at.to_rfc3339(),
-                refresh_token: tokens.refresh_token,
-                user,
-                ..auth
-            })?;
+            identity?;
             Ok(tokens.access_token)
         }
         Err(error) if error.downcast_ref::<RefreshRejected>().is_some() => {
             // Another WarpSpeed process may have rotated the refresh token first.
-            let latest = load_stozn_auth()?;
-            if latest.refresh_token != auth.refresh_token {
-                return stored_access_token();
+            match load_stozn_auth_at(path) {
+                Ok(latest) if latest.refresh_token != auth.refresh_token => {
+                    access_token_at(path, zitadel)
+                }
+                Ok(_) => {
+                    remove_auth_file(path)?;
+                    Err(error)
+                }
+                Err(_) => Err(error),
             }
-            logout_stozn()?;
-            Err(error)
         }
         Err(error) => Err(error),
     }
 }
 
+fn remove_auth_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
 fn save_stozn_auth(auth: &StoredStoznAuth) -> Result<()> {
-    let path = stozn_auth_path();
+    save_stozn_auth_at(&stozn_auth_path(), auth)
+}
+
+fn save_stozn_auth_at(path: &Path, auth: &StoredStoznAuth) -> Result<()> {
     let parent = path.parent().context("STOZN auth path has no parent")?;
     fs::create_dir_all(parent)?;
     let temp = path.with_extension("bin.tmp");
@@ -1518,9 +1547,9 @@ fn save_stozn_auth(auth: &StoredStoznAuth) -> Result<()> {
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
     }
     if cfg!(windows) && path.exists() {
-        fs::remove_file(&path)?;
+        fs::remove_file(path)?;
     }
-    fs::rename(&temp, &path)?;
+    fs::rename(&temp, path)?;
     Ok(())
 }
 
@@ -1765,7 +1794,7 @@ fn save_bookmarks(bookmarks: &[ManagedSessionBookmark]) -> Result<()> {
     if cfg!(windows) && path.exists() {
         fs::remove_file(&path)?;
     }
-    fs::rename(&temp, &path)?;
+    fs::rename(&temp, path)?;
     Ok(())
 }
 

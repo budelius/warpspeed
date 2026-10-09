@@ -11,6 +11,14 @@ use super::*;
 fn token_server(
     responses: Vec<(&'static str, serde_json::Value)>,
 ) -> (&'static str, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    token_server_with_hook(responses, || {})
+}
+
+/// Like `token_server`, running `before_response` after each request is read.
+fn token_server_with_hook(
+    responses: Vec<(&'static str, serde_json::Value)>,
+    before_response: impl Fn() + Send + 'static,
+) -> (&'static str, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -26,6 +34,7 @@ fn token_server(
                 served.push(text);
                 served.len() - 1
             };
+            before_response();
             let (status, body) = &responses[index.min(responses.len() - 1)];
             let body = body
                 .to_string()
@@ -205,4 +214,159 @@ fn needs_refresh_inside_the_sixty_second_window() {
     let now = chrono::Utc::now();
     assert!(needs_refresh(now + chrono::Duration::seconds(59), now));
     assert!(!needs_refresh(now + chrono::Duration::seconds(61), now));
+}
+
+#[test]
+fn refresh_server_errors_are_not_a_rejected_sign_in() {
+    for status in ["503 Service Unavailable", "429 Too Many Requests"] {
+        let (issuer, _) = token_server(vec![(
+            status,
+            json!({ "error": "temporarily_unavailable" }),
+        )]);
+        let error = refresh(&profile(issuer), "ref-1").unwrap_err();
+        assert!(
+            error.downcast_ref::<RefreshRejected>().is_none(),
+            "{status}"
+        );
+    }
+    let (issuer, _) = token_server(vec![(
+        "400 Bad Request",
+        json!({ "error": "invalid_request" }),
+    )]);
+    let error = refresh(&profile(issuer), "ref-1").unwrap_err();
+    assert!(error.downcast_ref::<RefreshRejected>().is_none());
+}
+
+#[test]
+fn refresh_invalid_grant_is_a_rejected_sign_in() {
+    for status in ["400 Bad Request", "401 Unauthorized"] {
+        let (issuer, _) = token_server(vec![(status, json!({ "error": "invalid_grant" }))]);
+        let error = refresh(&profile(issuer), "ref-1").unwrap_err();
+        assert!(
+            error.downcast_ref::<RefreshRejected>().is_some(),
+            "{status}"
+        );
+    }
+}
+
+mod stored_sign_in {
+    use std::path::Path;
+
+    use super::*;
+    use crate::{
+        STOZN_AUTH_FORMAT, StoredStoznAuth, access_token_at, load_stozn_auth_at, save_stozn_auth_at,
+    };
+
+    fn temp_auth_path() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("stozn-auth-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("stozn-auth.bin")
+    }
+
+    fn save(path: &Path, access_token: String, expires_in: i64, refresh_token: &str) {
+        save_stozn_auth_at(
+            path,
+            &StoredStoznAuth {
+                format_version: STOZN_AUTH_FORMAT,
+                environment_alias: "staging".to_owned(),
+                access_token,
+                access_expires_at: (Utc::now() + chrono::Duration::seconds(expires_in))
+                    .to_rfc3339(),
+                refresh_token: refresh_token.to_owned(),
+                user: StoznIdentity {
+                    subject: "2847".to_owned(),
+                    role: "user".to_owned(),
+                    display_name: None,
+                },
+            },
+        )
+        .unwrap();
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn fresh_token_is_returned_without_contacting_the_issuer() {
+        let path = temp_auth_path();
+        save(&path, "stored-access".to_owned(), 3600, "ref-1");
+        let token = access_token_at(&path, &profile("http://127.0.0.1:1")).unwrap();
+        assert_eq!(token, "stored-access");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn expiring_token_is_refreshed_and_the_rotated_refresh_token_is_saved() {
+        let path = temp_auth_path();
+        save(&path, "old-access".to_owned(), 10, "ref-1");
+        let new_access = access_token(&["agent-admin"], 3600);
+        let (issuer, _) = token_server(vec![(
+            "200 OK",
+            json!({ "access_token": new_access, "refresh_token": "ref-2", "expires_in": 3600 }),
+        )]);
+        let token = access_token_at(&path, &profile(issuer)).unwrap();
+        assert_eq!(token, new_access);
+        let stored = load_stozn_auth_at(&path).unwrap();
+        assert_eq!(stored.refresh_token, "ref-2");
+        assert_eq!(stored.access_token, new_access);
+        assert_eq!(stored.user.role, "admin");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotated_refresh_token_is_saved_even_when_the_role_is_missing() {
+        let path = temp_auth_path();
+        save(&path, "old-access".to_owned(), 10, "ref-1");
+        let new_access = access_token(&[], 3600);
+        let (issuer, _) = token_server(vec![(
+            "200 OK",
+            json!({ "access_token": new_access, "refresh_token": "ref-2", "expires_in": 3600 }),
+        )]);
+        assert!(access_token_at(&path, &profile(issuer)).is_err());
+        let stored = load_stozn_auth_at(&path).unwrap();
+        assert_eq!(stored.refresh_token, "ref-2");
+        assert_eq!(stored.user.role, "user");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rejected_refresh_with_an_unchanged_token_signs_out() {
+        let path = temp_auth_path();
+        save(&path, "old-access".to_owned(), 10, "ref-1");
+        let (issuer, _) = token_server(vec![(
+            "400 Bad Request",
+            json!({ "error": "invalid_grant" }),
+        )]);
+        let error = access_token_at(&path, &profile(issuer)).unwrap_err();
+        assert!(error.downcast_ref::<RefreshRejected>().is_some());
+        assert!(!path.exists());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rejected_refresh_after_another_process_rotated_uses_the_newer_sign_in() {
+        let path = temp_auth_path();
+        save(&path, "old-access".to_owned(), 10, "ref-1");
+        let rotated_path = path.clone();
+        let (issuer, _) = token_server_with_hook(
+            vec![("400 Bad Request", json!({ "error": "invalid_grant" }))],
+            move || save(&rotated_path, "rotated-access".to_owned(), 3600, "ref-2"),
+        );
+        let token = access_token_at(&path, &profile(issuer)).unwrap();
+        assert_eq!(token, "rotated-access");
+        assert!(path.exists());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn server_error_during_refresh_keeps_the_stored_sign_in() {
+        let path = temp_auth_path();
+        save(&path, "old-access".to_owned(), 10, "ref-1");
+        let (issuer, _) = token_server(vec![("503 Service Unavailable", json!({}))]);
+        let error = access_token_at(&path, &profile(issuer)).unwrap_err();
+        assert!(error.downcast_ref::<RefreshRejected>().is_none());
+        assert_eq!(load_stozn_auth_at(&path).unwrap().refresh_token, "ref-1");
+        cleanup(&path);
+    }
 }

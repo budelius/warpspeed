@@ -160,12 +160,15 @@ pub(crate) fn refresh(profile: &ZitadelProfile, refresh_token: &str) -> Result<T
         ])
         .send()
         .context("could not reach the STOZN sign-in service")?;
-    if !response.status().is_success() {
-        let error = response
-            .json::<TokenError>()
-            .map(|error| error.error)
-            .unwrap_or_else(|_| "unknown".to_owned());
-        bail!(RefreshRejected(error));
+    let status = response.status();
+    if !status.is_success() {
+        let error = response.json::<TokenError>().ok();
+        if matches!(status.as_u16(), 400 | 401)
+            && let Some(error) = error.filter(|error| error.error == "invalid_grant")
+        {
+            bail!(RefreshRejected(error.error));
+        }
+        bail!("STOZN sign-in service could not refresh the sign-in ({status})");
     }
     token_set(
         response.json().context("invalid STOZN token response")?,

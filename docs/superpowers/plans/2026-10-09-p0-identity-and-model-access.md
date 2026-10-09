@@ -1643,3 +1643,16 @@ git push gitea feat/p0-zitadel-login && git push gitlab feat/p0-zitadel-login
 - [ ] **Step 5: Refresh** — force expiry by editing nothing: wait for the access token lifetime, or temporarily set the Zitadel app's access token lifetime to 5 minutes in the console, then run `agent-ctrl list` again; it succeeds and `stozn-auth.bin` changes on disk.
 - [ ] **Step 6: Sign out** from settings; `agent-ctrl list` fails with the "not signed in" message.
 - [ ] **Step 7: Merge** `feat/p0-zitadel-login` into `dev` via PR on git-dev.obachan.dev (stozn/warpspeed), and the obachan and passiv PRs into their base branches. Update the `self-hosted-agent-platform` memory with P0 status and the provisioned ids.
+
+## Provisioned ids (staging)
+
+Provisioned 2026-10-09 with `obachan auth provision-agent-platform-sso --env staging` (rerun was idempotent).
+
+- Issuer: `https://id-dev.obachan.dev`
+- Project `agent-platform`: `394361582064240430`
+- App `warpspeed`: app id `394361583389640494`, client id `394361583406417710`
+- Endpoints (from discovery): `/oauth/v2/device_authorization`, `/oauth/v2/token`, `/oauth/v2/keys`, `/oidc/v1/userinfo`; verification page `/device?user_code=…`
+- OpenBao: `obachan/staging/warpspeed/runtime` (`oidc_project_id`, `oidc_app_id`, `oidc_client_id`)
+- `agent-admin` granted to staging user `budelius` (id `381309740384256019`)
+
+Task 6 uses `STAGING_ZITADEL_CLIENT_ID = "394361583406417710"` and `STAGING_ZITADEL_PROJECT_ID = "394361582064240430"`; Task 5 Step 6 uses `AGENT_PLATFORM_PROJECT_ID: "394361582064240430"`.

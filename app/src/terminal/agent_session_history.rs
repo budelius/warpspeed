@@ -474,6 +474,18 @@ pub(crate) fn session_id_from_command(agent: CLIAgent, command: &str) -> Option<
             .windows(2)
             .find(|pair| pair[0] == "resume" && !pair[1].starts_with('-'))
             .map(|pair| pair[1].to_owned()),
+        CLIAgent::Kimi => ["-S", "--session", "-r", "--resume"]
+            .into_iter()
+            .find_map(argument_after)
+            .or_else(|| {
+                words.iter().find_map(|word| {
+                    word.strip_prefix("--session=")
+                        .or_else(|| word.strip_prefix("--resume="))
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                })
+            }),
+        CLIAgent::DeepSeekHarness => argument_after("--session-id"),
         CLIAgent::Gemini
         | CLIAgent::Amp
         | CLIAgent::Droid
@@ -485,8 +497,6 @@ pub(crate) fn session_id_from_command(agent: CLIAgent, command: &str) -> Option<
         | CLIAgent::Goose
         | CLIAgent::Hermes
         | CLIAgent::Antigravity
-        | CLIAgent::Kimi
-        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }

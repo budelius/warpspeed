@@ -63,8 +63,8 @@ fn create_handler(agent: &CLIAgent) -> Option<Box<dyn CLIAgentSessionHandler>> {
         // hooks or future integrations that emit the same events. We don't ship
         // install flows for these agents here — we just listen.
         // WarpTui emits OSC 777 events directly (no external plugin needed).
-        // Kimi Code (hooks) and DeepSeek Harness (Cordis plugin) report through
-        // `warp agent-event`, which re-emits the same structured events.
+        // DeepSeek Harness (Cordis plugin) reports through `warp agent-event`, which
+        // re-emits the same structured events.
         CLIAgent::Claude
         | CLIAgent::OpenCode
         | CLIAgent::Gemini
@@ -72,10 +72,10 @@ fn create_handler(agent: &CLIAgent) -> Option<Box<dyn CLIAgentSessionHandler>> {
         | CLIAgent::Droid
         | CLIAgent::Pi
         | CLIAgent::OhMyPi
-        | CLIAgent::Kimi
         | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui => Some(Box::new(DefaultSessionListener)),
         CLIAgent::Codex => Some(Box::new(CodexSessionHandler)),
+        CLIAgent::Kimi => Some(Box::new(KimiSessionHandler)),
         CLIAgent::Hermes
         | CLIAgent::Amp
         | CLIAgent::Copilot
@@ -156,6 +156,91 @@ impl CLIAgentSessionHandler for CodexSessionHandler {
         }
         // OSC 9 notifications have no title. Skip OSC 9 once the rich plugin is
         // active, otherwise we'd process both OSC 777 and OSC 9 notifications.
+        if title.is_some() || plugin_already_active {
+            return None;
+        }
+        Self::parse_osc9_text(body)
+    }
+
+    fn handle_event(&mut self, event: CLIAgentEvent) -> Option<CLIAgentEvent> {
+        Some(event)
+    }
+}
+
+/// Kimi Code reports through its hooks, which `warp agent-event` delivers as structured events.
+/// Its TUI also sends OSC 9 on turn end, approval and question, with fixed titles, which stands
+/// in for the hooks until they report.
+struct KimiSessionHandler;
+
+impl KimiSessionHandler {
+    const TASK_COMPLETE: &'static str = "Kimi Code task complete";
+    const APPROVAL_REQUIRED: &'static str = "Kimi Code approval required";
+    const NEEDS_ANSWER: &'static str = "Kimi Code needs your answer";
+
+    /// Parses a Kimi OSC 9 body (`<title>: <detail>`). Returns `None` only for empty bodies.
+    fn parse_osc9_text(body: &str) -> Option<CLIAgentEvent> {
+        let body = body.trim();
+        if body.is_empty() {
+            return None;
+        }
+        let (title, detail) = body
+            .split_once(": ")
+            .map(|(title, detail)| (title, Some(detail.trim().to_owned())))
+            .unwrap_or((body, None));
+        let (event, payload) = match title {
+            Self::APPROVAL_REQUIRED => (
+                CLIAgentEventType::PermissionRequest,
+                CLIAgentEventPayload {
+                    summary: detail.clone(),
+                    tool_name: detail,
+                    ..Default::default()
+                },
+            ),
+            Self::NEEDS_ANSWER => (
+                CLIAgentEventType::QuestionAsked,
+                CLIAgentEventPayload {
+                    summary: detail,
+                    ..Default::default()
+                },
+            ),
+            Self::TASK_COMPLETE => (
+                CLIAgentEventType::Stop,
+                CLIAgentEventPayload {
+                    query: detail.or_else(|| Some(body.to_owned())),
+                    ..Default::default()
+                },
+            ),
+            _ => (
+                CLIAgentEventType::Stop,
+                CLIAgentEventPayload {
+                    query: Some(body.to_owned()),
+                    ..Default::default()
+                },
+            ),
+        };
+        Some(CLIAgentEvent {
+            v: 1,
+            agent: CLIAgent::Kimi,
+            event,
+            session_id: None,
+            cwd: None,
+            project: None,
+            payload,
+            source: CLIAgentEventSource::KimiOsc9Fallback,
+        })
+    }
+}
+
+impl CLIAgentSessionHandler for KimiSessionHandler {
+    fn try_parse(
+        &mut self,
+        title: Option<&str>,
+        body: &str,
+        plugin_already_active: bool,
+    ) -> Option<CLIAgentEvent> {
+        if let Some(event) = parse_event(title, body) {
+            return (event.agent == CLIAgent::Kimi).then_some(event);
+        }
         if title.is_some() || plugin_already_active {
             return None;
         }

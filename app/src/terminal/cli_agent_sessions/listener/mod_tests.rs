@@ -318,3 +318,81 @@ fn deepseek_harness_end_to_end_parsing_and_handling() {
     assert_eq!(handled.agent, CLIAgent::DeepSeekHarness);
     assert_eq!(handled.event, CLIAgentEventType::Stop);
 }
+
+#[test]
+fn kimi_osc9_titles_map_to_their_events() {
+    let done = KimiSessionHandler::parse_osc9_text("Kimi Code task complete: Fix the reboot bug")
+        .expect("task complete parses");
+    assert_eq!(done.agent, CLIAgent::Kimi);
+    assert_eq!(done.event, CLIAgentEventType::Stop);
+    assert_eq!(done.payload.query.as_deref(), Some("Fix the reboot bug"));
+    assert_eq!(done.source, CLIAgentEventSource::KimiOsc9Fallback);
+
+    let approval = KimiSessionHandler::parse_osc9_text("Kimi Code approval required: Shell")
+        .expect("approval parses");
+    assert_eq!(approval.event, CLIAgentEventType::PermissionRequest);
+    assert_eq!(approval.payload.tool_name.as_deref(), Some("Shell"));
+    assert_eq!(approval.payload.summary.as_deref(), Some("Shell"));
+
+    let question =
+        KimiSessionHandler::parse_osc9_text("Kimi Code needs your answer: Which branch?")
+            .expect("question parses");
+    assert_eq!(question.event, CLIAgentEventType::QuestionAsked);
+    assert_eq!(question.payload.summary.as_deref(), Some("Which branch?"));
+
+    let untitled = KimiSessionHandler::parse_osc9_text("Kimi Code task complete")
+        .expect("a title alone parses");
+    assert_eq!(untitled.event, CLIAgentEventType::Stop);
+    assert_eq!(
+        untitled.payload.query.as_deref(),
+        Some("Kimi Code task complete")
+    );
+    assert!(KimiSessionHandler::parse_osc9_text("   ").is_none());
+}
+
+#[test]
+fn kimi_handler_takes_hook_events_and_forwards_session_start() {
+    let mut handler = create_handler(&CLIAgent::Kimi).expect("should create handler");
+    let start = handler
+        .try_parse(
+            Some(CLI_AGENT_NOTIFICATION_SENTINEL),
+            r#"{"v":1,"agent":"kimi","event":"session_start","session_id":"session_0b6c1234-ffff-4a4a-8b8b-0123456789ab","plugin_version":"1.0.0"}"#,
+            false,
+        )
+        .expect("session_start parses");
+    let forwarded = handler.handle_event(start).expect("session_start is forwarded");
+    assert_eq!(forwarded.event, CLIAgentEventType::SessionStart);
+    assert_eq!(
+        forwarded.session_id.as_deref(),
+        Some("session_0b6c1234-ffff-4a4a-8b8b-0123456789ab")
+    );
+}
+
+#[test]
+fn kimi_handler_ignores_other_agents_and_osc9_once_hooks_report() {
+    let mut handler = create_handler(&CLIAgent::Kimi).expect("should create handler");
+    assert!(
+        handler
+            .try_parse(
+                Some(CLI_AGENT_NOTIFICATION_SENTINEL),
+                r#"{"v":1,"agent":"claude","event":"stop"}"#,
+                false,
+            )
+            .is_none()
+    );
+    assert!(
+        handler
+            .try_parse(Some("some-title"), "Kimi Code task complete: x", false)
+            .is_none()
+    );
+    assert!(
+        handler
+            .try_parse(None, "Kimi Code task complete: x", false)
+            .is_some()
+    );
+    assert!(
+        handler
+            .try_parse(None, "Kimi Code task complete: x", true)
+            .is_none()
+    );
+}

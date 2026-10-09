@@ -13,13 +13,22 @@ use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, ManagedSessionsCommand};
+use zitadel_auth::{RefreshRejected, ZitadelProfile};
+
+mod zitadel_auth;
 
 const STAGING_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
-const STAGING_WEB_URL: &str = "https://dash-dev.stozn.ai";
 const STAGING_FLEET_ID: &str = "stoz3n-agent-ctrl-staging";
 const SUPPORTED_PROTOCOL: u32 = 1;
 const BOOKMARK_FORMAT: u32 = 1;
-const STOZN_AUTH_FORMAT: u32 = 1;
+const STOZN_AUTH_FORMAT: u32 = 2;
+const STAGING_ZITADEL_CLIENT_ID: &str = "394361583406417710";
+const STAGING_ZITADEL_PROJECT_ID: &str = "394361582064240430";
+const STAGING_ZITADEL: ZitadelProfile = ZitadelProfile {
+    issuer: "https://id-dev.obachan.dev",
+    client_id: STAGING_ZITADEL_CLIENT_ID,
+    project_id: STAGING_ZITADEL_PROJECT_ID,
+};
 const STOZN_LOGIN_MAX_WAIT: Duration = Duration::from_secs(330);
 pub const MANAGED_SESSION_DEEP_LINK_SCHEME: &str = "warpspeed";
 pub const MANAGED_SESSION_DEEP_LINK_HOST: &str = "agent-ctrl";
@@ -82,8 +91,7 @@ pub fn parse_managed_session_deep_link(url: &reqwest::Url) -> Result<ManagedSess
 
 #[derive(Debug, Clone)]
 pub struct StoznLoginFlow {
-    request_id: String,
-    verifier: String,
+    device_code: String,
     verification_url: String,
     user_code: String,
     expires_at: DateTime<Utc>,
@@ -112,26 +120,10 @@ pub struct StoznIdentity {
 struct StoredStoznAuth {
     format_version: u32,
     environment_alias: String,
-    token: String,
-    expires_at: String,
+    access_token: String,
+    access_expires_at: String,
+    refresh_token: String,
     user: StoznIdentity,
-}
-
-#[derive(Debug, Deserialize)]
-struct StoznLoginStart {
-    request_id: String,
-    verification_url: String,
-    user_code: String,
-    expires_at: String,
-    poll_interval_seconds: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct StoznLoginPoll {
-    status: String,
-    token: Option<String>,
-    expires_at: Option<String>,
-    user: Option<StoznIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,98 +177,42 @@ struct EventPage {
 
 pub fn begin_stozn_login() -> Result<StoznLoginFlow> {
     let profile = profile(ManagedEnvironment::Staging);
-    let verifier = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    let request = Client::new()
-        .post(format!("{}/api/auth/warpspeed/start", profile.base_url))
-        .header("X-Stozn-Client", "warpspeed")
-        .json(&json!({ "verifier": verifier }));
-    let started: StoznLoginStart = send(profile, request)?
-        .json()
-        .context("invalid STOZN login start response")?;
-    if started.request_id.len() != 43
-        || !started
-            .request_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-    {
-        bail!("dashboard returned an invalid STOZN login request ID");
-    }
-    let expires_at = DateTime::parse_from_rfc3339(&started.expires_at)
-        .context("dashboard returned an invalid STOZN login expiry")?
-        .with_timezone(&Utc);
-    if expires_at <= Utc::now() || started.poll_interval_seconds == 0 {
-        bail!("dashboard returned an expired STOZN login request");
-    }
-    validate_verification_url(profile, &started.verification_url, &started.request_id)?;
-    if !valid_user_code(&started.user_code) {
-        bail!("dashboard returned an invalid STOZN confirmation code");
-    }
+    let started = zitadel_auth::start_device_login(profile.zitadel)?;
     Ok(StoznLoginFlow {
-        request_id: started.request_id,
-        verifier,
+        device_code: started.device_code,
         verification_url: started.verification_url,
         user_code: started.user_code,
-        expires_at,
-        poll_interval: Duration::from_secs(started.poll_interval_seconds.clamp(1, 10)),
+        expires_at: started.expires_at,
+        poll_interval: started.interval,
     })
 }
 
 pub fn complete_stozn_login(flow: StoznLoginFlow) -> Result<StoznIdentity> {
     let profile = profile(ManagedEnvironment::Staging);
-    let started = Instant::now();
-    loop {
-        if Utc::now() >= flow.expires_at || started.elapsed() >= STOZN_LOGIN_MAX_WAIT {
-            bail!("STOZN login request expired");
-        }
-        let request = Client::new()
-            .post(format!("{}/api/auth/warpspeed/poll", profile.base_url))
-            .header("X-Stozn-Client", "warpspeed")
-            .json(&json!({
-                "request_id": flow.request_id,
-                "verifier": flow.verifier,
-            }));
-        validate_request_destination(profile, &request)?;
-        let response = request.send().context("STOZN login polling failed")?;
-        if response.status() == StatusCode::ACCEPTED {
-            thread::sleep(flow.poll_interval);
-            continue;
-        }
-        if !response.status().is_success() {
-            return Err(http_error(response));
-        }
-        let approved: StoznLoginPoll = response
-            .json()
-            .context("invalid STOZN login approval response")?;
-        if approved.status != "approved" {
-            bail!("dashboard returned an invalid STOZN login status");
-        }
-        let token = approved
-            .token
-            .context("STOZN login response omitted its token")?;
-        let expires_at = approved
-            .expires_at
-            .context("STOZN login response omitted its expiry")?;
-        let identity = approved
-            .user
-            .context("STOZN login response omitted its user")?;
-        if !valid_dashboard_token(&token) || identity.role != "admin" {
-            bail!("dashboard returned invalid STOZN login credentials");
-        }
-        let parsed_expiry = DateTime::parse_from_rfc3339(&expires_at)
-            .context("dashboard returned an invalid STOZN token expiry")?
-            .with_timezone(&Utc);
-        if parsed_expiry <= Utc::now() {
-            bail!("dashboard returned expired STOZN login credentials");
-        }
-        save_stozn_auth(&StoredStoznAuth {
-            format_version: STOZN_AUTH_FORMAT,
-            environment_alias: profile.alias.to_owned(),
-            token,
-            expires_at,
-            user: identity.clone(),
-        })?;
-        return Ok(identity);
-    }
+    let remaining = (flow.expires_at - Utc::now())
+        .to_std()
+        .unwrap_or_default()
+        .min(STOZN_LOGIN_MAX_WAIT);
+    let tokens = zitadel_auth::poll_device_login(
+        profile.zitadel,
+        &flow.device_code,
+        flow.poll_interval,
+        remaining,
+    )?;
+    let identity = zitadel_auth::identity_from_access_token(
+        &tokens.access_token,
+        profile.zitadel.project_id,
+        profile.zitadel.issuer_host(),
+    )?;
+    save_stozn_auth(&StoredStoznAuth {
+        format_version: STOZN_AUTH_FORMAT,
+        environment_alias: profile.alias.to_owned(),
+        access_token: tokens.access_token,
+        access_expires_at: tokens.access_expires_at.to_rfc3339(),
+        refresh_token: tokens.refresh_token,
+        user: identity.clone(),
+    })?;
+    Ok(identity)
 }
 
 pub fn stored_stozn_identity() -> Option<StoznIdentity> {
@@ -1103,6 +1039,7 @@ fn attach(
     let mut known_events = HashSet::new();
     loop {
         let wait_ms = if once { 0 } else { 15_000 };
+        let token = dashboard_token()?;
         let (page, history_gap) =
             fetch_event_page(&client, profile, job_id, &token, cursor.as_deref(), wait_ms)?;
         if history_gap || page.gap {
@@ -1216,12 +1153,11 @@ pub fn wait_until_resumed(
     timeout: Duration,
 ) -> Result<()> {
     validate_job_id(job_id)?;
-    let token = dashboard_token()?;
     let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
     wait_until_resumed_with(
         &client,
         profile(environment),
-        &token,
+        &dashboard_token,
         job_id,
         Instant::now() + timeout,
     )
@@ -1230,41 +1166,48 @@ pub fn wait_until_resumed(
 fn wait_until_resumed_with(
     client: &Client,
     profile: &EnvironmentProfile,
-    token: &str,
+    token: &dyn Fn() -> Result<String>,
     job_id: &str,
     deadline: Instant,
 ) -> Result<()> {
     let started = Instant::now();
     let mut cursor: Option<String> = None;
     loop {
-        let (idle, last_error) =
-            match fetch_event_page(client, profile, job_id, token, cursor.as_deref(), 15_000) {
-                Ok((page, history_gap)) => {
-                    if page
-                        .items
-                        .iter()
-                        .any(|event| event.event_type == "status" && event.content == "resumed")
-                    {
-                        return Ok(());
-                    }
-                    if page.terminal {
-                        bail!("managed run {job_id} ended before resuming");
-                    }
-                    // The cursor fell out of retained history; replaying from the start still
-                    // includes the `resumed` event if it was emitted.
-                    cursor = if history_gap {
-                        None
-                    } else {
-                        page.next_cursor.or(cursor)
-                    };
-                    (page.items.is_empty() && cursor.is_none(), None)
+        let access_token = token()?;
+        let (idle, last_error) = match fetch_event_page(
+            client,
+            profile,
+            job_id,
+            &access_token,
+            cursor.as_deref(),
+            15_000,
+        ) {
+            Ok((page, history_gap)) => {
+                if page
+                    .items
+                    .iter()
+                    .any(|event| event.event_type == "status" && event.content == "resumed")
+                {
+                    return Ok(());
                 }
-                Err(error) if is_rejection(&error) => {
-                    return Err(error.context(format!("could not watch managed run {job_id}")));
+                if page.terminal {
+                    bail!("managed run {job_id} ended before resuming");
                 }
-                // The run is already importing; a dashboard blip must not abandon it early.
-                Err(error) => (true, Some(error)),
-            };
+                // The cursor fell out of retained history; replaying from the start still
+                // includes the `resumed` event if it was emitted.
+                cursor = if history_gap {
+                    None
+                } else {
+                    page.next_cursor.or(cursor)
+                };
+                (page.items.is_empty() && cursor.is_none(), None)
+            }
+            Err(error) if is_rejection(&error) => {
+                return Err(error.context(format!("could not watch managed run {job_id}")));
+            }
+            // The run is already importing; a dashboard blip must not abandon it early.
+            Err(error) => (true, Some(error)),
+        };
         if Instant::now() >= deadline {
             let secs = started.elapsed().as_secs();
             match last_error {
@@ -1394,16 +1337,16 @@ fn render_event(event: &RunEvent, json_output: bool) -> Result<()> {
 struct EnvironmentProfile {
     alias: &'static str,
     base_url: &'static str,
-    web_url: &'static str,
     fleet_id: &'static str,
+    zitadel: &'static ZitadelProfile,
 }
 
 fn profile(environment: ManagedEnvironment) -> &'static EnvironmentProfile {
     static STAGING: EnvironmentProfile = EnvironmentProfile {
         alias: "staging",
         base_url: STAGING_BASE_URL,
-        web_url: STAGING_WEB_URL,
         fleet_id: STAGING_FLEET_ID,
+        zitadel: &STAGING_ZITADEL,
     };
     match environment {
         ManagedEnvironment::Staging => &STAGING,
@@ -1428,17 +1371,6 @@ fn validate_descriptor(
         bail!("managed-session identity does not match the selected environment");
     }
     Ok(())
-}
-
-fn valid_user_code(value: &str) -> bool {
-    value.len() == 9
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if index == 4 {
-                byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()
-            }
-        })
 }
 
 fn validate_task_id(task_id: &str) -> Result<()> {
@@ -1494,8 +1426,8 @@ fn dashboard_token() -> Result<String> {
         }
         bail!("STOZN_TOKEN must contain 1 to 8192 visible ASCII bytes");
     }
-    if let Ok(auth) = load_stozn_auth() {
-        return Ok(auth.token);
+    if stozn_auth_path().exists() {
+        return stored_access_token();
     }
     let path = dirs::home_dir()
         .context("home directory is unavailable")?
@@ -1522,21 +1454,55 @@ fn load_stozn_auth() -> Result<StoredStoznAuth> {
     let path = stozn_auth_path();
     let protected =
         fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let plaintext = unprotect_auth_bytes(protected)?;
-    let auth: StoredStoznAuth = serde_json::from_slice(&plaintext)
+    let auth: StoredStoznAuth = serde_json::from_slice(&unprotect_auth_bytes(protected)?)
         .context("invalid WarpSpeed STOZN authentication state")?;
-    let expires_at = DateTime::parse_from_rfc3339(&auth.expires_at)
-        .context("invalid WarpSpeed STOZN authentication expiry")?
-        .with_timezone(&Utc);
     if auth.format_version != STOZN_AUTH_FORMAT
         || auth.environment_alias != profile(ManagedEnvironment::Staging).alias
-        || auth.user.role != "admin"
-        || expires_at <= Utc::now()
-        || !valid_dashboard_token(&auth.token)
+        || auth.refresh_token.is_empty()
+        || !valid_dashboard_token(&auth.access_token)
     {
-        bail!("WarpSpeed STOZN authentication is invalid or expired");
+        bail!("WarpSpeed STOZN authentication is invalid; sign in again");
     }
     Ok(auth)
+}
+
+/// Returns a current access token, refreshing and re-saving the stored sign-in when needed.
+fn stored_access_token() -> Result<String> {
+    let auth = load_stozn_auth()?;
+    let expires_at = DateTime::parse_from_rfc3339(&auth.access_expires_at)
+        .context("invalid WarpSpeed STOZN authentication expiry")?
+        .with_timezone(&Utc);
+    if !zitadel_auth::needs_refresh(expires_at, Utc::now()) {
+        return Ok(auth.access_token);
+    }
+    let zitadel = profile(ManagedEnvironment::Staging).zitadel;
+    match zitadel_auth::refresh(zitadel, &auth.refresh_token) {
+        Ok(tokens) => {
+            let user = zitadel_auth::identity_from_access_token(
+                &tokens.access_token,
+                zitadel.project_id,
+                zitadel.issuer_host(),
+            )?;
+            save_stozn_auth(&StoredStoznAuth {
+                access_token: tokens.access_token.clone(),
+                access_expires_at: tokens.access_expires_at.to_rfc3339(),
+                refresh_token: tokens.refresh_token,
+                user,
+                ..auth
+            })?;
+            Ok(tokens.access_token)
+        }
+        Err(error) if error.downcast_ref::<RefreshRejected>().is_some() => {
+            // Another WarpSpeed process may have rotated the refresh token first.
+            let latest = load_stozn_auth()?;
+            if latest.refresh_token != auth.refresh_token {
+                return stored_access_token();
+            }
+            logout_stozn()?;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn save_stozn_auth(auth: &StoredStoznAuth) -> Result<()> {
@@ -1613,32 +1579,6 @@ fn unprotect_auth_bytes(mut protected: Vec<u8>) -> Result<Vec<u8>> {
         LocalFree(Some(HLOCAL(output.pbData.cast())));
         Ok(plaintext)
     }
-}
-
-fn validate_verification_url(
-    profile: &EnvironmentProfile,
-    verification_url: &str,
-    request_id: &str,
-) -> Result<()> {
-    let allowed = reqwest::Url::parse(profile.web_url)?;
-    let requested = reqwest::Url::parse(verification_url)
-        .context("dashboard returned an invalid STOZN login URL")?;
-    let same_origin = requested.scheme() == allowed.scheme()
-        && requested.host_str() == allowed.host_str()
-        && requested.port_or_known_default() == allowed.port_or_known_default();
-    let matching_request = requested.path() == "/warpspeed-auth"
-        && requested
-            .query_pairs()
-            .any(|(key, value)| key == "request_id" && value == request_id);
-    if !same_origin
-        || !matching_request
-        || !requested.username().is_empty()
-        || requested.password().is_some()
-        || requested.fragment().is_some()
-    {
-        bail!("dashboard returned an unsafe STOZN login URL");
-    }
-    Ok(())
 }
 
 fn ensure_command_accepted(result: &Value) -> Result<()> {

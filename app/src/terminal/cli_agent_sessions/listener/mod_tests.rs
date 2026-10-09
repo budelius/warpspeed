@@ -360,7 +360,9 @@ fn kimi_handler_takes_hook_events_and_forwards_session_start() {
             false,
         )
         .expect("session_start parses");
-    let forwarded = handler.handle_event(start).expect("session_start is forwarded");
+    let forwarded = handler
+        .handle_event(start)
+        .expect("session_start is forwarded");
     assert_eq!(forwarded.event, CLIAgentEventType::SessionStart);
     assert_eq!(
         forwarded.session_id.as_deref(),

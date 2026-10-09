@@ -484,3 +484,40 @@ fn a_detach_message_takes_over_the_session() {
     assert_eq!(response, Some(Message::DetachResponse { error: None }));
     assert_eq!(supervisor.session_count(), 1);
 }
+
+/// A window that restored a pane for a held session but never opened it still lists that session
+/// when it closes. Its detach carries an empty screen and no metadata, and accepting it would leave
+/// the next pane to adopt the shell with nothing to replay and no idea the shell sits at a prompt.
+#[test]
+fn a_detach_of_a_session_nobody_attached_keeps_what_the_supervisor_holds() {
+    let mut supervisor = supervisor_with_session(1, 0);
+
+    let response = supervisor.handle_message(
+        &Message::Detach {
+            session_id: SessionId::from(1u64),
+            snapshot: snapshot_of(b""),
+            metadata: SessionMetadata::default(),
+        },
+        9001,
+        10,
+        &listener(),
+    );
+
+    assert_eq!(response, Some(Message::DetachResponse { error: None }));
+    let Some(Message::AttachResponse {
+        result: Ok(attached),
+    }) = supervisor.handle_message(
+        &Message::Attach {
+            session_id: SessionId::from(1u64),
+            after_sequence: None,
+        },
+        7,
+        11,
+        &listener(),
+    )
+    else {
+        panic!("the held session should still attach");
+    };
+    assert_eq!(attached.metadata, metadata());
+    assert_eq!(attached.snapshot, snapshot_of(b"before"));
+}

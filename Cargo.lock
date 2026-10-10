@@ -15240,6 +15240,7 @@ dependencies = [
  "event-listener",
  "field_mask",
  "firebase",
+ "flate2",
  "float-cmp",
  "freedesktop-desktop-entry",
  "fs4",

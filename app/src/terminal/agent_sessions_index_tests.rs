@@ -76,6 +76,34 @@ fn a_running_conversation_appears_once_as_running() {
 }
 
 #[test]
+fn a_running_conversation_uses_its_history_title_when_live_context_has_none() {
+    let pane = PaneAgentInput {
+        running: Some(claude("a", "/p")),
+        ..pane_at(0, "/p")
+    };
+    let mut past = past_session(CLIAgent::Claude, "a", "/p");
+    past.title = Some("fix resume button".to_owned());
+
+    let rows = build_rows(&[pane], &[], &[past]);
+
+    assert_eq!(rows[0].title.as_deref(), Some("fix resume button"));
+}
+
+#[test]
+fn a_running_conversation_uses_its_history_timestamp_when_live_context_has_none() {
+    let pane = PaneAgentInput {
+        running: Some(claude("a", "/p")),
+        ..pane_at(0, "/p")
+    };
+    let past = past_session_at(CLIAgent::Claude, "a", "/p", 30);
+    let expected = past.modified;
+
+    let rows = build_rows(&[pane], &[], &[past]);
+
+    assert_eq!(rows[0].last_used, Some(expected));
+}
+
+#[test]
 fn a_pending_restore_outranks_its_past_entry() {
     let pane = PaneAgentInput {
         pending: Some(claude("b", "/p")),

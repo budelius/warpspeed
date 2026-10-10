@@ -1,11 +1,13 @@
 //! Installs the Kimi Code hooks that report to Warp through `warp agent-event`.
 
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::{fs, io};
 
 use async_trait::async_trait;
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+use tempfile::NamedTempFile;
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value, value};
 
 use super::{
     CliAgentPluginManager, PluginInstallError, PluginInstructionStep, PluginInstructions,
@@ -152,23 +154,45 @@ fn read_config() -> Option<String> {
 }
 
 fn write_hooks() -> Result<(), PluginInstallError> {
-    let path = config_path()?;
-    let existing = match fs::read_to_string(&path) {
+    write_hooks_to(&config_path()?)
+}
+
+fn write_hooks_to(path: &Path) -> Result<(), PluginInstallError> {
+    let existing = match fs::read_to_string(path) {
         Ok(config) => config,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.into()),
     };
     let updated =
         with_warp_hooks(&existing, &hook_command()).map_err(|message| PluginInstallError {
-            log: format!("{}: {message}\n", path.display()),
+            log: format!(
+                "{}: {message}
+",
+                path.display()
+            ),
             message,
         })?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+    // The config can hold provider API keys, and dotfile managers symlink it: replace the real
+    // file behind any link, with its permissions (a new one is owner-only).
+    let (target, permissions) = match fs::canonicalize(path) {
+        Ok(target) => {
+            let permissions = fs::metadata(&target)?.permissions();
+            (target, Some(permissions))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (path.to_owned(), None),
+        Err(error) => return Err(error.into()),
+    };
+    let dir = target
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let mut temporary = NamedTempFile::new_in(dir)?;
+    temporary.write_all(updated.as_bytes())?;
+    if let Some(permissions) = permissions {
+        temporary.as_file().set_permissions(permissions)?;
     }
-    let temporary = path.with_extension("toml.warp-tmp");
-    fs::write(&temporary, updated)?;
-    fs::rename(&temporary, &path)?;
+    temporary.persist(&target).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -181,9 +205,15 @@ fn with_warp_hooks(config: &str, command: &str) -> Result<String, String> {
     let hooks = document
         .entry("hooks")
         .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
+    if let Item::Value(Value::Array(array)) = hooks
+        && array.is_empty()
+    {
+        *hooks = Item::ArrayOfTables(ArrayOfTables::new());
+    }
     let Some(hooks) = hooks.as_array_of_tables_mut() else {
         return Err(
-            "Kimi Code's config.toml defines `hooks` other than as [[hooks]] tables".to_owned(),
+            "Kimi Code's config.toml defines `hooks` other than as [[hooks]] tables. Rewrite each              entry of `hooks = [...]` as its own [[hooks]] table, then install again."
+                .to_owned(),
         );
     };
     hooks.retain(|hook| !is_warp_hook(hook));

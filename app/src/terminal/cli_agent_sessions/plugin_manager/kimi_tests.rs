@@ -1,8 +1,11 @@
+use std::fs;
+
+use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
 use super::{
     HOOK_EVENTS, HOOKS_VERSION, MANUAL_HOOK_EXAMPLE, hook_command, hooks_need_update,
-    installed_hooks_version, with_warp_hooks,
+    installed_hooks_version, with_warp_hooks, write_hooks_to,
 };
 
 /// Kimi's `HooksConfigSchema` (`externalHooks/configSection.ts:10-21`, zod `.strict()`).
@@ -161,9 +164,102 @@ fn a_config_without_warp_hooks_is_not_installed() {
 }
 
 #[test]
-fn refuses_hooks_that_are_not_tables_and_invalid_toml() {
-    assert!(with_warp_hooks("hooks = []\n", &hook_command()).is_err());
+fn an_empty_inline_hooks_array_counts_as_no_hooks() {
+    let config = with_warp_hooks(
+        "default_model = \"kimi-k2\"
+hooks = []
+",
+        &hook_command(),
+    )
+    .unwrap();
+    assert_kimi_accepts(&config);
+    assert_eq!(warp_hook_events(&config), HOOK_EVENTS);
+    assert!(config.contains("default_model = \"kimi-k2\""), "{config}");
+}
+
+#[test]
+fn refuses_inline_hooks_and_says_how_to_fix_them() {
+    let error = with_warp_hooks(
+        "hooks = [{ event = \"Stop\", command = \"notify-send kimi\" }]
+",
+        &hook_command(),
+    )
+    .unwrap_err();
+    assert!(error.contains("[[hooks]] table"), "{error}");
+}
+
+#[test]
+fn refuses_invalid_toml() {
     assert!(with_warp_hooks("this is = = not toml", &hook_command()).is_err());
+}
+
+#[test]
+fn installing_creates_a_missing_config_and_leaves_no_temporary_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("kimi-home").join("config.toml");
+
+    write_hooks_to(&path).unwrap();
+
+    assert_eq!(
+        warp_hook_events(&fs::read_to_string(&path).unwrap()),
+        HOOK_EVENTS
+    );
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn installing_keeps_the_configs_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, USER_CONFIG).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    write_hooks_to(&path).unwrap();
+
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        warp_hook_events(&fs::read_to_string(&path).unwrap()),
+        HOOK_EVENTS
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installing_through_a_symlink_updates_its_target() {
+    let dir = TempDir::new().unwrap();
+    let dotfiles = dir.path().join("dotfiles");
+    fs::create_dir(&dotfiles).unwrap();
+    let target = dotfiles.join("kimi.toml");
+    fs::write(&target, USER_CONFIG).unwrap();
+    let link = dir.path().join("config.toml");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    write_hooks_to(&link).unwrap();
+
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let config = fs::read_to_string(&target).unwrap();
+    assert_eq!(warp_hook_events(&config), HOOK_EVENTS);
+    assert!(config.contains("python ~/guard.py"), "{config}");
+    assert_eq!(fs::read_dir(&dotfiles).unwrap().count(), 1);
 }
 
 #[test]

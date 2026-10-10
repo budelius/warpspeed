@@ -622,6 +622,9 @@ pub const WAKEUP_THROTTLE_PERIOD: Duration =
 
 pub const EXECUTE_PENDING_COMMAND_DELAY: Duration = Duration::from_millis(100);
 
+/// How long a bootstrapped pane keeps retrying a pending command its input refuses.
+pub const PENDING_COMMAND_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub const WARP_PROMPT_HEIGHT_LINES: f32 = 0.9;
 
 const SCROLLBAR_WIDTH: ScrollbarWidth = ScrollbarWidth::Auto;
@@ -2631,6 +2634,10 @@ pub struct TerminalView {
     /// next `AfterBlockCompleted`, at which point `Event::PendingCommandCompleted`
     /// is emitted so subscribers know the command has finished.
     awaiting_pending_command_completion: bool,
+    /// The retry scheduled for a pending command the bootstrapped shell refused.
+    pending_command_retry: Option<SpawnedFutureHandle>,
+    /// When the current run of retries gives up.
+    pending_command_retry_deadline: Option<Instant>,
     /// Commands that should run as separate blocks after the active pending
     /// command finishes successfully.
     pending_command_queue: VecDeque<String>,
@@ -4417,6 +4424,8 @@ impl TerminalView {
             bootstrap_start: None,
             is_login_shell_bootstrapped: false,
             awaiting_pending_command_completion: false,
+            pending_command_retry: None,
+            pending_command_retry_deadline: None,
             pending_command_queue: Default::default(),
             enter_agent_view_after_pending_commands: false,
             slow_bootstrap_banner,
@@ -13907,6 +13916,9 @@ impl TerminalView {
 
         self.is_login_shell_bootstrapped = true;
         self.hide_slow_bootstrap_banner(ctx);
+        if self.input.as_ref(ctx).has_pending_command() {
+            self.execute_pending_command((), ctx);
+        }
 
         #[cfg(feature = "local_tty")]
         if let Some(restore) = self.withheld_restore.take() {
@@ -16340,11 +16352,46 @@ impl TerminalView {
         self.input.update(ctx, |input, ctx| {
             input.execute_pending_command(ctx);
         });
+        let still_pending = self.input.read(ctx, |input, _| input.has_pending_command());
         // If the pending command was just consumed, track that we're waiting
         // for the resulting block to complete.
-        if had_pending && !self.input.read(ctx, |input, _| input.has_pending_command()) {
+        if had_pending && !still_pending {
             self.awaiting_pending_command_completion = true;
         }
+        if still_pending && self.is_login_shell_bootstrapped {
+            self.schedule_pending_command_retry(ctx);
+        } else {
+            self.pending_command_retry_deadline = None;
+        }
+    }
+
+    /// A bootstrapped shell refuses a pending command only while its session's history is still
+    /// being registered. The registration's `Initialized` event is not guaranteed to reach this
+    /// pane afterwards (a restored tab's precmd can race it), and an idle prompt never retries on
+    /// its own, so poll until the command runs or the timeout passes.
+    fn schedule_pending_command_retry(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.pending_command_retry.is_some() {
+            return;
+        }
+        let deadline = *self
+            .pending_command_retry_deadline
+            .get_or_insert_with(|| Instant::now() + PENDING_COMMAND_RETRY_TIMEOUT);
+        if Instant::now() >= deadline {
+            log::warn!(
+                "Pending command still refused after {PENDING_COMMAND_RETRY_TIMEOUT:?}; giving up"
+            );
+            self.pending_command_retry_deadline = None;
+            return;
+        }
+        self.pending_command_retry = Some(ctx.spawn(
+            async move {
+                Timer::after(EXECUTE_PENDING_COMMAND_DELAY).await;
+            },
+            |me, _, ctx| {
+                me.pending_command_retry = None;
+                me.execute_pending_command((), ctx);
+            },
+        ));
     }
 
     // Try to execute the provided command. If we cannot execute it now, set it as the pending

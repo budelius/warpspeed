@@ -18,11 +18,25 @@ use crate::terminal::model::session::LocalCommandExecutor;
 use crate::terminal::shell::ShellType;
 
 const PACKAGE: &str = "@stozn/dsh-warp";
-/// The release the installer pins (`dsh plugin add @stozn/dsh-warp@<version>`), so a newer publish
-/// is never pulled in unreviewed, and the oldest one the footer treats as up to date. Keep in
-/// sync with app/resources/dsh-warp/package.json and bump them together.
-const MINIMUM_PLUGIN_VERSION: &str = "0.1.0";
-const REGISTRY_LINE: &str = "@stozn:registry=https://git-dev.obachan.dev/api/packages/stozn/npm/";
+
+/// The bundled plugin release: the one the installer adds and the oldest one the footer treats as
+/// up to date. A macro so the embedded tarball's file name is built from the same literal. Keep in
+/// sync with app/resources/dsh-warp/package.json and its packed tarball, and bump them together.
+macro_rules! plugin_version {
+    () => {
+        "0.1.0"
+    };
+}
+const MINIMUM_PLUGIN_VERSION: &str = plugin_version!();
+
+/// The packed plugin, embedded because installed WarpSpeed ships no resources and the package
+/// registry refuses anonymous downloads.
+const PLUGIN_TARBALL: &[u8] = include_bytes!(concat!(
+    "../../../../resources/dsh-warp/stozn-dsh-warp-",
+    plugin_version!(),
+    ".tgz"
+));
+
 /// The profile `dsh --profile headless` uses, which is how dsh runs in a pane.
 const DEFAULT_PROFILE: &str = "headless";
 const PNPM_MISSING: &str = "Installing the DeepSeek Harness plugin needs pnpm on PATH. Install it \
@@ -70,15 +84,10 @@ impl DshPluginManager {
                 log: error.log,
             });
         }
-        let spec = format!("{PACKAGE}@{MINIMUM_PLUGIN_VERSION}");
+        let tarball = command_path(&write_tarball(&home)?)?;
         for profile in profiles(&home) {
-            ensure_registry(&home.join("profiles").join(&profile))?;
-            self.run_logged(
-                "dsh",
-                &["plugin", "--profile", &profile, "add", &spec],
-                &mut log,
-            )
-            .await?;
+            self.run_logged("dsh", &plugin_add_args(&profile, &tarball), &mut log)
+                .await?;
         }
         Ok(())
     }
@@ -141,16 +150,15 @@ static INSTRUCTIONS: LazyLock<PluginInstructions> = LazyLock::new(|| PluginInstr
             link: None,
         },
         PluginInstructionStep {
-            description: "Let the profile's pnpm find the plugin: add this line to \
-                          ~/.dsh/profiles/headless/.npmrc",
-            command: REGISTRY_LINE,
+            description: "WarpSpeed bundles the plugin: the Install button writes it to \
+                          <dsh home>/warp/ (~/.dsh unless DSH_HOME is set) and adds it to each \
+                          profile. To add it to a profile by hand after that, run",
+            command: concat!(
+                "dsh plugin --profile headless add <dsh home>/warp/stozn-dsh-warp-",
+                plugin_version!(),
+                ".tgz"
+            ),
             executable: false,
-            link: None,
-        },
-        PluginInstructionStep {
-            description: "Install the plugin into the profile (repeat for each profile you use)",
-            command: "dsh plugin --profile headless add @stozn/dsh-warp@0.1.0",
-            executable: true,
             link: None,
         },
     ],
@@ -185,36 +193,52 @@ fn is_plain_profile_name(name: &str) -> bool {
         })
 }
 
-/// `.npmrc` contents that resolve `@stozn` packages from the Gitea registry, or `None` when
-/// `existing` already names a registry for the scope.
-fn with_registry_line(existing: &str) -> Option<String> {
-    if existing
-        .lines()
-        .any(|line| line.trim_start().starts_with("@stozn:registry="))
-    {
-        return None;
-    }
-    let mut updated = existing.to_owned();
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated.push_str(REGISTRY_LINE);
-    updated.push('\n');
-    Some(updated)
+fn tarball_file_name() -> String {
+    format!("stozn-dsh-warp-{MINIMUM_PLUGIN_VERSION}.tgz")
 }
 
-fn ensure_registry(profile_dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(profile_dir)?;
-    let path = profile_dir.join(".npmrc");
-    let existing = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error),
-    };
-    if let Some(updated) = with_registry_line(&existing) {
-        fs::write(path, updated)?;
+/// Writes the bundled tarball to `<home>/warp/` and returns its path. A concurrent install in
+/// another pane only ever sees a complete file, because it is written beside and renamed in.
+fn write_tarball(home: &Path) -> io::Result<PathBuf> {
+    let dir = home.join("warp");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(tarball_file_name());
+    if fs::read(&path).is_ok_and(|existing| existing == PLUGIN_TARBALL) {
+        return Ok(path);
     }
-    Ok(())
+    let temp = tempfile::NamedTempFile::new_in(&dir)?;
+    fs::write(temp.path(), PLUGIN_TARBALL)?;
+    temp.persist(&path).map_err(|error| error.error)?;
+    Ok(path)
+}
+
+/// `path` as it can go unquoted into the install command, which the pane's shell (bash,
+/// PowerShell or cmd) splits on its own rules. Paths those shells would split or expand are
+/// refused rather than quoted, since no one quoting works in all three.
+fn command_path(path: &Path) -> Result<String, PluginInstallError> {
+    let display = path.display().to_string();
+    // Backslashes are escapes to bash; pnpm takes forward slashes on Windows too.
+    let command = if cfg!(windows) {
+        display.replace('\\', "/")
+    } else {
+        display.clone()
+    };
+    let is_unsafe =
+        |character: char| character.is_whitespace() || "\"'&|;<>()$\\`%^!".contains(character);
+    if command.chars().any(is_unsafe) {
+        return Err(PluginInstallError {
+            message: format!(
+                "cannot install the DeepSeek Harness plugin from {display}: the path has spaces \
+                 or shell characters. Set DSH_HOME to a plain path and try again."
+            ),
+            log: String::new(),
+        });
+    }
+    Ok(command)
+}
+
+fn plugin_add_args<'a>(profile: &'a str, tarball: &'a str) -> [&'a str; 5] {
+    ["plugin", "--profile", profile, "add", tarball]
 }
 
 /// The plugin version installed in a profile: `None` when the profile does not depend on it,

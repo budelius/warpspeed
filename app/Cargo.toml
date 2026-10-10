@@ -454,6 +454,7 @@ warp_files = { workspace = true, features = ["test-util"] }
 repo_metadata = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+flate2 = "1.0"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time"] }
 
 [build-dependencies]

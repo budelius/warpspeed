@@ -23,7 +23,7 @@
 - Stage explicit paths only (`git add <path> …`); never `git add -A`, `git add .` or `git commit -a`. Other sessions edit these trees.
 - Push targets: agent-ctrl, dashboard, obachan, obachan-config, passiv → `origin` (Gitea). WarpSpeed → `gitea` and `gitlab`, never `origin` (upstream warpdotdev).
 - Never run `find /` in Git Bash on this machine; bound every search to a named directory or use Grep/Glob.
-- Staging cluster access: `kubectl --server https://staging-gateway:6443 --tls-server-name 10.96.0.1 …` with `KUBECONFIG=~/.kube/obachan-staging` (the kubeconfig's own server address is dead).
+- Staging cluster access: `kubectl --context admin@obachan-staging --server https://10.10.1.5:6443 --tls-server-name 10.96.0.1 …` (the kubeconfig's own server address and `staging-gateway` are dead; never edit the shared kubeconfig).
 
 ---
 

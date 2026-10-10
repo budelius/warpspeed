@@ -144,7 +144,7 @@ fn is_valid_session_id(session_id: &str) -> bool {
     (1..=MAX_SESSION_ID_CHARS).contains(&session_id.len())
         && session_id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 fn file_in_dir_ending_with(dir: &Path, suffix: &str) -> Option<PathBuf> {
@@ -305,10 +305,16 @@ pub(crate) fn resolve_session_file(
 }
 
 pub(crate) fn handoff_branch_name(now: DateTime<Local>, session_id: &str) -> String {
-    let short_id = session_id
+    // Kimi and dsh ids start with a fixed `session_`/`session-`, which would name every branch alike.
+    let distinct = ["session_", "session-"]
+        .into_iter()
+        .find_map(|prefix| session_id.strip_prefix(prefix))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(session_id);
+    let short_id = distinct
         .char_indices()
         .nth(BRANCH_ID_CHARS)
-        .map_or(session_id, |(end, _)| &session_id[..end]);
+        .map_or(distinct, |(end, _)| &distinct[..end]);
     format!("handoff/{}-{short_id}", now.format("%Y%m%d-%H%M"))
 }
 

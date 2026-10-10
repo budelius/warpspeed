@@ -871,3 +871,36 @@ fn start_agent_on_agent_ctrl_failure_says_when_the_node_is_at_capacity() {
         "{message}"
     );
 }
+
+const KIMI_SESSION_ID: &str = "session_0b6c1234-ffff-4a4a-8b8b-0123456789ab";
+
+#[test]
+fn kimi_and_dsh_session_ids_are_valid_but_path_characters_are_not() {
+    for id in [
+        KIMI_SESSION_ID,
+        "session-0b6c1234-ffff-4a4a-8b8b-0123456789ab",
+        SESSION_ID,
+    ] {
+        assert!(is_valid_session_id(id), "{id}");
+    }
+    for id in ["", "a.b", "../x", r"a\b", "a/b", &"a".repeat(129)] {
+        assert!(!is_valid_session_id(id), "{id}");
+    }
+}
+
+#[test]
+fn handoff_branch_name_skips_the_session_prefix() {
+    let now = Local.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
+    assert_eq!(
+        handoff_branch_name(now, KIMI_SESSION_ID),
+        "handoff/20261003-1200-0b6c1234"
+    );
+    assert_eq!(
+        handoff_branch_name(now, "session-0b6c1234-ffff-4a4a-8b8b-0123456789ab"),
+        "handoff/20261003-1200-0b6c1234"
+    );
+    assert_eq!(
+        handoff_branch_name(now, "session_"),
+        "handoff/20261003-1200-session_"
+    );
+}

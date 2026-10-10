@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    PastAgentSession, ResolvedPath, UnidentifiedAgent, current_dsh_log, describe, dsh_sessions,
-    is_within_known, kimi_sessions, match_for_restore, pi_candidates, resolve_folders,
-    vibe_sessions,
+    AgentSessionPreviewMessage, AgentSessionPreviewRole, PastAgentSession, ResolvedPath,
+    UnidentifiedAgent, current_dsh_log, describe, dsh_sessions, is_within_known, kimi_sessions,
+    match_for_restore, pi_candidates, resolve_folders, vibe_sessions,
 };
 use crate::terminal::CLIAgent;
 
@@ -19,7 +19,8 @@ fn pi_transcript_supplies_session_identity_directory_and_title() {
         project.join("2026-09-28T09-53-21-590Z_filename-id.jsonl"),
         concat!(
             "{\"type\":\"session\",\"id\":\"actual-id\",\"cwd\":\"/work/repo\"}\n",
-            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Fix the reboot bug\"}]}}\n"
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Fix the reboot bug\"}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Fixed\\u0007\"}]}}\n"
         ),
     )
     .expect("transcript should be written");
@@ -35,6 +36,63 @@ fn pi_transcript_supplies_session_identity_directory_and_title() {
     assert_eq!(session.session_id, "actual-id");
     assert_eq!(session.cwd, std::path::Path::new("/work/repo"));
     assert_eq!(session.title.as_deref(), Some("Fix the reboot bug"));
+    assert_eq!(
+        session.preview,
+        vec![
+            AgentSessionPreviewMessage {
+                role: AgentSessionPreviewRole::User,
+                text: "Fix the reboot bug".to_owned(),
+            },
+            AgentSessionPreviewMessage {
+                role: AgentSessionPreviewRole::Agent,
+                text: "Fixed�".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn transcript_preview_keeps_only_bounded_recent_messages() {
+    let root = tempfile::tempdir().expect("temporary root should be created");
+    let project = root.path().join("--project--");
+    fs::create_dir(&project).expect("project directory should be created");
+    let mut transcript = "{\"type\":\"session\",\"id\":\"id\",\"cwd\":\"/repo\"}\n".to_owned();
+    for index in 0..9 {
+        transcript.push_str(
+            &serde_json::json!({
+                "type": "message",
+                "message": { "role": "user", "content": format!("message {index}") }
+            })
+            .to_string(),
+        );
+        transcript.push('\n');
+    }
+    transcript.push_str(
+        &serde_json::json!({
+            "type": "message",
+            "message": { "role": "assistant", "content": "x".repeat(1_300) }
+        })
+        .to_string(),
+    );
+    transcript.push('\n');
+    fs::write(
+        project.join("2026-09-28T09-53-21-590Z_filename-id.jsonl"),
+        transcript,
+    )
+    .expect("transcript should be written");
+
+    let session = describe(
+        pi_candidates(root.path())
+            .into_iter()
+            .next()
+            .expect("Pi transcript should be found"),
+    );
+
+    assert_eq!(session.preview.len(), 8);
+    assert_eq!(session.preview[0].text, "message 2");
+    let last = &session.preview[7].text;
+    assert_eq!(last.chars().count(), 1_201);
+    assert!(last.ends_with('…'));
 }
 
 #[test]
@@ -82,6 +140,7 @@ fn past(
         canonical_cwd: None,
         title: title.map(str::to_owned),
         modified: saved_at() - Duration::from_secs(hours_before * 60 * 60),
+        preview: Vec::new(),
     }
 }
 

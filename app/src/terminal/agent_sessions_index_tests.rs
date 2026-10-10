@@ -5,6 +5,7 @@ use warpui::EntityId;
 
 use super::*;
 use crate::pane_group::PaneId;
+use crate::terminal::agent_session_history::{AgentSessionPreviewMessage, AgentSessionPreviewRole};
 use crate::terminal::cli_agent::CLIAgent;
 
 fn claude(id: &str, cwd: &str) -> CliAgentResumeDescriptor {
@@ -47,6 +48,7 @@ fn past_session_at(agent: CLIAgent, id: &str, cwd: &str, age_secs: u64) -> PastA
         canonical_cwd: None,
         title: None,
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
+        preview: Vec::new(),
     }
 }
 
@@ -87,6 +89,23 @@ fn a_running_conversation_uses_its_history_title_when_live_context_has_none() {
     let rows = build_rows(&[pane], &[], &[past]);
 
     assert_eq!(rows[0].title.as_deref(), Some("fix resume button"));
+}
+
+#[test]
+fn a_live_conversation_keeps_its_history_preview() {
+    let pane = PaneAgentInput {
+        running: Some(claude("a", "/p")),
+        ..pane_at(0, "/p")
+    };
+    let mut past = past_session(CLIAgent::Claude, "a", "/p");
+    past.preview = vec![AgentSessionPreviewMessage {
+        role: AgentSessionPreviewRole::User,
+        text: "Fix resume".to_owned(),
+    }];
+
+    let rows = build_rows(&[pane], &[], &[past]);
+
+    assert_eq!(rows[0].preview[0].text, "Fix resume");
 }
 
 #[test]

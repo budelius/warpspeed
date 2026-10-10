@@ -918,7 +918,7 @@ impl BackingView for TerminalView {
         // Every agent-session action works on local shells and agents.
         if !shared_session_status.is_viewer() && cfg!(feature = "local_tty") {
             items.push(
-                MenuItemFields::new("Agent sessions…")
+                MenuItemFields::new("Sessions…")
                     .with_on_select_action(TerminalAction::ShowAgentSessions)
                     .into_item(),
             );

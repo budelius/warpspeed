@@ -47,6 +47,7 @@ fn past(id: &str, cwd: &str, age_secs: u64) -> PastAgentSession {
         canonical_cwd: None,
         title: Some(format!("past {id}")),
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
+        preview: Vec::new(),
     }
 }
 
@@ -56,6 +57,21 @@ fn detached(id: u64, title: &str) -> DetachedInput {
         title: title.into(),
         cwd: "/elsewhere".into(),
         detached_for_seconds: id,
+    }
+}
+
+fn managed(job_id: &str, state: &str) -> RunSummary {
+    RunSummary {
+        job_id: job_id.to_owned(),
+        state: state.to_owned(),
+        agent_name: "staging-claude-interactive-rw".to_owned(),
+        repo_url: Some("https://gitlab.com/acme/warp.git".to_owned()),
+        branch: Some("feat/sessions".to_owned()),
+        interactive: true,
+        last_activity_at: None,
+        node_name: None,
+        paused_at: None,
+        pause_allowed: Some(true),
     }
 }
 
@@ -74,6 +90,9 @@ fn kinds(rows: &[ViewRow]) -> Vec<String> {
             ViewRow::Detached { row } => {
                 format!("detached:{}", row.title.clone().unwrap_or_default())
             }
+            ViewRow::ManagedHeader => "managed-header".to_owned(),
+            ViewRow::Managed { run } => format!("managed:{}", run.job_id),
+            ViewRow::ManagedError(_) => "managed-error".to_owned(),
             ViewRow::SupervisorUnreachable => "unreachable".to_owned(),
         })
         .collect()
@@ -106,6 +125,9 @@ fn pane_action(rows: &[ViewRow], tab_index: usize) -> ViewRowAction {
             | ViewRow::Past { .. }
             | ViewRow::DetachedHeader { .. }
             | ViewRow::Detached { .. }
+            | ViewRow::ManagedHeader
+            | ViewRow::Managed { .. }
+            | ViewRow::ManagedError(_)
             | ViewRow::SupervisorUnreachable => None,
         })
         .expect("the pane has a row")
@@ -287,6 +309,30 @@ fn the_detached_section_comes_last() {
 }
 
 #[test]
+fn managed_runs_are_searchable_and_keep_state_specific_actions() {
+    let runs = [
+        managed("job-running", "running"),
+        managed("job-paused", "paused"),
+    ];
+
+    let rows = managed_view_rows(&runs, None, "paused");
+
+    assert_eq!(kinds(&rows), ["managed-header", "managed:job-paused"]);
+    let ViewRow::Managed { run } = &rows[1] else {
+        panic!("the matching run should be listed");
+    };
+    assert_eq!(managed_action_label(&run.state), "Resume & attach");
+    assert_eq!(managed_action_label("completed"), "View transcript");
+    assert_eq!(managed_action_label("running"), "Attach here");
+}
+
+#[test]
+fn a_managed_error_stays_visible_without_runs() {
+    let rows = managed_view_rows(&[], Some("sign in required"), "");
+    assert_eq!(kinds(&rows), ["managed-header", "managed-error"]);
+}
+
+#[test]
 fn an_unreachable_supervisor_is_one_row_in_the_detached_section() {
     assert_eq!(
         kinds(&supervisor_rows(&DetachedListError::Unreachable(
@@ -357,6 +403,9 @@ fn past_targets(rows: &[ViewRow]) -> Vec<(String, PaneViewLocator)> {
             | ViewRow::PastToggle { .. }
             | ViewRow::DetachedHeader { .. }
             | ViewRow::Detached { .. }
+            | ViewRow::ManagedHeader
+            | ViewRow::Managed { .. }
+            | ViewRow::ManagedError(_)
             | ViewRow::SupervisorUnreachable => None,
         })
         .collect()

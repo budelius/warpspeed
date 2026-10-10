@@ -105,6 +105,8 @@ impl FleetView {
                 me.sync_mouse_states(ctx);
                 ctx.notify();
             }
+            FleetModelEvent::PreviewUpdated => ctx.notify(),
+            FleetModelEvent::ResumeForAttachSucceeded { .. } => {}
         });
         let mut view = Self {
             model,

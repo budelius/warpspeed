@@ -35,6 +35,7 @@ fn row(title: Option<&str>, cwd: &str, state: AgentSessionState) -> AgentSession
         cwd: cwd.into(),
         canonical_cwd: None,
         last_used: None,
+        preview: Vec::new(),
         state,
     }
 }
@@ -184,6 +185,7 @@ fn past_session(id: &str, title: &str, cwd: &str) -> PastAgentSession {
         canonical_cwd: None,
         title: Some(title.into()),
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
+        preview: Vec::new(),
     }
 }
 

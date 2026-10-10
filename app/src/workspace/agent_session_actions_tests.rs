@@ -23,6 +23,7 @@ fn row(agent: Option<CLIAgent>, state: AgentSessionState) -> AgentSessionRow {
         cwd: PathBuf::from("T:/p/x"),
         canonical_cwd: None,
         last_used: None,
+        preview: Vec::new(),
         state,
     }
 }

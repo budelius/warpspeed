@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime};
 use warp_core::SessionId;
 
 use crate::app_state::CliAgentResumeDescriptor;
-use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath, is_within_known};
+use crate::terminal::agent_session_history::{
+    AgentSessionPreviewMessage, PastAgentSession, ResolvedPath, is_within_known,
+};
 use crate::terminal::cli_agent::CLIAgent;
 use crate::workspace::PaneViewLocator;
 
@@ -41,6 +43,7 @@ pub(crate) struct AgentSessionRow {
     /// `cwd` as the background scan resolved it, for a past conversation; `None` otherwise.
     pub canonical_cwd: Option<PathBuf>,
     pub last_used: Option<SystemTime>,
+    pub preview: Vec<AgentSessionPreviewMessage>,
     pub state: AgentSessionState,
 }
 
@@ -103,6 +106,9 @@ fn live_row(
             .and_then(|seconds| u64::try_from(seconds).ok())
             .map(|seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
             .or_else(|| history.map(|session| session.modified)),
+        preview: history
+            .map(|session| session.preview.clone())
+            .unwrap_or_default(),
         state,
     }
 }
@@ -115,6 +121,7 @@ fn past_row(past: &PastAgentSession, state: AgentSessionState) -> AgentSessionRo
         cwd: past.cwd.clone(),
         canonical_cwd: past.canonical_cwd.clone(),
         last_used: Some(past.modified),
+        preview: past.preview.clone(),
         state,
     }
 }
@@ -181,6 +188,7 @@ pub(crate) fn build_rows(
                 cwd: input.cwd.clone(),
                 canonical_cwd: None,
                 last_used: None,
+                preview: Vec::new(),
                 state,
             },
         };

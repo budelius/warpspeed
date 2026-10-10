@@ -71,6 +71,7 @@ fn refreshes_requested_during_a_load_trigger_exactly_one_more_load() {
                 canonical_cwd: None,
                 title: None,
                 modified: std::time::SystemTime::UNIX_EPOCH,
+                preview: Vec::new(),
             })
             .collect()
     }
@@ -113,6 +114,7 @@ fn a_refresh_that_finds_nothing_new_announces_nothing() {
             canonical_cwd: None,
             title: None,
             modified: std::time::SystemTime::UNIX_EPOCH,
+            preview: Vec::new(),
         }]
     }
 

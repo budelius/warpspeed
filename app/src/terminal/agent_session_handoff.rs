@@ -11,6 +11,8 @@ use managed_agent_sessions::{
 };
 use tempfile::TempDir;
 
+use super::agent_session_history::current_dsh_log;
+use super::agent_session_paths::kimi_indexed_session_dirs;
 use crate::terminal::CLIAgent;
 
 const MAX_SESSION_ID_CHARS: usize = 128;
@@ -71,6 +73,10 @@ pub(crate) struct AgentSessionRoots {
     /// per-project directories.
     pub pi_session_dir: Option<PathBuf>,
     pub codex_home: PathBuf,
+    /// `KIMI_CODE_HOME`, by default `~/.kimi-code`.
+    pub kimi_home: PathBuf,
+    /// `DSH_HOME`, by default `~/.dsh`.
+    pub dsh_home: PathBuf,
 }
 
 impl AgentSessionRoots {
@@ -81,6 +87,8 @@ impl AgentSessionRoots {
             pi_agent_dir: home.join(".pi").join("agent"),
             pi_session_dir: None,
             codex_home: home.join(".codex"),
+            kimi_home: home.join(".kimi-code"),
+            dsh_home: home.join(".dsh"),
         }
     }
 
@@ -97,6 +105,8 @@ impl AgentSessionRoots {
             pi_agent_dir: env_dir("PI_CODING_AGENT_DIR").unwrap_or(defaults.pi_agent_dir),
             pi_session_dir: env_dir("PI_CODING_AGENT_SESSION_DIR"),
             codex_home: env_dir("CODEX_HOME").unwrap_or(defaults.codex_home),
+            kimi_home: env_dir("KIMI_CODE_HOME").unwrap_or(defaults.kimi_home),
+            dsh_home: env_dir("DSH_HOME").unwrap_or(defaults.dsh_home),
         }
     }
 }
@@ -174,6 +184,49 @@ fn file_under_ending_with(root: &Path, suffix: &str) -> Option<PathBuf> {
         .map(walkdir::DirEntry::into_path)
 }
 
+fn has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn is_named(path: &Path, name: &str) -> bool {
+    path.file_name().and_then(OsStr::to_str) == Some(name)
+}
+
+/// Kimi's directory for session `session_id`: the one Kimi's `session_index.jsonl` records for it
+/// when that is under `sessions/`, else the workspace directory under `sessions/` that holds it.
+fn kimi_session_dir(kimi_home: &Path, session_id: &str) -> Option<PathBuf> {
+    let sessions = kimi_home.join("sessions");
+    let is_session_dir = |dir: &Path| {
+        !has_parent_dir(dir)
+            && dir.starts_with(&sessions)
+            && is_named(dir, session_id)
+            && dir.is_dir()
+    };
+    kimi_indexed_session_dirs(kimi_home)
+        .into_iter()
+        .flatten()
+        .find_map(|(id, dir)| (id == session_id && is_session_dir(&dir)).then_some(dir))
+        .or_else(|| {
+            fs::read_dir(&sessions)
+                .ok()?
+                .flatten()
+                .map(|workspace| workspace.path().join(session_id))
+                .find(|dir| dir.is_dir())
+        })
+}
+
+/// dsh keeps a session at `sessions/<project key>/<id>/`, and the project key is lossy, so the
+/// directory is found by id under any project. dsh reads only the highest generation there.
+fn dsh_session_file(dsh_home: &Path, session_id: &str) -> Option<PathBuf> {
+    fs::read_dir(dsh_home.join("sessions"))
+        .ok()?
+        .flatten()
+        .map(|project| project.path().join(session_id))
+        .filter(|dir| dir.is_dir())
+        .find_map(|dir| current_dsh_log(&dir).map(|(path, _)| path))
+}
+
 /// Locates the session file `agent` wrote for `session_id` while running in `cwd`.
 pub(crate) fn session_file_path(
     agent: CLIAgent,
@@ -218,6 +271,20 @@ pub(crate) fn session_file_path(
                 )
             })
         }
+        CLIAgent::Kimi => kimi_session_dir(&roots.kimi_home, session_id).ok_or_else(|| {
+            anyhow!(
+                "no kimi session {session_id} under {}",
+                roots.kimi_home.join("sessions").display()
+            )
+        }),
+        CLIAgent::DeepSeekHarness => {
+            dsh_session_file(&roots.dsh_home, session_id).ok_or_else(|| {
+                anyhow!(
+                    "no dsh session file for {session_id} under {}",
+                    roots.dsh_home.join("sessions").display()
+                )
+            })
+        }
         CLIAgent::Gemini
         | CLIAgent::Amp
         | CLIAgent::Droid
@@ -230,8 +297,6 @@ pub(crate) fn session_file_path(
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
-        | CLIAgent::Kimi
-        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => bail!("{agent:?} sessions cannot be moved"),
     }
@@ -248,6 +313,8 @@ fn agent_session_root(agent: CLIAgent, roots: &AgentSessionRoots) -> Option<Path
                 .unwrap_or_else(|| roots.pi_agent_dir.join("sessions")),
         ),
         CLIAgent::Codex => Some(roots.codex_home.join("sessions")),
+        CLIAgent::Kimi => Some(roots.kimi_home.join("sessions")),
+        CLIAgent::DeepSeekHarness => Some(roots.dsh_home.join("sessions")),
         CLIAgent::Gemini
         | CLIAgent::Amp
         | CLIAgent::Droid
@@ -260,31 +327,58 @@ fn agent_session_root(agent: CLIAgent, roots: &AgentSessionRoots) -> Option<Path
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
-        | CLIAgent::Kimi
-        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }
 }
 
-/// Whether `path`, as reported by the agent's hooks, is this session's file. The path arrives
-/// through terminal output, so it is trusted only for a file named after the session under the
-/// agent's own session directory; anything else could make the move upload an unrelated file.
+/// Whether `path`, as reported by the agent's hooks, is this session's file (Kimi: its
+/// directory). The path arrives through terminal output or the agent-event channel, so it is
+/// trusted only for an entry named after the session under the agent's own session directory;
+/// anything else could make the move upload unrelated data.
 fn is_reported_session_file(
     path: &Path,
     source: &HandoffSource,
     roots: &AgentSessionRoots,
 ) -> bool {
-    is_valid_session_id(&source.session_id)
-        && !path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
+    let id = source.session_id.as_str();
+    let named_for_session = match source.agent {
+        CLIAgent::Kimi => is_named(path, id) && path.is_dir(),
+        CLIAgent::DeepSeekHarness => {
+            path.parent().is_some_and(|dir| is_named(dir, id))
+                && path
+                    .parent()
+                    .and_then(current_dsh_log)
+                    .is_some_and(|(current, _)| current == path)
+                && path.is_file()
+        }
+        CLIAgent::Claude
+        | CLIAgent::Pi
+        | CLIAgent::Codex
+        | CLIAgent::Gemini
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Vibe
+        | CLIAgent::Antigravity
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.ends_with(&format!("{id}.jsonl")))
+                && path.is_file()
+        }
+    };
+    is_valid_session_id(id)
+        && !has_parent_dir(path)
         && agent_session_root(source.agent, roots).is_some_and(|root| path.starts_with(root))
-        && path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name.ends_with(&format!("{}.jsonl", source.session_id)))
-        && path.is_file()
+        && named_for_session
 }
 
 /// The session file to upload for `source`. The reported transcript wins because the agent may

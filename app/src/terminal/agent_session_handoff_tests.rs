@@ -904,3 +904,151 @@ fn handoff_branch_name_skips_the_session_prefix() {
         "handoff/20261003-1200-session_"
     );
 }
+
+fn kimi_session(roots: &AgentSessionRoots, workspace: &str, id: &str) -> PathBuf {
+    let dir = roots.kimi_home.join("sessions").join(workspace).join(id);
+    write_file(&dir.join("state.json"), br#"{"id":"x","cwd":"/old"}"#);
+    write_file(&dir.join("agents/main/wire.jsonl"), b"{}\n");
+    dir
+}
+
+#[test]
+fn kimi_session_dir_comes_from_the_last_index_line_for_the_id() {
+    let home = TempDir::new().unwrap();
+    let roots = AgentSessionRoots::under_home(home.path());
+    let stale = kimi_session(&roots, "wd_app_aaaaaaaaaaaa", KIMI_SESSION_ID);
+    let current = kimi_session(&roots, "wd_app_bbbbbbbbbbbb", KIMI_SESSION_ID);
+    let line = |dir: &Path| {
+        serde_json::json!({"sessionId": KIMI_SESSION_ID, "sessionDir": dir, "workDir": "/app"})
+            .to_string()
+    };
+    write_file(
+        &roots.kimi_home.join("session_index.jsonl"),
+        format!(
+            "{}\n{{\"sessionId\":\"other\",\"sessionDir\":\"/x\",\"workDir\":\"/x\"}}\n{}\n",
+            line(&stale),
+            line(&current)
+        )
+        .as_bytes(),
+    );
+    let found =
+        session_file_path(CLIAgent::Kimi, KIMI_SESSION_ID, Path::new("/app"), &roots).unwrap();
+    assert_eq!(found, current);
+}
+
+#[test]
+fn kimi_session_dir_is_scanned_for_without_an_index_or_with_an_outside_entry() {
+    let home = TempDir::new().unwrap();
+    let roots = AgentSessionRoots::under_home(home.path());
+    let dir = kimi_session(&roots, "wd_app_aaaaaaaaaaaa", KIMI_SESSION_ID);
+    assert_eq!(
+        session_file_path(CLIAgent::Kimi, KIMI_SESSION_ID, Path::new("/app"), &roots).unwrap(),
+        dir
+    );
+
+    let outside = home.path().join("elsewhere").join(KIMI_SESSION_ID);
+    fs::create_dir_all(&outside).unwrap();
+    write_file(
+        &roots.kimi_home.join("session_index.jsonl"),
+        serde_json::json!({"sessionId": KIMI_SESSION_ID, "sessionDir": outside, "workDir": "/app"})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(
+        session_file_path(CLIAgent::Kimi, KIMI_SESSION_ID, Path::new("/app"), &roots).unwrap(),
+        dir
+    );
+    assert!(
+        session_file_path(CLIAgent::Kimi, "session_missing", Path::new("/app"), &roots).is_err()
+    );
+}
+
+#[test]
+fn dsh_session_file_is_the_highest_generation_under_any_project() {
+    let home = TempDir::new().unwrap();
+    let roots = AgentSessionRoots::under_home(home.path());
+    let dir = roots
+        .dsh_home
+        .join("sessions/--C-Users-budel-src-app--")
+        .join(SESSION_ID);
+    for name in [
+        "session.jsonl",
+        "session.v3.jsonl.zstd",
+        "session.v4.jsonl.zstd",
+        "session.v04.jsonl.zstd",
+        "session.v9.jsonl.tmp",
+    ] {
+        write_file(&dir.join(name), b"x");
+    }
+    let found = session_file_path(
+        CLIAgent::DeepSeekHarness,
+        SESSION_ID,
+        Path::new("/x"),
+        &roots,
+    )
+    .unwrap();
+    assert_eq!(found, dir.join("session.v4.jsonl.zstd"));
+    assert!(
+        session_file_path(
+            CLIAgent::DeepSeekHarness,
+            "missing",
+            Path::new("/x"),
+            &roots
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn reported_kimi_dir_and_dsh_file_are_trusted_only_under_their_roots() {
+    let home = TempDir::new().unwrap();
+    let roots = AgentSessionRoots::under_home(home.path());
+    let kimi_dir = kimi_session(&roots, "wd_app_aaaaaaaaaaaa", KIMI_SESSION_ID);
+    let kimi_source = |transcript_path: PathBuf| HandoffSource {
+        agent: CLIAgent::Kimi,
+        session_id: KIMI_SESSION_ID.to_owned(),
+        cwd: PathBuf::from("/app"),
+        transcript_path: Some(transcript_path),
+    };
+    assert!(is_reported_session_file(
+        &kimi_dir,
+        &kimi_source(kimi_dir.clone()),
+        &roots
+    ));
+    let other = kimi_session(&roots, "wd_app_aaaaaaaaaaaa", "session_other");
+    assert!(!is_reported_session_file(
+        &other,
+        &kimi_source(other.clone()),
+        &roots
+    ));
+    let escaped = kimi_dir.join("..").join(KIMI_SESSION_ID);
+    assert!(!is_reported_session_file(
+        &escaped,
+        &kimi_source(escaped.clone()),
+        &roots
+    ));
+
+    let dsh_file = roots
+        .dsh_home
+        .join("sessions/--app--")
+        .join(SESSION_ID)
+        .join("session.v4.jsonl.zstd");
+    write_file(&dsh_file, b"x");
+    let dsh_source = HandoffSource {
+        agent: CLIAgent::DeepSeekHarness,
+        session_id: SESSION_ID.to_owned(),
+        cwd: PathBuf::from("/app"),
+        transcript_path: Some(dsh_file.clone()),
+    };
+    assert!(is_reported_session_file(&dsh_file, &dsh_source, &roots));
+    let outside = home.path().join(SESSION_ID).join("session.v4.jsonl.zstd");
+    write_file(&outside, b"x");
+    assert!(!is_reported_session_file(&outside, &dsh_source, &roots));
+}
+
+#[test]
+fn session_roots_default_under_home() {
+    let roots = AgentSessionRoots::under_home(Path::new("/home/ben"));
+    assert_eq!(roots.kimi_home, Path::new("/home/ben/.kimi-code"));
+    assert_eq!(roots.dsh_home, Path::new("/home/ben/.dsh"));
+}

@@ -15381,6 +15381,7 @@ dependencies = [
  "syntect",
  "sysinfo",
  "tabwriter",
+ "tar",
  "tempfile",
  "thiserror 2.0.17",
  "thousands",
@@ -15451,6 +15452,7 @@ dependencies = [
  "winreg",
  "x11rb",
  "zbus",
+ "zstd",
 ]
 
 [[package]]

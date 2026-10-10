@@ -1,17 +1,23 @@
 use std::collections::HashSet;
 use std::fs::File;
+#[cfg(not(target_family = "wasm"))]
+use std::io::Read;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
+#[cfg(not(target_family = "wasm"))]
+use super::agent_session_paths::{dsh_home, kimi_home, kimi_indexed_session_dirs};
 use crate::terminal::CLIAgent;
 
 const MAX_CANDIDATES: usize = 200;
 const MAX_HEAD_LINES: usize = 200;
 const MAX_HEAD_BYTES: usize = 256 * 1024;
 const TITLE_MAX_CHARS: usize = 80;
+#[cfg(not(target_family = "wasm"))]
+const DSH_HEAD_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PastAgentSession {
@@ -158,6 +164,169 @@ fn vibe_sessions(root: &Path) -> Vec<PastAgentSession> {
             })
         })
         .collect()
+}
+
+/// Kimi Code's sessions: directories from its index, or every `sessions/*/*` directory when the
+/// index is gone, each described by its `state.json`.
+#[cfg(not(target_family = "wasm"))]
+fn kimi_sessions(home: &Path) -> Vec<PastAgentSession> {
+    let dirs = kimi_indexed_session_dirs(home).unwrap_or_else(|| {
+        directories(&home.join("sessions"))
+            .into_iter()
+            .flat_map(|workspace| directories(&workspace))
+            .filter_map(|dir| {
+                let session_id = dir.file_name()?.to_str()?.to_owned();
+                is_safe_session_id(&session_id).then_some((session_id, dir))
+            })
+            .collect()
+    });
+    dirs.into_iter()
+        .filter_map(|(session_id, dir)| kimi_session(session_id, &dir))
+        .collect()
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn kimi_session(session_id: String, dir: &Path) -> Option<PastAgentSession> {
+    let state_path = dir.join("state.json");
+    let state: Value =
+        serde_json::from_reader(BufReader::new(File::open(&state_path).ok()?)).ok()?;
+    if state["archived"] == true {
+        return None;
+    }
+    let cwd = state["cwd"]
+        .as_str()
+        .or_else(|| state["workDir"].as_str())
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let modified = epoch_millis_or_rfc3339(&state["updatedAt"])
+        .or_else(|| std::fs::metadata(&state_path).ok()?.modified().ok())?;
+    let title = state["title"]
+        .as_str()
+        .or_else(|| state["lastPrompt"].as_str())
+        .and_then(title);
+    Some(PastAgentSession {
+        agent: CLIAgent::Kimi,
+        session_id,
+        cwd,
+        canonical_cwd: None,
+        title,
+        modified,
+    })
+}
+
+/// DeepSeek Harness's sessions under `root` (`<DSH_HOME>/sessions`), each described by the head
+/// of its current log.
+#[cfg(not(target_family = "wasm"))]
+fn dsh_sessions(root: &Path) -> Vec<PastAgentSession> {
+    directories(root)
+        .into_iter()
+        .filter(|project| {
+            project
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.len() > 4 && name.starts_with("--") && name.ends_with("--")
+                })
+        })
+        .flat_map(|project| directories(&project))
+        .filter_map(|dir| dsh_session(&dir))
+        .collect()
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn dsh_session(dir: &Path) -> Option<PastAgentSession> {
+    let (path, compressed) = current_dsh_log(dir)?;
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    let head = read_dsh_head(&path, compressed);
+    let mut rows = head
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok());
+    let header = rows.next().filter(|header| header["type"] == "session")?;
+    let session_id = header["id"]
+        .as_str()
+        .filter(|id| is_safe_session_id(id))?
+        .to_owned();
+    let cwd = header["cwd"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let title = rows
+        .find(|row| row["type"] == "user/message" && row["data"]["source"]["kind"] == "user")
+        .and_then(|row| {
+            row["data"]["content"]
+                .as_array()?
+                .iter()
+                .find(|part| part["type"] == "text")?["text"]
+                .as_str()
+                .and_then(title)
+        });
+    Some(PastAgentSession {
+        agent: CLIAgent::DeepSeekHarness,
+        session_id,
+        cwd,
+        canonical_cwd: None,
+        title,
+        modified,
+    })
+}
+
+/// The session's current log, the highest generation of `session[.vN].jsonl[.zstd]` in `dir`
+/// (N has no leading zero, as dsh writes it), and whether it is zstd-compressed.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn current_dsh_log(dir: &Path) -> Option<(PathBuf, bool)> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let (stem, compressed) = match name.strip_suffix(".zstd") {
+                Some(stem) => (stem, true),
+                None => (name.as_str(), false),
+            };
+            let generation = match stem.strip_prefix("session")?.strip_suffix(".jsonl")? {
+                "" => 0,
+                version => {
+                    let digits = version.strip_prefix(".v")?;
+                    let canonical = !digits.starts_with('0')
+                        && digits.bytes().all(|byte| byte.is_ascii_digit());
+                    canonical.then(|| digits.parse::<u32>().ok()).flatten()?
+                }
+            };
+            Some((generation, entry.path(), compressed))
+        })
+        .max_by_key(|(generation, _, _)| *generation)
+        .map(|(_, path, compressed)| (path, compressed))
+}
+
+/// Up to [`DSH_HEAD_BYTES`] of the log's text. A log dsh is still appending to can end in a
+/// partial frame; what decoded before it is kept.
+#[cfg(not(target_family = "wasm"))]
+fn read_dsh_head(path: &Path, compressed: bool) -> String {
+    let mut head = Vec::new();
+    if let Ok(file) = File::open(path) {
+        let _ = if compressed {
+            zstd::stream::read::Decoder::new(file)
+                .and_then(|decoder| decoder.take(DSH_HEAD_BYTES).read_to_end(&mut head))
+        } else {
+            file.take(DSH_HEAD_BYTES).read_to_end(&mut head)
+        };
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+/// A timestamp Kimi wrote as epoch milliseconds, or as an RFC 3339 string in older versions.
+#[cfg(not(target_family = "wasm"))]
+fn epoch_millis_or_rfc3339(value: &Value) -> Option<SystemTime> {
+    let millis = match value.as_u64() {
+        Some(millis) => millis,
+        None => u64::try_from(
+            chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+                .ok()?
+                .timestamp_millis(),
+        )
+        .ok()?,
+    };
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis))
 }
 
 fn codex_session_id(path: &Path) -> Option<String> {
@@ -389,19 +558,51 @@ pub(crate) fn is_within_known(
     }
 }
 
-fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession> {
-    let mut sessions = if agent == CLIAgent::Vibe {
-        #[cfg(not(target_family = "wasm"))]
-        {
+/// The sessions of agents that keep an index or a directory per session, read whole instead of
+/// through [`candidates`] and [`describe`]. `None` for every other agent.
+#[cfg(not(target_family = "wasm"))]
+fn directory_sessions(agent: CLIAgent) -> Option<Vec<PastAgentSession>> {
+    match agent {
+        CLIAgent::Vibe => Some(
             dirs::home_dir()
                 .map(|home| vibe_sessions(&home.join(".vibe").join("logs").join("session")))
-                .unwrap_or_default()
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            Vec::new()
-        }
-    } else {
+                .unwrap_or_default(),
+        ),
+        CLIAgent::Kimi => Some(
+            kimi_home()
+                .map(|home| kimi_sessions(&home))
+                .unwrap_or_default(),
+        ),
+        CLIAgent::DeepSeekHarness => Some(
+            dsh_home()
+                .map(|home| dsh_sessions(&home.join("sessions")))
+                .unwrap_or_default(),
+        ),
+        CLIAgent::Claude
+        | CLIAgent::Gemini
+        | CLIAgent::Codex
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::Pi
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Antigravity
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => None,
+    }
+}
+
+fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession> {
+    #[cfg(not(target_family = "wasm"))]
+    let listed = directory_sessions(agent);
+    #[cfg(target_family = "wasm")]
+    let listed = None;
+    let mut sessions = listed.unwrap_or_else(|| {
         let mut candidates = candidates(agent)
             .into_iter()
             .filter(|candidate| not_before.is_none_or(|time| candidate.modified >= time))
@@ -409,7 +610,7 @@ fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession
         candidates.sort_by(|left, right| right.modified.cmp(&left.modified));
         candidates.truncate(MAX_CANDIDATES);
         candidates.into_iter().map(describe).collect()
-    };
+    });
     sessions.retain(|session| not_before.is_none_or(|time| session.modified >= time));
     sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
     sessions.truncate(MAX_CANDIDATES);
@@ -428,8 +629,15 @@ pub(crate) fn find_all(agent: CLIAgent) -> Vec<PastAgentSession> {
     scan(agent, None)
 }
 
-pub(crate) const RESUMABLE_AGENTS: [CLIAgent; 3] =
-    [CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Pi];
+/// The agents whose past sessions the session picker lists. An agent without a resume command
+/// is listed without a Resume action.
+pub(crate) const RESUMABLE_AGENTS: [CLIAgent; 5] = [
+    CLIAgent::Claude,
+    CLIAgent::Codex,
+    CLIAgent::Pi,
+    CLIAgent::Kimi,
+    CLIAgent::DeepSeekHarness,
+];
 
 /// Every resumable agent's past sessions, newest first.
 pub(crate) fn find_all_resumable() -> Vec<PastAgentSession> {

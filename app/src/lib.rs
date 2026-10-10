@@ -3,6 +3,10 @@
 mod agent_ctrl;
 #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
 mod agent_ctrl_fleet_cli;
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+mod agent_ctrl_move_session_cli;
+#[cfg(not(target_family = "wasm"))]
+mod agent_event_cli;
 #[cfg(feature = "local_fs")]
 mod agent_session_registry;
 mod ai;
@@ -791,6 +795,14 @@ pub fn run() -> Result<()> {
         warp_cli::local_control::run_and_exit(args);
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(parsed) = warp_cli::agent_event::from_argv(std::env::args_os()) {
+        if let Ok(args) = parsed {
+            agent_event_cli::run(&args);
+        }
+        return Ok(());
+    }
+
     // Parse command-line arguments.
     let args = warp_cli::Args::from_env();
 
@@ -864,10 +876,19 @@ pub fn run() -> Result<()> {
                 return sessions_cli::run(args);
             }
             #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::AgentEvent(args) => {
+                agent_event_cli::run(args);
+                return Ok(());
+            }
+            #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::AgentCtrl(args) => {
                 #[cfg(feature = "local_fs")]
                 if let Some(request) = agent_ctrl_fleet_cli::move_all_request(args) {
                     return agent_ctrl_fleet_cli::run(request);
+                }
+                #[cfg(feature = "local_fs")]
+                if let Some(request) = agent_ctrl_move_session_cli::move_session_request(args) {
+                    return agent_ctrl_move_session_cli::run(request);
                 }
                 return managed_agent_sessions::run(args);
             }

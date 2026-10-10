@@ -285,6 +285,9 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
         }
         ManagedSessionsCommand::Repos { environment } => repos(*environment, args.json),
         ManagedSessionsCommand::MoveAll { .. } => bail!("move-all is handled by the application"),
+        ManagedSessionsCommand::MoveSession { .. } => {
+            bail!("move-session is handled by the application")
+        }
         ManagedSessionsCommand::Open {
             job_id,
             environment,
@@ -456,19 +459,20 @@ fn parse_items<T: serde::de::DeserializeOwned>(mut page: Value, what: &str) -> R
     serde_json::from_value(items).with_context(|| format!("invalid {what} items"))
 }
 
-/// The AgentCtrl profile that runs moved and fleet sessions of a CLI agent (`claude`, `pi`,
-/// `codex`).
+/// The AgentCtrl profile that runs moved and fleet sessions of a CLI agent kind.
 pub fn agent_ctrl_profile(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some("staging-claude-interactive-rw"),
         "pi" => Some("staging-pi-interactive-rw"),
         "codex" => Some("staging-codex-interactive-rw"),
+        "kimi" => Some("staging-kimi-interactive-rw"),
+        "dsh" => Some("staging-dsh-interactive-rw"),
         _ => None,
     }
 }
 
 /// The CLI agent kinds that [`agent_ctrl_profile`] maps to an AgentCtrl profile.
-pub const AGENT_KINDS: [&str; 3] = ["claude", "pi", "codex"];
+pub const AGENT_KINDS: [&str; 5] = ["claude", "pi", "codex", "kimi", "dsh"];
 
 /// The AgentCtrl profile that `agent` names: a CLI agent kind maps through
 /// [`agent_ctrl_profile`], and a name with the environment's profile prefix is taken as a

@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-warp
+      name: '@stozn/dsh-warp'

@@ -400,8 +400,9 @@ use crate::terminal::agent_session_handoff::{
     agent_ctrl_profile, agent_exit_command, configured_repository, cut_over_decision,
     move_failure_message, move_idempotency_key, move_progress_message,
     prepare_handoff as prepare_agent_session_handoff, repo_url_for, select_remote,
-    session_changed_message, start_agent_failure_message, start_agent_progress_message,
-    start_agent_prompt, start_agent_unavailable_message, stop_request_outcome,
+    session_changed_message, session_content_len, start_agent_failure_message,
+    start_agent_progress_message, start_agent_prompt, start_agent_unavailable_message,
+    stop_request_outcome,
 };
 use crate::terminal::agent_session_history::is_safe_session_id;
 use crate::terminal::agent_session_history_model::{
@@ -14220,7 +14221,7 @@ impl Workspace {
         let uploaded = UploadedSession {
             session_id: source.session_id.clone(),
             file_path: prepared.session_file_path.clone(),
-            file_len: prepared.session_file.len() as u64,
+            file_len: prepared.session_len,
             pushed_branch: format!("{}/{}", prepared.remote, prepared.branch),
         };
         ctx.spawn(
@@ -14402,9 +14403,7 @@ impl Workspace {
             },
         );
         let sessions = CLIAgentSessionsModel::as_ref(ctx);
-        let current_file_len = std::fs::metadata(&uploaded.file_path)
-            .ok()
-            .map(|metadata| metadata.len());
+        let current_file_len = session_content_len(&uploaded.file_path);
         let decision = cut_over_decision(
             sessions.session_id(terminal_view_id),
             &uploaded.session_id,
@@ -14742,11 +14741,7 @@ impl Workspace {
         repositories: &[managed_agent_sessions::RepositoryInfo],
         ctx: &mut ViewContext<Self>,
     ) {
-        const STARTABLE_AGENTS: [(CLIAgent, &str); 3] = [
-            (CLIAgent::Claude, "Claude"),
-            (CLIAgent::Pi, "Pi"),
-            (CLIAgent::Codex, "Codex"),
-        ];
+        use crate::agent_ctrl::fleet_model::STARTABLE_AGENTS;
 
         // Checked again here: a start can begin while the repositories are being looked up.
         if self.reshow_agent_ctrl_start_in_flight(terminal_view_id, ctx) {
@@ -15134,6 +15129,24 @@ impl Workspace {
             }
         }
         panes
+    }
+
+    /// The terminal view whose shell was given `token` as its agent-event token, in any tab of
+    /// this window.
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn terminal_view_with_agent_event_token(
+        &self,
+        token: &str,
+        ctx: &AppContext,
+    ) -> Option<ViewHandle<TerminalView>> {
+        self.tabs.iter().find_map(|tab| {
+            let pane_group = tab.pane_group.as_ref(ctx);
+            pane_group.pane_ids().find_map(|pane_id| {
+                pane_group
+                    .terminal_view_from_pane_id(pane_id, ctx)
+                    .filter(|view| view.as_ref(ctx).agent_event_token() == Some(token))
+            })
+        })
     }
 
     /// Reads one pane's screen and identity into a handover for the supervisor.

@@ -1,7 +1,9 @@
 use tempfile::TempDir;
+use warp_core::features::FeatureFlag;
 use warpui::{App, EntityId, SingletonEntity, ViewHandle};
 
 use super::*;
+use crate::remote_control::protocol::MAX_CLI_AGENT_EVENT_BYTES;
 use crate::terminal::agent_session_handoff::MoveStep;
 use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus,
@@ -392,5 +394,154 @@ fn move_status_reports_the_move_of_a_pane_closed_mid_move() {
             move_state(closed_view_id, &mut app),
             ("done:job-1".to_owned(), Some("gitea/handoff/x".to_owned()))
         );
+    });
+}
+
+const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+const KIMI_SESSION_ID: &str = "session_0b6c1234-ffff-4a4a-8b8b-0123456789ab";
+
+fn deliver(token: &str, notification: &str, app: &mut App) -> Response {
+    app.update(|ctx| {
+        handle(
+            Request::CliAgentEvent {
+                token: token.to_owned().into(),
+                notification: notification.to_owned(),
+            },
+            ctx,
+        )
+    })
+}
+
+#[test]
+fn cli_agent_event_reaches_the_pane_that_owns_the_token() {
+    let _flag = FeatureFlag::PluggableNotifications.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        terminal_view.update(&mut app, |view, _| {
+            view.set_agent_event_token(TOKEN.to_owned())
+        });
+
+        let response = deliver(
+            TOKEN,
+            &format!(
+                r#"{{"v":1,"agent":"kimi","event":"session_start","session_id":"{KIMI_SESSION_ID}","cwd":"/srv/app","transcript_path":"/home/ben/.kimi-code/sessions/wd_app_0123456789ab/{KIMI_SESSION_ID}"}}"#
+            ),
+            &mut app,
+        );
+        assert!(matches!(response, Response::Done), "{response:?}");
+
+        let response = deliver(
+            TOKEN,
+            r#"{"v":1,"agent":"kimi","event":"prompt_submit","query":"fix the build"}"#,
+            &mut app,
+        );
+        assert!(matches!(response, Response::Done), "{response:?}");
+
+        app.read(|ctx| {
+            let session = CLIAgentSessionsModel::as_ref(ctx)
+                .session(terminal_view.id())
+                .expect("the event created an agent session");
+            assert_eq!(session.agent, CLIAgent::Kimi);
+            assert_eq!(
+                session.session_context.session_id.as_deref(),
+                Some(KIMI_SESSION_ID)
+            );
+            assert_eq!(session.session_context.cwd.as_deref(), Some("/srv/app"));
+            assert_eq!(
+                session.session_context.query.as_deref(),
+                Some("fix the build")
+            );
+            assert_eq!(session.status, CLIAgentSessionStatus::InProgress);
+            assert!(session.received_rich_notification);
+        });
+    });
+}
+
+#[test]
+fn cli_agent_event_with_an_unknown_token_is_refused() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        terminal_view.update(&mut app, |view, _| {
+            view.set_agent_event_token(TOKEN.to_owned())
+        });
+
+        let response = deliver(
+            "ffffffffffffffffffffffffffffffff",
+            r#"{"v":1,"agent":"kimi","event":"stop"}"#,
+            &mut app,
+        );
+        assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+        app.read(|ctx| {
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(terminal_view.id())
+                    .is_none()
+            );
+        });
+    });
+}
+
+#[test]
+fn cli_agent_event_without_any_tokened_pane_is_refused() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let _workspace = mock_workspace(&mut app);
+        let response = deliver("", r#"{"v":1,"agent":"kimi","event":"stop"}"#, &mut app);
+        assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+    });
+}
+
+#[test]
+fn cli_agent_event_is_refused_while_pluggable_notifications_are_off() {
+    let _flag = FeatureFlag::PluggableNotifications.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        terminal_view.update(&mut app, |view, _| {
+            view.set_agent_event_token(TOKEN.to_owned())
+        });
+
+        let response = deliver(TOKEN, r#"{"v":1,"agent":"kimi","event":"stop"}"#, &mut app);
+
+        assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+        app.read(|ctx| {
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(terminal_view.id())
+                    .is_none()
+            );
+        });
+    });
+}
+
+#[test]
+fn oversized_cli_agent_event_is_refused() {
+    let _flag = FeatureFlag::PluggableNotifications.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view(&workspace, &mut app);
+        terminal_view.update(&mut app, |view, _| {
+            view.set_agent_event_token(TOKEN.to_owned())
+        });
+        let query = "x".repeat(MAX_CLI_AGENT_EVENT_BYTES);
+        let notification =
+            format!(r#"{{"v":1,"agent":"kimi","event":"prompt_submit","query":"{query}"}}"#);
+
+        let response = deliver(TOKEN, &notification, &mut app);
+
+        assert!(matches!(response, Response::Failed { .. }), "{response:?}");
+        app.read(|ctx| {
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(terminal_view.id())
+                    .is_none()
+            );
+        });
     });
 }

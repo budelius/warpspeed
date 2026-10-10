@@ -23,7 +23,7 @@ pub enum ManagedSessionsCommand {
 
     /// Start one configured operator-enabled agent, bound to a task or to a repository.
     Start {
-        /// Agent kind (claude, pi, codex) or configured AgentCtrl profile name.
+        /// Agent kind (claude, pi, codex, kimi, dsh) or configured AgentCtrl profile name.
         #[arg(long)]
         agent: String,
 
@@ -64,6 +64,21 @@ pub enum ManagedSessionsCommand {
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
+    /// Move a recorded agent session that no pane holds (a finished DeepSeek Harness run) to
+    /// AgentCtrl.
+    MoveSession {
+        /// Agent kind: dsh.
+        #[arg(long)]
+        agent: String,
+
+        /// The session id the agent recorded.
+        #[arg(long)]
+        session: String,
 
         #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
         environment: ManagedEnvironment,

@@ -17,6 +17,7 @@ use warpui::{
 };
 
 use super::fleet_model::{FleetGroup, FleetModel, FleetModelEvent, FleetRow};
+use crate::agent_ctrl::fleet_model::STARTABLE_AGENTS;
 use crate::appearance::Appearance;
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::pane_group::pane::view::{self, HeaderContent, StandardHeader, StandardHeaderOptions};
@@ -29,12 +30,6 @@ pub const FLEET_HEADER_TEXT: &str = "AgentCtrl fleet · staging";
 
 /// How long a first click on Stop waits for the confirming second click.
 const STOP_CONFIRMATION_WINDOW: Duration = Duration::from_secs(5);
-
-const STARTABLE_AGENTS: [(CLIAgent, &str); 3] = [
-    (CLIAgent::Claude, "Claude"),
-    (CLIAgent::Pi, "Pi"),
-    (CLIAgent::Codex, "Codex"),
-];
 
 const SPACING: f32 = 8.;
 
@@ -95,7 +90,7 @@ pub struct FleetView {
     dismiss_error_mouse_state: MouseStateHandle,
     row_mouse_states: HashMap<String, RowMouseStates>,
     /// One per startable agent, by repository URL.
-    repo_mouse_states: HashMap<String, [MouseStateHandle; 3]>,
+    repo_mouse_states: HashMap<String, [MouseStateHandle; STARTABLE_AGENTS.len()]>,
     start_menu_open: bool,
     /// The run whose Stop was clicked once, and when.
     stop_armed: Option<(String, Instant)>,

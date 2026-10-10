@@ -347,10 +347,12 @@ rquickjs = { workspace = true, optional = true }
 rustls.workspace = true
 syntect = "5.0"
 sysinfo.workspace = true
+tar = "0.4"
 warp-command-signatures = { workspace = true, features = ["embed-signatures"] }
 is_executable = "1.0.1"
 watcher.workspace = true
 warp_files.workspace = true
+zstd = "0.13.3"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 console_error_panic_hook = { version = "0.1.6" }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_channel::Receiver;
+use warp_core::cli_agent_protocol::CLI_AGENT_NOTIFICATION_SENTINEL;
 use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use super::event::{BootstrappedEvent, SshLoginStatus};
@@ -367,6 +368,19 @@ impl ModelEventDispatcher {
         ctx: &mut ModelContext<Self>,
     ) {
         ctx.emit(ModelEvent::RemoteServerBlockRequested { session_id });
+    }
+
+    /// Emits a structured CLI agent notification that arrived outside the PTY, so it reaches
+    /// exactly the subscribers an OSC 777 one does.
+    pub fn emit_out_of_band_cli_agent_notification(
+        &mut self,
+        body: String,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        ctx.emit(ModelEvent::PluggableNotification {
+            title: Some(CLI_AGENT_NOTIFICATION_SENTINEL.to_owned()),
+            body,
+        });
     }
 }
 

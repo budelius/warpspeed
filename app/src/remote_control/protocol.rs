@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Adding a variant at the end of an enum is safe for bincode only in one
 /// direction, and the two ends here can be either older or newer than one
 /// another, so treat any change as a bump.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A request from the `sessions` command to a running window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +67,43 @@ pub enum Request {
 
     /// How far the move of a pane's session to AgentCtrl has got.
     MoveStatus { terminal_view_id: u64 },
+
+    /// Delivers a CLI agent event that could not be written to its terminal, to the pane whose
+    /// shell was given `token` as `WARP_AGENT_EVENT_TOKEN`.
+    CliAgentEvent {
+        token: AgentEventToken,
+        /// One protocol v1 notification as JSON, exactly what would follow the OSC 777
+        /// `warp://cli-agent` title. A string because the notification's `serde_json::Value`
+        /// fields do not survive bincode.
+        notification: String,
+    },
+}
+
+/// The largest [`Request::CliAgentEvent`] notification an instance accepts, in bytes.
+pub const MAX_CLI_AGENT_EVENT_BYTES: usize = 64 * 1024;
+
+/// A pane's agent-event token. Its `Debug` output leaves the value out, so logging a request can
+/// never leak a token that lets any local process post events to that pane.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentEventToken(String);
+
+impl AgentEventToken {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for AgentEventToken {
+    fn from(token: String) -> Self {
+        Self(token)
+    }
+}
+
+impl std::fmt::Debug for AgentEventToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AgentEventToken(<redacted>)")
+    }
 }
 
 /// A running window's answer.

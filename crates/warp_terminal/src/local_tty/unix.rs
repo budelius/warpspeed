@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 use signal_hook_mio::v1_0::Signals;
 use warp_core::channel::ChannelState;
 use warp_core::cli_agent_protocol::{
-    CLI_AGENT_PROTOCOL_VERSION, WARP_CLI_AGENT_PROTOCOL_VERSION_ENV, WARP_CLIENT_VERSION_ENV,
+    CLI_AGENT_PROTOCOL_VERSION, WARP_AGENT_EVENT_BIN_ENV, WARP_AGENT_EVENT_TOKEN_ENV,
+    WARP_CLI_AGENT_PROTOCOL_VERSION_ENV, WARP_CLIENT_VERSION_ENV,
 };
 use warp_core::features::FeatureFlag;
 use warp_core::safe_error;
@@ -441,6 +442,11 @@ fn build_host_shell_command(
     if let Some(start_dir) = start_dir {
         builder.env("WARP_INITIAL_WORKING_DIR", start_dir);
     }
+
+    // An agent-event token belongs to the pane it was made for; one inherited from the shell that
+    // started this process would let hooks in this pane address that other pane.
+    builder.env_remove(WARP_AGENT_EVENT_TOKEN_ENV);
+    builder.env_remove(WARP_AGENT_EVENT_BIN_ENV);
 
     // Apply any caller-provided environment overrides last, so they win.
     for (key, value) in env_vars {

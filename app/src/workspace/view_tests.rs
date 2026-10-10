@@ -7689,6 +7689,11 @@ fn start_agent_on_agent_ctrl_asks_which_agent_for_a_configured_repo() {
                 ("Claude".to_owned(), Some(crate::terminal::CLIAgent::Claude)),
                 ("Pi".to_owned(), Some(crate::terminal::CLIAgent::Pi)),
                 ("Codex".to_owned(), Some(crate::terminal::CLIAgent::Codex)),
+                ("Kimi".to_owned(), Some(crate::terminal::CLIAgent::Kimi)),
+                (
+                    "DeepSeek".to_owned(),
+                    Some(crate::terminal::CLIAgent::DeepSeekHarness)
+                ),
             ]
         );
     });

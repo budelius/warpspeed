@@ -277,6 +277,75 @@ fn test_fingerprint_skips_contextual_chip_recompute_when_context_is_unchanged() 
 }
 
 #[test]
+fn test_environment_updates_only_refresh_matching_session() {
+    App::test((), |mut app| async move {
+        let prompt_session_id = SessionId::from(777);
+        let other_session_id = SessionId::from(778);
+        app.add_singleton_model(|_| {
+            Prompt::mock_with(
+                [ContextChipKind::WorkingDirectory],
+                false,
+                WarpPromptSeparator::None,
+            )
+        });
+        app.add_singleton_model(SessionSettings::new_with_defaults);
+        app.add_singleton_model(|_ctx| {
+            settings::PublicPreferences::new(
+                Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+            )
+        });
+        app.add_singleton_model(|_| {
+            settings::PrivatePreferences::new(
+                Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+            )
+        });
+
+        let sessions = app.add_model(|_| Sessions::new_for_test());
+        let sessions_for_prompt = sessions.clone();
+        let current_prompt = app.add_model(move |ctx| CurrentPrompt::new(sessions_for_prompt, ctx));
+
+        current_prompt.update(&mut app, |current_prompt, ctx| {
+            current_prompt.latest_context = Some(PromptContext {
+                active_block_metadata: BlockMetadata::new(
+                    Some(prompt_session_id),
+                    Some("/tmp/project".to_string()),
+                ),
+                environment: Environment::default(),
+            });
+            current_prompt.update_states_with_new_context(ctx);
+        });
+
+        sessions.update(&mut app, |sessions, ctx| {
+            sessions.set_env_vars_for_session(
+                other_session_id,
+                HashMap::from([("OTHER".to_string(), "changed".to_string())]),
+                ctx,
+            );
+        });
+        current_prompt.read(&app, |current_prompt, _| {
+            assert_eq!(
+                current_prompt.states[&ContextChipKind::WorkingDirectory].update_status,
+                ChipUpdateStatus::Ready
+            );
+        });
+
+        sessions.update(&mut app, |sessions, ctx| {
+            sessions.set_env_vars_for_session(
+                prompt_session_id,
+                HashMap::from([("MATCHING".to_string(), "changed".to_string())]),
+                ctx,
+            );
+        });
+        current_prompt.read(&app, |current_prompt, _| {
+            assert_eq!(
+                current_prompt.states[&ContextChipKind::WorkingDirectory].update_status,
+                ChipUpdateStatus::Cached
+            );
+        });
+    });
+}
+
+#[test]
 fn test_shell_chip_is_disabled_when_required_executable_is_missing() {
     App::test((), |mut app| async move {
         let session_id = SessionId::from(456);

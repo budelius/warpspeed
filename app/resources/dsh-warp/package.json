@@ -1,0 +1,21 @@
+{
+  "name": "@stozn/dsh-warp",
+  "version": "0.1.0",
+  "description": "Reports DeepSeek Harness agent status to the WarpSpeed pane it runs in.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist/index.js", "dist/index.d.ts", "dist/protocol.js", "dist/protocol.d.ts", "cordis.patch.yml", "README.md"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test src/protocol.test.ts src/index.test.ts",
+    "prepublishOnly": "npm test && npm run build"
+  },
+  "peerDependencies": { "@deepseek-ai/cordis": ">=4.0.5-alpha.1 <4.1.0" },
+  "peerDependenciesMeta": { "@deepseek-ai/cordis": { "optional": true } },
+  "devDependencies": { "@types/node": "^22.19.0", "typescript": "^5.9.0" },
+  "engines": { "node": ">=22.19" },
+  "publishConfig": { "registry": "https://git-dev.obachan.dev/api/packages/stozn/npm/" }
+}

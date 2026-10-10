@@ -12,7 +12,9 @@ use managed_agent_sessions::{
 use tempfile::TempDir;
 
 use super::agent_session_history::current_dsh_log;
-use super::agent_session_paths::kimi_indexed_session_dirs;
+use super::agent_session_paths::{
+    dsh_home_override, kimi_home_override, kimi_indexed_session_dirs,
+};
 use crate::terminal::CLIAgent;
 
 const MAX_SESSION_ID_CHARS: usize = 128;
@@ -107,8 +109,9 @@ impl AgentSessionRoots {
             pi_agent_dir: env_dir("PI_CODING_AGENT_DIR").unwrap_or(defaults.pi_agent_dir),
             pi_session_dir: env_dir("PI_CODING_AGENT_SESSION_DIR"),
             codex_home: env_dir("CODEX_HOME").unwrap_or(defaults.codex_home),
-            kimi_home: env_dir("KIMI_CODE_HOME").unwrap_or(defaults.kimi_home),
-            dsh_home: env_dir("DSH_HOME").unwrap_or(defaults.dsh_home),
+            kimi_home: kimi_home_override(std::env::var_os("KIMI_CODE_HOME"))
+                .unwrap_or(defaults.kimi_home),
+            dsh_home: dsh_home_override(std::env::var_os("DSH_HOME")).unwrap_or(defaults.dsh_home),
         }
     }
 }

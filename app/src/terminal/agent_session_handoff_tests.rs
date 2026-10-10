@@ -1185,3 +1185,22 @@ fn prepare_handoff_uploads_a_kimi_tar_and_a_dsh_file_as_is() {
     assert_eq!(prepared.session_file, b"\x28\xb5\x2f\xfdrest");
     assert_eq!(prepared.session_len, 8);
 }
+
+#[test]
+fn blank_agent_homes_resolve_to_the_defaults() {
+    let home = Path::new("/home/user");
+    let saved = ["DSH_HOME", "KIMI_CODE_HOME"].map(|key| (key, std::env::var_os(key)));
+    unsafe { std::env::set_var("DSH_HOME", "  \t") };
+    unsafe { std::env::set_var("KIMI_CODE_HOME", "") };
+
+    let roots = AgentSessionRoots::from_env(home);
+
+    for (key, value) in saved {
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+    assert_eq!(roots.dsh_home, home.join(".dsh"));
+    assert_eq!(roots.kimi_home, home.join(".kimi-code"));
+}

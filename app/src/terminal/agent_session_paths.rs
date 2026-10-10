@@ -1,6 +1,7 @@
 //! Where Kimi Code and DeepSeek Harness keep their data, as their own code resolves it.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -10,22 +11,28 @@ use sha2::{Digest, Sha256};
 
 use super::agent_session_history::is_safe_session_id;
 
-/// Kimi Code's data root: `$KIMI_CODE_HOME`, else `~/.kimi-code`. Kimi's CLI treats an empty
-/// value as unset.
+/// Kimi Code's data root: `$KIMI_CODE_HOME`, else `~/.kimi-code`.
 pub(crate) fn kimi_home() -> Option<PathBuf> {
-    std::env::var_os("KIMI_CODE_HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+    kimi_home_override(std::env::var_os("KIMI_CODE_HOME"))
         .or_else(|| dirs::home_dir().map(|home| home.join(".kimi-code")))
 }
 
-/// DeepSeek Harness's data root: `$DSH_HOME`, else `~/.dsh`. dsh treats a blank value as unset.
+/// `KIMI_CODE_HOME`'s value as a path, or `None` where Kimi's CLI treats it as unset (empty).
+pub(crate) fn kimi_home_override(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|home| !home.is_empty()).map(PathBuf::from)
+}
+
+/// DeepSeek Harness's data root: `$DSH_HOME`, else `~/.dsh`.
 pub(crate) fn dsh_home() -> Option<PathBuf> {
-    std::env::var("DSH_HOME")
-        .ok()
-        .filter(|home| !home.trim().is_empty())
-        .map(PathBuf::from)
+    dsh_home_override(std::env::var_os("DSH_HOME"))
         .or_else(|| dirs::home_dir().map(|home| home.join(".dsh")))
+}
+
+/// `DSH_HOME`'s value as a path, or `None` where dsh treats it as unset (blank or not Unicode).
+pub(crate) fn dsh_home_override(value: Option<OsString>) -> Option<PathBuf> {
+    value
+        .filter(|home| home.to_str().is_some_and(|home| !home.trim().is_empty()))
+        .map(PathBuf::from)
 }
 
 /// Each live session's directory from Kimi's `session_index.jsonl`, or `None` without an index.

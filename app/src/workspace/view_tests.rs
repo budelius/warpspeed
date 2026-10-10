@@ -9241,3 +9241,87 @@ fn fleet_row_pause_and_resume_reach_agent_ctrl() {
         );
     });
 }
+
+fn detach_focused_pane_for_test(workspace: &ViewHandle<Workspace>, app: &mut App) {
+    workspace.update(app, |workspace, ctx| {
+        let pane_group = workspace.active_tab_pane_group().clone();
+        let pane_id = pane_group.as_ref(ctx).focused_pane_id(ctx);
+        workspace.close_detached_pane(pane_group.id(), pane_id, ctx);
+    });
+}
+
+#[test]
+fn detaching_the_only_pane_opens_a_replacement_tab() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let original_group = workspace.read(&app, |workspace, _| {
+            assert_eq!(workspace.tabs.len(), 1);
+            workspace.active_tab_pane_group().id()
+        });
+
+        detach_focused_pane_for_test(&workspace, &mut app);
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(
+                workspace.tabs.len(),
+                1,
+                "the detached pane's tab must be replaced, not leave the window empty"
+            );
+            let pane_group = workspace.active_tab_pane_group();
+            assert_ne!(pane_group.id(), original_group);
+            assert_eq!(pane_group.as_ref(ctx).visible_pane_ids().len(), 1);
+        });
+    });
+}
+
+#[test]
+fn detaching_one_pane_of_a_split_only_closes_that_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let original_group = workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().clone();
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.add_terminal_pane(Direction::Right, None, ctx);
+            });
+            pane_group.id()
+        });
+
+        detach_focused_pane_for_test(&workspace, &mut app);
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.tabs.len(), 1);
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(pane_group.id(), original_group);
+            assert_eq!(pane_group.as_ref(ctx).visible_pane_ids().len(), 1);
+        });
+    });
+}
+
+#[test]
+fn detaching_a_tabs_only_pane_beside_other_tabs_closes_just_that_tab() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::default()),
+                Arc::new(HashMap::new()),
+                None,
+                ctx,
+            );
+            assert_eq!(workspace.tabs.len(), 2);
+        });
+
+        detach_focused_pane_for_test(&workspace, &mut app);
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.len(),
+                1,
+                "with another tab left the window survives, so no replacement is added"
+            );
+        });
+    });
+}

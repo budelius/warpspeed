@@ -13933,7 +13933,7 @@ impl Workspace {
         };
 
         match self.hand_session_to_supervisor(pane_group_id, pane_id, ctx) {
-            Ok(()) => self.close_pane(pane_group_id, pane_id, ctx),
+            Ok(()) => self.close_detached_pane(pane_group_id, pane_id, ctx),
             Err(error) => {
                 report_error!(error.context("Failed to detach a terminal session"));
                 self.toast_stack.update(ctx, |toast_stack, ctx| {
@@ -13947,6 +13947,60 @@ impl Workspace {
                 });
             }
         }
+    }
+
+    /// Closes a pane whose session the supervisor now owns, keeping the window open.
+    ///
+    /// Detaching hands a session away without ending it, so it must not take the window with it:
+    /// when the pane is the window's last visible one, a plain terminal tab in the session's
+    /// directory goes in first. It has to go in before the close, because an emptied window is
+    /// closed at once and leaves nothing to add a tab to.
+    pub(crate) fn close_detached_pane(
+        &mut self,
+        pane_group_id: EntityId,
+        pane_id: PaneId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.is_last_visible_pane_in_window(pane_group_id, pane_id, ctx) {
+            let initial_directory = self
+                .get_pane_group_view_with_id(pane_group_id)
+                .and_then(|pane_group| {
+                    pane_group
+                        .as_ref(ctx)
+                        .terminal_view_from_pane_id(pane_id, ctx)
+                })
+                .and_then(|view| view.as_ref(ctx).pwd_if_local(ctx))
+                .map(PathBuf::from);
+            self.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                    initial_directory,
+                    ..Default::default()
+                })),
+                Arc::new(HashMap::new()),
+                None, /*custom_tab_title*/
+                ctx,
+            );
+        }
+        self.close_pane(pane_group_id, pane_id, ctx);
+    }
+
+    /// Whether closing this pane would empty the window. Hidden panes do not count: with
+    /// `FeatureFlag::UndoClosedPanes` a just-closed sibling stays in the tree, hidden, for the
+    /// undo grace period.
+    fn is_last_visible_pane_in_window(
+        &self,
+        pane_group_id: EntityId,
+        pane_id: PaneId,
+        ctx: &AppContext,
+    ) -> bool {
+        if self.tabs.len() != 1 {
+            return false;
+        }
+        let Some(pane_group) = self.get_pane_group_view_with_id(pane_group_id) else {
+            return false;
+        };
+        let visible_pane_ids = pane_group.as_ref(ctx).visible_pane_ids();
+        visible_pane_ids.len() == 1 && visible_pane_ids.contains(&pane_id)
     }
 
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -15290,7 +15344,7 @@ impl Workspace {
             .with_context(|| format!("No pane in this window holds session {session_id:?}"))?;
 
         self.hand_session_to_supervisor(pane.pane_group_id, pane.pane_id, ctx)?;
-        self.close_pane(pane.pane_group_id, pane.pane_id, ctx);
+        self.close_detached_pane(pane.pane_group_id, pane.pane_id, ctx);
         Ok(())
     }
 

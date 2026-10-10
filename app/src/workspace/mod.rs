@@ -1294,7 +1294,7 @@ pub fn init(app: &mut AppContext) {
         .with_custom_action(CustomAction::SearchDrive),
         EditableBinding::new(
             "workspace:search_agent_sessions",
-            "Agent sessions: search",
+            "Sessions: search",
             WorkspaceAction::OpenPalette {
                 mode: PaletteMode::AgentSessions,
                 source: PaletteSource::Keybinding,
@@ -1305,7 +1305,7 @@ pub fn init(app: &mut AppContext) {
         .with_enabled(|| cfg!(feature = "local_tty")),
         EditableBinding::new(
             "workspace:show_agent_sessions",
-            "Agent sessions: show window",
+            "Sessions: show window",
             WorkspaceAction::ShowAgentSessions { focus: None },
         )
         .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))

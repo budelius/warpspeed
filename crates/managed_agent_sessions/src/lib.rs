@@ -202,6 +202,48 @@ struct EventPage {
     earliest_cursor: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunPreviewEventKind {
+    User,
+    Assistant,
+    Tool,
+    Output,
+    Error,
+    Status,
+    System,
+}
+
+impl RunPreviewEventKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            RunPreviewEventKind::User => "You",
+            RunPreviewEventKind::Assistant => "Agent",
+            RunPreviewEventKind::Tool => "Tool",
+            RunPreviewEventKind::Output => "Output",
+            RunPreviewEventKind::Error => "Error",
+            RunPreviewEventKind::Status => "Status",
+            RunPreviewEventKind::System => "System",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunPreviewEvent {
+    pub kind: RunPreviewEventKind,
+    pub content: String,
+    pub timestamp: String,
+    pub redacted: bool,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunPreview {
+    pub events: Vec<RunPreviewEvent>,
+    pub terminal: bool,
+    pub history_gap: bool,
+    pub truncated: bool,
+}
+
 pub fn begin_stozn_login() -> Result<StoznLoginFlow> {
     let profile = profile(ManagedEnvironment::Staging);
     let started = zitadel_auth::start_device_login(profile.zitadel)?;
@@ -432,8 +474,113 @@ pub fn list_runs(environment: ManagedEnvironment) -> Result<Vec<RunSummary>> {
     list_runs_with(profile(environment), &token)
 }
 
+/// Fetches a bounded transcript preview for one managed run.
+pub fn fetch_run_preview(
+    environment: ManagedEnvironment,
+    job_id: &str,
+    max_events: usize,
+) -> Result<RunPreview> {
+    fetch_run_preview_with(profile(environment), job_id, max_events, &dashboard_token)
+}
+
 fn list_runs_with(profile: &EnvironmentProfile, token: &str) -> Result<Vec<RunSummary>> {
     parse_items(fetch_runs_page(profile, token)?, "managed-run list")
+}
+
+fn fetch_run_preview_with(
+    profile: &EnvironmentProfile,
+    job_id: &str,
+    max_events: usize,
+    token: &dyn Fn() -> Result<String>,
+) -> Result<RunPreview> {
+    const MAX_PAGES: usize = 4;
+    const PAGE_SIZE: usize = 100;
+
+    validate_job_id(job_id)?;
+    if max_events == 0 {
+        return Ok(RunPreview::default());
+    }
+    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
+    let mut cursor = None;
+    let mut events = Vec::new();
+    let mut terminal = false;
+    let mut history_gap = false;
+    let mut truncated = false;
+    let mut known_events = HashSet::new();
+    for page_index in 0..MAX_PAGES {
+        let access_token = token()?;
+        let (page, response_gap) = fetch_event_page_with_limit(
+            &client,
+            profile,
+            job_id,
+            &access_token,
+            cursor.as_deref(),
+            0,
+            PAGE_SIZE,
+        )?;
+        terminal |= page.terminal;
+        history_gap |= response_gap || page.gap;
+        let is_empty = page.items.is_empty();
+        let page_events = retain_new_events(page.items, &mut known_events);
+        events.extend(page_events);
+        let next_cursor = page.next_cursor;
+        let has_more = !terminal && !is_empty && next_cursor.is_some() && next_cursor != cursor;
+        truncated = has_more && page_index + 1 == MAX_PAGES;
+        if !has_more {
+            break;
+        }
+        cursor = next_cursor;
+    }
+    let mut events = events
+        .iter()
+        .filter_map(run_preview_event)
+        .collect::<Vec<_>>();
+    let keep_from = events.len().saturating_sub(max_events.min(PAGE_SIZE));
+    events.drain(..keep_from);
+    Ok(RunPreview {
+        events,
+        terminal,
+        history_gap,
+        truncated,
+    })
+}
+
+fn run_preview_event(event: &RunEvent) -> Option<RunPreviewEvent> {
+    const MAX_CONTENT_CHARS: usize = 4_000;
+
+    let kind = match event.event_type.as_str() {
+        "user_input" => RunPreviewEventKind::User,
+        "assistant" => RunPreviewEventKind::Assistant,
+        "tool_use" => RunPreviewEventKind::Tool,
+        "stdout" => RunPreviewEventKind::Output,
+        "stderr" => RunPreviewEventKind::Error,
+        "status" => RunPreviewEventKind::Status,
+        "system" => RunPreviewEventKind::System,
+        _ => return None,
+    };
+    let content = event
+        .content
+        .chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || !character.is_control() {
+                character
+            } else {
+                '�'
+            }
+        })
+        .take(MAX_CONTENT_CHARS)
+        .collect::<String>();
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    Some(RunPreviewEvent {
+        kind,
+        content: content.to_owned(),
+        timestamp: event.timestamp.clone(),
+        redacted: event.redacted,
+        truncated: event.truncated || event.content.chars().count() > MAX_CONTENT_CHARS,
+    })
 }
 
 fn fetch_runs_page(profile: &EnvironmentProfile, token: &str) -> Result<Value> {
@@ -974,6 +1121,32 @@ pub fn resume_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunCo
     resume_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
 }
 
+/// Resumes a paused run and waits for the corresponding resumed event before returning.
+pub fn resume_run_and_wait(
+    environment: ManagedEnvironment,
+    job_id: &str,
+    timeout: Duration,
+) -> Result<()> {
+    validate_job_id(job_id)?;
+    let profile = profile(environment);
+    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
+    let token = dashboard_token()?;
+    let cursor = fetch_descriptor(&client, profile, job_id, &token)?.next_cursor;
+    let token = dashboard_token()?;
+    let outcome = run_control_outcome(&resume_run_with(profile, &token, job_id)?);
+    if outcome.state == "running" {
+        return Ok(());
+    }
+    wait_until_resumed_after(
+        &client,
+        profile,
+        &dashboard_token,
+        job_id,
+        cursor,
+        Instant::now() + timeout,
+    )
+}
+
 /// What the dashboard reports after accepting a pause or resume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunControlOutcome {
@@ -1238,8 +1411,18 @@ fn wait_until_resumed_with(
     job_id: &str,
     deadline: Instant,
 ) -> Result<()> {
+    wait_until_resumed_after(client, profile, token, job_id, None, deadline)
+}
+
+fn wait_until_resumed_after(
+    client: &Client,
+    profile: &EnvironmentProfile,
+    token: &dyn Fn() -> Result<String>,
+    job_id: &str,
+    mut cursor: Option<String>,
+    deadline: Instant,
+) -> Result<()> {
     let started = Instant::now();
-    let mut cursor: Option<String> = None;
     loop {
         let fetched = match token() {
             Ok(access_token) => fetch_event_page(
@@ -1325,7 +1508,20 @@ fn fetch_event_page(
     cursor: Option<&str>,
     wait_ms: u64,
 ) -> Result<(EventPage, bool)> {
+    fetch_event_page_with_limit(client, profile, job_id, token, cursor, wait_ms, 100)
+}
+
+fn fetch_event_page_with_limit(
+    client: &Client,
+    profile: &EnvironmentProfile,
+    job_id: &str,
+    token: &str,
+    cursor: Option<&str>,
+    wait_ms: u64,
+    limit: usize,
+) -> Result<(EventPage, bool)> {
     let wait = wait_ms.to_string();
+    let limit = limit.to_string();
     let mut request = client
         .get(format!(
             "{}/api/agent-control/runs/{job_id}/events",
@@ -1333,7 +1529,7 @@ fn fetch_event_page(
         ))
         .bearer_auth(token)
         .header("X-Stozn-Client", "warpspeed")
-        .query(&[("limit", "100"), ("wait_ms", wait.as_str())]);
+        .query(&[("limit", limit.as_str()), ("wait_ms", wait.as_str())]);
     if let Some(after) = cursor {
         request = request.query(&[("after", after)]);
     }
@@ -1473,7 +1669,8 @@ fn valid_base_branch(branch: &str) -> bool {
             .any(|component| component.starts_with('.'))
 }
 
-fn validate_job_id(job_id: &str) -> Result<()> {
+/// Rejects job ids that cannot safely be used in an AgentCtrl route or CLI command.
+pub fn validate_job_id(job_id: &str) -> Result<()> {
     let valid = job_id.starts_with("job-")
         && job_id.len() <= 128
         && job_id

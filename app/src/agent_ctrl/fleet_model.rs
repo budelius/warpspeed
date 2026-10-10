@@ -1,9 +1,11 @@
 //! The managed runs on AgentCtrl staging and the repositories it can start runs on, refreshed
-//! while a fleet view is attached.
-use std::collections::HashSet;
+//! while a consuming view is attached.
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use managed_agent_sessions::{RepositoryInfo, RunSummary, is_paused_state, normalize_repo_url};
+use managed_agent_sessions::{
+    RepositoryInfo, RunPreview, RunSummary, is_paused_state, normalize_repo_url,
+};
 use warp_cli::managed_sessions::ManagedEnvironment;
 use warpui::{Entity, EntityId, ModelContext, SingletonEntity};
 
@@ -40,6 +42,8 @@ pub struct FleetBackend {
     pub stop: fn(&str) -> anyhow::Result<()>,
     pub pause: fn(&str) -> anyhow::Result<()>,
     pub resume: fn(&str) -> anyhow::Result<()>,
+    pub resume_for_attach: fn(&str) -> anyhow::Result<()>,
+    pub preview: fn(&str) -> anyhow::Result<RunPreview>,
 }
 
 impl FleetBackend {
@@ -68,6 +72,16 @@ impl FleetBackend {
             },
             resume: |job_id| {
                 managed_agent_sessions::resume_run(ManagedEnvironment::Staging, job_id).map(drop)
+            },
+            resume_for_attach: |job_id| {
+                managed_agent_sessions::resume_run_and_wait(
+                    ManagedEnvironment::Staging,
+                    job_id,
+                    Duration::from_secs(60),
+                )
+            },
+            preview: |job_id| {
+                managed_agent_sessions::fetch_run_preview(ManagedEnvironment::Staging, job_id, 12)
             },
         }
     }
@@ -127,6 +141,8 @@ impl FleetRow {
 
 pub enum FleetModelEvent {
     Updated,
+    PreviewUpdated,
+    ResumeForAttachSucceeded { job_id: String, requester: EntityId },
 }
 
 pub struct FleetModel {
@@ -142,6 +158,8 @@ pub struct FleetModel {
     /// Set when a refresh is asked for while one is in flight, so the newer state is fetched once
     /// it lands.
     refresh_again: bool,
+    previews: HashMap<String, Result<RunPreview, String>>,
+    previewing: HashSet<String>,
     attached_views: HashSet<EntityId>,
     /// Whether a refresh timer is pending, so re-attaching within an interval does not start a
     /// second polling chain.
@@ -162,6 +180,8 @@ impl FleetModel {
             action_error: None,
             refreshing: false,
             refresh_again: false,
+            previews: HashMap::new(),
+            previewing: HashSet::new(),
             attached_views: HashSet::new(),
             refresh_scheduled: false,
         }
@@ -169,6 +189,18 @@ impl FleetModel {
 
     pub fn repos(&self) -> &[RepositoryInfo] {
         &self.repos
+    }
+
+    pub fn runs(&self) -> &[RunSummary] {
+        &self.runs
+    }
+
+    pub fn preview(&self, job_id: &str) -> Option<&Result<RunPreview, String>> {
+        self.previews.get(job_id)
+    }
+
+    pub fn is_previewing(&self, job_id: &str) -> bool {
+        self.previewing.contains(job_id)
     }
 
     pub fn last_error(&self) -> Option<&str> {
@@ -183,6 +215,11 @@ impl FleetModel {
         if self.action_error.take().is_some() {
             ctx.emit(FleetModelEvent::Updated);
         }
+    }
+
+    pub fn set_action_error(&mut self, error: String, ctx: &mut ModelContext<Self>) {
+        self.action_error = Some(error);
+        ctx.emit(FleetModelEvent::Updated);
     }
 
     pub fn attached_view_count(&self) -> usize {
@@ -212,6 +249,27 @@ impl FleetModel {
         self.attached_views.remove(&view_id);
     }
 
+    pub fn request_preview(&mut self, job_id: String, force: bool, ctx: &mut ModelContext<Self>) {
+        if self.previewing.contains(&job_id) || (!force && self.previews.contains_key(&job_id)) {
+            return;
+        }
+        self.previewing.insert(job_id.clone());
+        ctx.emit(FleetModelEvent::PreviewUpdated);
+        let preview = self.backend.preview;
+        let completed_job_id = job_id.clone();
+        ctx.spawn(
+            async move { blocking::unblock(move || preview(&job_id)).await },
+            move |me, result, ctx| {
+                me.previewing.remove(&completed_job_id);
+                me.previews.insert(
+                    completed_job_id.clone(),
+                    result.map_err(|error| format!("Could not load transcript: {error:#}")),
+                );
+                ctx.emit(FleetModelEvent::PreviewUpdated);
+            },
+        );
+    }
+
     pub fn refresh(&mut self, ctx: &mut ModelContext<Self>) {
         if self.refreshing {
             self.refresh_again = true;
@@ -236,6 +294,13 @@ impl FleetModel {
             Ok(snapshot) => {
                 self.runs = snapshot.runs;
                 self.repos = snapshot.repos;
+                let job_ids = self
+                    .runs
+                    .iter()
+                    .map(|run| run.job_id.as_str())
+                    .collect::<HashSet<_>>();
+                self.previews
+                    .retain(|job_id, _| job_ids.contains(job_id.as_str()));
                 self.last_error = None;
             }
             Err(error) => {
@@ -299,6 +364,35 @@ impl FleetModel {
             resume,
             managed_agent_sessions::resume_failure_message,
             ctx,
+        );
+    }
+
+    /// Resumes `job_id`, waits until its session is live, then tells only the requesting view.
+    pub fn resume_for_attach(
+        &mut self,
+        job_id: String,
+        requester: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.action_error = None;
+        let resume = self.backend.resume_for_attach;
+        let completed_job_id = job_id.clone();
+        ctx.spawn(
+            async move { blocking::unblock(move || resume(&job_id)).await },
+            move |me, result, ctx| {
+                match result {
+                    Ok(()) => ctx.emit(FleetModelEvent::ResumeForAttachSucceeded {
+                        job_id: completed_job_id,
+                        requester,
+                    }),
+                    Err(error) => {
+                        me.action_error =
+                            Some(managed_agent_sessions::resume_failure_message(&error));
+                        ctx.emit(FleetModelEvent::Updated);
+                    }
+                }
+                me.refresh(ctx);
+            },
         );
     }
 

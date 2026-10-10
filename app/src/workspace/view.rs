@@ -167,6 +167,7 @@ use super::util::{
 };
 use super::{ActiveSession, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry, util};
 use crate::agent_ctrl::FleetPaneManager;
+use crate::agent_ctrl::fleet_model::FleetModel;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::agent::CancellationReason;
@@ -1186,6 +1187,8 @@ pub struct Workspace {
     /// The window's agent sessions by tab and pane, opened by `ShowAgentSessions`. Shown while
     /// `current_workspace_state.is_agent_sessions_modal_open`, so closing all modals closes it.
     agent_sessions_modal: ViewHandle<Modal<AgentSessionsView>>,
+    /// The pane that opened the sessions browser, used when attaching an AgentCtrl run.
+    agent_sessions_target: Option<PaneViewLocator>,
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
@@ -2303,13 +2306,13 @@ impl Workspace {
                 .close_modal_button_disabled()
                 .with_dismiss_on_click()
                 .with_modal_style(UiComponentStyles {
-                    width: Some(640.),
-                    height: Some(520.),
+                    width: Some(1040.),
+                    height: Some(620.),
                     ..Default::default()
                 })
                 .with_body_style(UiComponentStyles {
                     padding: Some(Coords::uniform(0.)),
-                    height: Some(520.),
+                    height: Some(620.),
                     ..Default::default()
                 })
                 .with_header_style(UiComponentStyles {
@@ -3812,6 +3815,7 @@ impl Workspace {
             change_shell_menu_modal,
             attach_session_menu_modal,
             agent_sessions_modal,
+            agent_sessions_target: None,
             pending_shell_restart: None,
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_moves: HashMap::new(),
@@ -17755,6 +17759,7 @@ impl Workspace {
                 pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
             })
         });
+        self.agent_sessions_target = focus;
         let (panes, detached) = self.agent_session_inputs(ctx);
         let history = AgentSessionHistoryModel::as_ref(ctx);
         let (past, history_loaded) = (history.sessions().to_vec(), history.is_loaded());
@@ -17764,6 +17769,8 @@ impl Workspace {
             });
         });
         self.current_workspace_state.is_agent_sessions_modal_open = true;
+        let view_id = self.agent_sessions_modal.as_ref(ctx).body().id();
+        FleetModel::handle(ctx).update(ctx, |model, ctx| model.attach_view(view_id, ctx));
         ctx.focus(&self.agent_sessions_modal);
         AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
         ctx.notify();
@@ -17801,6 +17808,9 @@ impl Workspace {
     /// Closes the window view without handing focus back, for when something else takes it.
     fn hide_agent_sessions_modal(&mut self, ctx: &mut ViewContext<Self>) {
         self.current_workspace_state.is_agent_sessions_modal_open = false;
+        let view_id = self.agent_sessions_modal.as_ref(ctx).body().id();
+        FleetModel::handle(ctx).update(ctx, |model, _| model.detach_view(view_id));
+        self.agent_sessions_target = None;
         ctx.notify();
     }
 
@@ -17821,6 +17831,10 @@ impl Workspace {
                 self.focus_pane(*target, ctx);
                 Self::open_agent_sessions_palette(Some(folder.display().to_string()), ctx);
             }
+            AgentSessionsViewEvent::OpenManaged(job_id) if self.is_agent_sessions_modal_open() => {
+                self.open_managed_session_from_browser(job_id, ctx);
+            }
+            AgentSessionsViewEvent::OpenManaged(_) => {}
             AgentSessionsViewEvent::Close => self.close_agent_sessions_modal(ctx),
         }
     }
@@ -18702,6 +18716,116 @@ impl Workspace {
                 ctx,
             );
         });
+    }
+
+    fn open_managed_session_from_browser(&mut self, job_id: &str, ctx: &mut ViewContext<Self>) {
+        if let Err(error) = managed_agent_sessions::validate_job_id(job_id) {
+            FleetModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_action_error(format!("Could not attach to the run: {error:#}"), ctx)
+            });
+            return;
+        }
+        let arguments = managed_agent_sessions::ManagedSessionDeepLink {
+            environment: warp_cli::managed_sessions::ManagedEnvironment::Staging,
+            job_id: job_id.to_owned(),
+        }
+        .cli_arguments();
+        let target = self.agent_sessions_target.and_then(|target| {
+            self.get_pane_group_view_with_id(target.pane_group_id)
+                .filter(|pane_group| {
+                    pane_group
+                        .as_ref(ctx)
+                        .visible_pane_ids()
+                        .contains(&target.pane_id)
+                })
+                .map(|pane_group| (target, pane_group.clone()))
+        });
+        let idle_view = target.as_ref().and_then(|(target, pane_group)| {
+            pane_group
+                .as_ref(ctx)
+                .terminal_view_from_pane_id(target.pane_id, ctx)
+                .filter(|view| {
+                    let terminal = view.as_ref(ctx);
+                    terminal.is_login_shell_bootstrapped()
+                        && !terminal.is_long_running()
+                        && !terminal.has_pending_command_or_awaiting_completion(ctx)
+                        && terminal
+                            .input()
+                            .as_ref(ctx)
+                            .editor()
+                            .as_ref(ctx)
+                            .is_empty(ctx)
+                        && CLIAgentSessionsModel::as_ref(ctx)
+                            .session(view.id())
+                            .is_none()
+                })
+        });
+        let destination = if let Some(view) = idle_view {
+            let locator = target.as_ref().map(|(locator, _)| *locator);
+            Some((view, locator))
+        } else if let Some((target, pane_group)) = target {
+            let cwd = pane_group
+                .as_ref(ctx)
+                .terminal_view_from_pane_id(target.pane_id, ctx)
+                .and_then(|view| view.as_ref(ctx).pwd_if_local(ctx))
+                .or_else(|| {
+                    pane_group
+                        .as_ref(ctx)
+                        .terminal_working_directory(target.pane_id, ctx)
+                })
+                .map(PathBuf::from)
+                .or_else(|| std::env::current_dir().ok());
+            cwd.and_then(|cwd| {
+                let pane_id = pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.split_terminal_in_directory(target.pane_id, cwd, ctx)
+                });
+                pane_group
+                    .as_ref(ctx)
+                    .terminal_view_from_pane_id(pane_id, ctx)
+                    .map(|view| {
+                        (
+                            view,
+                            Some(PaneViewLocator {
+                                pane_group_id: target.pane_group_id,
+                                pane_id: pane_id.into(),
+                            }),
+                        )
+                    })
+            })
+        } else {
+            None
+        };
+        let (view, locator) = match destination {
+            Some(destination) => destination,
+            None => {
+                self.add_terminal_tab(false, ctx);
+                let pane_group = self.active_tab_pane_group();
+                let locator = PaneViewLocator {
+                    pane_group_id: pane_group.id(),
+                    pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+                };
+                let Some(view) = pane_group.as_ref(ctx).active_session_view(ctx) else {
+                    FleetModel::handle(ctx).update(ctx, |model, ctx| {
+                        model.set_action_error(
+                            "Could not open a terminal for the managed run.".to_owned(),
+                            ctx,
+                        )
+                    });
+                    return;
+                };
+                (view, Some(locator))
+            }
+        };
+        if let Err(error) = Self::try_execute_managed_session_command_in(&view, &arguments, ctx) {
+            FleetModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_action_error(format!("Could not attach to the run: {error}"), ctx)
+            });
+            return;
+        }
+        self.hide_agent_sessions_modal(ctx);
+        if let Some(locator) = locator {
+            self.focus_pane(locator, ctx);
+        }
     }
 
     fn open_managed_session_in_new_tab(&mut self, job_id: &str, ctx: &mut ViewContext<Self>) {
@@ -20841,17 +20965,23 @@ impl Workspace {
         arguments: &str,
         ctx: &mut ViewContext<Self>,
     ) {
-        let executable = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(error) => {
-                log::warn!("Cannot open managed session without the current executable: {error}");
-                return;
-            }
-        };
-        let Some(executable) = executable.to_str() else {
-            log::warn!("Cannot open managed session from a non-Unicode executable path");
-            return;
-        };
+        if let Err(error) =
+            Self::try_execute_managed_session_command_in(terminal_view, arguments, ctx)
+        {
+            log::warn!("Cannot open managed session: {error}");
+        }
+    }
+
+    fn try_execute_managed_session_command_in(
+        terminal_view: &ViewHandle<TerminalView>,
+        arguments: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<(), String> {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("the current executable is unavailable: {error}"))?;
+        let executable = executable
+            .to_str()
+            .ok_or_else(|| "the current executable path is not Unicode".to_owned())?;
         let executable: std::borrow::Cow<str> = if cfg!(windows) {
             executable.replace('\\', "/").into()
         } else {
@@ -20865,6 +20995,7 @@ impl Workspace {
             );
             terminal_view.execute_command_or_set_pending(&command, ctx);
         });
+        Ok(())
     }
 
     /// Insert the given command that should open a subshell. And set a flag that we should

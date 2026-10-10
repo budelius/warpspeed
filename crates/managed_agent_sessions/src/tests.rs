@@ -293,6 +293,87 @@ fn http_gap_fixture_deduplicates_replayed_events() {
 }
 
 #[test]
+fn run_preview_is_bounded_sanitized_and_typed() {
+    let base = http_fixture(
+        "200 OK",
+        json!({
+            "items": [
+                {
+                    "event_id": "event-1", "job_id": "job-123", "sequence": 1,
+                    "timestamp": "2026-01-01T00:00:00Z", "type": "user_input",
+                    "content": "fix it", "redacted": false, "truncated": false
+                },
+                {
+                    "event_id": "event-2", "job_id": "job-123", "sequence": 2,
+                    "timestamp": "2026-01-01T00:00:01Z", "type": "assistant",
+                    "content": "done\u{7}", "redacted": false, "truncated": false
+                }
+            ],
+            "next_cursor": null,
+            "terminal": true,
+            "gap": false,
+            "earliest_cursor": null
+        }),
+    );
+    let profile = fixture_profile(base);
+
+    let preview =
+        fetch_run_preview_with(&profile, "job-123", 1, &|| Ok("test-token".to_owned())).unwrap();
+
+    assert!(preview.terminal);
+    assert!(!preview.history_gap);
+    assert!(!preview.truncated);
+    assert_eq!(preview.events.len(), 1);
+    assert_eq!(preview.events[0].kind, RunPreviewEventKind::Assistant);
+    assert_eq!(preview.events[0].kind.label(), "Agent");
+    assert_eq!(preview.events[0].content, "done�");
+}
+
+#[test]
+fn run_preview_pages_with_fresh_credentials_and_deduplicates_replays() {
+    let event = |id: &str, sequence: u64, content: &str| {
+        json!({
+            "event_id": id, "job_id": "job-123", "sequence": sequence,
+            "timestamp": "2026-01-01T00:00:00Z", "type": "assistant",
+            "content": content, "redacted": false, "truncated": false
+        })
+    };
+    let replay = event("event-2", 2, "second");
+    let (base, requests) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [event("event-1", 1, "first"), replay.clone()],
+                "next_cursor": "cursor-2", "terminal": false, "gap": false,
+                "earliest_cursor": null
+            }),
+        ),
+        (
+            "200 OK",
+            json!({
+                "items": [replay, event("event-3", 3, "third")],
+                "next_cursor": null, "terminal": false, "gap": false,
+                "earliest_cursor": null
+            }),
+        ),
+    ]);
+    let profile = fixture_profile(base);
+    let refreshes = std::sync::atomic::AtomicUsize::new(0);
+
+    let preview = fetch_run_preview_with(&profile, "job-123", 10, &|| {
+        refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("test-token".to_owned())
+    })
+    .unwrap();
+
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(preview.events.len(), 3);
+    assert_eq!(preview.events[2].content, "third");
+    assert!(!preview.truncated);
+    assert!(requests.lock().unwrap()[1].contains("after=cursor-2"));
+}
+
+#[test]
 fn full_managed_flow_has_dashboard_only_network_authority() {
     let profile = profile(ManagedEnvironment::Staging);
     let client = Client::new();
@@ -537,6 +618,24 @@ fn sequence_fixture(
         }
     });
     (Box::leak(format!("http://{address}").into_boxed_str()), log)
+}
+
+#[test]
+fn resume_wait_can_start_after_the_pre_resume_cursor() {
+    let (base, requests) = sequence_fixture(vec![("200 OK", resumed_page("resumed", false))]);
+    let profile = fixture_profile(base);
+
+    wait_until_resumed_after(
+        &Client::new(),
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Some("before-resume".to_owned()),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+
+    assert!(requests.lock().unwrap()[0].contains("after=before-resume"));
 }
 
 fn empty_page() -> serde_json::Value {

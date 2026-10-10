@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use managed_agent_sessions::{RepositoryInfo, RunSummary};
 use warpui::App;
 
@@ -178,6 +179,25 @@ fn no_resume(_: &str) -> anyhow::Result<()> {
     panic!("not resumed in these tests")
 }
 
+fn no_preview(_: &str) -> anyhow::Result<managed_agent_sessions::RunPreview> {
+    panic!("preview not fetched in these tests")
+}
+
+fn preview_ok(job_id: &str) -> anyhow::Result<managed_agent_sessions::RunPreview> {
+    Ok(managed_agent_sessions::RunPreview {
+        events: vec![managed_agent_sessions::RunPreviewEvent {
+            kind: managed_agent_sessions::RunPreviewEventKind::Assistant,
+            content: format!("preview for {job_id}"),
+            timestamp: String::new(),
+            redacted: false,
+            truncated: false,
+        }],
+        terminal: false,
+        history_gap: false,
+        truncated: false,
+    })
+}
+
 fn backend(list: fn() -> anyhow::Result<FleetSnapshot>) -> FleetBackend {
     FleetBackend {
         list,
@@ -185,7 +205,68 @@ fn backend(list: fn() -> anyhow::Result<FleetSnapshot>) -> FleetBackend {
         stop: no_stop,
         pause: no_pause,
         resume: no_resume,
+        resume_for_attach: no_resume,
+        preview: no_preview,
     }
+}
+
+#[test]
+fn preview_is_loaded_in_the_background_for_the_requested_job() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                preview: preview_ok,
+                ..backend(list_two_runs)
+            })
+        });
+
+        model.update(&mut app, |model, ctx| {
+            model.request_preview("job-b".to_owned(), false, ctx)
+        });
+        assert!(model.read(&app, |model, _| model.is_previewing("job-b")));
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => model.read(&app, |model, _| {
+                model.preview("job-b").is_some()
+            }),
+            "the preview never finished"
+        );
+        let content = model.read(&app, |model, _| {
+            model
+                .preview("job-b")
+                .and_then(|preview| preview.as_ref().ok())
+                .and_then(|preview| preview.events.first())
+                .map(|event| event.content.clone())
+        });
+        assert_eq!(content.as_deref(), Some("preview for job-b"));
+    });
+}
+
+#[test]
+fn resume_for_attach_announces_success_only_after_agent_ctrl_accepts_it() {
+    App::test((), |mut app| async move {
+        let accept: fn(&str) -> anyhow::Result<()> = |_| Ok(());
+        let model = app.add_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                resume_for_attach: accept,
+                ..backend(list_two_runs)
+            })
+        });
+        let (sender, mut events) = futures::channel::mpsc::unbounded();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&model, move |_, event, _| {
+                if let FleetModelEvent::ResumeForAttachSucceeded { job_id, .. } = event {
+                    let _ = sender.unbounded_send(job_id.clone());
+                }
+            });
+        });
+
+        model.update(&mut app, |model, ctx| {
+            model.resume_for_attach("job-paused".to_owned(), warpui::EntityId::new(), ctx)
+        });
+
+        assert_eq!(events.next().await.as_deref(), Some("job-paused"));
+    });
 }
 
 #[test]

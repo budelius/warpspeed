@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 use std::fs::File;
-#[cfg(not(target_family = "wasm"))]
-use std::io::Read;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -15,9 +13,33 @@ use crate::terminal::CLIAgent;
 const MAX_CANDIDATES: usize = 200;
 const MAX_HEAD_LINES: usize = 200;
 const MAX_HEAD_BYTES: usize = 256 * 1024;
+const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+const MAX_PREVIEW_MESSAGES: usize = 8;
+const MAX_PREVIEW_MESSAGE_CHARS: usize = 1_200;
 const TITLE_MAX_CHARS: usize = 80;
 #[cfg(not(target_family = "wasm"))]
 const DSH_HEAD_BYTES: u64 = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentSessionPreviewRole {
+    User,
+    Agent,
+}
+
+impl AgentSessionPreviewRole {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            AgentSessionPreviewRole::User => "You",
+            AgentSessionPreviewRole::Agent => "Agent",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentSessionPreviewMessage {
+    pub role: AgentSessionPreviewRole,
+    pub text: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PastAgentSession {
@@ -29,6 +51,7 @@ pub(crate) struct PastAgentSession {
     pub canonical_cwd: Option<PathBuf>,
     pub title: Option<String>,
     pub modified: SystemTime,
+    pub preview: Vec<AgentSessionPreviewMessage>,
 }
 
 pub(super) struct Candidate {
@@ -53,6 +76,36 @@ fn read_head(path: &Path) -> Vec<Value> {
             Ok(read) => consumed += read,
         }
         if let Ok(value) = serde_json::from_str(line.trim()) {
+            entries.push(value);
+        }
+    }
+    entries
+}
+
+fn read_tail(path: &Path) -> Vec<Value> {
+    let Ok(mut file) = File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+        return Vec::new();
+    };
+    let start = length.saturating_sub(MAX_PREVIEW_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut reader = BufReader::new(file.take(MAX_PREVIEW_BYTES));
+    let mut line = Vec::new();
+    if start > 0 {
+        let _ = reader.read_until(b'\n', &mut line);
+    }
+    let mut entries = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if let Ok(value) = serde_json::from_slice(&line) {
             entries.push(value);
         }
     }
@@ -161,6 +214,7 @@ fn vibe_sessions(root: &Path) -> Vec<PastAgentSession> {
                 canonical_cwd: None,
                 title: entry["title"].as_str().and_then(title),
                 modified,
+                preview: Vec::new(),
             })
         })
         .collect()
@@ -211,6 +265,7 @@ fn kimi_session(session_id: String, dir: &Path) -> Option<PastAgentSession> {
         canonical_cwd: None,
         title,
         modified,
+        preview: Vec::new(),
     })
 }
 
@@ -267,6 +322,7 @@ fn dsh_session(dir: &Path) -> Option<PastAgentSession> {
         canonical_cwd: None,
         title,
         modified,
+        preview: Vec::new(),
     })
 }
 
@@ -367,8 +423,111 @@ fn first_claude_text(content: &Value) -> Option<&str> {
         .and_then(|part| part["text"].as_str())
 }
 
+fn message_text(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => String::new(),
+    };
+    preview_text(&text)
+}
+
+fn preview_text(text: &str) -> Option<String> {
+    let sanitized = text
+        .chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || !character.is_control() {
+                character
+            } else {
+                '�'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        return None;
+    }
+    let mut preview = sanitized
+        .chars()
+        .take(MAX_PREVIEW_MESSAGE_CHARS)
+        .collect::<String>();
+    if sanitized.chars().count() > MAX_PREVIEW_MESSAGE_CHARS {
+        preview.push('…');
+    }
+    Some(preview)
+}
+
+fn preview_message(agent: CLIAgent, entry: &Value) -> Option<AgentSessionPreviewMessage> {
+    let (role, content) = match agent {
+        CLIAgent::Claude => {
+            let role = match entry["message"]["role"].as_str()? {
+                "user" => AgentSessionPreviewRole::User,
+                "assistant" => AgentSessionPreviewRole::Agent,
+                _ => return None,
+            };
+            (role, &entry["message"]["content"])
+        }
+        CLIAgent::Codex => {
+            if entry["type"] != "event_msg" {
+                return None;
+            }
+            let role = match entry["payload"]["type"].as_str()? {
+                "user_message" => AgentSessionPreviewRole::User,
+                "agent_message" => AgentSessionPreviewRole::Agent,
+                _ => return None,
+            };
+            (role, &entry["payload"]["message"])
+        }
+        CLIAgent::Pi => {
+            if entry["type"] != "message" {
+                return None;
+            }
+            let role = match entry["message"]["role"].as_str()? {
+                "user" => AgentSessionPreviewRole::User,
+                "assistant" => AgentSessionPreviewRole::Agent,
+                _ => return None,
+            };
+            (role, &entry["message"]["content"])
+        }
+        CLIAgent::Gemini
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Vibe
+        | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => return None,
+    };
+    Some(AgentSessionPreviewMessage {
+        role,
+        text: message_text(content)?,
+    })
+}
+
+fn preview(candidate: &Candidate) -> Vec<AgentSessionPreviewMessage> {
+    let messages = read_tail(&candidate.path)
+        .iter()
+        .filter_map(|entry| preview_message(candidate.agent, entry))
+        .collect::<Vec<_>>();
+    messages[messages.len().saturating_sub(MAX_PREVIEW_MESSAGES)..].to_vec()
+}
+
 pub(super) fn describe(candidate: Candidate) -> PastAgentSession {
     let head = read_head(&candidate.path);
+    let preview = preview(&candidate);
     let (session_id, cwd, title) = match candidate.agent {
         CLIAgent::Claude => {
             let cwd = head
@@ -440,6 +599,7 @@ pub(super) fn describe(candidate: Candidate) -> PastAgentSession {
         canonical_cwd: None,
         title,
         modified: candidate.modified,
+        preview,
     }
 }
 

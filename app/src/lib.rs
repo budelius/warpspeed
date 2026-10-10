@@ -3,6 +3,8 @@
 mod agent_ctrl;
 #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
 mod agent_ctrl_fleet_cli;
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+mod agent_ctrl_move_session_cli;
 #[cfg(not(target_family = "wasm"))]
 mod agent_event_cli;
 #[cfg(feature = "local_fs")]
@@ -883,6 +885,10 @@ pub fn run() -> Result<()> {
                 #[cfg(feature = "local_fs")]
                 if let Some(request) = agent_ctrl_fleet_cli::move_all_request(args) {
                     return agent_ctrl_fleet_cli::run(request);
+                }
+                #[cfg(feature = "local_fs")]
+                if let Some(request) = agent_ctrl_move_session_cli::move_session_request(args) {
+                    return agent_ctrl_move_session_cli::run(request);
                 }
                 return managed_agent_sessions::run(args);
             }

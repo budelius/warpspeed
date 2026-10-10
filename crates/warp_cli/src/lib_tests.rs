@@ -3491,3 +3491,18 @@ fn agent_event_argv_is_parsed_apart_from_the_rest_of_the_cli() {
     assert!(agent_event::from_argv(["warpspeed", "sessions", "panes"]).is_none());
     assert!(agent_event::from_argv(["warpspeed", "--format", "agent-event"]).is_none());
 }
+
+#[test]
+fn managed_agent_move_session_parses() {
+    let command = agent_ctrl_command(&["move-session", "--agent", "dsh", "--session", "0b6c"]);
+    let managed_sessions::ManagedSessionsCommand::MoveSession { agent, session, .. } = command
+    else {
+        panic!("expected move-session, got {command:?}");
+    };
+    assert_eq!(agent, "dsh");
+    assert_eq!(session, "0b6c");
+    assert!(
+        Args::try_parse_from(["warpspeed", "agent-ctrl", "move-session", "--agent", "dsh"])
+            .is_err()
+    );
+}

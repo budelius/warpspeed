@@ -176,6 +176,7 @@ pub(crate) fn move_all_request(args: &ManagedSessionsArgs) -> Option<MoveAllRequ
         ManagedSessionsCommand::List
         | ManagedSessionsCommand::Start { .. }
         | ManagedSessionsCommand::Repos { .. }
+        | ManagedSessionsCommand::MoveSession { .. }
         | ManagedSessionsCommand::Open { .. }
         | ManagedSessionsCommand::Attach { .. }
         | ManagedSessionsCommand::Input { .. }

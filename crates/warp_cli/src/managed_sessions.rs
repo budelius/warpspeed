@@ -69,6 +69,21 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
     },
 
+    /// Move a recorded agent session that no pane holds (a finished DeepSeek Harness run) to
+    /// AgentCtrl.
+    MoveSession {
+        /// Agent kind: dsh.
+        #[arg(long)]
+        agent: String,
+
+        /// The session id the agent recorded.
+        #[arg(long)]
+        session: String,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
     /// Open the managed-session viewer for a dashboard-launched run.
     Open {
         job_id: String,

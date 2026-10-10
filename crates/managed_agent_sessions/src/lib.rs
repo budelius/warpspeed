@@ -283,6 +283,9 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
         }
         ManagedSessionsCommand::Repos { environment } => repos(*environment, args.json),
         ManagedSessionsCommand::MoveAll { .. } => bail!("move-all is handled by the application"),
+        ManagedSessionsCommand::MoveSession { .. } => {
+            bail!("move-session is handled by the application")
+        }
         ManagedSessionsCommand::Open {
             job_id,
             environment,

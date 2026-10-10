@@ -37,6 +37,7 @@ use crate::terminal::agent_sessions_index::{
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::detached_sessions::DetachedListError;
 use crate::util::time_format::format_approx_duration_from_now;
+use crate::view_components::action_button::{ActionButtonTheme, SecondaryTheme};
 use crate::workspace::PaneViewLocator;
 use crate::workspace::agent_session_actions::{AgentSessionAction, action_for};
 
@@ -174,6 +175,19 @@ fn pane_folder(pane: &PaneAgentInput) -> Option<&Path> {
     pane.cwd
         .as_deref()
         .filter(|folder| !folder.as_os_str().is_empty())
+}
+
+fn folders_with_past(panes: &[PaneAgentInput], past_by_folder: &PastByFolder) -> ExpandedFolders {
+    panes
+        .iter()
+        .filter_map(|pane| {
+            let folder = pane_folder(pane)?;
+            past_by_folder
+                .get(folder)
+                .is_some_and(|past| !past.is_empty())
+                .then(|| (pane.tab_index, folder.to_path_buf()))
+        })
+        .collect()
 }
 
 /// Lays out `rows` (from `build_rows`) by tab and pane, with the detached sessions last. Each
@@ -422,7 +436,7 @@ impl AgentSessionsView {
             Err(error) => (Vec::new(), Some(error)),
         };
         self.set_rows(past);
-        self.expanded_folders.clear();
+        self.expanded_folders = folders_with_past(&self.panes, &self.past_by_folder);
         self.query_editor.update(ctx, |editor, ctx| {
             editor.clear_buffer_and_reset_undo_stack(ctx)
         });
@@ -440,12 +454,16 @@ impl AgentSessionsView {
 
     /// Rebuilds the rows with newly scanned past sessions, keeping the rest of the snapshot.
     pub(crate) fn refresh_past(&mut self, past: &[PastAgentSession], ctx: &mut ViewContext<Self>) {
+        let expand_loaded_history = !self.history_loaded;
         self.history_loaded = true;
         let selected = self
             .selected_index
             .and_then(|index| self.view_rows.get(index))
             .map(ViewRow::key);
         self.set_rows(past);
+        if expand_loaded_history {
+            self.expanded_folders = folders_with_past(&self.panes, &self.past_by_folder);
+        }
         self.rebuild_view_rows(ctx);
         self.selected_index = selected
             .and_then(|selected| self.index_of(&selected))
@@ -569,14 +587,7 @@ impl AgentSessionsView {
     }
 
     fn is_selectable(&self, index: usize) -> bool {
-        self.view_rows.get(index).is_some_and(|row| match row {
-            ViewRow::Pane { action, .. } => *action != ViewRowAction::None,
-            ViewRow::PastToggle { .. } | ViewRow::Detached { .. } => true,
-            ViewRow::Past { .. } => self.past_action(index).is_some(),
-            ViewRow::TabHeader { .. }
-            | ViewRow::DetachedHeader { .. }
-            | ViewRow::SupervisorUnreachable => false,
-        })
+        self.view_rows.get(index).is_some_and(is_interactive)
     }
 
     fn next_selectable(&self, start: usize) -> Option<usize> {
@@ -704,11 +715,49 @@ fn session_label(row: &AgentSessionRow) -> String {
     }
 }
 
+fn last_used_label(last_used: std::time::SystemTime) -> String {
+    format!(
+        "last used {}",
+        format_approx_duration_from_now(DateTime::<Local>::from(last_used))
+    )
+}
+
+fn is_interactive(row: &ViewRow) -> bool {
+    match row {
+        ViewRow::Pane { action, .. } => *action != ViewRowAction::None,
+        ViewRow::PastToggle { .. } | ViewRow::Detached { .. } => true,
+        ViewRow::Past { row, .. } => action_for(row, None).is_some(),
+        ViewRow::TabHeader { .. }
+        | ViewRow::DetachedHeader { .. }
+        | ViewRow::SupervisorUnreachable => false,
+    }
+}
+
 fn render_row(
     row: &ViewRow,
     key: RowKey,
     is_selected: bool,
     button_state: MouseStateHandle,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    if !is_interactive(row) {
+        return render_row_contents(row, is_selected, false, app);
+    }
+
+    Hoverable::new(button_state, |state| {
+        render_row_contents(row, is_selected, state.is_hovered(), app)
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(key.clone()));
+    })
+    .finish()
+}
+
+fn render_row_contents(
+    row: &ViewRow,
+    is_selected: bool,
+    is_hovered: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -720,13 +769,18 @@ fn render_row(
     let text = |text: String, color| Text::new_inline(text, font, font_size).with_color(color);
     let bold = || Properties::default().weight(Weight::Bold);
 
-    let state = match row {
-        ViewRow::Pane { row, .. } => Some(row.as_ref().map_or("—", |row| row.state.label())),
-        ViewRow::Past { row, .. } | ViewRow::Detached { row } => Some(row.state.label()),
+    let (last_used, state) = match row {
+        ViewRow::Pane { row, .. } => (
+            row.as_ref().and_then(|row| row.last_used),
+            Some(row.as_ref().map_or("—", |row| row.state.label())),
+        ),
+        ViewRow::Past { row, .. } | ViewRow::Detached { row } => {
+            (row.last_used, Some(row.state.label()))
+        }
         ViewRow::TabHeader { .. }
         | ViewRow::PastToggle { .. }
         | ViewRow::DetachedHeader { .. }
-        | ViewRow::SupervisorUnreachable => None,
+        | ViewRow::SupervisorUnreachable => (None, None),
     };
     let (indent, label, detail, button): (f32, Box<dyn Element>, Option<String>, Option<&str>) =
         match row {
@@ -742,7 +796,7 @@ fn render_row(
                     .map_or_else(|| "Shell".to_owned(), session_label);
                 let button = match action {
                     ViewRowAction::Act(action) => Some(action.label()),
-                    ViewRowAction::ResumeInFolder { .. } => Some("Resume…"),
+                    ViewRowAction::ResumeInFolder { .. } => Some("Choose…"),
                     ViewRowAction::None => None,
                 };
                 let label = Flex::row()
@@ -775,16 +829,16 @@ fn render_row(
                             .with_height(12.)
                             .finish(),
                     )
-                    .with_child(text(format!("Past in this folder ({count})"), sub_color).finish())
+                    .with_child(
+                        text(format!("Past sessions in this folder ({count})"), sub_color).finish(),
+                    )
                     .finish();
                 (PANE_INDENT, label, None, None)
             }
             ViewRow::Past { row, .. } => (
                 PAST_INDENT,
                 text(session_label(row), main_color).finish(),
-                row.last_used.map(|last_used| {
-                    format_approx_duration_from_now(DateTime::<Local>::from(last_used))
-                }),
+                None,
                 action_for(row, None).map(|action| action.label()),
             ),
             ViewRow::DetachedHeader { count } => {
@@ -823,73 +877,49 @@ fn render_row(
         .with_spacing(8.)
         .with_child(label)
         .with_child(Shrinkable::new(1.0, detail).finish());
-    let is_toggle = matches!(row, ViewRow::PastToggle { .. });
+    if let Some(last_used) = last_used {
+        line = line.with_child(text(last_used_label(last_used), sub_color).finish());
+    }
     if let Some(state) = state {
         line = line.with_child(text(state.to_owned(), sub_color).finish());
     }
     if let Some(button) = button {
-        line = line.with_child(render_button(
-            button,
-            key.clone(),
-            button_state.clone(),
-            app,
-        ));
+        line = line.with_child(render_button(button, is_hovered, app));
     }
 
     let mut container = Container::new(line.finish())
         .with_padding_left(indent)
         .with_padding_right(12.);
-    if is_selected {
+    if is_selected || is_hovered {
         container = container.with_background(theme.surface_overlay_1());
     }
-    let row_element = ConstrainedBox::new(container.finish())
+    ConstrainedBox::new(container.finish())
         .with_height(ROW_HEIGHT)
-        .finish();
-
-    if !is_toggle {
-        return row_element;
-    }
-    Hoverable::new(button_state, move |_| row_element)
-        .with_cursor(Cursor::PointingHand)
-        .on_click(move |ctx, _, _| {
-            ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(key.clone()));
-        })
         .finish()
 }
 
-fn render_button(
-    label: &str,
-    key: RowKey,
-    mouse_state: MouseStateHandle,
-    app: &AppContext,
-) -> Box<dyn Element> {
+fn render_button(label: &str, is_hovered: bool, app: &AppContext) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
-    let theme = appearance.theme();
+    let button_theme = SecondaryTheme;
+    let background = button_theme.background(is_hovered, appearance);
     let label = Text::new_inline(
         label.to_owned(),
         appearance.ui_font_family(),
         appearance.ui_font_size() - 1.,
     )
-    .with_color(theme.active_ui_text_color().into_solid())
+    .with_color(button_theme.text_color(is_hovered, background, appearance))
     .finish();
-    let border = theme.surface_3();
-    let hover_background = theme.surface_overlay_1();
-    Hoverable::new(mouse_state, move |state| {
-        let mut button = Container::new(label)
-            .with_horizontal_padding(8.)
-            .with_vertical_padding(2.)
-            .with_border(Border::all(1.).with_border_fill(border))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
-        if state.is_hovered() {
-            button = button.with_background(hover_background);
-        }
-        button.finish()
-    })
-    .with_cursor(Cursor::PointingHand)
-    .on_click(move |ctx, _, _| {
-        ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(key.clone()));
-    })
-    .finish()
+    let mut button = Container::new(label)
+        .with_horizontal_padding(8.)
+        .with_vertical_padding(2.)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+    if let Some(background) = background {
+        button = button.with_background(background);
+    }
+    if let Some(border) = button_theme.border(appearance) {
+        button = button.with_border(Border::all(1.).with_border_color(border));
+    }
+    button.finish()
 }
 
 fn render_search_box(query_editor: &ViewHandle<EditorView>, app: &AppContext) -> Box<dyn Element> {

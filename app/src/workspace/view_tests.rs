@@ -8544,7 +8544,7 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
             target
         });
 
-        workspace.update(&mut app, |workspace, ctx| {
+        let sessions_view = workspace.update(&mut app, |workspace, ctx| {
             let first_tab = workspace.tabs[0].pane_group.clone();
             assert_ne!(
                 first_tab.as_ref(ctx).focused_pane_id(ctx),
@@ -8552,12 +8552,34 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
                 "the clicked pane is not the one focused in its tab"
             );
             workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
-            workspace.handle_agent_sessions_view_event(
-                &AgentSessionsViewEvent::ResumeInFolder {
-                    folder: std::env::temp_dir(),
-                    target,
-                },
+            workspace.agent_sessions_modal.as_ref(ctx).body().clone()
+        });
+        sessions_view.update(&mut app, |view, ctx| {
+            view.set_inputs(
+                vec![crate::terminal::agent_sessions_index::PaneAgentInput {
+                    locator: target,
+                    tab_index: 0,
+                    tab_title: "tab".to_owned(),
+                    pane_number: 1,
+                    cwd: Some(std::env::temp_dir()),
+                    running: None,
+                    pending: None,
+                }],
+                Ok(Vec::new()),
+                &[],
+                true,
+                Some(target),
                 ctx,
+            );
+        });
+        let window_id = workspace.read(&app, |workspace, _| workspace.window_id);
+        app.update(|ctx| {
+            ctx.dispatch_typed_action_for_view(
+                window_id,
+                sessions_view.id(),
+                &crate::workspace::agent_sessions_view::AgentSessionsViewAction::Activate(
+                    crate::workspace::agent_sessions_view::RowKey::Pane(target),
+                ),
             );
         });
 

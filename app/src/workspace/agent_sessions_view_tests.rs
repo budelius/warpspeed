@@ -178,6 +178,26 @@ fn a_pane_without_a_folder_has_no_action() {
 }
 
 #[test]
+fn folders_with_past_sessions_are_expanded_when_the_view_opens() {
+    let panes = vec![
+        same_tab(0, "/proj"),
+        same_tab(0, "/proj"),
+        pane(1, "/proj"),
+        pane(2, "/empty"),
+    ];
+    let history = vec![past("top", "/proj", 1)];
+    let rows = build_rows(&panes, &[], &history);
+    let membership = past_by_folder(&panes, &rows);
+
+    let expanded = folders_with_past(&panes, &membership);
+
+    assert_eq!(
+        expanded,
+        ExpandedFolders::from([(0, PathBuf::from("/proj")), (1, PathBuf::from("/proj")),])
+    );
+}
+
+#[test]
 fn past_rows_appear_only_when_their_folder_is_expanded() {
     let panes = vec![pane(0, "/proj")];
     let history = vec![

@@ -1,6 +1,7 @@
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod gemini;
+pub(crate) mod kimi;
 pub(crate) mod opencode;
 
 use std::cmp::Ordering;
@@ -12,6 +13,7 @@ use async_trait::async_trait;
 use claude::ClaudeCodePluginManager;
 use codex::CodexPluginManager;
 use gemini::GeminiPluginManager;
+use kimi::KimiPluginManager;
 use opencode::OpenCodePluginManager;
 
 use crate::features::FeatureFlag;
@@ -284,6 +286,12 @@ pub(crate) fn plugin_manager_for_with_shell(
                 shell_type,
                 path_env_var,
             )))
+        }
+        CLIAgent::Kimi
+            if FeatureFlag::KimiNotifications.is_enabled()
+                && FeatureFlag::HOANotifications.is_enabled() =>
+        {
+            Some(Box::new(KimiPluginManager))
         }
         CLIAgent::OpenCode
         | CLIAgent::Codex

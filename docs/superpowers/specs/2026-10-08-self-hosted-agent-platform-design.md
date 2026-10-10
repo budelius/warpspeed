@@ -173,7 +173,7 @@ lands before P2.
   grant against the environment's Zitadel issuer. The existing framed-browser opener shows the
   verification URL.
 - Stored per environment: refresh token, access token and expiry in WarpSpeed's DPAPI-protected
-  `stozn-auth.bin` (format 2; revised 2026-10-09: same OS-user protection, no new dependency). A request helper refreshes when fewer than 60 s remain; a failed refresh marks the identity
+  `stozn-zitadel-auth.bin` (format 2, a new file so older WarpSpeed builds keep their `stozn-auth.bin`; revised 2026-10-09: same OS-user protection, no new dependency). A request helper refreshes when fewer than 60 s remain; a failed refresh marks the identity
   signed out and the UI offers sign-in again.
 - Environment config: issuer, client id, project id, API base URLs, compiled into the single
   `staging` profile (revised 2026-10-09: WarpSpeed stays staging-only per the 2026-10-07 decision; no

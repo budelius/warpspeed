@@ -777,9 +777,9 @@ impl LoginSlideView {
         .finish();
 
         let status = match StoznAuthManager::as_ref(app).state() {
-            StoznAuthState::Starting => "Creating a secure STOZN login request…".to_owned(),
+            StoznAuthState::Starting => "Starting STOZN sign-in…".to_owned(),
             StoznAuthState::WaitingForBrowser { user_code } => {
-                format!("Confirm code {user_code} in your browser. Waiting for one-time approval…")
+                format!("Confirm code {user_code} in your browser to finish signing in…")
             }
             StoznAuthState::SignedIn(identity) => format!(
                 "Signed in to STOZN as {}.",

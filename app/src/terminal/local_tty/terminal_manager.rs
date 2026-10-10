@@ -47,7 +47,6 @@ use crate::persistence::ModelEvent;
 use crate::send_telemetry_on_executor;
 use crate::server::telemetry::{PtySpawnMode as TelemetryPtySpawnMode, TelemetryEvent};
 use crate::settings::{DebugSettings, PrivacySettings, SshSettings};
-use crate::terminal::agent_event_token;
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 use crate::terminal::cli_agent_sessions::process_registry;
 use crate::terminal::color::List as ColorList;
@@ -77,7 +76,7 @@ use crate::terminal::writeable_pty::terminal_manager_util::{
 use crate::terminal::writeable_pty::{self, Message, PtyIntentEvent, TerminalSurface};
 use crate::terminal::{
     PTY_READS_BROADCAST_CHANNEL_SIZE, ShellLaunchData, ShellLaunchState, SizeInfo,
-    TerminalManager as TerminalManagerTrait, TerminalModel, terminal_manager,
+    TerminalManager as TerminalManagerTrait, TerminalModel, agent_event_token, terminal_manager,
 };
 
 type PtyController = writeable_pty::PtyController<mio_channel::Sender<Message>>;

@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, ManagedSessionsCommand};
 use zitadel_auth::{RefreshRejected, ZitadelProfile};
 
+#[cfg(feature = "tui")]
+mod tui;
 mod zitadel_auth;
 
 const STAGING_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
@@ -289,7 +291,7 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
         ManagedSessionsCommand::Open {
             job_id,
             environment,
-        } => ui_session(*environment, job_id),
+        } => ui_session(*environment, job_id, args.json),
         ManagedSessionsCommand::Attach {
             job_id,
             environment,
@@ -700,7 +702,16 @@ fn launch_request_with(
     Ok(result)
 }
 
-fn ui_session(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
+fn ui_session(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
+    #[cfg(feature = "tui")]
+    if !json_output && tui::can_run() {
+        return tui::run(environment, job_id);
+    }
+
+    if json_output {
+        return attach(environment, job_id, false, true);
+    }
+
     loop {
         attach(environment, job_id, true, false)?;
         let profile = profile(environment);
@@ -1022,38 +1033,18 @@ fn attach(
     once: bool,
     json_output: bool,
 ) -> Result<()> {
-    validate_job_id(job_id)?;
-    let profile = profile(environment);
-    let token = dashboard_token()?;
-    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
-    let descriptor = fetch_descriptor(&client, profile, job_id, &token)?;
+    #[cfg(feature = "tui")]
+    if !once && !json_output && tui::can_run() {
+        return tui::run(environment, job_id);
+    }
 
-    let mut bookmarks = load_bookmarks()?;
-    let existing_cursor = bookmarks
-        .iter()
-        .find(|bookmark| {
-            bookmark.environment_alias == profile.alias
-                && bookmark.fleet_id == descriptor.fleet_id
-                && bookmark.job_id == job_id
-        })
-        .and_then(|bookmark| bookmark.last_cursor.clone());
-    let now = Utc::now().to_rfc3339();
-    upsert_bookmark(
-        &mut bookmarks,
-        ManagedSessionBookmark {
-            format_version: BOOKMARK_FORMAT,
-            environment_alias: profile.alias.to_owned(),
-            fleet_id: descriptor.fleet_id.clone(),
-            job_id: descriptor.job_id.clone(),
-            last_cursor: existing_cursor.clone(),
-            display_name: Some(descriptor.display_name.clone()),
-            agent_name: Some(descriptor.agent_name.clone()),
-            last_known_state: Some(descriptor.state.clone()),
-            created_at: now.clone(),
-            last_opened_at: now,
-        },
-    );
-    save_bookmarks(&bookmarks)?;
+    let OpenedManagedSession {
+        profile,
+        client,
+        descriptor,
+        mut bookmarks,
+        existing_cursor,
+    } = open_managed_session(environment, job_id)?;
 
     if !json_output {
         println!("{}", attach_banner(&descriptor));
@@ -1096,6 +1087,59 @@ fn attach(
         }
     }
     Ok(())
+}
+
+struct OpenedManagedSession {
+    profile: &'static EnvironmentProfile,
+    client: Client,
+    descriptor: SessionDescriptor,
+    bookmarks: Vec<ManagedSessionBookmark>,
+    existing_cursor: Option<String>,
+}
+
+fn open_managed_session(
+    environment: ManagedEnvironment,
+    job_id: &str,
+) -> Result<OpenedManagedSession> {
+    validate_job_id(job_id)?;
+    let profile = profile(environment);
+    let token = dashboard_token()?;
+    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
+    let descriptor = fetch_descriptor(&client, profile, job_id, &token)?;
+    let mut bookmarks = load_bookmarks()?;
+    let existing_cursor = bookmarks
+        .iter()
+        .find(|bookmark| {
+            bookmark.environment_alias == profile.alias
+                && bookmark.fleet_id == descriptor.fleet_id
+                && bookmark.job_id == job_id
+        })
+        .and_then(|bookmark| bookmark.last_cursor.clone());
+    let now = Utc::now().to_rfc3339();
+    upsert_bookmark(
+        &mut bookmarks,
+        ManagedSessionBookmark {
+            format_version: BOOKMARK_FORMAT,
+            environment_alias: profile.alias.to_owned(),
+            fleet_id: descriptor.fleet_id.clone(),
+            job_id: descriptor.job_id.clone(),
+            last_cursor: existing_cursor.clone(),
+            display_name: Some(descriptor.display_name.clone()),
+            agent_name: Some(descriptor.agent_name.clone()),
+            last_known_state: Some(descriptor.state.clone()),
+            created_at: now.clone(),
+            last_opened_at: now,
+        },
+    );
+    save_bookmarks(&bookmarks)?;
+
+    Ok(OpenedManagedSession {
+        profile,
+        client,
+        descriptor,
+        bookmarks,
+        existing_cursor,
+    })
 }
 
 pub const MAX_SESSION_FILE_BYTES: usize = 33_554_432;

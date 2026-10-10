@@ -25,7 +25,7 @@ terminal startup and session-restore behaviour.
 
 ```bash
 export PROTOC=/path/to/protoc          # required by workspace build scripts
-cargo run -p warp --bin warpspeed
+cargo run -p warp --bin warpspeed --features tui
 ```
 
 On Windows, install WarpSpeed for routine use instead of launching it from Cargo's build directory:
@@ -55,8 +55,12 @@ warpspeed agent-ctrl start --agent staging-claude-interactive --task <stozn-task
 warpspeed agent-ctrl attach <job-id>
 warpspeed agent-ctrl input <job-id> "Inspect the failing test"
 warpspeed agent-ctrl close <job-id>
+warpspeed agent-ctrl pause <job-id>
+warpspeed agent-ctrl resume <job-id>
 warpspeed agent-ctrl stop <job-id>
 ```
+
+`open` and a following `attach` use a full-screen conversation UI when stdin and stdout are connected to a terminal. Type a follow-up and press Enter, scroll with the arrow or page keys, close agent input with Ctrl-D, request a stop with Ctrl-X, and detach without stopping the run with Esc or Ctrl-C. Type `/help` or press F1 for run-control and local-shell commands. `/shell` or Ctrl-O opens an interactive local shell; `!<command>`, `/ssh`, and `/tmux` suspend the UI and run against the local terminal, returning to AgentCtrl when the program exits. Use `//` to send an agent message that begins with `/`. Use `attach --once`, `--json`, or redirected input/output for the line-oriented interface.
 
 Every new managed session requires a dashboard-validated STOZN task. The dashboard endpoint, environment, and fleet identity are compiled/operator-owned; callers cannot supply controller URLs or runtime overrides. Local bookmarks contain only safe identifiers, labels, cursors, state, and timestamps. Closing `attach` never stops the Kubernetes process.
 

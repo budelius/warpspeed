@@ -20852,8 +20852,11 @@ impl Workspace {
             log::warn!("Cannot open managed session from a non-Unicode executable path");
             return;
         };
-        #[cfg(windows)]
-        let executable = executable.replace('\\', "/");
+        let executable: std::borrow::Cow<str> = if cfg!(windows) {
+            executable.replace('\\', "/").into()
+        } else {
+            executable.into()
+        };
 
         terminal_view.update(ctx, |terminal_view, ctx| {
             let command = format!(

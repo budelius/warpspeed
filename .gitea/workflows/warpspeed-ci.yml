@@ -83,6 +83,17 @@ jobs:
       # Two jobs fit a general runner (2.5 CPU, 8 GiB). Only the release build of the
       # `warp` crate needs a single job to stay inside the memory limit.
       CARGO_BUILD_JOBS: "2"
+      # Compiled crates are shared through Hetzner Object Storage, which outlives the
+      # runner pods. An unreachable store degrades to local compilation.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BUCKET: stozn-warpspeed-ci-cache
+      SCCACHE_ENDPOINT: https://fsn1.your-objectstorage.com
+      SCCACHE_REGION: fsn1
+      SCCACHE_S3_USE_SSL: "true"
+      SCCACHE_S3_KEY_PREFIX: warpspeed/
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
     steps:
       - name: Install the Actions runtime
@@ -97,6 +108,20 @@ jobs:
             | sha256sum --check
           tar -xJf "$node_archive" --directory /usr/local --strip-components=1
           node --version
+
+      - name: Install sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache_archive=/tmp/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz
+          curl --proto '=https' --tlsv1.2 --fail --show-error --silent --location \
+            --output "$sccache_archive" \
+            https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz
+          echo "1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b  $sccache_archive" \
+            | sha256sum --check
+          tar -xzf "$sccache_archive" --directory /tmp
+          install --mode 0755 /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+          sccache --version
 
       - name: Check out the exact commit without LFS payloads
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -112,6 +137,7 @@ jobs:
           cat /etc/warpspeed-ci-image
           df -h / | tail -1
           cargo clippy -p managed_agent_sessions -p warp_terminal --all-targets --locked -- -D warnings
+          sccache --show-stats
           df -h / | tail -1
 
   test:
@@ -126,6 +152,15 @@ jobs:
       image: harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0@sha256:007adbd65f1054905c436b9d50bc1e940619dd14f754331639352bf421c00c90
     env:
       CARGO_BUILD_JOBS: "2"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BUCKET: stozn-warpspeed-ci-cache
+      SCCACHE_ENDPOINT: https://fsn1.your-objectstorage.com
+      SCCACHE_REGION: fsn1
+      SCCACHE_S3_USE_SSL: "true"
+      SCCACHE_S3_KEY_PREFIX: warpspeed/
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
     steps:
       - name: Install the Actions runtime
@@ -141,6 +176,20 @@ jobs:
           tar -xJf "$node_archive" --directory /usr/local --strip-components=1
           node --version
 
+      - name: Install sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache_archive=/tmp/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz
+          curl --proto '=https' --tlsv1.2 --fail --show-error --silent --location \
+            --output "$sccache_archive" \
+            https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz
+          echo "1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b  $sccache_archive" \
+            | sha256sum --check
+          tar -xzf "$sccache_archive" --directory /tmp
+          install --mode 0755 /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+          sccache --version
+
       - name: Check out the exact commit without LFS payloads
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -155,6 +204,7 @@ jobs:
           cat /etc/warpspeed-ci-image
           df -h / | tail -1
           cargo test -p managed_agent_sessions -p warp_terminal --lib --locked
+          sccache --show-stats
           df -h / | tail -1
 
   build_selection:

@@ -1,5 +1,6 @@
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod dsh;
 pub(crate) mod gemini;
 pub(crate) mod kimi;
 pub(crate) mod opencode;
@@ -12,6 +13,7 @@ use std::{fmt, io};
 use async_trait::async_trait;
 use claude::ClaudeCodePluginManager;
 use codex::CodexPluginManager;
+use dsh::DshPluginManager;
 use gemini::GeminiPluginManager;
 use kimi::KimiPluginManager;
 use opencode::OpenCodePluginManager;
@@ -292,6 +294,16 @@ pub(crate) fn plugin_manager_for_with_shell(
                 && FeatureFlag::HOANotifications.is_enabled() =>
         {
             Some(Box::new(KimiPluginManager))
+        }
+        CLIAgent::DeepSeekHarness
+            if FeatureFlag::DshNotifications.is_enabled()
+                && FeatureFlag::HOANotifications.is_enabled() =>
+        {
+            Some(Box::new(DshPluginManager::new(
+                shell_path,
+                shell_type,
+                path_env_var,
+            )))
         }
         CLIAgent::OpenCode
         | CLIAgent::Codex

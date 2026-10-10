@@ -94,3 +94,10 @@ fn returns_none_for_kimi_and_deepseek_harness_without_their_flags() {
     assert!(plugin_manager_for(CLIAgent::Kimi).is_none());
     assert!(plugin_manager_for(CLIAgent::DeepSeekHarness).is_none());
 }
+
+#[test]
+fn returns_manager_for_deepseek_harness() {
+    let _hoa_guard = crate::features::FeatureFlag::HOANotifications.override_enabled(true);
+    let _dsh_guard = crate::features::FeatureFlag::DshNotifications.override_enabled(true);
+    assert!(plugin_manager_for(CLIAgent::DeepSeekHarness).is_some());
+}

@@ -171,6 +171,17 @@ impl<H: SessionHost> Supervisor<H> {
                 snapshot,
                 metadata,
             } => {
+                // Only the client holding a session can describe it. A detach of one the
+                // supervisor already holds comes from a pane that never attached, and its empty
+                // screen and metadata would replace the last real handover. The session is
+                // already where the client wants it, so the detach succeeds without them.
+                if self.table.holds_detached(*session_id) {
+                    info!(
+                        "Client {client_pid} detached terminal session {session_id:?}, which it \
+                         never attached; keeping the held screen and metadata"
+                    );
+                    return Some(Message::DetachResponse { error: None });
+                }
                 let error = self
                     .host
                     .detach(*session_id)

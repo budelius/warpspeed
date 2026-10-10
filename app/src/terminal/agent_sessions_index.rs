@@ -81,6 +81,7 @@ fn key_of(descriptor: &CliAgentResumeDescriptor) -> Option<ConversationKey> {
 fn live_row(
     pane: &PaneAgentInput,
     descriptor: &CliAgentResumeDescriptor,
+    history: Option<&PastAgentSession>,
     state: AgentSessionState,
 ) -> AgentSessionRow {
     let cwd = if descriptor.cwd.as_os_str().is_empty() {
@@ -91,13 +92,17 @@ fn live_row(
     AgentSessionRow {
         agent: Some(descriptor.agent),
         session_id: descriptor.session_id.clone(),
-        title: descriptor.title.clone(),
+        title: descriptor
+            .title
+            .clone()
+            .or_else(|| history.and_then(|session| session.title.clone())),
         cwd,
         canonical_cwd: None,
         last_used: descriptor
             .captured_unix_seconds
             .and_then(|seconds| u64::try_from(seconds).ok())
-            .map(|seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)),
+            .map(|seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+            .or_else(|| history.map(|session| session.modified)),
         state,
     }
 }
@@ -182,6 +187,13 @@ pub(crate) fn build_rows(
         detached_rows.push(row);
     }
 
+    let history_for = |descriptor: &CliAgentResumeDescriptor| {
+        let session_id = descriptor.session_id.as_deref()?;
+        pasts
+            .iter()
+            .copied()
+            .find(|session| session.agent == descriptor.agent && session.session_id == session_id)
+    };
     let mut rows = Vec::new();
     let mut live_keys = running_keys.clone();
     for pane in panes {
@@ -189,7 +201,7 @@ pub(crate) fn build_rows(
             let state = AgentSessionState::Running {
                 locator: pane.locator,
             };
-            rows.push(live_row(pane, descriptor, state));
+            rows.push(live_row(pane, descriptor, history_for(descriptor), state));
         } else if let Some(descriptor) = &pane.pending {
             let key = key_of(descriptor);
             if key
@@ -202,7 +214,7 @@ pub(crate) fn build_rows(
             let state = AgentSessionState::Pending {
                 locator: pane.locator,
             };
-            rows.push(live_row(pane, descriptor, state));
+            rows.push(live_row(pane, descriptor, history_for(descriptor), state));
         }
     }
     rows.extend(detached_rows);

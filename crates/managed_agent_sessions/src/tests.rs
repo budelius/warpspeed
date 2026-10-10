@@ -43,70 +43,12 @@ fn dashboard_deep_link_rejects_redirects_overrides_and_shell_content() {
 }
 
 #[test]
-fn stozn_login_url_is_bound_to_the_compiled_dashboard_and_request() {
-    let profile = profile(ManagedEnvironment::Staging);
-    let request_id = "a".repeat(43);
-    let valid = format!("{}/warpspeed-auth?request_id={request_id}", profile.web_url);
-    assert!(validate_verification_url(profile, &valid, &request_id).is_ok());
-    assert!(
-        validate_verification_url(
-            profile,
-            &format!("https://attacker.invalid/warpspeed-auth?request_id={request_id}"),
-            &request_id,
-        )
-        .is_err()
-    );
-    assert!(
-        validate_verification_url(
-            profile,
-            &format!(
-                "{}/warpspeed-auth?request_id={request_id}",
-                profile.base_url
-            ),
-            &request_id,
-        )
-        .is_err()
-    );
-    assert!(
-        validate_verification_url(
-            profile,
-            &format!("{}/warpspeed-auth?request_id=wrong", profile.web_url),
-            &request_id,
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn stozn_confirmation_codes_are_strictly_formatted() {
-    assert!(valid_user_code("A1B2-C3D4"));
-    assert!(!valid_user_code("a1b2-c3d4"));
-    assert!(!valid_user_code("A1B2C3D4"));
-    assert!(!valid_user_code("A1B2-G3D4"));
-}
-
-#[test]
 fn stozn_desktop_credential_protection_round_trips_for_this_os_user() {
     let plaintext = br#"{\"token\":\"sensitive-test-value\"}"#.to_vec();
     let protected = protect_auth_bytes(plaintext.clone()).unwrap();
     #[cfg(windows)]
     assert_ne!(protected, plaintext);
     assert_eq!(unprotect_auth_bytes(protected).unwrap(), plaintext);
-}
-
-#[test]
-fn stozn_login_state_requires_admin_and_visible_ascii_credentials() {
-    assert!(valid_dashboard_token("header.payload.signature"));
-    assert!(!valid_dashboard_token(""));
-    assert!(!valid_dashboard_token("token with spaces"));
-    let identity: StoznIdentity = serde_json::from_value(json!({
-        "sub": "@operator:stozn.ai",
-        "role": "admin",
-        "display_name": "Operator"
-    }))
-    .unwrap();
-    assert_eq!(identity.subject, "@operator:stozn.ai");
-    assert_eq!(identity.role, "admin");
 }
 
 #[test]
@@ -142,8 +84,8 @@ fn fixture_profile(base_url: &'static str) -> EnvironmentProfile {
     EnvironmentProfile {
         alias: "staging",
         base_url,
-        web_url: STAGING_WEB_URL,
         fleet_id: STAGING_FLEET_ID,
+        zitadel: &STAGING_ZITADEL,
     }
 }
 
@@ -533,7 +475,7 @@ fn resume_wait_succeeds_on_resumed_status() {
     wait_until_resumed_with(
         &client,
         &profile,
-        "token",
+        &|| Ok("token".to_owned()),
         "job-1",
         Instant::now() + Duration::from_secs(5),
     )
@@ -547,7 +489,7 @@ fn resume_wait_fails_on_terminal_page() {
     let error = wait_until_resumed_with(
         &client,
         &profile,
-        "token",
+        &|| Ok("token".to_owned()),
         "job-1",
         Instant::now() + Duration::from_secs(5),
     )
@@ -617,7 +559,7 @@ fn resume_wait_retries_a_transient_error() {
     wait_until_resumed_with(
         &Client::new(),
         &profile,
-        "token",
+        &|| Ok("token".to_owned()),
         "job-1",
         Instant::now() + Duration::from_secs(10),
     )
@@ -632,7 +574,7 @@ fn resume_wait_gives_up_at_the_deadline_without_spinning() {
     let error = wait_until_resumed_with(
         &Client::new(),
         &profile,
-        "token",
+        &|| Ok("token".to_owned()),
         "job-1",
         Instant::now() + Duration::from_millis(1200),
     )
@@ -659,7 +601,7 @@ fn resume_wait_fails_fast_on_a_client_error() {
         let error = wait_until_resumed_with(
             &Client::new(),
             &profile,
-            "token",
+            &|| Ok("token".to_owned()),
             "job-1",
             Instant::now() + Duration::from_secs(10),
         )
@@ -681,7 +623,7 @@ fn resume_wait_retries_rate_limiting() {
     wait_until_resumed_with(
         &Client::new(),
         &profile,
-        "token",
+        &|| Ok("token".to_owned()),
         "job-1",
         Instant::now() + Duration::from_secs(10),
     )
@@ -713,7 +655,7 @@ fn resume_wait_restarts_without_a_cursor_after_a_history_gap() {
     wait_until_resumed_with(
         &Client::new(),
         &profile,
-        "token",
+        &|| Ok("token".to_owned()),
         "job-1",
         Instant::now() + Duration::from_secs(10),
     )

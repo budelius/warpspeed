@@ -10799,3 +10799,58 @@ fn pending_command_runs_once_history_is_initialized() {
         );
     });
 }
+
+/// A pending command refused because the session's history was not appendable yet must run once
+/// it becomes appendable, even when no event announces that change: on a real restore the
+/// bootstrap precmd can arrive before the session is registered, and the registration's own
+/// `Initialized` event is not guaranteed to reach the pane afterwards.
+#[test]
+fn pending_command_retries_until_the_session_history_is_appendable() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let cwd = std::env::temp_dir();
+        let session_id = terminal.update(&mut app, |view, ctx| {
+            view.set_active_local_session_for_test(&cwd, ctx);
+            view.set_login_shell_bootstrapped_for_test();
+            let session_id = view
+                .active_block_session_id()
+                .and_then(|id| view.sessions.as_ref(ctx).get(id))
+                .unwrap()
+                .id();
+            let mut model = view.model.lock();
+            model.block_list_mut().set_bootstrapped();
+            model
+                .block_list_mut()
+                .active_block_mut()
+                .set_session_id(session_id);
+            drop(model);
+            view.set_pending_command("echo resumed", ctx);
+            view.execute_pending_command((), ctx);
+            session_id
+        });
+        warpui::r#async::Timer::after(EXECUTE_PENDING_COMMAND_DELAY * 5).await;
+        assert!(
+            terminal.read(&app, |view, ctx| view
+                .input
+                .as_ref(ctx)
+                .has_pending_command()),
+            "with no history registered for the session the command must stay pending"
+        );
+
+        let session = terminal
+            .read(&app, |view, ctx| view.sessions.as_ref(ctx).get(session_id))
+            .unwrap();
+        app.update(|ctx| {
+            History::handle(ctx).update(ctx, |history, _ctx| {
+                history.register_shell_host_for_test(&session)
+            })
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) =>
+                !terminal.read(&app, |view, ctx| view.input.as_ref(ctx).has_pending_command()),
+            "the pending command must run once the session's history became appendable"
+        );
+    });
+}

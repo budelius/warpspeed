@@ -231,7 +231,13 @@ impl CurrentPrompt {
             Self::handle_session_settings_changed,
         );
         ctx.subscribe_to_model(&sessions, |me, _, event, ctx| {
-            if let SessionsEvent::EnvironmentVariablesUpdated { .. } = event {
+            if let SessionsEvent::EnvironmentVariablesUpdated { session_id } = event
+                && me
+                    .latest_context
+                    .as_ref()
+                    .and_then(|context| context.active_block_metadata.session_id())
+                    == Some(*session_id)
+            {
                 me.update_states_with_new_context(ctx);
             }
         });

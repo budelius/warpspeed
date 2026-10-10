@@ -267,6 +267,20 @@ pub struct SessionSummary {
     pub attached: bool,
 }
 
+impl SessionMetadata {
+    /// Whether a pane adopting this session should treat its shell as waiting at the prompt.
+    ///
+    /// A shell running a program is never at its prompt, whatever the handover says. Without a
+    /// recorded bootstrap there was no real handover -- the client died, or never attached the
+    /// session -- so `input_editor_active` is only a default, and an idle shell is at its prompt.
+    pub fn adopted_shell_is_at_prompt(&self, has_running_child: bool) -> bool {
+        if has_running_child {
+            return false;
+        }
+        self.bootstrap.is_none() || self.input_editor_active
+    }
+}
+
 impl SessionBootstrap {
     /// The announcement of a local shell supervised under `session_id`, rebuilt for a session
     /// whose client vanished without handing it over.

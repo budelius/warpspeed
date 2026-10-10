@@ -15025,7 +15025,7 @@ impl Workspace {
             .context("This pane has no terminal session")?;
         let handover = self
             .capture_handover(&pane, ctx)
-            .context("This pane's shell is not owned by a session supervisor")?;
+            .context("This pane's shell is not owned by a session supervisor or has not started")?;
         let session_id = handover.session_id;
 
         PtySpawner::handle(ctx)
@@ -15156,8 +15156,8 @@ impl Workspace {
 
     /// Reads one pane's screen and identity into a handover for the supervisor.
     ///
-    /// `None` when the pane's shell is not the supervisor's to keep, which is
-    /// the one case where there is nothing to hand over.
+    /// `None` when the pane's shell is not the supervisor's to keep, or when the
+    /// pane never started or attached its shell: both leave nothing to hand over.
     #[cfg(feature = "local_tty")]
     fn capture_handover(&self, pane: &TerminalPaneInfo, ctx: &AppContext) -> Option<PendingDetach> {
         use warp_terminal::local_tty::supervisor::message::SessionMetadata;
@@ -15167,6 +15167,13 @@ impl Workspace {
             .get_pane_group_view_with_id(pane.pane_group_id)?
             .as_ref(ctx)
             .terminal_manager_for_pane_id(pane.pane_id, ctx)?;
+        // A restored pane in a tab that was never opened names its session but never attached it.
+        // The supervisor, or whichever pane did attach it, holds the real screen and metadata;
+        // this pane's blank ones would replace them and leave the next pane to adopt the shell
+        // stuck in an unnamed running block.
+        if manager.as_ref(ctx).has_deferred_shell() {
+            return None;
+        }
         // One lock for both: the screen and what the shell said about itself
         // have to describe the same moment, and `TerminalModel`'s mutex is not
         // reentrant.

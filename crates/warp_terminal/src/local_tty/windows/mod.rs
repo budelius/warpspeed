@@ -12,7 +12,7 @@ pub mod pipe_transport;
 mod pipes;
 mod proc_thread_attribute_list;
 pub mod supervised_pty;
-pub(crate) mod supervisor_client;
+pub mod supervisor_client;
 pub mod supervisor_daemon;
 mod supervisor_host;
 

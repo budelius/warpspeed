@@ -80,7 +80,9 @@ jobs:
     container:
       image: harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0@sha256:007adbd65f1054905c436b9d50bc1e940619dd14f754331639352bf421c00c90
     env:
-      CARGO_BUILD_JOBS: "1"
+      # Two jobs fit a general runner (2.5 CPU, 8 GiB). Only the release build of the
+      # `warp` crate needs a single job to stay inside the memory limit.
+      CARGO_BUILD_JOBS: "2"
 
     steps:
       - name: Install the Actions runtime
@@ -110,6 +112,48 @@ jobs:
           cat /etc/warpspeed-ci-image
           df -h / | tail -1
           cargo clippy -p managed_agent_sessions -p warp_terminal --all-targets --locked -- -D warnings
+          df -h / | tail -1
+
+  test:
+    name: Rust tests
+    if: >-
+      ${{ github.event_name == 'pull_request' ||
+          github.event_name == 'workflow_dispatch' ||
+          github.ref == 'refs/heads/dev' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    container:
+      image: harbor.pseekoo.io/stozn-warpspeed/ci:1.92.0@sha256:007adbd65f1054905c436b9d50bc1e940619dd14f754331639352bf421c00c90
+    env:
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Install the Actions runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_archive=/tmp/node-v20.20.2-linux-x64.tar.xz
+          curl --proto '=https' --tlsv1.2 --fail --show-error --silent --location \
+            --output "$node_archive" \
+            https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.xz
+          echo "df770b2a6f130ed8627c9782c988fda9669fa23898329a61a871e32f965e007d  $node_archive" \
+            | sha256sum --check
+          tar -xJf "$node_archive" --directory /usr/local --strip-components=1
+          node --version
+
+      - name: Check out the exact commit without LFS payloads
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          lfs: false
+          github-server-url: http://gitea-http.gitea.svc:3000
+
+      - name: Run the unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /etc/warpspeed-ci-image
+          df -h / | tail -1
           cargo test -p managed_agent_sessions -p warp_terminal --lib --locked
           df -h / | tail -1
 

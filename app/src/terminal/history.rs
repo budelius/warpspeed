@@ -726,6 +726,14 @@ impl History {
         self.is_queryable(session_id) && self.is_appendable(session_id)
     }
 
+    /// Makes `session` appendable without reading a history file or emitting
+    /// [`HistoryEvent::Initialized`].
+    #[cfg(test)]
+    pub fn register_shell_host_for_test(&mut self, session: &Session) {
+        self.session_id_to_shell_host
+            .insert(session.id(), ShellHost::from_session(session));
+    }
+
     /// Appends restored block commands from session restoration.
     /// We don't persist session_id for restored blocks, so the restored HistoryEntries are missing session_id.
     /// We manually set the session_id of each HistoryEntry here to ensure it's populated and correct.

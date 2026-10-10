@@ -146,7 +146,7 @@ if (-not $SKIP_BUILD) {
 
         Push-Location $WORKSPACE_ROOT
         try {
-            cargo build -p warp --release --bin warpspeed
+            cargo build -p warp --release --bin warpspeed --features tui
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to build warpspeed (exit code $LASTEXITCODE)"
             }

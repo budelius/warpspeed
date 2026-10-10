@@ -69,7 +69,7 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
     },
 
-    /// Open the managed-session viewer for a dashboard-launched run.
+    /// Open the managed-session viewer (full-screen when attached to a terminal).
     Open {
         job_id: String,
 
@@ -77,7 +77,7 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
     },
 
-    /// Watch or resume a managed session by controller job id.
+    /// Follow a managed session (full-screen when attached to a terminal).
     Attach {
         job_id: String,
 

@@ -86,11 +86,11 @@ jobs:
       # Compiled crates are shared through Hetzner Object Storage, which outlives the
       # runner pods. An unreachable store degrades to local compilation.
       RUSTC_WRAPPER: sccache
-      SCCACHE_BUCKET: stozn-warpspeed-ci-cache
+      SCCACHE_BUCKET: obachan
       SCCACHE_ENDPOINT: https://fsn1.your-objectstorage.com
       SCCACHE_REGION: fsn1
       SCCACHE_S3_USE_SSL: "true"
-      SCCACHE_S3_KEY_PREFIX: warpspeed/
+      SCCACHE_S3_KEY_PREFIX: ci-cache/warpspeed/
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
@@ -153,11 +153,11 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "2"
       RUSTC_WRAPPER: sccache
-      SCCACHE_BUCKET: stozn-warpspeed-ci-cache
+      SCCACHE_BUCKET: obachan
       SCCACHE_ENDPOINT: https://fsn1.your-objectstorage.com
       SCCACHE_REGION: fsn1
       SCCACHE_S3_USE_SSL: "true"
-      SCCACHE_S3_KEY_PREFIX: warpspeed/
+      SCCACHE_S3_KEY_PREFIX: ci-cache/warpspeed/
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}

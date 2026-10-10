@@ -50,7 +50,7 @@ export type Report = (header: SessionHeader, event: string, extra?: Partial<Noti
 export function apply(ctx: Context): void {
   const binary = process.env.WARP_AGENT_EVENT_BIN
   if (!binary) return
-  const send = serialSender(binary)
+  const send = serialSender((event) => deliver(binary, event))
   subscribe(ctx, (header, event, extra) => send(notification(event, header, VERSION, extra)))
 }
 
@@ -61,52 +61,87 @@ export function subscribe(ctx: Context, report: Report, home: string = dshHome()
     if (header.origin !== 'subagent') report(header, event, extra)
   }
 
-  ctx.on('agent/created', ({ agent, source }) => {
-    if (source === 'startup' || source === 'resume') {
-      const header = agent.session.header
-      forSession(header, 'session_start', { cwd: header.cwd, transcript_path: transcriptPath(header, home) })
-    }
-    return undefined
-  })
-  ctx.on('agent/inbox/claimed', ({ agent, message }) => {
-    if (message.source?.kind === 'user') {
-      forSession(agent.session.header, 'prompt_submit', { query: textOf(message.content) })
-    }
-  })
-  ctx.on('tools/result', (exec) => {
-    if (exec.agent) {
-      forSession(exec.agent.session.header, 'tool_complete', { tool_name: exec.name, tool_input: exec.arguments })
-    }
-  })
-  ctx.on('session/event', (session, event) => {
-    if (event.type === 'approval/asked') {
-      const toolName = event.data?.toolName
-      forSession(session.header, 'permission_request', {
-        tool_name: toolName,
-        summary: event.data?.reason ?? (toolName ? `Approve ${toolName}?` : undefined),
-      })
-    } else if (event.type === 'approval/decided') {
-      forSession(session.header, 'permission_replied')
-    }
-  })
-  ctx.on('agent/turn-stopping', ({ agent }) => forSession(agent.session.header, 'stop'))
-  ctx.on('agent/status', ({ agent, status }) => {
-    if (status === 'idle') forSession(agent.session.header, 'idle_prompt')
-  })
+  ctx.on(
+    'agent/created',
+    guarded(({ agent, source }) => {
+      if (source === 'startup' || source === 'resume') {
+        const header = agent.session.header
+        forSession(header, 'session_start', { cwd: header.cwd, transcript_path: transcriptPath(header, home) })
+      }
+    }),
+  )
+  ctx.on(
+    'agent/inbox/claimed',
+    guarded(({ agent, message }) => {
+      if (message.source?.kind === 'user') {
+        forSession(agent.session.header, 'prompt_submit', { query: textOf(message.content) })
+      }
+    }),
+  )
+  ctx.on(
+    'tools/result',
+    guarded((exec) => {
+      if (exec.agent) {
+        forSession(exec.agent.session.header, 'tool_complete', { tool_name: exec.name, tool_input: exec.arguments })
+      }
+    }),
+  )
+  ctx.on(
+    'session/event',
+    guarded((session, event) => {
+      if (event.type === 'approval/asked') {
+        const toolName = event.data?.toolName
+        forSession(session.header, 'permission_request', {
+          tool_name: toolName,
+          summary: event.data?.reason ?? (toolName ? `Approve ${toolName}?` : undefined),
+        })
+      } else if (event.type === 'approval/decided') {
+        forSession(session.header, 'permission_replied')
+      }
+    }),
+  )
+  ctx.on(
+    'agent/turn-stopping',
+    guarded(({ agent }) => forSession(agent.session.header, 'stop')),
+  )
+  ctx.on(
+    'agent/status',
+    guarded(({ agent, status }) => {
+      if (status === 'idle') forSession(agent.session.header, 'idle_prompt')
+    }),
+  )
 }
 
-/** Sends notifications one at a time and in order, so a `stop` never overtakes its `prompt_submit`. */
-function serialSender(binary: string): (event: Notification) => void {
-  let queue: Promise<void> = Promise.resolve()
-  return (event) => {
-    queue = queue.then(() => deliver(binary, event))
+/** Wraps a listener so that nothing it throws reaches dsh; reporting is never worth a crashed session. */
+function guarded<Args extends unknown[]>(listener: (...args: Args) => void): (...args: Args) => undefined {
+  return (...args) => {
+    try {
+      listener(...args)
+    } catch {}
+    return undefined
   }
 }
 
-function deliver(binary: string, event: Notification): Promise<void> {
+/**
+ * Sends notifications one at a time and in order, so a `stop` never overtakes its `prompt_submit`.
+ * A failed delivery is dropped and the queue carries on. The returned promise settles when the
+ * event has been handled and never rejects.
+ */
+export function serialSender(deliverOne: (event: Notification) => Promise<void>): (event: Notification) => Promise<void> {
+  let queue: Promise<void> = Promise.resolve()
+  return (event) => {
+    queue = queue.then(() => deliverOne(event)).catch(() => {})
+    return queue
+  }
+}
+
+/** Pipes `event` into `binary agent-event --format protocol`; resolves, never rejects, once it is done. */
+export function deliver(binary: string, event: Notification): Promise<void> {
   return new Promise((resolve) => {
     let child: ChildProcess
+    let payload: string
     try {
+      payload = JSON.stringify(event)
       child = spawn(binary, ['agent-event', '--format', 'protocol'], { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true })
     } catch {
       resolve()
@@ -123,6 +158,6 @@ function deliver(binary: string, event: Notification): Promise<void> {
     child.once('error', finish)
     child.once('exit', finish)
     child.stdin?.once('error', () => {})
-    child.stdin?.end(JSON.stringify(event))
+    child.stdin?.end(payload)
   })
 }

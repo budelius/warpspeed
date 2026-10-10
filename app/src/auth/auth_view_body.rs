@@ -36,7 +36,7 @@ use crate::modal::MODAL_CORNER_RADIUS;
 use crate::network::NetworkStatus;
 use crate::server::telemetry::{AnonymousUserSignupEntrypoint, LoginEventSource, TelemetryEvent};
 use crate::settings::{AISettings, PrivacySettings};
-use crate::stozn_auth::{StoznAuthEvent, StoznAuthManager, StoznAuthState};
+use crate::stozn_auth::{StoznAuthEvent, StoznAuthManager, StoznAuthState, stozn_status_text};
 use crate::themes::theme::Fill as ThemeFill;
 use crate::util::color::{darken, lighten};
 use crate::{send_telemetry_from_ctx, send_telemetry_sync_from_ctx};
@@ -709,6 +709,20 @@ impl AuthViewBody {
         )
         .with_margin_top(AUTH_MODAL_GAP)
         .finish();
+        let stozn_state = StoznAuthManager::as_ref(app).state();
+        let sign_in_status = match stozn_state {
+            StoznAuthState::Failed(_) | StoznAuthState::WaitingForBrowser { .. } => {
+                stozn_status_text(stozn_state)
+            }
+            StoznAuthState::SignedOut | StoznAuthState::Starting | StoznAuthState::SignedIn(_) => {
+                None
+            }
+        }
+        .map(|status| {
+            Container::new(ui_builder.paragraph(status).build().finish())
+                .with_margin_top(AUTH_MODAL_GAP)
+                .finish()
+        });
         let force_login_disclaimer = self.render_force_login_disclaimer(appearance, ui_builder);
 
         match self.variant {
@@ -724,7 +738,9 @@ impl AuthViewBody {
                     );
                     vec![logo, header, offline_contents]
                 } else if self.active_overlay.is_none() {
-                    vec![logo, header, sign_up_button, sign_in_row]
+                    let mut contents = vec![logo, header, sign_up_button, sign_in_row];
+                    contents.extend(sign_in_status);
+                    contents
                 } else {
                     vec![]
                 }
@@ -765,21 +781,8 @@ impl AuthViewBody {
         .with_margin_bottom(AUTH_MODAL_GAP)
         .finish();
 
-        let status = match StoznAuthManager::as_ref(app).state() {
-            StoznAuthState::Starting => "Starting STOZN sign-in…".to_owned(),
-            StoznAuthState::WaitingForBrowser { user_code } => {
-                format!("Confirm code {user_code} in your browser to finish signing in…")
-            }
-            StoznAuthState::SignedIn(identity) => format!(
-                "Signed in to STOZN as {}.",
-                identity
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&identity.subject)
-            ),
-            StoznAuthState::Failed(error) => error.clone(),
-            StoznAuthState::SignedOut => "Select Sign in with STOZN to try again.".to_owned(),
-        };
+        let status = stozn_status_text(StoznAuthManager::as_ref(app).state())
+            .unwrap_or_else(|| "Select Sign in with STOZN to try again.".to_owned());
         let hint = Container::new(ui_builder.paragraph(status).build().finish()).finish();
         vec![logo, header, hint]
     }

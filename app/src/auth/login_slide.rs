@@ -38,7 +38,7 @@ use crate::auth::login_failure_notification::{self, LoginFailureReason};
 use crate::editor::{EditorView, SingleLineEditorOptions, TextColors, TextOptions};
 use crate::server::telemetry::{LoginEventSource, TelemetryEvent};
 use crate::settings::PrivacySettings;
-use crate::stozn_auth::{StoznAuthEvent, StoznAuthManager, StoznAuthState};
+use crate::stozn_auth::{StoznAuthEvent, StoznAuthManager, stozn_status_text};
 use crate::themes::theme::Fill as ThemeFill;
 use crate::{send_telemetry_from_ctx, send_telemetry_sync_from_ctx};
 
@@ -776,23 +776,8 @@ impl LoginSlideView {
         .with_alignment(TextAlignment::Left)
         .finish();
 
-        let status = match StoznAuthManager::as_ref(app).state() {
-            StoznAuthState::Starting => "Starting STOZN sign-in…".to_owned(),
-            StoznAuthState::WaitingForBrowser { user_code } => {
-                format!("Confirm code {user_code} in your browser to finish signing in…")
-            }
-            StoznAuthState::SignedIn(identity) => format!(
-                "Signed in to STOZN as {}.",
-                identity
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&identity.subject)
-            ),
-            StoznAuthState::Failed(error) => error.clone(),
-            StoznAuthState::SignedOut => {
-                "Go back and select Sign in with STOZN to try again.".to_owned()
-            }
-        };
+        let status = stozn_status_text(StoznAuthManager::as_ref(app).state())
+            .unwrap_or_else(|| "Go back and select Sign in with STOZN to try again.".to_owned());
         let hint = ui_builder
             .paragraph(status)
             .with_style(sub_text_styles)

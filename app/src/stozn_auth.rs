@@ -72,13 +72,54 @@ fn open_framed_stozn_auth(_verification_url: &str) -> bool {
     false
 }
 
+fn open_stozn_verification_url(verification_url: &str, ctx: &mut ModelContext<StoznAuthManager>) {
+    if !open_framed_stozn_auth(verification_url) {
+        ctx.open_url(verification_url);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum StoznAuthState {
     SignedOut,
     Starting,
-    WaitingForBrowser { user_code: String },
+    WaitingForBrowser {
+        user_code: String,
+        verification_url: String,
+    },
     SignedIn(StoznIdentity),
     Failed(String),
+}
+
+impl StoznAuthState {
+    fn name(&self) -> &'static str {
+        match self {
+            StoznAuthState::SignedOut => "SignedOut",
+            StoznAuthState::Starting => "Starting",
+            StoznAuthState::WaitingForBrowser { .. } => "WaitingForBrowser",
+            StoznAuthState::SignedIn(_) => "SignedIn",
+            StoznAuthState::Failed(_) => "Failed",
+        }
+    }
+}
+
+/// User-facing description of a STOZN sign-in state, or `None` when there is nothing to report
+/// (signed out).
+pub fn stozn_status_text(state: &StoznAuthState) -> Option<String> {
+    match state {
+        StoznAuthState::SignedOut => None,
+        StoznAuthState::Starting => Some("Starting STOZN sign-in…".to_owned()),
+        StoznAuthState::WaitingForBrowser { user_code, .. } => Some(format!(
+            "Confirm code {user_code} in your browser to finish signing in…"
+        )),
+        StoznAuthState::SignedIn(identity) => Some(format!(
+            "Signed in to STOZN as {}.",
+            identity
+                .display_name
+                .as_deref()
+                .unwrap_or(&identity.subject)
+        )),
+        StoznAuthState::Failed(error) => Some(error.clone()),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,13 +145,30 @@ impl StoznAuthManager {
         &self.state
     }
 
+    fn set_state(&mut self, state: StoznAuthState, ctx: &mut ModelContext<Self>) {
+        let previous = self.state.name();
+        match &state {
+            StoznAuthState::WaitingForBrowser { user_code, .. } => log::info!(
+                "STOZN sign-in state {previous} -> WaitingForBrowser (user code {user_code})"
+            ),
+            StoznAuthState::Failed(error) => {
+                log::warn!("STOZN sign-in state {previous} -> Failed: {error}")
+            }
+            StoznAuthState::SignedOut | StoznAuthState::Starting | StoznAuthState::SignedIn(_) => {
+                log::info!("STOZN sign-in state {previous} -> {}", state.name())
+            }
+        }
+        self.state = state;
+        ctx.emit(StoznAuthEvent::StateChanged);
+        ctx.notify();
+    }
+
     /// Whether a stored sign-in exists. A cached sign-in whose credential was removed (for example
     /// after the issuer rejected a refresh) drops to signed out.
     pub fn is_signed_in(&mut self, ctx: &mut ModelContext<Self>) -> bool {
         if matches!(self.state, StoznAuthState::SignedIn(_)) && stored_stozn_identity().is_none() {
-            self.state = StoznAuthState::SignedOut;
-            ctx.emit(StoznAuthEvent::StateChanged);
-            ctx.notify();
+            log::info!("STOZN stored credential is gone; dropping cached sign-in");
+            self.set_state(StoznAuthState::SignedOut, ctx);
         }
         matches!(self.state, StoznAuthState::SignedIn(_))
     }
@@ -120,60 +178,60 @@ impl StoznAuthManager {
             ctx.emit(StoznAuthEvent::LoginCompleted);
             return;
         }
-        if matches!(
-            self.state,
-            StoznAuthState::Starting | StoznAuthState::WaitingForBrowser { .. }
-        ) {
-            return;
+        match &self.state {
+            StoznAuthState::Starting => {
+                log::info!("Ignoring STOZN sign-in request: a sign-in is already starting");
+                return;
+            }
+            StoznAuthState::WaitingForBrowser {
+                verification_url, ..
+            } => {
+                log::info!(
+                    "STOZN sign-in already waiting for the browser; reopening the verification page"
+                );
+                open_stozn_verification_url(verification_url, ctx);
+                return;
+            }
+            StoznAuthState::SignedOut | StoznAuthState::SignedIn(_) | StoznAuthState::Failed(_) => {
+            }
         }
-        self.state = StoznAuthState::Starting;
-        ctx.emit(StoznAuthEvent::StateChanged);
-        ctx.notify();
+        self.set_state(StoznAuthState::Starting, ctx);
         let _ = ctx.spawn(
             async move { blocking::unblock(begin_stozn_login).await },
             |me, result, ctx| match result {
                 Ok(flow) => {
-                    if !open_framed_stozn_auth(flow.verification_url()) {
-                        ctx.open_url(flow.verification_url());
-                    }
-                    me.state = StoznAuthState::WaitingForBrowser {
-                        user_code: flow.user_code().to_owned(),
-                    };
-                    ctx.emit(StoznAuthEvent::StateChanged);
-                    ctx.notify();
+                    open_stozn_verification_url(flow.verification_url(), ctx);
+                    me.set_state(
+                        StoznAuthState::WaitingForBrowser {
+                            user_code: flow.user_code().to_owned(),
+                            verification_url: flow.verification_url().to_owned(),
+                        },
+                        ctx,
+                    );
                     let _ = ctx.spawn(
                         async move { blocking::unblock(move || complete_stozn_login(flow)).await },
-                        |me, result, ctx| {
-                            match result {
-                                Ok(identity) => {
-                                    me.state = StoznAuthState::SignedIn(identity);
-                                    ctx.emit(StoznAuthEvent::LoginCompleted);
-                                }
-                                Err(error) => {
-                                    me.state = StoznAuthState::Failed(format!("{error:#}"));
-                                }
+                        |me, result, ctx| match result {
+                            Ok(identity) => {
+                                me.set_state(StoznAuthState::SignedIn(identity), ctx);
+                                ctx.emit(StoznAuthEvent::LoginCompleted);
                             }
-                            ctx.emit(StoznAuthEvent::StateChanged);
-                            ctx.notify();
+                            Err(error) => {
+                                me.set_state(StoznAuthState::Failed(format!("{error:#}")), ctx)
+                            }
                         },
                     );
                 }
-                Err(error) => {
-                    me.state = StoznAuthState::Failed(format!("{error:#}"));
-                    ctx.emit(StoznAuthEvent::StateChanged);
-                    ctx.notify();
-                }
+                Err(error) => me.set_state(StoznAuthState::Failed(format!("{error:#}")), ctx),
             },
         );
     }
 
     pub fn logout(&mut self, ctx: &mut ModelContext<Self>) {
-        match logout_stozn() {
-            Ok(()) => self.state = StoznAuthState::SignedOut,
-            Err(error) => self.state = StoznAuthState::Failed(format!("{error:#}")),
-        }
-        ctx.emit(StoznAuthEvent::StateChanged);
-        ctx.notify();
+        let state = match logout_stozn() {
+            Ok(()) => StoznAuthState::SignedOut,
+            Err(error) => StoznAuthState::Failed(format!("{error:#}")),
+        };
+        self.set_state(state, ctx);
     }
 }
 
@@ -182,3 +240,7 @@ impl Entity for StoznAuthManager {
 }
 
 impl SingletonEntity for StoznAuthManager {}
+
+#[cfg(test)]
+#[path = "stozn_auth_tests.rs"]
+mod tests;

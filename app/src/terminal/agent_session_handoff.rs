@@ -106,6 +106,8 @@ pub(crate) fn agent_ctrl_profile(agent: CLIAgent) -> Option<&'static str> {
         CLIAgent::Claude => managed_agent_sessions::agent_ctrl_profile("claude"),
         CLIAgent::Pi => managed_agent_sessions::agent_ctrl_profile("pi"),
         CLIAgent::Codex => managed_agent_sessions::agent_ctrl_profile("codex"),
+        CLIAgent::Kimi => managed_agent_sessions::agent_ctrl_profile("kimi"),
+        CLIAgent::DeepSeekHarness => managed_agent_sessions::agent_ctrl_profile("dsh"),
         CLIAgent::Gemini
         | CLIAgent::Amp
         | CLIAgent::Droid
@@ -118,8 +120,6 @@ pub(crate) fn agent_ctrl_profile(agent: CLIAgent) -> Option<&'static str> {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
-        | CLIAgent::Kimi
-        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }

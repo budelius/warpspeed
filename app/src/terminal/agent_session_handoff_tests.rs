@@ -57,6 +57,14 @@ fn agent_ctrl_profiles() {
         agent_ctrl_profile(CLIAgent::Codex),
         Some("staging-codex-interactive-rw")
     );
+    assert_eq!(
+        agent_ctrl_profile(CLIAgent::Kimi),
+        Some("staging-kimi-interactive-rw")
+    );
+    assert_eq!(
+        agent_ctrl_profile(CLIAgent::DeepSeekHarness),
+        Some("staging-dsh-interactive-rw")
+    );
     assert_eq!(agent_ctrl_profile(CLIAgent::Gemini), None);
 }
 

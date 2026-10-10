@@ -14742,11 +14742,7 @@ impl Workspace {
         repositories: &[managed_agent_sessions::RepositoryInfo],
         ctx: &mut ViewContext<Self>,
     ) {
-        const STARTABLE_AGENTS: [(CLIAgent, &str); 3] = [
-            (CLIAgent::Claude, "Claude"),
-            (CLIAgent::Pi, "Pi"),
-            (CLIAgent::Codex, "Codex"),
-        ];
+        use crate::agent_ctrl::fleet_model::STARTABLE_AGENTS;
 
         // Checked again here: a start can begin while the repositories are being looked up.
         if self.reshow_agent_ctrl_start_in_flight(terminal_view_id, ctx) {

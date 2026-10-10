@@ -892,7 +892,18 @@ fn agent_ctrl_profiles_are_the_interactive_rw_profiles() {
         agent_ctrl_profile("codex"),
         Some("staging-codex-interactive-rw")
     );
+    assert_eq!(
+        agent_ctrl_profile("kimi"),
+        Some("staging-kimi-interactive-rw")
+    );
+    assert_eq!(
+        agent_ctrl_profile("dsh"),
+        Some("staging-dsh-interactive-rw")
+    );
     assert_eq!(agent_ctrl_profile("gemini"), None);
+    for kind in AGENT_KINDS {
+        assert!(agent_ctrl_profile(kind).is_some(), "{kind}");
+    }
 }
 
 #[test]
@@ -901,6 +912,8 @@ fn agent_kinds_resolve_to_their_profiles_and_profile_names_pass_through() {
     assert_eq!(resolve("claude"), "staging-claude-interactive-rw");
     assert_eq!(resolve("pi"), "staging-pi-interactive-rw");
     assert_eq!(resolve("codex"), "staging-codex-interactive-rw");
+    assert_eq!(resolve("kimi"), "staging-kimi-interactive-rw");
+    assert_eq!(resolve("dsh"), "staging-dsh-interactive-rw");
     assert_eq!(resolve("staging-pi-lander"), "staging-pi-lander");
     assert_eq!(
         resolve("staging-claude-interactive-rw"),
@@ -921,7 +934,10 @@ fn an_unknown_agent_fails_with_the_accepted_values() {
         let error = resolve_agent_name(ManagedEnvironment::Staging, unknown)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("claude, pi, codex"), "{unknown:?}: {error}");
+        assert!(
+            error.contains("claude, pi, codex, kimi, dsh"),
+            "{unknown:?}: {error}"
+        );
         assert!(error.contains("staging-"), "{unknown:?}: {error}");
     }
 }

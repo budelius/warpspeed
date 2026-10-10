@@ -466,3 +466,14 @@ fn a_successful_pause_and_resume_leave_no_error() {
     );
     assert_eq!((paused, resumed), (None, None));
 }
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn every_startable_agent_has_an_agent_ctrl_profile() {
+    for (agent, label) in STARTABLE_AGENTS {
+        assert!(agent_ctrl_profile(agent).is_some(), "{label}");
+    }
+    let agents = STARTABLE_AGENTS.map(|(agent, _)| agent);
+    assert!(agents.contains(&CLIAgent::Kimi));
+    assert!(agents.contains(&CLIAgent::DeepSeekHarness));
+}

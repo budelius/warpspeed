@@ -9,6 +9,15 @@ use warpui::{Entity, EntityId, ModelContext, SingletonEntity};
 
 use crate::terminal::CLIAgent;
 
+/// The agents a fleet or pane start offers, with their button labels.
+pub(crate) const STARTABLE_AGENTS: [(CLIAgent, &str); 5] = [
+    (CLIAgent::Claude, "Claude"),
+    (CLIAgent::Pi, "Pi"),
+    (CLIAgent::Codex, "Codex"),
+    (CLIAgent::Kimi, "Kimi"),
+    (CLIAgent::DeepSeekHarness, "DeepSeek"),
+];
+
 /// The heading of the runs that carry no repository.
 pub const NO_REPOSITORY: &str = "(no repository)";
 

@@ -23,7 +23,7 @@ pub enum ManagedSessionsCommand {
 
     /// Start one configured operator-enabled agent, bound to a task or to a repository.
     Start {
-        /// Agent kind (claude, pi, codex) or configured AgentCtrl profile name.
+        /// Agent kind (claude, pi, codex, kimi, dsh) or configured AgentCtrl profile name.
         #[arg(long)]
         agent: String,
 

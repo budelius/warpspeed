@@ -10,6 +10,7 @@ use mio::{Interest, Poll, Token};
 use serial_test::serial;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
+use super::super::pipe_transport::supervisor_pipe_name;
 use super::*;
 use crate::SizeInfo;
 use crate::local_tty::shell::{DirectShellStarter, ShellStarter};

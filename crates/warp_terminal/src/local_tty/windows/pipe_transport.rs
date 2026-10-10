@@ -55,7 +55,9 @@ pub fn supervisor_pipe_name() -> String {
     supervisor_pipe_name_for(&warp_core::paths::state_dir(), &executable)
 }
 
-fn supervisor_pipe_name_for(state_directory: &Path, executable: &Path) -> String {
+/// The pipe name of the supervisor that `executable` starts for the state in
+/// `state_directory`.
+pub fn supervisor_pipe_name_for(state_directory: &Path, executable: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(state_directory.to_string_lossy().as_bytes());
     // Separates the two paths so no pair of them hashes like another pair.

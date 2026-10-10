@@ -39,6 +39,8 @@ pub(crate) struct PreparedHandoff {
     pub agent_name: &'static str,
     pub session_file: Vec<u8>,
     pub session_file_path: PathBuf,
+    /// [`session_content_len`] of `session_file_path` as uploaded.
+    pub session_len: u64,
     pub repo_url: String,
     pub remote: String,
     pub branch: String,
@@ -503,6 +505,118 @@ fn read_session_file(path: &Path) -> Result<Vec<u8>> {
     Ok(content)
 }
 
+/// The bytes a move uploads for a session, and the [`session_content_len`] they were read at.
+struct SessionPayload {
+    bytes: Vec<u8>,
+    content_len: u64,
+}
+
+/// Lengths only: the bytes are the user's whole session.
+impl std::fmt::Debug for SessionPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionPayload")
+            .field("bytes", &self.bytes.len())
+            .field("content_len", &self.content_len)
+            .finish()
+    }
+}
+
+/// The combined size of the regular files at `path`: the file itself, or every file under a
+/// session directory. Agents only ever append, so growth means the session moved on. `None` when
+/// it cannot be read.
+pub(crate) fn session_content_len(path: &Path) -> Option<u64> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_dir() {
+        return Some(metadata.len());
+    }
+    let mut total = 0;
+    for entry in walkdir::WalkDir::new(path) {
+        let entry = entry.ok()?;
+        if entry.file_type().is_file() {
+            total += entry.metadata().ok()?.len();
+        }
+    }
+    Some(total)
+}
+
+/// Packs Kimi session directory `dir` as a tar of `<session_id>/<relative path>` regular files,
+/// the layout the AgentCtrl node unpacks. Symlinks are skipped.
+fn pack_kimi_session(dir: &Path, session_id: &str) -> Result<SessionPayload> {
+    let too_large = |len: u64| {
+        anyhow!(
+            "session {} is too large ({len} bytes, limit {MAX_SESSION_FILE_BYTES})",
+            dir.display()
+        )
+    };
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(dir).sort_by_file_name() {
+        let entry = entry.with_context(|| format!("failed to read {}", dir.display()))?;
+        if entry.file_type().is_file() {
+            let len = entry
+                .metadata()
+                .with_context(|| format!("failed to stat {}", entry.path().display()))?
+                .len();
+            files.push((entry.into_path(), len));
+        }
+    }
+    ensure!(
+        files
+            .iter()
+            .any(|(path, _)| *path == dir.join("state.json")),
+        "{} has no state.json",
+        dir.display()
+    );
+    let listed: u64 = files.iter().map(|(_, len)| len).sum();
+    if listed > MAX_SESSION_FILE_BYTES as u64 {
+        return Err(too_large(listed));
+    }
+    let mut archive = tar::Builder::new(Vec::new());
+    let mut content_len = 0;
+    for (path, _) in &files {
+        let content =
+            fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        content_len += content.len() as u64;
+        if content_len > MAX_SESSION_FILE_BYTES as u64 {
+            return Err(too_large(content_len));
+        }
+        let name = std::iter::once(session_id.to_owned())
+            .chain(
+                path.strip_prefix(dir)?
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned()),
+            )
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        archive
+            .append_data(&mut header, &name, content.as_slice())
+            .with_context(|| format!("failed to pack {}", path.display()))?;
+    }
+    let bytes = archive
+        .into_inner()
+        .context("failed to finish the session archive")?;
+    if bytes.len() > MAX_SESSION_FILE_BYTES {
+        return Err(too_large(bytes.len() as u64));
+    }
+    Ok(SessionPayload { bytes, content_len })
+}
+
+/// What a move uploads for the session at `path`: a Kimi session directory as a tar, any other
+/// agent's session file as is.
+fn read_session_payload(source: &HandoffSource, path: &Path) -> Result<SessionPayload> {
+    if path.is_dir() {
+        return pack_kimi_session(path, &source.session_id);
+    }
+    let bytes = read_session_file(path)?;
+    Ok(SessionPayload {
+        content_len: bytes.len() as u64,
+        bytes,
+    })
+}
+
 /// Reads the session file, commits the working tree to a handoff branch, and pushes it. Blocks on
 /// filesystem and git work, so it must run off the main thread.
 pub(crate) fn prepare_handoff(
@@ -521,7 +635,7 @@ fn prepare_handoff_with_roots(
     let agent_name = agent_ctrl_profile(source.agent)
         .ok_or_else(|| anyhow!("{:?} sessions cannot be moved", source.agent))?;
     let path = resolve_session_file(source, roots)?;
-    let session_file = read_session_file(&path)?;
+    let payload = read_session_payload(source, &path)?;
 
     let repo = source.cwd.as_path();
     let (remote, repo_url) = repo_url_for(repo)?;
@@ -540,8 +654,9 @@ fn prepare_handoff_with_roots(
 
     Ok(PreparedHandoff {
         agent_name,
-        session_file,
+        session_file: payload.bytes,
         session_file_path: path,
+        session_len: payload.content_len,
         repo_url,
         remote,
         branch,
@@ -742,7 +857,7 @@ pub(crate) fn move_idempotency_key(session_id: &str, commit: &str) -> String {
 /// What to type into a moved agent to make it exit.
 pub(crate) fn agent_exit_command(agent: CLIAgent) -> Option<&'static str> {
     match agent {
-        CLIAgent::Claude | CLIAgent::Codex => Some("/exit"),
+        CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Kimi => Some("/exit"),
         CLIAgent::Pi => Some("/quit"),
         CLIAgent::Gemini
         | CLIAgent::Amp
@@ -756,7 +871,6 @@ pub(crate) fn agent_exit_command(agent: CLIAgent) -> Option<&'static str> {
         | CLIAgent::Hermes
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
-        | CLIAgent::Kimi
         | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,

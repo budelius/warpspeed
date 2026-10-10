@@ -15379,6 +15379,7 @@ dependencies = [
  "syntect",
  "sysinfo",
  "tabwriter",
+ "tar",
  "tempfile",
  "thiserror 2.0.17",
  "thousands",

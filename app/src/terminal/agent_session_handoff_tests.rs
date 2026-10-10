@@ -626,7 +626,9 @@ fn move_session_idempotency_key_matches_the_server_pattern() {
 fn move_session_exit_command_matches_each_agent() {
     assert_eq!(agent_exit_command(CLIAgent::Claude), Some("/exit"));
     assert_eq!(agent_exit_command(CLIAgent::Codex), Some("/exit"));
+    assert_eq!(agent_exit_command(CLIAgent::Kimi), Some("/exit"));
     assert_eq!(agent_exit_command(CLIAgent::Pi), Some("/quit"));
+    assert_eq!(agent_exit_command(CLIAgent::DeepSeekHarness), None);
     assert_eq!(agent_exit_command(CLIAgent::Gemini), None);
 }
 
@@ -1051,4 +1053,135 @@ fn session_roots_default_under_home() {
     let roots = AgentSessionRoots::under_home(Path::new("/home/ben"));
     assert_eq!(roots.kimi_home, Path::new("/home/ben/.kimi-code"));
     assert_eq!(roots.dsh_home, Path::new("/home/ben/.dsh"));
+}
+
+fn tar_entries(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+    use std::io::Read as _;
+    tar::Archive::new(archive)
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let mut entry = entry.unwrap();
+            assert_eq!(entry.header().entry_type(), tar::EntryType::Regular);
+            let path = entry.path().unwrap().to_string_lossy().replace('\\', "/");
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content).unwrap();
+            (path, content)
+        })
+        .collect()
+}
+
+#[test]
+fn kimi_session_is_packed_as_a_tar_of_every_file_under_its_id() {
+    let home = TempDir::new().unwrap();
+    let roots = AgentSessionRoots::under_home(home.path());
+    let dir = kimi_session(&roots, "wd_app_aaaaaaaaaaaa", KIMI_SESSION_ID);
+    write_file(&dir.join("agents/sub-1/wire.jsonl"), b"{\"a\":1}\n");
+    write_file(&dir.join("session-meta/state.json"), b"{}");
+
+    let payload = pack_kimi_session(&dir, KIMI_SESSION_ID).unwrap();
+
+    let entries = tar_entries(&payload.bytes);
+    let names: Vec<_> = entries.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            format!("{KIMI_SESSION_ID}/agents/main/wire.jsonl"),
+            format!("{KIMI_SESSION_ID}/agents/sub-1/wire.jsonl"),
+            format!("{KIMI_SESSION_ID}/session-meta/state.json"),
+            format!("{KIMI_SESSION_ID}/state.json"),
+        ]
+    );
+    assert_eq!(entries[1].1, b"{\"a\":1}\n");
+    let total: u64 = entries
+        .iter()
+        .map(|(_, content)| content.len() as u64)
+        .sum();
+    assert_eq!(payload.content_len, total);
+    assert_eq!(session_content_len(&dir), Some(total));
+}
+
+#[test]
+fn kimi_session_without_state_or_over_the_limit_is_refused() {
+    let home = TempDir::new().unwrap();
+    let bare = home.path().join(KIMI_SESSION_ID);
+    write_file(&bare.join("agents/main/wire.jsonl"), b"{}\n");
+    let error = pack_kimi_session(&bare, KIMI_SESSION_ID).unwrap_err();
+    assert!(format!("{error:#}").contains("state.json"), "{error:#}");
+
+    let roots = AgentSessionRoots::under_home(home.path());
+    let dir = kimi_session(&roots, "wd_app_aaaaaaaaaaaa", KIMI_SESSION_ID);
+    fs::File::create(dir.join("agents/main/big.bin"))
+        .unwrap()
+        .set_len(MAX_SESSION_FILE_BYTES as u64 + 1)
+        .unwrap();
+    let error = pack_kimi_session(&dir, KIMI_SESSION_ID).unwrap_err();
+    assert!(format!("{error:#}").contains("too large"), "{error:#}");
+}
+
+#[test]
+fn session_content_len_follows_appends_to_a_file_or_a_directory() {
+    let home = TempDir::new().unwrap();
+    let file = home.path().join("session.jsonl");
+    write_file(&file, b"12345");
+    assert_eq!(session_content_len(&file), Some(5));
+    let dir = home.path().join("dir");
+    write_file(&dir.join("a"), b"12");
+    write_file(&dir.join("b/c"), b"345");
+    assert_eq!(session_content_len(&dir), Some(5));
+    write_file(&dir.join("b/c"), b"3456");
+    assert_eq!(session_content_len(&dir), Some(6));
+    assert_eq!(session_content_len(&home.path().join("missing")), None);
+}
+
+#[test]
+fn prepare_handoff_uploads_a_kimi_tar_and_a_dsh_file_as_is() {
+    let home = TempDir::new().unwrap();
+    let remotes = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let repo = repo.path();
+    init_repo(repo);
+    add_bare_remote(repo, "gitea", remotes.path());
+    let roots = AgentSessionRoots::under_home(home.path());
+    let now = Local.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
+
+    let kimi_dir = kimi_session(&roots, "wd_app_aaaaaaaaaaaa", KIMI_SESSION_ID);
+    let kimi = HandoffSource {
+        agent: CLIAgent::Kimi,
+        session_id: KIMI_SESSION_ID.to_owned(),
+        cwd: repo.to_path_buf(),
+        transcript_path: None,
+    };
+    let prepared = prepare_handoff_with_roots(&kimi, &roots, now).unwrap();
+    assert_eq!(prepared.agent_name, "staging-kimi-interactive-rw");
+    assert_eq!(prepared.session_file_path, kimi_dir);
+    assert_eq!(
+        prepared.session_len,
+        session_content_len(&kimi_dir).unwrap()
+    );
+    assert!(
+        tar_entries(&prepared.session_file)
+            .iter()
+            .any(|(name, _)| *name == format!("{KIMI_SESSION_ID}/state.json"))
+    );
+    assert_eq!(prepared.branch, "handoff/20261003-1200-0b6c1234");
+
+    let dsh_file = roots
+        .dsh_home
+        .join("sessions/--app--")
+        .join(SESSION_ID)
+        .join("session.v4.jsonl.zstd");
+    write_file(&dsh_file, b"\x28\xb5\x2f\xfdrest");
+    let dsh = HandoffSource {
+        agent: CLIAgent::DeepSeekHarness,
+        session_id: SESSION_ID.to_owned(),
+        cwd: repo.to_path_buf(),
+        transcript_path: None,
+    };
+    // Both ids shorten to `0b6c1234`, so the same minute would reuse the pushed Kimi branch.
+    let later = now + chrono::Duration::minutes(1);
+    let prepared = prepare_handoff_with_roots(&dsh, &roots, later).unwrap();
+    assert_eq!(prepared.agent_name, "staging-dsh-interactive-rw");
+    assert_eq!(prepared.session_file, b"\x28\xb5\x2f\xfdrest");
+    assert_eq!(prepared.session_len, 8);
 }

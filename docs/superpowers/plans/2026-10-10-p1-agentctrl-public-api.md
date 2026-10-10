@@ -57,6 +57,13 @@ git -C T:/projects/dev-ops/warp-dev-release worktree add -b feat/managed-base-ur
 
 If `origin/dev` of agent-ctrl moved past a3cde04, the `file:line` references below shift; locate each insertion by the quoted code instead of the number.
 
+## Rulings (2026-10-10)
+
+- Task-linked launches (`task_id`) are rejected by the API with 422 `task_launch_unsupported`; they stay on the dashboard.
+- The dashboard allows live input for `agentctrl_api` runs (Task 12a).
+- Rate limiting: the API's per-user limit is the real limit; APISIX's bearer route only carries a coarse flood guard
+  (3000 requests / 60 s on one shared bucket), because APISIX sees Caddy's address as the client.
+
 ## Order and dependencies
 
 ```
@@ -6852,6 +6859,35 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
+### Task 12a: Dashboard accepts live input for API-started runs
+
+Ruling 2026-10-10: runs started through `agentctrl-api` carry `source = "agentctrl_api"`; the dashboard must allow
+input for them like it does for dashboard and WarpSpeed runs.
+
+**Files (dashboard worktree `T:/projects/SOTZ3N/stoz3n-agent-dash-p1-golden`, same branch as Task 12):**
+- Modify: `server/agent-control.ts:659`
+- Test: `scripts/check-agent-control.mjs`
+
+- [ ] **Step 1: Failing check** — append to `scripts/check-agent-control.mjs`, next to the existing `publicRun`/`input_allowed` checks (reuse the script's running-job fixture and its node snapshot helper):
+
+```js
+await check("runs started through agentctrl-api accept live input", async () => {
+  const run = publicRun({ ...runningInteractiveJob, source: "agentctrl_api" }, connectedSnapshot);
+  assert.equal(run.input_allowed, true);
+});
+```
+Use the script's actual names for the running interactive job fixture and snapshot; if `publicRun` is not exported, export it from `server/agent-control.ts` for the check.
+
+- [ ] **Step 2:** `yarn test:agent-control` → the new check fails.
+- [ ] **Step 3: Fix** — `server/agent-control.ts:659`:
+
+```ts
+  const managedOperatorSource = ["dashboard", "warpspeed", "agentctrl_api"].includes(String(job.source ?? ""));
+```
+
+- [ ] **Step 4:** `yarn check && yarn test:agent-control` → all pass.
+- [ ] **Step 5: Commit** — `git add server/agent-control.ts scripts/check-agent-control.mjs && git commit -m "fix(agent-control): accept input for runs started through agentctrl-api"` (trailer as in Global Constraints).
+
 ### Task 12: Dashboard golden responses and the contract test
 
 The dashboard's `scripts/check-agent-control.mjs` asserts behavior but stores no responses. This task moves its fixture data into shared JSON, has the dashboard export its actual responses for a fixed case list, and replays them against the API.
@@ -8021,13 +8057,13 @@ def test_bearer_only_renders_only_jwks_validated_bearer_routes() -> None:
     assert "session" not in oidc
     assert "redirect_uri" not in oidc
     assert payload["plugins"]["limit-count"] == {
-        "count": 100,
+        "count": 3000,
         "time_window": 60,
         "rejected_code": 429,
         "rejected_msg": "Rate limit exceeded",
         "policy": "local",
-        "key_type": "var_combination",
-        "key": "$consumer_name $remote_addr",
+        "key_type": "var",
+        "key": "remote_addr",
     }
     assert "cors" not in payload["plugins"]
     assert "redirect" not in payload["plugins"]
@@ -8131,12 +8167,19 @@ def build_app_bearer_plugin_config(
     }
 
 
+BEARER_FLOOD_GUARD_COUNT = 3000
+
+
 def build_app_bearer_rate_limit_plugin(cfg: object) -> dict[str, Any]:
-    """limit-count for bearer-only app routes, keyed per APISIX consumer and client address."""
+    """Coarse flood guard for bearer-only app routes; the upstream enforces per-user limits.
+
+    APISIX sees Caddy's address as `remote_addr`, so every caller shares this bucket.
+    """
     return {
         **build_rate_limit_plugin(cfg),
-        "key_type": "var_combination",
-        "key": "$consumer_name $remote_addr",
+        "count": BEARER_FLOOD_GUARD_COUNT,
+        "key_type": "var",
+        "key": "remote_addr",
     }
 
 

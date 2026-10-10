@@ -127,6 +127,13 @@ impl SessionTable {
         );
     }
 
+    /// Whether `session_id` is held here with no client attached.
+    pub fn holds_detached(&self, session_id: SessionId) -> bool {
+        self.sessions
+            .get(&session_id)
+            .is_some_and(|session| !session.attached)
+    }
+
     /// Records output produced by a detached session.
     ///
     /// The bytes go to both the ring, so they can be replayed, and the screen,

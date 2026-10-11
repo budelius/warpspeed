@@ -132,6 +132,19 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
     },
 
+    /// Archive a terminal run and remove it from default managed-session listings.
+    #[command(visible_alias = "remove")]
+    Archive {
+        job_id: String,
+
+        /// Confirm that this run should be archived. Live and paused runs must be stopped first.
+        #[arg(long)]
+        yes: bool,
+
+        #[arg(long, value_enum, default_value_t = ManagedEnvironment::Staging)]
+        environment: ManagedEnvironment,
+    },
+
     /// Pause a live interactive run: its agent exits, its work is pushed to the run's branch, and
     /// it frees its node slot until resumed.
     Pause {

@@ -1073,6 +1073,44 @@ fn stop_run_posts_a_stop_request() {
 }
 
 #[test]
+fn archive_posts_to_the_run_route() {
+    let (base, request) = capturing_fixture(json!({
+        "status": "accepted",
+        "action": "archive",
+        "job_id": "job-1",
+        "request_id": "request-1",
+        "replayed": false,
+        "archived_at": "2026-10-11T00:00:00Z"
+    }));
+    archive_run_with(&fixture_profile(base), "token", "job-1").unwrap();
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(
+        raw.starts_with("POST /api/agent-control/runs/job-1/archive "),
+        "{raw}"
+    );
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("idempotency-key: warpspeed-"),
+        "{raw}"
+    );
+    assert!(raw.ends_with("{}"), "{raw}");
+}
+
+#[test]
+fn archive_requires_confirmation_before_authentication() {
+    let error = run(&ManagedSessionsArgs {
+        command: ManagedSessionsCommand::Archive {
+            job_id: "job-1".to_owned(),
+            yes: false,
+            environment: ManagedEnvironment::Staging,
+        },
+        json: false,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("--yes"), "{error}");
+}
+
+#[test]
 fn pause_and_resume_post_to_the_run_routes() {
     for (call, route) in [
         (

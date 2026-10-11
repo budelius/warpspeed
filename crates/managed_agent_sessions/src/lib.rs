@@ -353,6 +353,11 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             force,
             environment,
         } => stop(*environment, job_id, *force, args.json),
+        ManagedSessionsCommand::Archive {
+            job_id,
+            yes,
+            environment,
+        } => archive(*environment, job_id, *yes, args.json),
         ManagedSessionsCommand::Pause {
             job_id,
             environment,
@@ -1025,6 +1030,26 @@ fn stop(
     Ok(())
 }
 
+fn archive(
+    environment: ManagedEnvironment,
+    job_id: &str,
+    confirmed: bool,
+    json_output: bool,
+) -> Result<()> {
+    validate_job_id(job_id)?;
+    if !confirmed {
+        bail!("pass --yes to archive {job_id}; live and paused runs must be stopped first");
+    }
+    let token = dashboard_token()?;
+    let result = archive_run_with(profile(environment), &token, job_id)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Archived {job_id}; its audit history remains available with include_archived.");
+    }
+    Ok(())
+}
+
 fn pause(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
     let outcome = pause_run(environment, job_id)
         .map_err(|error| anyhow::Error::msg(pause_failure_message(&error)))?;
@@ -1160,6 +1185,10 @@ fn run_control_outcome(result: &Value) -> RunControlOutcome {
         state: text("state").unwrap_or_default(),
         node_name: text("node_name"),
     }
+}
+
+fn archive_run_with(profile: &EnvironmentProfile, token: &str, job_id: &str) -> Result<Value> {
+    post_run_command_with(profile, token, job_id, "archive", &json!({}))
 }
 
 fn pause_run_with(profile: &EnvironmentProfile, token: &str, job_id: &str) -> Result<Value> {

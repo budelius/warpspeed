@@ -961,7 +961,7 @@ fn make_launch_config_menu_items(ctx: &mut AppContext) -> Vec<MenuItem> {
             );
             let summary = Arc::new(summary);
             launch_config_menu_items.push(MenuItem::Custom(CustomMenuItem::new(
-                label,
+                &label,
                 enclose!((summary) move |ctx| {
                     ctx.dispatch_global_action(
                         "root_view:open_stored_session",

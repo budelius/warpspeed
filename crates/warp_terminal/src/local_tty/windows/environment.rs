@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use itertools::Itertools;
 use warp_core::channel::ChannelState;
 use warp_core::cli_agent_protocol::{
-    CLI_AGENT_PROTOCOL_VERSION, WARP_CLI_AGENT_PROTOCOL_VERSION_ENV, WARP_CLIENT_VERSION_ENV,
+    CLI_AGENT_PROTOCOL_VERSION, WARP_AGENT_EVENT_BIN_ENV, WARP_AGENT_EVENT_TOKEN_ENV,
+    WARP_CLI_AGENT_PROTOCOL_VERSION_ENV, WARP_CLIENT_VERSION_ENV,
 };
 use warp_core::features::FeatureFlag;
 use warp_core::safe_info;
@@ -205,8 +206,23 @@ pub(super) fn get_shell_environment_variables(options: &PtyOptions) -> Vec<u16> 
         _ => {}
     }
 
-    // Apply any caller-provided overrides last, so they win.
-    for (key, value) in &options.env_vars {
+    apply_caller_env_vars(&mut env, &options.env_vars);
+
+    environment_block(env.into_iter())
+}
+
+/// Applies the caller's variables last, so they win.
+///
+/// An agent-event token belongs to the pane it was made for, so one inherited from the shell that
+/// started this process would let hooks in this pane address that other pane.
+fn apply_caller_env_vars(
+    env: &mut BTreeMap<OsString, EnvEntry>,
+    overrides: &HashMap<OsString, OsString>,
+) {
+    for key in [WARP_AGENT_EVENT_TOKEN_ENV, WARP_AGENT_EVENT_BIN_ENV] {
+        env.remove(&map_key(key.into()));
+    }
+    for (key, value) in overrides {
         env.insert(
             map_key(key.clone()),
             EnvEntry {
@@ -215,8 +231,6 @@ pub(super) fn get_shell_environment_variables(options: &PtyOptions) -> Vec<u16> 
             },
         );
     }
-
-    environment_block(env.into_iter())
 }
 
 /// Build the WSLENV allowlist for variables that Windows should forward into WSL.

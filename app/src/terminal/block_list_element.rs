@@ -70,7 +70,9 @@ use crate::pane_group::SplitPaneState;
 use crate::settings::{
     AISettings, DebugSettings, EnforceMinimumContrast, PrivacySettings, TerminalSpacing,
 };
-use crate::terminal::alt_screen::{should_intercept_mouse, should_intercept_scroll};
+use crate::terminal::alt_screen::{
+    should_intercept_mouse, should_intercept_right_click, should_intercept_scroll,
+};
 use crate::terminal::block_list_viewport::AutoscrollBehavior;
 use crate::terminal::blockgrid_renderer::BlockGridParams;
 use crate::terminal::input::inline_menu::InlineMenuPositioner;
@@ -1438,7 +1440,7 @@ impl BlockListElement {
                 .and_then(|index| model.block_list().block_at(index))
                 .is_some_and(|block| block.is_active_and_long_running());
             let mouse_owned_by_running_app =
-                on_long_running_block && !should_intercept_mouse(&model, shift, app);
+                on_long_running_block && !should_intercept_right_click(&model, shift, app);
             (block_index, mouse_owned_by_running_app)
         };
 

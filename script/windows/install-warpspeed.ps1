@@ -133,10 +133,12 @@ if (-not $SKIP_BUILD) {
     $previous_target_dir = $env:CARGO_TARGET_DIR
     $previous_full_profile = $env:CARGO_FULL_PROFILE
     $previous_protoc = $env:PROTOC
+    $previous_app_name = $env:WARP_APP_NAME
 
     try {
         $env:CARGO_TARGET_DIR = $STAGING_TARGET_DIR
         $env:CARGO_FULL_PROFILE = 'warpspeed-merge/release'
+        $env:WARP_APP_NAME = 'WarpSpeed by STOZN'
         if (-not $env:PROTOC) {
             $protoc = Get-Command protoc -ErrorAction Stop
             $env:PROTOC = $protoc.Source
@@ -144,7 +146,7 @@ if (-not $SKIP_BUILD) {
 
         Push-Location $WORKSPACE_ROOT
         try {
-            cargo build -p warp --release --bin warpspeed
+            cargo build -p warp --release --bin warpspeed --features tui
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to build warpspeed (exit code $LASTEXITCODE)"
             }
@@ -155,6 +157,7 @@ if (-not $SKIP_BUILD) {
         $env:CARGO_TARGET_DIR = $previous_target_dir
         $env:CARGO_FULL_PROFILE = $previous_full_profile
         $env:PROTOC = $previous_protoc
+        $env:WARP_APP_NAME = $previous_app_name
     }
 }
 
@@ -206,7 +209,7 @@ setlocal
 set "WARPSPEED_INSTALL_ROOT=%~dp0"
 set /p WARPSPEED_VERSION=<"%~dp0current.txt"
 if not defined WARPSPEED_VERSION exit /b 1
-start "" "%~dp0versions\%WARPSPEED_VERSION%\warpspeed.exe" %*
+start "" /D "%USERPROFILE%" "%~dp0versions\%WARPSPEED_VERSION%\warpspeed.exe" %*
 '@
 [IO.File]::WriteAllText($launcher_path, $launcher, [Text.Encoding]::ASCII)
 
@@ -285,13 +288,30 @@ $current_temp_path = Join-Path $INSTALL_ROOT 'current.txt.new'
 Move-Item -Force -LiteralPath $current_temp_path -Destination $current_path
 Copy-Item -LiteralPath (Join-Path $version_dir 'icon.ico') -Destination $INSTALL_ROOT -Force
 
+# Register the stable dashboard-to-WarpSpeed handoff. The dashboard sends only
+# environment, fleet and controller job identifiers; WarpSpeed validates all of
+# them again before opening its fixed managed-session viewer command.
+$protocol_root = 'HKCU:\Software\Classes\warpspeed'
+New-Item -Path $protocol_root -Force | Out-Null
+Set-Item -Path $protocol_root -Value 'URL:WarpSpeed by STOZN managed session'
+New-ItemProperty -Path $protocol_root -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
+$protocol_icon = Join-Path $protocol_root 'DefaultIcon'
+New-Item -Path $protocol_icon -Force | Out-Null
+Set-Item -Path $protocol_icon -Value "$(Join-Path $version_dir 'warpspeed.exe'),0"
+$protocol_command = Join-Path $protocol_root 'shell\open\command'
+New-Item -Path $protocol_command -Force | Out-Null
+Set-Item -Path $protocol_command -Value "`"$(Join-Path $version_dir 'warpspeed.exe')`" `"%1`""
+
 $start_menu_dir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $wsh = New-Object -ComObject WScript.Shell
 $shortcuts = @{
-    'WarpSpeed.lnk' = $launcher_path
-    'WarpSpeed [a].lnk' = $profile_launchers['a']
-    'WarpSpeed [b].lnk' = $profile_launchers['b']
-    'WarpSpeed [c].lnk' = $profile_launchers['c']
+    'WarpSpeed by STOZN.lnk' = $launcher_path
+    'WarpSpeed by STOZN [a].lnk' = $profile_launchers['a']
+    'WarpSpeed by STOZN [b].lnk' = $profile_launchers['b']
+    'WarpSpeed by STOZN [c].lnk' = $profile_launchers['c']
+}
+@('WarpSpeed.lnk', 'WarpSpeed [a].lnk', 'WarpSpeed [b].lnk', 'WarpSpeed [c].lnk') | ForEach-Object {
+    Remove-Item -LiteralPath (Join-Path $start_menu_dir $_) -Force -ErrorAction SilentlyContinue
 }
 foreach ($entry in $shortcuts.GetEnumerator()) {
     $shortcut_path = Join-Path $start_menu_dir $entry.Key
@@ -308,7 +328,12 @@ New-Item -ItemType Directory -Force -Path $local_bin | Out-Null
 $cli_shim_path = Join-Path $local_bin 'warpspeed.cmd'
 $cli_shim = @"
 @echo off
-call "$launcher_path" %*
+setlocal
+set "WARPSPEED_INSTALL_ROOT=$INSTALL_ROOT\"
+set /p WARPSPEED_VERSION=<"$INSTALL_ROOT\current.txt"
+if not defined WARPSPEED_VERSION exit /b 1
+"$INSTALL_ROOT\versions\%WARPSPEED_VERSION%\warpspeed.exe" %*
+exit /b %ERRORLEVEL%
 "@
 [IO.File]::WriteAllText($cli_shim_path, $cli_shim, [Text.Encoding]::ASCII)
 
@@ -368,7 +393,7 @@ if ($running.UnidentifiedProcessIds.Count -gt 0) {
 
 $running_count = $running_executables.Count + $running.UnidentifiedProcessIds.Count
 if ($running_count -gt 0) {
-    Write-Host "$running_count WarpSpeed process(es) are still running and were left alone. Each keeps serving its sessions from the version it launched with; use 'Restart window in new process' to move a window to $version."
+    Write-Host "$running_count WarpSpeed process(es) are still running and were left alone. Each keeps serving its sessions from the version it launched with; start WarpSpeed from the Start Menu to use $version. Each version runs its own terminal supervisor, so 'Restart window in new process' keeps a window on the version it already runs."
 }
 
 Write-Host "Installed WarpSpeed $version"

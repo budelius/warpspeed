@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_channel::Receiver;
+use warp_core::cli_agent_protocol::CLI_AGENT_NOTIFICATION_SENTINEL;
 use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use super::event::{BootstrappedEvent, SshLoginStatus};
@@ -104,6 +105,7 @@ impl ModelEventDispatcher {
         let event_to_emit = match event {
             Event::Handler(HandlerEvent::InitShell {
                 pending_session_info,
+                restored,
             }) => {
                 self.sessions.update(ctx, |sessions, ctx| {
                     sessions.register_pending_session(pending_session_info.as_ref(), ctx);
@@ -112,13 +114,14 @@ impl ModelEventDispatcher {
                     pending_session_info.is_ssh_wrapper_session,
                     IsSSHWrapperSession::Yes { .. }
                 );
-                if self.should_use_ssh_remote_server(is_ssh_wrapper_session) {
+                if !restored && self.should_use_ssh_remote_server(is_ssh_wrapper_session) {
                     ModelEvent::SshInitShell {
                         pending_session_info,
                     }
                 } else {
                     ModelEvent::Handler(AnsiHandlerEvent::InitShell {
                         pending_session_info,
+                        restored,
                     })
                 }
             }
@@ -317,6 +320,7 @@ impl ModelEventDispatcher {
             spawning_command,
             restored_block_commands,
             rcfiles_duration_seconds,
+            restored,
         } = event;
 
         let (is_ssh_wrapper_session, session_id, shell_type_name, shell_path) = (
@@ -334,7 +338,9 @@ impl ModelEventDispatcher {
         // `SessionsEvent::SessionBootstrapped`, which causes subscribers to
         // immediately queue `RunCommand` requests (e.g. `load_external_commands`).
         // The daemon must have the executor ready before those requests arrive.
-        if self.should_use_ssh_remote_server(is_ssh_wrapper_session) {
+        // A restored pane adopts an existing shell and must not start this
+        // one-time bootstrap path again.
+        if !restored && self.should_use_ssh_remote_server(is_ssh_wrapper_session) {
             RemoteServerManager::handle(ctx).update(ctx, |mgr, _ctx| {
                 mgr.notify_session_bootstrapped(
                     session_id,
@@ -362,6 +368,19 @@ impl ModelEventDispatcher {
         ctx: &mut ModelContext<Self>,
     ) {
         ctx.emit(ModelEvent::RemoteServerBlockRequested { session_id });
+    }
+
+    /// Emits a structured CLI agent notification that arrived outside the PTY, so it reaches
+    /// exactly the subscribers an OSC 777 one does.
+    pub fn emit_out_of_band_cli_agent_notification(
+        &mut self,
+        body: String,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        ctx.emit(ModelEvent::PluggableNotification {
+            title: Some(CLI_AGENT_NOTIFICATION_SENTINEL.to_owned()),
+            body,
+        });
     }
 }
 
@@ -488,6 +507,7 @@ pub enum ModelEvent {
 pub enum AnsiHandlerEvent {
     InitShell {
         pending_session_info: Box<SessionInfo>,
+        restored: bool,
     },
     Bootstrapped {
         session_id: SessionId,

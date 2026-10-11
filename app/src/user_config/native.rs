@@ -47,6 +47,9 @@ impl super::WarpConfig {
             },
         );
         if FeatureFlag::TabConfigs.is_enabled() {
+            // Task selection and launch live in the STOZN Dashboard. Remove the
+            // retired local picker before loading authored tab configurations.
+            super::remove_stozn_managed_agent_config();
             let _ = ctx.spawn(
                 async move { load_tab_configs(&tab_configs_dir()) },
                 |me, (tab_configs, tab_config_errors), ctx| {
@@ -460,7 +463,7 @@ fn overwrite_launch_config_window_in_dir(
     let config = configs
         .get_mut(source.document_index)
         .ok_or_else(|| anyhow!("Launch configuration document no longer exists"))?;
-    if config.name != source.config_name {
+    if !config.name.eq_ignore_ascii_case(&source.config_name) {
         return Err(anyhow!("Launch configuration document has changed"));
     }
     let target = config

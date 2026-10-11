@@ -13,6 +13,8 @@ use crate::app_state::get_app_state;
 use crate::features::FeatureFlag;
 use crate::network::NetworkStatus;
 use crate::persistence::ModelEvent;
+#[cfg(not(target_family = "wasm"))]
+use crate::remote_control::may_save_shared_session;
 use crate::root_view::OpenPath;
 use crate::server::server_api::ServerApiProvider;
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
@@ -21,6 +23,11 @@ use crate::undo_close::UndoCloseStack;
 use crate::workspace::cross_window_tab_drag::CrossWindowTabDrag;
 use crate::workspace::{Workspace, WorkspaceAction};
 use crate::{GlobalResourceHandlesProvider, auth};
+
+#[cfg(target_family = "wasm")]
+fn may_save_shared_session() -> bool {
+    true
+}
 
 /// Specifies where a forked conversation should be opened.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -136,7 +143,7 @@ fn save_app(_: &(), ctx: &mut AppContext) {
         return;
     }
 
-    let save_app_state = *GeneralSettings::as_ref(ctx).restore_session;
+    let save_app_state = *GeneralSettings::as_ref(ctx).restore_session && may_save_shared_session();
     let save_launch_config_sessions = FeatureFlag::PersistentLaunchConfigSessions.is_enabled();
     if !save_app_state && !save_launch_config_sessions {
         return;

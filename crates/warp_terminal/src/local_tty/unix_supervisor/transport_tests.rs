@@ -31,6 +31,7 @@ fn a_message_carrying_no_descriptor_round_trips() {
             shell: "bash".to_owned(),
             working_directory: "/home/me".to_owned(),
             title: "Claude Code".to_owned(),
+            input_editor_active: false,
             bootstrap: None,
         },
     };

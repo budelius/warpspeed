@@ -66,10 +66,15 @@ impl Instance {
 
     /// Sends one request and waits for the answer.
     pub(crate) fn call(&self, request: Request) -> Result<Response> {
+        self.call_within(request, REQUEST_TIMEOUT)
+    }
+
+    /// Sends one request and waits at most `timeout` for the answer.
+    pub(crate) fn call_within(&self, request: Request, timeout: Duration) -> Result<Response> {
         let caller = service_caller::<RemoteControlService>(self.client.clone());
         let answer = block_on(futures::future::select(
             Box::pin(caller.call(request)),
-            Box::pin(warpui_core::r#async::Timer::after(REQUEST_TIMEOUT)),
+            Box::pin(warpui_core::r#async::Timer::after(timeout)),
         ));
 
         match answer {
@@ -79,7 +84,7 @@ impl Instance {
             futures::future::Either::Right(_) => bail!(
                 "The Warp instance with pid {} did not answer within {} seconds",
                 self.marker.pid,
-                REQUEST_TIMEOUT.as_secs()
+                timeout.as_secs()
             ),
         }
     }

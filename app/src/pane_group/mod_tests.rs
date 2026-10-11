@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
@@ -61,6 +63,7 @@ use crate::ai::outline::RepoOutlines;
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::ai::restored_conversations::RestoredAgentConversations;
 use crate::ai::skills::SkillManager;
+use crate::app_state::{BranchSnapshot, PaneFlex, SessionHolder, SplitDirection};
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::user::TEST_USER_UID;
 use crate::changelog_model::ChangelogModel;
@@ -101,6 +104,7 @@ use crate::terminal::shared_session::{
 };
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::terminal::terminal_manager::{HeldAgent, HeldVerdict, WithheldRestore};
 use crate::terminal::view::Event as TerminalViewEvent;
 use crate::terminal::{ShellLaunchData, TerminalSurface};
 use crate::test_util::assert_eventually_within;
@@ -195,6 +199,9 @@ fn initialize_app_with_history(app: &mut App, conversations: Vec<AgentConversati
         )
     });
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
     app.add_singleton_model(OrchestrationEventService::new);
     app.add_singleton_model(LocalAgentTaskSyncModel::new);
     app.add_singleton_model(OrchestrationEventStreamer::new);
@@ -773,6 +780,32 @@ fn test_pane_focus_on_close() {
             panes.close_pane(third_pane_id, ctx);
             assert_eq!(second_pane_id, panes.focused_pane_id(ctx));
         })
+    });
+}
+
+#[test]
+fn test_adding_terminal_pane_emits_app_state_changed() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        let app_state_changed = Rc::new(Cell::new(false));
+
+        app.update({
+            let app_state_changed = app_state_changed.clone();
+            |ctx| {
+                ctx.subscribe_to_view(&pane_group, move |_, event, _| {
+                    if matches!(event, Event::AppStateChanged) {
+                        app_state_changed.set(true);
+                    }
+                });
+            }
+        });
+
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.add_terminal_pane(Direction::Right, None, ctx);
+        });
+
+        assert!(app_state_changed.get());
     });
 }
 
@@ -3839,6 +3872,17 @@ fn test_focused_pane_is_synchronized_with_application_focus() {
                 FocusDetectionView::new(pane_group, ctx)
             });
         let pane_group = root_view.read(&app, |root_view, _ctx| root_view.pane_group.clone());
+        let app_state_changed = Rc::new(Cell::new(false));
+        app.update({
+            let app_state_changed = app_state_changed.clone();
+            |ctx| {
+                ctx.subscribe_to_view(&pane_group, move |_, event, _| {
+                    if matches!(event, Event::AppStateChanged) {
+                        app_state_changed.set(true);
+                    }
+                });
+            }
+        });
 
         let (focused_pane_id, active_session_id) = pane_group.read(&app, |pane_group, ctx| {
             (
@@ -3888,6 +3932,8 @@ fn test_focused_pane_is_synchronized_with_application_focus() {
             // enqueue this event on the effect queue.
             ctx.emit(Event::OpenPromptEditor);
         });
+
+        assert!(app_state_changed.get());
     });
 }
 
@@ -4602,6 +4648,421 @@ fn test_parked_restored_pane_round_trips_cwd_and_shell_launch_data() {
     });
 }
 
+/// A restored pane whose shell has started but not bootstrapped -- or died before it did -- has
+/// reported no directory yet. It must re-save the one it was restored with: saving none brings
+/// the pane back in the app's own working directory, which then gets saved for good.
+#[test]
+fn test_started_unbootstrapped_restored_pane_round_trips_cwd() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(terminal_leaf_snapshot(Some(cwd.clone()), None)),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored pane's shell must have started for this test to mean anything"
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected the restored tab to snapshot as a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected the restored leaf to snapshot as a terminal pane");
+        };
+        assert_eq!(
+            terminal.cwd,
+            Some(cwd),
+            "a pane whose shell has not reported a directory must re-save the one it was              restored with"
+        );
+    });
+}
+
+/// A restored agent pane whose shell is still parked has not started its agent, so no live agent
+/// session exists for it yet. It must re-save the agent it was restored with, or the next save
+/// drops the agent and the session stops resuming it.
+#[test]
+fn test_parked_restored_pane_round_trips_its_agent() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let descriptor = crate::app_state::CliAgentResumeDescriptor {
+            agent: crate::terminal::CLIAgent::Claude,
+            session_id: Some("restored-session".to_owned()),
+            cwd: PathBuf::from(&cwd),
+            title: None,
+            captured_unix_seconds: Some(1),
+        };
+        let mut snapshot = terminal_leaf_snapshot(Some(cwd), None);
+        if let PaneNodeSnapshot::Leaf(leaf) = &mut snapshot
+            && let LeafContents::Terminal(terminal) = &mut leaf.contents
+        {
+            terminal.cli_agent_resume_descriptor = Some(descriptor.clone());
+        }
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored agent pane must be parked for this test to mean anything"
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected the restored tab to snapshot as a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected the restored leaf to snapshot as a terminal pane");
+        };
+        assert_eq!(
+            terminal.cli_agent_resume_descriptor,
+            Some(descriptor),
+            "a parked pane must re-save the agent it was restored with"
+        );
+    });
+}
+
+/// A parked pane still names the session another build's supervisor holds. Saving it must keep
+/// that holder: recording this build would make the next restore skip the guard, or ask a
+/// supervisor that never had the session, and resume the agent a second time.
+#[test]
+fn test_a_parked_pane_keeps_its_foreign_holder_until_its_shell_starts() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let foreign_session = warp_core::SessionId::from(4242u64);
+        let foreign_holder = SessionHolder {
+            channel: format!(
+                r"\.\pipe\warp-terminal-supervisor-test-foreign-{}",
+                std::process::id()
+            ),
+            version: "20261004-173607861-268f56926594".to_owned(),
+            pid: 27784,
+        };
+        let mut snapshot = terminal_leaf_snapshot(Some(cwd), None);
+        if let PaneNodeSnapshot::Leaf(leaf) = &mut snapshot
+            && let LeafContents::Terminal(terminal) = &mut leaf.contents
+        {
+            terminal.persistent_session_id = Some(foreign_session);
+            terminal.session_holder = Some(foreign_holder.clone());
+        }
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
+            "the restored pane must be parked for this test to mean anything"
+        );
+
+        let terminal_snapshot = |app: &mut App| {
+            let saved = pane_group.update(app, |panes, ctx| panes.snapshot(ctx));
+            let PaneNodeSnapshot::Leaf(leaf) = saved else {
+                panic!("expected the restored tab to snapshot as a single leaf");
+            };
+            let LeafContents::Terminal(terminal) = leaf.contents else {
+                panic!("expected the restored leaf to snapshot as a terminal pane");
+            };
+            terminal
+        };
+        let parked = terminal_snapshot(&mut app);
+        assert_eq!(parked.persistent_session_id, Some(foreign_session));
+        assert_eq!(parked.session_holder, Some(foreign_holder));
+
+        app.update(|ctx| {
+            pane_group.update(ctx, |group, ctx| group.start_deferred_shells(ctx));
+        });
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .established_session_count()
+                    == 1
+            })),
+            "the restored pane's shell never started"
+        );
+        let started = terminal_snapshot(&mut app);
+        assert_eq!(
+            started.session_holder,
+            Some(crate::terminal::local_tty::session_holder::current_holder())
+        );
+    });
+}
+
+/// The resume command a pane is restored with must reach its terminal manager, which runs it once
+/// the shell starts. A manager that drops it restores a plain shell and the agent never resumes.
+#[test]
+fn test_restored_pane_hands_its_resume_command_to_the_terminal_manager() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let mut snapshot = terminal_leaf_snapshot(Some(cwd.clone()), None);
+        if let PaneNodeSnapshot::Leaf(leaf) = &mut snapshot
+            && let LeafContents::Terminal(terminal) = &mut leaf.contents
+        {
+            terminal.cli_agent_resume_descriptor =
+                Some(crate::app_state::CliAgentResumeDescriptor {
+                    agent: crate::terminal::CLIAgent::Claude,
+                    session_id: Some("restored-session".to_owned()),
+                    cwd: PathBuf::from(&cwd),
+                    title: None,
+                    captured_unix_seconds: Some(1),
+                });
+        }
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("restored pane 0 has a terminal manager");
+
+        let resume_command = app.read(|ctx| {
+            manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<TerminalManager<crate::terminal::TerminalView>>()
+                    .expect("a restored pane runs on the GUI terminal manager")
+                    .cli_agent_resume_command()
+                    .map(str::to_owned)
+            })
+        });
+        assert_eq!(
+            resume_command.as_deref(),
+            Some("claude --resume restored-session"),
+            "the restored pane's resume command must wait in its terminal manager"
+        );
+    });
+}
+
+/// A pane opened onto a detached supervisor session has no scrollback of its own, so the GUI
+/// terminal manager must repaint the session's screen when it attaches, as the TUI one does.
+#[test]
+fn test_detached_session_attach_repaints_on_the_gui_terminal_manager() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(terminal_leaf_snapshot(Some(cwd), None)),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+        let manager = app
+            .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(0, ctx)))
+            .expect("pane 0 has a terminal manager");
+        let session_id = warp_core::SessionId::from(42_u64);
+
+        manager.update(&mut app, |manager, ctx| {
+            manager.attach_detached_session(session_id, ctx)
+        });
+
+        let (persistent_session_id, repaint) = app.read(|ctx| {
+            manager.read(ctx, |manager, _| {
+                let gui = manager
+                    .as_any()
+                    .downcast_ref::<TerminalManager<crate::terminal::TerminalView>>()
+                    .expect("the pane runs on the GUI terminal manager");
+                (
+                    manager.persistent_session_id(),
+                    gui.repaint_screen_on_attach(),
+                )
+            })
+        });
+        assert_eq!(persistent_session_id, Some(session_id));
+        assert!(
+            repaint,
+            "attaching a detached session must repaint its screen on the GUI manager"
+        );
+    });
+}
+
+/// A restored agent pane whose tab nobody has opened has no live agent session, so anything
+/// listing agents must ask for the restored one or report the pane as having none.
+#[test]
+fn test_parked_restored_pane_reports_the_agent_it_has_not_resumed() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let descriptor = crate::app_state::CliAgentResumeDescriptor {
+            agent: crate::terminal::CLIAgent::Claude,
+            session_id: Some("restored-session".to_owned()),
+            cwd: PathBuf::from(&cwd),
+            title: None,
+            captured_unix_seconds: Some(1),
+        };
+        let mut snapshot = terminal_leaf_snapshot(Some(cwd), None);
+        if let PaneNodeSnapshot::Leaf(leaf) = &mut snapshot
+            && let LeafContents::Terminal(terminal) = &mut leaf.contents
+        {
+            terminal.cli_agent_resume_descriptor = Some(descriptor.clone());
+        }
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let restored = app.read(|ctx| {
+            pane_group.read(ctx, |group, ctx| {
+                let pane_id = group
+                    .pane_id_from_index(0)
+                    .expect("the restored tab has a pane");
+                group.pending_agent_resume(pane_id, ctx)
+            })
+        });
+        assert_eq!(restored, Some(descriptor));
+    });
+}
+
+#[test]
+fn test_parked_restored_mixed_shells_round_trip_per_pane() {
+    let _lazy_shell_startup = FeatureFlag::LazyShellStartup.override_enabled(true);
+    let _persistent_sessions = FeatureFlag::PersistentLaunchConfigSessions.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let cwd = std::env::current_dir()
+            .expect("the test process has a current directory")
+            .to_string_lossy()
+            .into_owned();
+        let git_bash = ShellLaunchData::Executable {
+            executable_path: PathBuf::from("C:/Program Files/Git/bin/bash.exe"),
+            shell_type: ShellType::Bash,
+        };
+        let powershell = ShellLaunchData::Executable {
+            executable_path: PathBuf::from("C:/Program Files/PowerShell/7/pwsh.exe"),
+            shell_type: ShellType::PowerShell,
+        };
+        let snapshot = PaneNodeSnapshot::Branch(BranchSnapshot {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                (
+                    PaneFlex(1.0),
+                    terminal_leaf_snapshot(Some(cwd.clone()), Some(git_bash.clone())),
+                ),
+                (
+                    PaneFlex(1.0),
+                    terminal_leaf_snapshot(Some(cwd), Some(powershell.clone())),
+                ),
+            ],
+        });
+        let pane_group = mock_pane_group(
+            &mut app,
+            MockOptions {
+                layout: PanesLayout::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    shell_start: ShellStartPolicy::Deferred,
+                },
+                ..Default::default()
+            },
+        );
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Branch(branch) = saved else {
+            panic!("expected the restored tab to remain split");
+        };
+        let [(_, git_bash_leaf), (_, powershell_leaf)] = branch.children.as_slice() else {
+            panic!("expected exactly two restored panes");
+        };
+        let PaneNodeSnapshot::Leaf(git_bash_leaf) = git_bash_leaf else {
+            panic!("expected the first pane to be a leaf");
+        };
+        let LeafContents::Terminal(git_bash_terminal) = &git_bash_leaf.contents else {
+            panic!("expected the first pane to be a terminal");
+        };
+        let PaneNodeSnapshot::Leaf(powershell_leaf) = powershell_leaf else {
+            panic!("expected the second pane to be a leaf");
+        };
+        let LeafContents::Terminal(powershell_terminal) = &powershell_leaf.contents else {
+            panic!("expected the second pane to be a terminal");
+        };
+
+        assert_eq!(git_bash_terminal.shell_launch_data, Some(git_bash));
+        assert_eq!(powershell_terminal.shell_launch_data, Some(powershell));
+    });
+}
+
 #[test]
 fn test_parked_restored_pane_exposes_its_working_directory() {
     let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
@@ -4726,8 +5187,16 @@ fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
 
         let panes_before =
             app.read(|ctx| pane_group.read(ctx, |group, _| group.pane_ids().count()));
-        let blocks_before =
-            app.read(|ctx| view.as_ref(ctx).model.lock().block_list().blocks().len());
+        let block_ids_before = app.read(|ctx| {
+            view.as_ref(ctx)
+                .model
+                .lock()
+                .block_list()
+                .blocks()
+                .iter()
+                .map(|block| block.id().clone())
+                .collect::<Vec<_>>()
+        });
         let active_conversation_before =
             app.read(|ctx| view.as_ref(ctx).active_conversation_id(ctx));
 
@@ -4788,11 +5257,20 @@ fn test_restart_session_keeps_the_pane_and_rearms_its_exit_handling() {
             panes_before,
             "a restart must not close the pane it is restarting"
         );
+        let block_ids_after = app.read(|ctx| {
+            view.as_ref(ctx)
+                .model
+                .lock()
+                .block_list()
+                .blocks()
+                .iter()
+                .map(|block| block.id().clone())
+                .collect::<Vec<_>>()
+        });
         assert_eq!(
-            app.read(|ctx| view.as_ref(ctx).model.lock().block_list().blocks().len()),
-            blocks_before,
-            "a restart must leave the scrollback alone: no terminated banner, no \
-             initialization block"
+            &block_ids_after[..block_ids_before.len()],
+            block_ids_before.as_slice(),
+            "a restart must preserve every existing scrollback block"
         );
         assert_eq!(
             app.read(|ctx| view.as_ref(ctx).active_conversation_id(ctx)),
@@ -5192,12 +5670,12 @@ fn restartable_pane(
 
 /// The replaced shell's post-mortem must not outlive it.
 ///
-/// Four pieces of state are written by a shell dying and never cleared by
-/// anything else: the pinned "shell exited" banner, the forced-on
-/// initialization block, `pty_spawn_failed`, and `is_login_shell_bootstrapped`.
-/// A user whose shell config broke -- the case the feature exists for -- fixes
-/// it, restarts, and must get a clean pane, not a healthy prompt sitting under
-/// a banner describing a process that no longer exists.
+/// Four pieces of state are written after a bootstrapped shell dies and never cleared by
+/// anything else: the pinned "shell exited" banner, the forced-on initialization block,
+/// `pty_spawn_failed`, and `is_login_shell_bootstrapped`. A user whose shell config broke fixes it,
+/// restarts, and must get a clean pane, not a healthy prompt sitting under a banner describing a
+/// process that no longer exists. The unbootstrapped rich-content banner path is covered by the
+/// terminal-view unit tests.
 ///
 /// Asserted on the state directly, one assertion per assignment, so deleting
 /// any single reset in `on_session_restart_started` fails exactly one
@@ -5210,10 +5688,8 @@ fn test_restart_clears_the_replaced_shells_post_mortem_state() {
         initialize_app(&mut app);
         let (_pane_group, manager, view) = restartable_pane(&mut app);
 
-        // The banner is only pinned for a shell that *had* come up
-        // (`insert_shell_process_terminated_banner` routes an unbootstrapped
-        // death into a rich-content block instead, which is scrollback and
-        // deliberately survives a restart).
+        // The banner is only pinned for a shell that had come up; an unbootstrapped death uses
+        // the separately tested rich-content banner path.
         app.update(|ctx| {
             view.update(ctx, |view, ctx| {
                 view.set_login_shell_bootstrapped_for_test();
@@ -5295,6 +5771,596 @@ fn test_restart_clears_the_replaced_shells_post_mortem_state() {
                 "the replacement has not bootstrapped yet, so the replaced shell's verdict \
                  about itself must not carry over"
             );
+        });
+    });
+}
+
+/// The guard runs when the attach fails and a holder is recorded. With no holder answering, the
+/// verdict is `Unknown` and the pane restores as it always has: the resume command is queued.
+#[test]
+fn test_an_unreachable_holder_does_not_withhold_the_resume_command() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                manager.restore_persistent_session(warp_core::SessionId::from(4242u64), ctx);
+                manager.restore_cli_agent_resume_command("claude --resume abc".to_owned());
+                manager.restore_session_holder(
+                    Some(SessionHolder {
+                        channel: format!(
+                            r"\\.\pipe\warp-terminal-supervisor-test-missing-{}",
+                            std::process::id()
+                        ),
+                        version: "test".to_owned(),
+                        pid: 1,
+                    }),
+                    None,
+                );
+                manager.ensure_shell_started(ctx);
+            });
+        });
+        // The guard runs where the shell start lands, after its starter resolves off the main
+        // thread.
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .established_session_count()
+                    == 1
+            })),
+            "the restored pane's shell never started"
+        );
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(!view.has_session_holder_banner_for_test());
+            assert_eq!(
+                view.pending_command_for_test(ctx).as_deref(),
+                Some("claude --resume abc")
+            );
+        });
+    });
+}
+
+/// Start fresh never resumes: the agent still runs in the held session, and a second copy here
+/// would write to the same conversation.
+#[test]
+fn test_discard_withheld_restore_leaves_the_shell_and_clears_the_banner() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: Some(SessionHolder {
+                channel: "x".into(),
+                version: "test".into(),
+                pid: 1,
+            }),
+            session_id: Some(warp_core::SessionId::from(4242u64)),
+            agent: None,
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore.clone(), ctx);
+            });
+            manager.update(ctx, |manager, _| {
+                manager.set_withheld_restore_for_test(restore)
+            });
+        });
+        app.read(|ctx| assert!(view.as_ref(ctx).has_session_holder_banner_for_test()));
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(manager.discard_withheld_restore(ctx))
+            });
+        });
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(!view.has_session_holder_banner_for_test());
+            assert_eq!(view.pending_command_for_test(ctx), None);
+        });
+    });
+}
+
+/// A withheld command belongs to the session it was withheld from. A restart replaces that session,
+/// so the prompt must go with it rather than offer a take-over of a session the pane no longer runs.
+#[test]
+fn test_restart_drops_the_withheld_restore_and_its_banner() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: Some(SessionHolder {
+                channel: "x".into(),
+                version: "test".into(),
+                pid: 1,
+            }),
+            session_id: Some(warp_core::SessionId::from(4242u64)),
+            agent: None,
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore.clone(), ctx);
+            });
+            manager.update(ctx, |manager, _| {
+                manager.set_withheld_restore_for_test(restore)
+            });
+        });
+        app.read(|ctx| assert!(view.as_ref(ctx).has_session_holder_banner_for_test()));
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(
+                    manager.restart_session(None, None, ctx),
+                    "a local-tty manager must report that it restarted"
+                );
+            });
+        });
+
+        app.read(|ctx| assert!(!view.as_ref(ctx).has_session_holder_banner_for_test()));
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(!manager.discard_withheld_restore(ctx))
+            });
+        });
+    });
+}
+
+/// Quitting with the banner up must bring the pane back to the same question: the held session,
+/// its holder and the agent, not this build's stand-in shell.
+#[test]
+fn test_a_withheld_restore_is_saved_as_the_held_session() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (pane_group, manager, view) = restartable_pane(&mut app);
+        let holder = SessionHolder {
+            channel: "x".into(),
+            version: "test".into(),
+            pid: 1,
+        };
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: Some(holder.clone()),
+            session_id: Some(warp_core::SessionId::from(4242u64)),
+            agent: Some(HeldAgent {
+                agent: crate::terminal::CLIAgent::Claude,
+                session_id: "abc".to_owned(),
+            }),
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore.clone(), ctx);
+            });
+            manager.update(ctx, |manager, _| {
+                manager.set_withheld_restore_for_test(restore)
+            });
+        });
+
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected a single leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected a terminal pane");
+        };
+        assert_eq!(
+            terminal.persistent_session_id,
+            Some(warp_core::SessionId::from(4242u64))
+        );
+        assert_eq!(terminal.session_holder, Some(holder));
+        let descriptor = terminal
+            .cli_agent_resume_descriptor
+            .expect("the held agent is saved");
+        assert_eq!(descriptor.agent, crate::terminal::CLIAgent::Claude);
+        assert_eq!(descriptor.session_id.as_deref(), Some("abc"));
+    });
+}
+
+fn local_tty_manager(
+    manager: &mut Box<dyn crate::terminal::TerminalManager>,
+) -> &mut LocalTtyTerminalManager<TerminalView> {
+    manager
+        .as_any_mut()
+        .downcast_mut::<LocalTtyTerminalManager<TerminalView>>()
+        .expect("panes in this harness use the local-tty manager")
+}
+
+fn held_detached_restore() -> WithheldRestore {
+    WithheldRestore {
+        command: "claude --resume abc".to_owned(),
+        holder: Some(SessionHolder {
+            channel: "x".into(),
+            version: "test".into(),
+            pid: 1,
+        }),
+        session_id: Some(warp_core::SessionId::from(4242u64)),
+        agent: Some(HeldAgent {
+            agent: crate::terminal::CLIAgent::Claude,
+            session_id: "abc".to_owned(),
+        }),
+        verdict: HeldVerdict::Detached,
+    }
+}
+
+/// Puts `restore` on a bootstrapped pane's manager and banner, the way the guard leaves them.
+fn withhold_on_pane(
+    app: &mut App,
+    manager: &ModelHandle<Box<dyn crate::terminal::TerminalManager>>,
+    view: &warpui::ViewHandle<TerminalView>,
+    restore: WithheldRestore,
+) {
+    app.update(|ctx| {
+        view.update(ctx, |view, ctx| {
+            view.set_login_shell_bootstrapped_for_test();
+            view.withhold_restore_command(restore.clone(), ctx);
+        });
+        manager.update(ctx, |manager, _| {
+            manager.set_withheld_restore_for_test(restore)
+        });
+    });
+}
+
+fn take_over_answers(
+    app: &App,
+    manager: &ModelHandle<Box<dyn crate::terminal::TerminalManager>>,
+) -> usize {
+    app.read(|ctx| {
+        manager.read(ctx, |manager, _| {
+            manager
+                .as_any()
+                .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                .expect("panes in this harness use the local-tty manager")
+                .take_over_answers_for_test()
+        })
+    })
+}
+
+#[test]
+fn test_a_take_over_that_succeeds_runs_the_command_and_clears_the_banner() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        withhold_on_pane(&mut app, &manager, &view, held_detached_restore());
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                local_tty_manager(manager)
+                    .set_take_over_hook_for_test(std::sync::Arc::new(|_| Ok(())));
+                assert!(manager.take_over_held_session(ctx));
+            });
+        });
+        app.read(|ctx| {
+            let banner = view.as_ref(ctx).session_holder_banner_for_test().unwrap();
+            assert!(
+                banner.in_flight(),
+                "the banner says the session is being ended"
+            );
+        });
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => take_over_answers(&app, &manager) == 1,
+            "the take-over never answered"
+        );
+        app.read(|ctx| {
+            let view_ref = view.as_ref(ctx);
+            assert!(!view_ref.has_session_holder_banner_for_test());
+            assert_eq!(
+                view_ref.pending_command_for_test(ctx).as_deref(),
+                Some("claude --resume abc")
+            );
+            assert_eq!(manager.as_ref(ctx).withheld_restore(), None);
+        });
+    });
+}
+
+#[test]
+fn test_a_take_over_that_fails_keeps_the_banner_with_its_error() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        withhold_on_pane(&mut app, &manager, &view, held_detached_restore());
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                local_tty_manager(manager).set_take_over_hook_for_test(std::sync::Arc::new(|_| {
+                    Err(anyhow::anyhow!("A window is attached to that session now"))
+                }));
+                assert!(manager.take_over_held_session(ctx));
+            });
+        });
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => take_over_answers(&app, &manager) == 1,
+            "the take-over never answered"
+        );
+        app.read(|ctx| {
+            let view_ref = view.as_ref(ctx);
+            let banner = view_ref.session_holder_banner_for_test().unwrap();
+            assert_eq!(
+                banner.error(),
+                Some("A window is attached to that session now")
+            );
+            assert!(!banner.in_flight());
+            assert_eq!(view_ref.pending_command_for_test(ctx), None);
+            assert_eq!(
+                manager.as_ref(ctx).withheld_restore(),
+                Some(held_detached_restore())
+            );
+        });
+    });
+}
+
+/// The answer to a take-over the pane has since restarted away from belongs to the replaced
+/// session: it must not resume the agent into the replacement shell.
+#[test]
+fn test_a_take_over_answered_after_a_restart_queues_nothing() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        withhold_on_pane(&mut app, &manager, &view, held_detached_restore());
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        let hook_called = called.clone();
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                local_tty_manager(manager).set_take_over_hook_for_test(std::sync::Arc::new(
+                    move |_| {
+                        hook_called.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let _ = released.lock().unwrap().recv();
+                        Ok(())
+                    },
+                ));
+                assert!(manager.take_over_held_session(ctx));
+            });
+        });
+        assert_eventually_within!(
+            Duration::from_secs(10) => called.load(std::sync::atomic::Ordering::SeqCst),
+            "the take-over never started ending the session"
+        );
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                assert!(manager.restart_session(None, None, ctx));
+            });
+        });
+        release.send(()).unwrap();
+        assert_eventually_within!(
+            Duration::from_secs(10) => take_over_answers(&app, &manager) == 1,
+            "the take-over never answered"
+        );
+
+        app.read(|ctx| {
+            let view_ref = view.as_ref(ctx);
+            assert!(!view_ref.has_session_holder_banner_for_test());
+            assert_eq!(view_ref.pending_command_for_test(ctx), None);
+            assert_eq!(manager.as_ref(ctx).withheld_restore(), None);
+        });
+    });
+}
+
+#[test]
+fn test_a_second_take_over_click_does_not_end_the_session_again() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        withhold_on_pane(&mut app, &manager, &view, held_detached_restore());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = calls.clone();
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                local_tty_manager(manager).set_take_over_hook_for_test(std::sync::Arc::new(
+                    move |_| {
+                        hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                ));
+                assert!(manager.take_over_held_session(ctx));
+                assert!(manager.take_over_held_session(ctx));
+            });
+        });
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => take_over_answers(&app, &manager) == 1,
+            "the take-over never answered"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        app.read(|ctx| {
+            assert_eq!(
+                view.as_ref(ctx).pending_command_for_test(ctx).as_deref(),
+                Some("claude --resume abc")
+            );
+        });
+    });
+}
+
+/// Restores a pane with no recorded holder and a Claude resume command, reporting
+/// `running_sessions` as the agent sessions running on the machine, and waits for its shell.
+fn restore_without_a_holder(
+    app: &mut App,
+    running_sessions: &[&str],
+) -> (
+    warpui::ViewHandle<PaneGroup>,
+    ModelHandle<Box<dyn crate::terminal::TerminalManager>>,
+    warpui::ViewHandle<TerminalView>,
+) {
+    let (pane_group, manager, view) = restartable_pane(app);
+    let running_sessions = running_sessions
+        .iter()
+        .map(|session| (*session).to_owned())
+        .collect();
+    app.update(|ctx| {
+        manager.update(ctx, |manager, ctx| {
+            manager.restore_persistent_session(warp_core::SessionId::from(4242u64), ctx);
+            manager.restore_cli_agent_resume_command("claude --resume abc".to_owned());
+            manager.restore_session_holder(
+                None,
+                Some(HeldAgent {
+                    agent: crate::terminal::CLIAgent::Claude,
+                    session_id: "abc".to_owned(),
+                }),
+            );
+            local_tty_manager(manager).set_running_agent_sessions_for_test(running_sessions);
+            manager.ensure_shell_started(ctx);
+        });
+    });
+    (pane_group, manager, view)
+}
+
+fn wait_for_shell_start(
+    app: &App,
+    manager: &ModelHandle<Box<dyn crate::terminal::TerminalManager>>,
+) -> bool {
+    app.read(|ctx| {
+        manager.read(ctx, |manager, _| {
+            manager
+                .as_any()
+                .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                .expect("panes in this harness use the local-tty manager")
+                .established_session_count()
+                == 1
+        })
+    })
+}
+
+/// A pane saved before holders were recorded has none, but its agent may still be running in the
+/// Warp that saved it. The agent's own registry shows that, and the resume is withheld.
+#[test]
+fn test_a_running_agent_withholds_a_pane_with_no_holder() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restore_without_a_holder(&mut app, &["abc"]);
+        assert_eventually_within!(
+            Duration::from_secs(10) => wait_for_shell_start(&app, &manager),
+            "the restored pane's shell never started"
+        );
+        app.read(|ctx| {
+            let restore = manager
+                .as_ref(ctx)
+                .withheld_restore()
+                .expect("the resume is withheld");
+            assert_eq!(restore.verdict, HeldVerdict::HeldByUnknown);
+            assert_eq!(restore.holder, None);
+            assert_eq!(view.as_ref(ctx).pending_command_for_test(ctx), None);
+        });
+    });
+}
+
+#[test]
+fn test_a_pane_with_no_holder_and_no_running_agent_resumes() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restore_without_a_holder(&mut app, &[]);
+        assert_eventually_within!(
+            Duration::from_secs(10) => wait_for_shell_start(&app, &manager),
+            "the restored pane's shell never started"
+        );
+        app.read(|ctx| {
+            assert_eq!(manager.as_ref(ctx).withheld_restore(), None);
+            assert_eq!(
+                view.as_ref(ctx).pending_command_for_test(ctx).as_deref(),
+                Some("claude --resume abc")
+            );
+        });
+    });
+}
+
+#[test]
+fn test_a_session_held_by_an_unknown_warp_offers_take_over() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, _manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            holder: None,
+            verdict: HeldVerdict::HeldByUnknown,
+            ..held_detached_restore()
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore, ctx);
+            });
+        });
+        app.read(|ctx| {
+            let banner = view.as_ref(ctx).session_holder_banner_for_test().unwrap();
+            assert_eq!(
+                banner.title(),
+                "Still running in another Warp (holder unknown)"
+            );
+            assert!(banner.offers_take_over());
+        });
+    });
+}
+
+#[test]
+fn test_a_withheld_restore_shows_the_holder_banner_with_both_actions() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, _manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "claude --resume abc".to_owned(),
+            holder: Some(SessionHolder {
+                channel: "x".into(),
+                version: "20261004-173607861-268f56926594".into(),
+                pid: 27784,
+            }),
+            session_id: Some(warp_core::SessionId::from(4242u64)),
+            agent: None,
+            verdict: HeldVerdict::Detached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore, ctx);
+            });
+        });
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            let banner = view
+                .session_holder_banner_for_test()
+                .expect("banner is shown");
+            assert_eq!(
+                banner.title(),
+                "Still running under build 20261004-173607861-268f56926594 (pid 27784)"
+            );
+            assert!(banner.offers_take_over());
+            assert_eq!(view.model.lock().block_list().inline_banner_count(), 1);
+        });
+    });
+}
+
+#[test]
+fn test_an_attached_session_offers_only_start_fresh() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, _manager, view) = restartable_pane(&mut app);
+        let restore = WithheldRestore {
+            command: "pi --session abc".to_owned(),
+            holder: Some(SessionHolder {
+                channel: "x".into(),
+                version: "b".into(),
+                pid: 7,
+            }),
+            session_id: Some(warp_core::SessionId::from(1u64)),
+            agent: None,
+            verdict: HeldVerdict::Attached,
+        };
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.set_login_shell_bootstrapped_for_test();
+                view.withhold_restore_command(restore, ctx);
+            });
+        });
+        app.read(|ctx| {
+            let banner = view.as_ref(ctx).session_holder_banner_for_test().unwrap();
+            assert_eq!(banner.title(), "Open in another window (build b, pid 7)");
+            assert!(!banner.offers_take_over());
         });
     });
 }
@@ -5625,6 +6691,100 @@ fn test_restart_switching_to_wsl_converts_the_directory_to_the_wsl_form() {
             "a restart that switches to WSL must hand the WSL shell the `/mnt/<drive>/...` \
              form of the requested directory; handing it the Windows host path starts the \
              shell somewhere else entirely"
+        );
+    });
+}
+
+fn two_pane_group(app: &mut App) -> warpui::ViewHandle<PaneGroup> {
+    let leaf = |is_focused| PaneTemplateType::PaneTemplate {
+        is_focused,
+        cwd: "/".into(),
+        commands: vec![],
+        pane_mode: PaneMode::Terminal,
+        shell: None,
+    };
+    mock_pane_group(
+        app,
+        MockOptions {
+            layout: PanesLayout::Template {
+                template: PaneTemplateType::PaneBranchTemplate {
+                    split_direction:
+                        crate::launch_configs::launch_config::SplitDirection::Horizontal,
+                    panes: vec![leaf(Some(true)), leaf(None)],
+                },
+                shell_start: ShellStartPolicy::Deferred,
+            },
+            ..Default::default()
+        },
+    )
+}
+
+/// Ends pane 1's bootstrapped shell, after `before_exit` has run against its view, and waits for
+/// the exit to reach the view.
+async fn end_second_pane_shell(
+    app: &mut App,
+    pane_group: &warpui::ViewHandle<PaneGroup>,
+    before_exit: impl FnOnce(&mut TerminalView),
+) {
+    let view = app
+        .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(1, ctx)))
+        .expect("pane 1 has a terminal view");
+    let manager = app
+        .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_manager(1, ctx)))
+        .expect("pane 1 has a terminal manager");
+    let exited = Rc::new(RefCell::new(false));
+    app.update(|ctx| {
+        let exited = exited.clone();
+        ctx.subscribe_to_view(&view, move |_, event, _| {
+            if let TerminalViewEvent::Exited = event {
+                *exited.borrow_mut() = true;
+            }
+        });
+        view.update(ctx, |view, _| {
+            view.set_login_shell_bootstrapped_for_test();
+            before_exit(view);
+        });
+        manager
+            .read(ctx, |manager, _| manager.model())
+            .lock()
+            .exit(ExitReason::ShellProcessExited);
+    });
+    assert_eventually_within!(
+        Duration::from_secs(10) => *exited.borrow(),
+        "the shell's exit never reached the view (waited 10s)"
+    );
+}
+
+/// A shell that ends without being asked to keeps its pane, so the pane stays in its saved
+/// session and can be restarted.
+#[test]
+fn test_crashed_shell_keeps_its_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = two_pane_group(&mut app);
+
+        end_second_pane_shell(&mut app, &pane_group, |_| {}).await;
+
+        assert_eq!(
+            app.read(|ctx| pane_group.as_ref(ctx).visible_pane_ids().len()),
+            2,
+            "a crashed shell must not close its pane"
+        );
+    });
+}
+
+/// A shell the user ended with EOF closes its pane, as it always has.
+#[test]
+fn test_shell_ended_by_eof_closes_its_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = two_pane_group(&mut app);
+
+        end_second_pane_shell(&mut app, &pane_group, TerminalView::set_eof_sent_for_test).await;
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| pane_group.as_ref(ctx).visible_pane_ids().len()) == 1,
+            "a shell the user ended must close its pane (waited 10s)"
         );
     });
 }

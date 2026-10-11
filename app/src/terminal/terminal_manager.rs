@@ -18,9 +18,41 @@ use super::{BlockPadding, ShellLaunchData, ShellLaunchState, SizeInfo, TerminalM
 use crate::PrivacySettings;
 use crate::ai::blocklist::SerializedBlockListItem;
 use crate::ai::blocklist::telemetry_banner::should_collect_ai_ugc_telemetry;
+use crate::app_state::SessionHolder;
 use crate::appearance::Appearance;
 use crate::pane_group::pane::DetachType;
 use crate::settings::{BlockVisibilitySettings, DebugSettings, InputModeSettings};
+use crate::terminal::CLIAgent;
+
+/// What a restored pane was going to run before the guard found its session held elsewhere.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithheldRestore {
+    pub command: String,
+    /// `None` when no supervisor is known to hold the session and only the agent's own registry
+    /// shows it still running.
+    pub holder: Option<SessionHolder>,
+    pub session_id: Option<SessionId>,
+    pub agent: Option<HeldAgent>,
+    pub verdict: HeldVerdict,
+}
+
+/// The agent a held session was running, identified the way its process registry records it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldAgent {
+    pub agent: CLIAgent,
+    pub session_id: String,
+}
+
+/// Where the held session is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldVerdict {
+    /// The holder's supervisor has it and no window is attached.
+    Detached,
+    /// A window of the holding build is attached to it.
+    Attached,
+    /// No supervisor answers for it, but the agent's registry shows the agent still running.
+    HeldByUnknown,
+}
 
 pub trait TerminalManager: Any {
     /// Returns the backing terminal model.
@@ -57,6 +89,17 @@ pub trait TerminalManager: Any {
         None
     }
 
+    /// The supervisor holding [`Self::persistent_session_id`]: the one the pane was restored with
+    /// until this manager's shell starts, then this build's.
+    fn session_holder(&self) -> Option<SessionHolder> {
+        None
+    }
+
+    /// The resume command the guard is holding back until the user decides what to do with it.
+    fn withheld_restore(&self) -> Option<WithheldRestore> {
+        None
+    }
+
     /// Stops this manager's local session before its pane moves to another process.
     fn shutdown_for_process_handoff(&mut self) {}
 
@@ -84,6 +127,37 @@ pub trait TerminalManager: Any {
     /// Supplies a command to run only when a restored PTY cannot be reattached.
     fn restore_cli_agent_resume_command(&mut self, _command: String) {}
 
+    /// Supplies the supervisor that held this pane's session when it was saved, and the agent the
+    /// session was running, so a restore can tell whether that supervisor still holds it.
+    fn restore_session_holder(
+        &mut self,
+        _holder: Option<SessionHolder>,
+        _agent: Option<HeldAgent>,
+    ) {
+    }
+
+    /// Ends the held session where it is and then runs the withheld command here.
+    #[must_use]
+    fn take_over_held_session(
+        &mut self,
+        _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
+    ) -> bool {
+        false
+    }
+
+    /// Drops the withheld command and leaves this pane's shell as it is; the held session keeps
+    /// running where it is.
+    #[must_use]
+    fn discard_withheld_restore(
+        &mut self,
+        _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
+    ) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn set_withheld_restore_for_test(&mut self, _restore: WithheldRestore) {}
+
     /// Replaces this manager's shell session in place, keeping the pane, its
     /// blocklist, and its agent conversation.
     ///
@@ -109,6 +183,14 @@ pub trait TerminalManager: Any {
         _cwd: Option<PathBuf>,
         _ctx: &mut ModelContext<Box<dyn TerminalManager>>,
     ) -> bool {
+        false
+    }
+
+    /// Attaches this pane again, in place, to the supervised session it lost the connection to,
+    /// keeping its scrollback. Returns whether a reattach was started; managers with no
+    /// supervised session keep the default and return `false`.
+    #[must_use]
+    fn reattach_session(&mut self, _ctx: &mut ModelContext<Box<dyn TerminalManager>>) -> bool {
         false
     }
 

@@ -218,6 +218,9 @@ pub struct BootstrappedEvent {
     /// The time we spent sourcing the user's rcfiles, in seconds.  This may be
     /// None if the information was not provided by the shell.
     pub rcfiles_duration_seconds: Option<f64>,
+    /// This announcement was restored for an already-running shell, so
+    /// one-time bootstrap side effects must not be started again.
+    pub restored: bool,
 }
 
 #[derive(Clone)]

@@ -40,6 +40,11 @@ pub const SIGNALS_TOKEN: mio::Token = mio::Token(2);
 /// state.
 pub trait ActiveTerminal: ansi::Handler + Send {
     fn exit(&mut self, reason: ExitReason);
+
+    /// Called after staged attachment replay has been parsed, before live PTY
+    /// bytes are read. Implementations can restore lifecycle state that a
+    /// screen repaint would otherwise reset.
+    fn replay_complete(&mut self) {}
 }
 
 pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
@@ -153,6 +158,18 @@ fn fold_pending_resize(
 ) -> (SizeInfo, bool) {
     let (size, forced) = incoming;
     (size, forced || matches!(pending, Some((_, true))))
+}
+
+fn should_kill_on_shutdown(child_exited: bool, requires_exit_polling: bool) -> bool {
+    !child_exited || requires_exit_polling
+}
+
+/// Whether a shutdown should hand the session back to its supervisor rather than end it.
+///
+/// Only a lost connection qualifies: the pane did not ask to stop, and the shell is still
+/// running in the supervisor, so ending it would destroy work nobody chose to end.
+fn should_detach_on_shutdown(lost_connection: bool, supervised: bool, shell_running: bool) -> bool {
+    lost_connection && supervised && shell_running
 }
 
 impl<P, M> EventLoop<P, M>
@@ -393,8 +410,9 @@ where
                             }
                         }
                     }
-                    self.event_listener.send_wakeup_event();
                 }
+                self.terminal.lock().replay_complete();
+                self.event_listener.send_wakeup_event();
 
                 // Keep track of whether we've "drained" read and write
                 // readiness.  Once we receive a read or write readiness event,
@@ -419,6 +437,8 @@ where
                 // True if the child exiting caused the event loop to wind down
                 // (e.g. CTRL D or `exit`) rather than the inverse.
                 let mut child_exited = false;
+                let mut shutdown_cause = "a shutdown request";
+                let mut lost_connection = false;
                 let child_poll_interval = std::time::Duration::from_millis(250);
                 let mut next_child_poll = Instant::now() + child_poll_interval;
 
@@ -543,6 +563,8 @@ where
                                     }
 
                                     error!("Error reading from PTY in event loop: {err}");
+                                    shutdown_cause = "a PTY read error";
+                                    lost_connection = true;
                                     break 'event_loop;
                                 }
                             }
@@ -553,6 +575,8 @@ where
                             && let Err(err) = self.pty_write(&mut state, &mut can_write)
                         {
                             error!("Error writing to PTY in event loop: {err}");
+                            shutdown_cause = "a PTY write error";
+                            lost_connection = true;
                             break 'event_loop;
                         }
                     }
@@ -562,15 +586,53 @@ where
                 let _ = self.poll.registry().deregister(&mut self.rx);
                 let _ = self.pty.deregister(&self.poll);
 
-                // Terminate the PTY process, if it's not the initiator of the shutdown.
-                if !child_exited {
-                    let res = self.pty.kill();
-                    if let Err(err) = res {
+                // A directly owned child that initiated shutdown is already cleaned up by the
+                // operating system. A supervisor-owned child still needs an explicit Kill request
+                // to remove its durable session entry, even when the process itself is already dead.
+                let mut exit_reason = ExitReason::PtyDisconnected;
+                if should_kill_on_shutdown(child_exited, self.pty.requires_exit_polling()) {
+                    let mut detached = false;
+                    if !child_exited {
+                        // A shell that is still running here is about to be ended by this pane
+                        // rather than having exited on its own, unless its supervisor can take it
+                        // back. Only a supervised shell can be polled for that.
+                        let supervised = self.pty.requires_exit_polling();
+                        let shell_running = supervised
+                            && !matches!(
+                                self.pty.next_child_event(),
+                                Some(local_tty::ChildEvent::Exited)
+                            );
+                        if should_detach_on_shutdown(lost_connection, supervised, shell_running) {
+                            match self.pty.detach() {
+                                Ok(()) => {
+                                    log::warn!(
+                                        "Detached the supervised shell after {shutdown_cause}; it is still running and can be reattached"
+                                    );
+                                    detached = true;
+                                    exit_reason = ExitReason::PtyDetached;
+                                }
+                                Err(err) => log::warn!(
+                                    "Failed to detach the supervised shell after {shutdown_cause}: {err:#}"
+                                ),
+                            }
+                        }
+                        if !detached {
+                            let shell_running = match (supervised, shell_running) {
+                                (false, _) => "unknown",
+                                (true, true) => "yes",
+                                (true, false) => "no",
+                            };
+                            log::warn!(
+                                "Ending the PTY after {shutdown_cause} (supervised: {supervised}, shell still running: {shell_running})"
+                            );
+                        }
+                    }
+                    if !detached && let Err(err) = self.pty.kill() {
                         log::warn!("Failed to kill PTY process: {err:#}");
                     }
                 }
                 // Notify the terminal model that the PTY process has exited.
-                self.terminal.lock().exit(ExitReason::PtyDisconnected);
+                self.terminal.lock().exit(exit_reason);
             })
             .expect("thread spawn works")
     }

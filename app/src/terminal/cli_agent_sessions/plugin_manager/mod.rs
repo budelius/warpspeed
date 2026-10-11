@@ -1,6 +1,8 @@
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod dsh;
 pub(crate) mod gemini;
+pub(crate) mod kimi;
 pub(crate) mod opencode;
 
 use std::cmp::Ordering;
@@ -11,7 +13,9 @@ use std::{fmt, io};
 use async_trait::async_trait;
 use claude::ClaudeCodePluginManager;
 use codex::CodexPluginManager;
+use dsh::DshPluginManager;
 use gemini::GeminiPluginManager;
+use kimi::KimiPluginManager;
 use opencode::OpenCodePluginManager;
 
 use crate::features::FeatureFlag;
@@ -285,6 +289,22 @@ pub(crate) fn plugin_manager_for_with_shell(
                 path_env_var,
             )))
         }
+        CLIAgent::Kimi
+            if FeatureFlag::KimiNotifications.is_enabled()
+                && FeatureFlag::HOANotifications.is_enabled() =>
+        {
+            Some(Box::new(KimiPluginManager))
+        }
+        CLIAgent::DeepSeekHarness
+            if FeatureFlag::DshNotifications.is_enabled()
+                && FeatureFlag::HOANotifications.is_enabled() =>
+        {
+            Some(Box::new(DshPluginManager::new(
+                shell_path,
+                shell_type,
+                path_env_var,
+            )))
+        }
         CLIAgent::OpenCode
         | CLIAgent::Codex
         | CLIAgent::Gemini
@@ -299,6 +319,8 @@ pub(crate) fn plugin_manager_for_with_shell(
         | CLIAgent::Goose
         | CLIAgent::Vibe
         | CLIAgent::Antigravity
+        | CLIAgent::Kimi
+        | CLIAgent::DeepSeekHarness
         | CLIAgent::WarpTui
         | CLIAgent::Unknown => None,
     }

@@ -36,6 +36,7 @@ fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
                 contents: LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: vec![1, 2, 3],
                     persistent_session_id: Some(warp_core::SessionId::from(u64::MAX)),
+                    session_holder: None,
                     cli_agent_resume_descriptor: Some(CliAgentResumeDescriptor {
                         agent: CLIAgent::Claude,
                         session_id: Some("cf44b8d2-9381-4016-8bfb-7aafc57062fd".to_owned()),

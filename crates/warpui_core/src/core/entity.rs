@@ -31,6 +31,10 @@ impl EntityId {
     pub fn from_usize(value: usize) -> EntityId {
         EntityId(value)
     }
+
+    pub fn as_u64(self) -> u64 {
+        self.0 as u64
+    }
 }
 
 impl fmt::Display for EntityId {

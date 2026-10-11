@@ -13,6 +13,7 @@ use warpui::platform::Cursor;
 use warpui::platform::keyboard::KeyCode;
 use warpui::{EntityId, WeakViewHandle, WindowId};
 
+use super::agent_session_actions::AgentSessionAction;
 use super::global_actions::{ForkFromExchange, ForkedConversationDestination};
 use super::tab_settings::{
     VerticalTabsCompactSubtitle, VerticalTabsDisplayGranularity, VerticalTabsPrimaryInfo,
@@ -41,9 +42,9 @@ use crate::server::telemetry::{
 use crate::settings_view::{SettingsAction as SettingsTabAction, SettingsSection};
 use crate::tab::{NewSessionMenuItem, SelectedTabColor};
 use crate::tab_configs::TabConfig;
-use crate::terminal::ShellLaunchData;
 use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
+use crate::terminal::{CLIAgent, ShellLaunchData};
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::themes::theme_chooser::ThemeChooserMode;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
@@ -279,12 +280,54 @@ pub enum WorkspaceAction {
     RestartShellForTerminalView {
         terminal_view_id: EntityId,
     },
+    /// Attaches a pane again, in place, to the supervised shell it lost the connection to.
+    ReattachShellForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Ends a restored pane's session in the supervisor that still holds it, then resumes here.
+    TakeOverHeldSessionForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Resumes a restored pane here without touching the supervisor that still holds its session.
+    StartFreshForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Hands the focused pane's shell to the session supervisor and closes the
     /// pane. The shell and everything running under it keep going; the session
     /// then appears in the picker opened by `ToggleAttachSessionMenu`.
     DetachSession,
     DetachSessionForTerminalView {
         terminal_view_id: EntityId,
+    },
+    /// Asks to move the focused pane's local claude, pi, or codex session into an AgentCtrl
+    /// managed run on staging. Nothing happens until `ConfirmMoveSessionToAgentCtrl`.
+    MoveSessionToAgentCtrl,
+    MoveSessionToAgentCtrlForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Starts the move asked for by `MoveSessionToAgentCtrlForTerminalView`. The local agent is
+    /// told to exit only once the managed run has resumed, and the pane then shows that run.
+    ConfirmMoveSessionToAgentCtrl {
+        terminal_view_id: EntityId,
+    },
+    /// Offers to start a fresh AgentCtrl run on staging in the repository of the focused pane's
+    /// directory. Nothing starts until `ConfirmStartAgentOnAgentCtrl` picks the agent.
+    StartAgentOnAgentCtrl,
+    StartAgentOnAgentCtrlForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Starts `agent` on the repository offered by `StartAgentOnAgentCtrlForTerminalView` and
+    /// opens the new run in that pane.
+    ConfirmStartAgentOnAgentCtrl {
+        terminal_view_id: EntityId,
+        agent: CLIAgent,
+    },
+    /// Offers to move every agent session in the folder holding the focused pane's repository to
+    /// AgentCtrl. Nothing moves until `ConfirmMoveAllAgentSessions`.
+    MoveAllAgentSessionsHere,
+    /// Runs `agent-ctrl move-all` on `folder` in a new tab.
+    ConfirmMoveAllAgentSessions {
+        folder: PathBuf,
     },
     /// Opens (or closes, if already open) the picker listing the sessions the
     /// supervisor is holding with no pane attached. Selecting an entry there
@@ -294,6 +337,15 @@ pub enum WorkspaceAction {
     /// starting a fresh shell.
     AttachDetachedSession {
         session_id: TerminalSessionId,
+    },
+    /// Focuses, starts, attaches or resumes the agent session a picker row stands for.
+    AgentSession(AgentSessionAction),
+    /// Opens the window's agent sessions by tab and pane, with `focus`'s pane selected.
+    ShowAgentSessions {
+        focus: Option<PaneViewLocator>,
+    },
+    ShowAgentSessionsForTerminalView {
+        terminal_view_id: EntityId,
     },
     /// Restores this window in a newly launched application process, then closes the original.
     RestartWindowInNewProcess,
@@ -413,6 +465,7 @@ pub enum WorkspaceAction {
     CreateTeamAIPrompt,
     ToggleMouseReporting,
     ToggleScrollReporting,
+    ToggleRightClickReporting,
     ToggleFocusReporting,
     StartTabDrag,
     DragTab {
@@ -931,6 +984,12 @@ pub enum WorkspaceAction {
     /// Opens (or focuses) the in-app network log pane as a right-split of the
     /// active pane group. Gated on `ContextFlag::NetworkLogConsole`.
     OpenNetworkLogPane,
+    /// Opens (or focuses) the AgentCtrl fleet pane as a right-split of the active pane group.
+    OpenAgentCtrlFleetPane,
+    /// Opens the AgentCtrl staging run `job_id` in the managed-session viewer, in a new tab.
+    OpenManagedSession {
+        job_id: String,
+    },
     /// Opens or focuses a window scoped to the specified team.
     OpenNewWindowForTeam {
         team_uid: ServerId,
@@ -1065,7 +1124,18 @@ impl WorkspaceAction {
             // adds a tab.
             | DetachSession
             | DetachSessionForTerminalView { .. }
+            | MoveSessionToAgentCtrl
+            | MoveSessionToAgentCtrlForTerminalView { .. }
+            | ConfirmMoveSessionToAgentCtrl { .. }
+            | StartAgentOnAgentCtrl
+            | StartAgentOnAgentCtrlForTerminalView { .. }
+            | ConfirmStartAgentOnAgentCtrl { .. }
+            | MoveAllAgentSessionsHere
+            | ConfirmMoveAllAgentSessions { .. }
+            | OpenManagedSession { .. }
             | AttachDetachedSession { .. }
+            // Can open a tab or split a pane, as attaching and resuming do.
+            | AgentSession(_)
             | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets
             // restarted, the user can continue working
@@ -1108,12 +1178,17 @@ impl WorkspaceAction {
             | ToggleTabConfigsMenu
             | ToggleNewSessionMenu { .. }
             | SelectNewSessionMenuItem(_)
-            // Restarting or changing a pane's shell mutates session content, not
-            // the persisted tab/pane layout, and the picker toggle is a plain
-            // menu open/close -- none of these need a save.
+            // Changing shells saves when the terminal reports its new active launch data;
+            // saving at action dispatch could capture the old shell. Restart and picker actions
+            // do not change persisted state.
             | RestartShell
             | RestartShellForTerminalView { .. }
+            | ReattachShellForTerminalView { .. }
+            | TakeOverHeldSessionForTerminalView { .. }
+            | StartFreshForTerminalView { .. }
             | ToggleAttachSessionMenu
+            | ShowAgentSessions { .. }
+            | ShowAgentSessionsForTerminalView { .. }
             | RestartWindowInNewProcess
             | ToggleChangeShellMenu
             | ToggleChangeShellMenuForTerminalView { .. }
@@ -1133,6 +1208,7 @@ impl WorkspaceAction {
             | ShowCommandSearch(_)
             | ToggleMouseReporting
             | ToggleScrollReporting
+            | ToggleRightClickReporting
             | ToggleFocusReporting
             | ImportToPersonalDrive
             | ImportToTeamDrive
@@ -1276,6 +1352,7 @@ impl WorkspaceAction {
             | ShowCloudModeV2EnvironmentCreationModal
             | OpenCreateAuthSecretModal { .. }
             | OpenNetworkLogPane
+            | OpenAgentCtrlFleetPane
             | OpenNewWindowForTeam { .. }
             | ShowTeamSwitcherMenu => false,
             #[cfg(debug_assertions)]

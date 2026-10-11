@@ -19,6 +19,7 @@ fn agents_with_verified_syntax_generate_a_resume_command() {
         (CLIAgent::Codex, "codex resume session-1"),
         (CLIAgent::Vibe, "vibe --resume session-1"),
         (CLIAgent::Pi, "pi --session session-1"),
+        (CLIAgent::Kimi, "kimi --session session-1"),
     ] {
         assert_eq!(
             descriptor(agent, Some("session-1"))
@@ -29,6 +30,15 @@ fn agents_with_verified_syntax_generate_a_resume_command() {
             agent.display_name()
         );
     }
+}
+
+/// DeepSeek Harness ships no interactive terminal UI to reopen a session in.
+#[test]
+fn deepseek_harness_has_no_resume_command() {
+    assert_eq!(
+        descriptor(CLIAgent::DeepSeekHarness, Some("session-1")).resume_command(),
+        None
+    );
 }
 
 /// `gemini --resume` takes "latest" or a per-project index, and `opencode session` can list and
@@ -158,4 +168,27 @@ fn test_code_pane_snapshot_with_multiple_tabs() {
     assert_eq!(tabs[1].path, Some(PathBuf::from("/tmp/lib.rs")));
     assert_eq!(tabs[2].path, None);
     assert!(matches!(source, Some(CodeSource::Link { .. })));
+}
+
+#[test]
+fn a_snapshot_without_a_session_holder_still_deserializes() {
+    let json = r#"{"uuid":[1,2],"persistent_session_id":7,"cwd":null,"shell_launch_data":null,
+        "is_active":true,"is_read_only":false,"input_config":null,"llm_model_override":null,
+        "active_profile_id":null,"conversation_ids_to_restore":[],"active_conversation_id":null}"#;
+    let snapshot: TerminalPaneSnapshot = serde_json::from_str(json).unwrap();
+    assert_eq!(snapshot.session_holder, None);
+}
+
+#[test]
+fn a_session_holder_round_trips_through_json() {
+    let holder = SessionHolder {
+        channel: r"\\.\pipe\warp-terminal-supervisor-v6-abcdef0123456789".to_owned(),
+        version: "20261004-173607861-268f56926594".to_owned(),
+        pid: 27784,
+    };
+    let json = serde_json::to_string(&holder).unwrap();
+    assert_eq!(
+        serde_json::from_str::<SessionHolder>(&json).unwrap(),
+        holder
+    );
 }

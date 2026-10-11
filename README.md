@@ -1,4 +1,4 @@
-# WarpSpeed
+# WarpSpeed by STOZN
 
 A fork of [warpdotdev/Warp](https://github.com/warpdotdev/Warp), used for work on
 terminal startup and session-restore behaviour.
@@ -16,12 +16,16 @@ terminal startup and session-restore behaviour.
 - **Lazy session restore.** Restored tabs defer starting their shells until activated,
   so opening a large saved session forks shells for the active tab rather than every
   pane. The reduction in shell count has not been measured.
+- **Self-hosted AgentCtrl sessions.** `warpspeed agent-ctrl` discovers, starts,
+  follows, resumes, messages, closes, and stops staging agents through the
+  authenticated STOZN dashboard. This path does not use Warp accounts, Oz,
+  Session Sharing, Remote Control, hosted transcripts, or Warp API keys.
 
 ## Building
 
 ```bash
 export PROTOC=/path/to/protoc          # required by workspace build scripts
-cargo run -p warp --bin warpspeed
+cargo run -p warp --bin warpspeed --features tui
 ```
 
 On Windows, install WarpSpeed for routine use instead of launching it from Cargo's build directory:
@@ -35,6 +39,33 @@ The installer stages only the `warpspeed` release binary under `target/warpspeed
 Installing never disturbs a running WarpSpeed. Each instance keeps running from the version directory it launched with, and only new launches pick up the newly installed version -- the launcher resolves `current.txt` at launch time. Old version directories are pruned only when every running instance can be identified; if one will not report its executable path (an elevated instance, typically), the installer says so and leaves every version in place.
 
 File-backed session configs compose reusable tab configs into one persistent, lazily restored window. On Windows, definitions live under `%APPDATA%\warp\WarpSpeed\data\session_configurations`; full runtime snapshots live under `%LOCALAPPDATA%\warp\WarpSpeed\data\session_config_sessions`. Open one directly with a URL argument such as `warplocal://launch/JustVIBE.toml`. YAML launch configurations remain static templates and no longer restore an evolving runtime snapshot.
+
+## Self-hosted managed agents
+
+Use the graphical **Sign in with STOZN** flow. WarpSpeed opens a one-time dashboard approval page, shows a confirmation code that must match the page, and stores the resulting expiring desktop credential in its own state directory (DPAPI-protected for the current OS user on Windows); no Warp account or prior `stozn auth` command is required. `STOZN_TOKEN` and the legacy `~/.stozn.json` remain non-graphical migration fallbacks.
+
+Create or select the task in the STOZN Dashboard, choose the configured agent there, and start the managed session. After AgentCtrl accepts the launch, the dashboard opens a strict `warpspeed://agent-ctrl/attach?...` deep link. WarpSpeed validates the compiled staging environment, fleet, and job ID, then opens only that session's normalized event viewer with bounded `send`, `close`, `stop`, and `detach` controls. WarpSpeed deliberately has no duplicate task picker or task-creation UI.
+
+The lower-level CLI remains available for automation and recovery:
+
+```bash
+warpspeed agent-ctrl open <job-id>
+warpspeed agent-ctrl list
+warpspeed agent-ctrl start --agent staging-claude-interactive --task <stozn-task-id> --interactive
+warpspeed agent-ctrl attach <job-id>
+warpspeed agent-ctrl input <job-id> "Inspect the failing test"
+warpspeed agent-ctrl close <job-id>
+warpspeed agent-ctrl pause <job-id>
+warpspeed agent-ctrl resume <job-id>
+warpspeed agent-ctrl stop <job-id>
+warpspeed agent-ctrl archive <job-id> --yes  # `remove` is an alias
+```
+
+Only terminal runs can be archived; stop a live or paused run first. Archiving removes the run from default managed-session lists while retaining its server-side events and command audit.
+
+`open` and a following `attach` use a full-screen conversation UI when stdin and stdout are connected to a terminal. Type a follow-up and press Enter, scroll with the arrow or page keys, close agent input with Ctrl-D, request a stop with Ctrl-X, and detach without stopping the run with Esc or Ctrl-C. Type `/help` or press F1 for run-control and local-shell commands. `/shell` or Ctrl-O opens an interactive local shell; `!<command>`, `/ssh`, and `/tmux` suspend the UI and run against the local terminal, returning to AgentCtrl when the program exits. Use `//` to send an agent message that begins with `/`. Use `attach --once`, `--json`, or redirected input/output for the line-oriented interface.
+
+Every new managed session requires a dashboard-validated STOZN task. The dashboard endpoint, environment, and fleet identity are compiled/operator-owned; callers cannot supply controller URLs or runtime overrides. Local bookmarks contain only safe identifiers, labels, cursors, state, and timestamps. Closing `attach` never stops the Kubernetes process.
 
 ## Recovering CLI agent sessions
 

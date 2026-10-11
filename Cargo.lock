@@ -8082,6 +8082,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "managed_agent_sessions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "dirs 6.0.0",
+ "instant",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "unicode-width 0.1.14",
+ "uuid",
+ "warp_cli",
+ "warp_core",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "managed_secrets_wasm"
 version = "0.1.0"
 dependencies = [
@@ -15220,6 +15240,7 @@ dependencies = [
  "event-listener",
  "field_mask",
  "firebase",
+ "flate2",
  "float-cmp",
  "freedesktop-desktop-entry",
  "fs4",
@@ -15269,6 +15290,7 @@ dependencies = [
  "lsp-types",
  "lz4_flex 0.11.6",
  "mach2 0.5.0",
+ "managed_agent_sessions",
  "markdown_parser",
  "mcp",
  "memchr",
@@ -15360,6 +15382,7 @@ dependencies = [
  "syntect",
  "sysinfo",
  "tabwriter",
+ "tar",
  "tempfile",
  "thiserror 2.0.17",
  "thousands",
@@ -15430,6 +15453,7 @@ dependencies = [
  "winreg",
  "x11rb",
  "zbus",
+ "zstd",
 ]
 
 [[package]]

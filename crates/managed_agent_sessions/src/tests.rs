@@ -1,0 +1,1414 @@
+use std::io::Read as _;
+use std::net::TcpListener;
+
+use super::*;
+
+#[test]
+fn dashboard_deep_link_opens_only_the_fixed_managed_session() {
+    let job_id = "job-ca9b590c-979c-4d46-b19f-f6f50fc852d3";
+    let url = reqwest::Url::parse(&format!(
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id={STAGING_FLEET_ID}&job_id={job_id}"
+    ))
+    .unwrap();
+    let intent = parse_managed_session_deep_link(&url).unwrap();
+    assert_eq!(intent.environment, ManagedEnvironment::Staging);
+    assert_eq!(intent.job_id, job_id);
+    assert_eq!(
+        intent.cli_arguments(),
+        format!("agent-ctrl open {job_id} --environment staging")
+    );
+}
+
+#[test]
+fn dashboard_deep_link_rejects_redirects_overrides_and_shell_content() {
+    let invalid = [
+        format!(
+            "https://agent-ctrl/attach?environment=staging&fleet_id={STAGING_FLEET_ID}&job_id=job-safe"
+        ),
+        "warpspeed://attacker.invalid/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/other?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=production&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=other&job_id=job-safe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe&job_id=job-other".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe%26calc.exe".to_owned(),
+        "warpspeed://agent-ctrl/attach?environment=staging&fleet_id=stoz3n-agent-ctrl-staging&job_id=job-safe&controller=https%3A%2F%2Fattacker.invalid".to_owned(),
+    ];
+    for value in invalid {
+        let url = reqwest::Url::parse(&value).unwrap();
+        assert!(
+            parse_managed_session_deep_link(&url).is_err(),
+            "unexpectedly accepted {value}"
+        );
+    }
+}
+
+#[test]
+fn stozn_desktop_credential_protection_round_trips_for_this_os_user() {
+    let plaintext = br#"{\"token\":\"sensitive-test-value\"}"#.to_vec();
+    let protected = protect_auth_bytes(plaintext.clone()).unwrap();
+    #[cfg(windows)]
+    assert_ne!(protected, plaintext);
+    assert_eq!(unprotect_auth_bytes(protected).unwrap(), plaintext);
+}
+
+#[test]
+fn waiting_input_remains_controllable_in_the_ui() {
+    assert!(!session_is_finished("waiting_input"));
+    assert!(!session_is_finished("running"));
+    assert!(!session_is_finished("paused"));
+    assert!(session_is_finished("completed"));
+    assert!(session_is_finished("interrupted"));
+}
+
+fn http_fixture(status: &str, body: serde_json::Value) -> &'static str {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let status = status.to_owned();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8192];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    });
+    Box::leak(format!("http://{address}").into_boxed_str())
+}
+
+fn fixture_profile(base_url: &'static str) -> EnvironmentProfile {
+    EnvironmentProfile {
+        alias: "staging",
+        base_url,
+        fleet_id: STAGING_FLEET_ID,
+        zitadel: &STAGING_ZITADEL,
+    }
+}
+
+fn descriptor_json() -> serde_json::Value {
+    json!({
+        "protocol_version": 1,
+        "environment": "staging",
+        "fleet_id": STAGING_FLEET_ID,
+        "job_id": "job-123",
+        "display_name": "Inspector",
+        "agent_name": "staging-pi-inspector",
+        "state": "running",
+        "capabilities": ["watch", "input", "close"],
+        "next_cursor": null
+    })
+}
+
+#[test]
+fn bookmark_serialization_contains_only_safe_fields() {
+    let bookmark = ManagedSessionBookmark {
+        format_version: 1,
+        environment_alias: "staging".to_owned(),
+        fleet_id: "fleet".to_owned(),
+        job_id: "job-123".to_owned(),
+        last_cursor: Some("cursor".to_owned()),
+        display_name: Some("inspector".to_owned()),
+        agent_name: Some("staging-pi-inspector".to_owned()),
+        last_known_state: Some("running".to_owned()),
+        created_at: "2026-01-01T00:00:00Z".to_owned(),
+        last_opened_at: "2026-01-01T00:00:01Z".to_owned(),
+    };
+    let value = serde_json::to_value(bookmark).unwrap();
+    let object = value.as_object().unwrap();
+    let expected = [
+        "format_version",
+        "environment_alias",
+        "fleet_id",
+        "job_id",
+        "last_cursor",
+        "display_name",
+        "agent_name",
+        "last_known_state",
+        "created_at",
+        "last_opened_at",
+    ];
+    assert_eq!(object.len(), expected.len());
+    for key in expected {
+        assert!(object.contains_key(key), "missing safe key {key}");
+    }
+    for forbidden in [
+        "token",
+        "authorization",
+        "prompt",
+        "transcript",
+        "events",
+        "url",
+        "endpoint",
+        "controller",
+        "environment_variables",
+        "reasoning",
+    ] {
+        assert!(!object.contains_key(forbidden));
+    }
+}
+
+#[test]
+fn task_ids_are_bounded_before_launch() {
+    assert!(validate_task_id("67d000000000000000000001").is_ok());
+    assert!(validate_task_id("task:staging-42").is_ok());
+    assert!(validate_task_id("").is_err());
+    assert!(validate_task_id("task/../../secret").is_err());
+}
+
+#[test]
+fn command_response_must_be_explicitly_accepted() {
+    assert!(ensure_command_accepted(&json!({ "status": "accepted" })).is_ok());
+    assert!(
+        ensure_command_accepted(&json!({
+            "status": "rejected",
+            "error": { "error": "node unavailable" }
+        }))
+        .is_err()
+    );
+    assert!(ensure_command_accepted(&json!({})).is_err());
+}
+
+#[test]
+fn bookmark_upsert_preserves_creation_and_resume_cursor() {
+    let mut bookmarks = vec![ManagedSessionBookmark {
+        format_version: 1,
+        environment_alias: "staging".to_owned(),
+        fleet_id: STAGING_FLEET_ID.to_owned(),
+        job_id: "job-123".to_owned(),
+        last_cursor: Some("old".to_owned()),
+        display_name: None,
+        agent_name: None,
+        last_known_state: Some("running".to_owned()),
+        created_at: "created".to_owned(),
+        last_opened_at: "first".to_owned(),
+    }];
+    upsert_bookmark(
+        &mut bookmarks,
+        ManagedSessionBookmark {
+            format_version: 1,
+            environment_alias: "staging".to_owned(),
+            fleet_id: STAGING_FLEET_ID.to_owned(),
+            job_id: "job-123".to_owned(),
+            last_cursor: Some("next".to_owned()),
+            display_name: Some("run".to_owned()),
+            agent_name: Some("agent".to_owned()),
+            last_known_state: Some("running".to_owned()),
+            created_at: "replacement".to_owned(),
+            last_opened_at: "second".to_owned(),
+        },
+    );
+    assert_eq!(bookmarks.len(), 1);
+    assert_eq!(bookmarks[0].created_at, "created");
+    assert_eq!(bookmarks[0].last_cursor.as_deref(), Some("next"));
+}
+
+#[test]
+fn descriptor_must_match_compiled_environment_identity() {
+    let descriptor = SessionDescriptor {
+        protocol_version: 1,
+        environment: "staging".to_owned(),
+        fleet_id: STAGING_FLEET_ID.to_owned(),
+        job_id: "job-123".to_owned(),
+        display_name: "run".to_owned(),
+        agent_name: "agent".to_owned(),
+        state: "running".to_owned(),
+        capabilities: vec!["watch".to_owned()],
+        next_cursor: None,
+    };
+    assert!(
+        validate_descriptor(profile(ManagedEnvironment::Staging), "job-123", &descriptor).is_ok()
+    );
+    assert!(
+        validate_descriptor(
+            profile(ManagedEnvironment::Staging),
+            "job-other",
+            &descriptor
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn http_auth_and_expired_token_responses_fail_closed() {
+    for (status, code) in [
+        ("401 Unauthorized", "unauthenticated"),
+        ("403 Forbidden", "forbidden"),
+        ("401 Unauthorized", "token_expired"),
+    ] {
+        let base = http_fixture(status, json!({ "error": "denied", "code": code }));
+        let profile = fixture_profile(base);
+        let error = send(
+            &profile,
+            Client::new().get(format!("{base}/api/agent-control/runs")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(status.split_once(' ').unwrap().0));
+        assert!(error.contains(code));
+    }
+}
+
+#[test]
+fn http_gap_fixture_deduplicates_replayed_events() {
+    let event = json!({
+        "event_id": "event-3",
+        "job_id": "job-123",
+        "sequence": 3,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "type": "assistant",
+        "content": "safe output",
+        "redacted": false,
+        "truncated": false
+    });
+    let base = http_fixture(
+        "410 Gone",
+        json!({
+            "items": [event.clone(), event],
+            "next_cursor": "djE6Mw",
+            "terminal": false,
+            "gap": true,
+            "earliest_cursor": "djE6Mw"
+        }),
+    );
+    let profile = fixture_profile(base);
+    let (page, history_gap) = fetch_event_page(
+        &Client::new(),
+        &profile,
+        "job-123",
+        "test-token",
+        Some("djE6MA"),
+        0,
+    )
+    .unwrap();
+    assert!(history_gap);
+    assert!(page.gap);
+    let mut known = HashSet::new();
+    let events = retain_new_events(page.items, &mut known);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_id, "event-3");
+}
+
+#[test]
+fn run_preview_is_bounded_sanitized_and_typed() {
+    let base = http_fixture(
+        "200 OK",
+        json!({
+            "items": [
+                {
+                    "event_id": "event-1", "job_id": "job-123", "sequence": 1,
+                    "timestamp": "2026-01-01T00:00:00Z", "type": "user_input",
+                    "content": "fix it", "redacted": false, "truncated": false
+                },
+                {
+                    "event_id": "event-2", "job_id": "job-123", "sequence": 2,
+                    "timestamp": "2026-01-01T00:00:01Z", "type": "assistant",
+                    "content": "done\u{7}", "redacted": false, "truncated": false
+                }
+            ],
+            "next_cursor": null,
+            "terminal": true,
+            "gap": false,
+            "earliest_cursor": null
+        }),
+    );
+    let profile = fixture_profile(base);
+
+    let preview =
+        fetch_run_preview_with(&profile, "job-123", 1, &|| Ok("test-token".to_owned())).unwrap();
+
+    assert!(preview.terminal);
+    assert!(!preview.history_gap);
+    assert!(!preview.truncated);
+    assert_eq!(preview.events.len(), 1);
+    assert_eq!(preview.events[0].kind, RunPreviewEventKind::Assistant);
+    assert_eq!(preview.events[0].kind.label(), "Agent");
+    assert_eq!(preview.events[0].content, "done�");
+}
+
+#[test]
+fn run_preview_pages_with_fresh_credentials_and_deduplicates_replays() {
+    let event = |id: &str, sequence: u64, content: &str| {
+        json!({
+            "event_id": id, "job_id": "job-123", "sequence": sequence,
+            "timestamp": "2026-01-01T00:00:00Z", "type": "assistant",
+            "content": content, "redacted": false, "truncated": false
+        })
+    };
+    let replay = event("event-2", 2, "second");
+    let (base, requests) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [event("event-1", 1, "first"), replay.clone()],
+                "next_cursor": "cursor-2", "terminal": false, "gap": false,
+                "earliest_cursor": null
+            }),
+        ),
+        (
+            "200 OK",
+            json!({
+                "items": [replay, event("event-3", 3, "third")],
+                "next_cursor": null, "terminal": false, "gap": false,
+                "earliest_cursor": null
+            }),
+        ),
+    ]);
+    let profile = fixture_profile(base);
+    let refreshes = std::sync::atomic::AtomicUsize::new(0);
+
+    let preview = fetch_run_preview_with(&profile, "job-123", 10, &|| {
+        refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("test-token".to_owned())
+    })
+    .unwrap();
+
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(preview.events.len(), 3);
+    assert_eq!(preview.events[2].content, "third");
+    assert!(!preview.truncated);
+    assert!(requests.lock().unwrap()[1].contains("after=cursor-2"));
+}
+
+#[test]
+fn full_managed_flow_has_dashboard_only_network_authority() {
+    let profile = profile(ManagedEnvironment::Staging);
+    let client = Client::new();
+    for (method, path) in [
+        ("GET", "/api/agent-control/runs?limit=100"),
+        ("GET", "/api/work-items/?open_only=true&limit=100"),
+        ("GET", "/api/agent-control/overview"),
+        ("POST", "/api/agent-control/runs"),
+        ("GET", "/api/agent-control/runs/job-123/session"),
+        ("GET", "/api/agent-control/runs/job-123/events"),
+        ("POST", "/api/agent-control/runs/job-123/input"),
+        ("POST", "/api/agent-control/runs/job-123/close"),
+        ("POST", "/api/agent-control/runs/job-123/stop"),
+        ("POST", "/api/agent-control/runs/job-123/pause"),
+        ("POST", "/api/agent-control/runs/job-123/resume"),
+    ] {
+        let request = client.request(
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+            format!("{}{path}", profile.base_url),
+        );
+        validate_request_destination(profile, &request).unwrap();
+    }
+
+    for forbidden in [
+        "https://api.warp.dev/managed-session",
+        "https://app.warp.dev/api/session-sharing",
+        "https://rtc.warp.dev/connect",
+        "https://oz.warp.dev/run",
+        "https://releases.warp.dev/artifacts/session",
+        "https://app.warp.dev/api/v1/inference",
+    ] {
+        let error = send(profile, client.get(forbidden))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("destination is not the selected dashboard"),
+            "{forbidden} was not denied before network I/O: {error}"
+        );
+    }
+}
+
+#[test]
+fn http_descriptor_fixtures_reject_protocol_fleet_environment_and_job_mismatch() {
+    for (field, value) in [
+        ("protocol_version", json!(2)),
+        ("environment", json!("production")),
+        ("fleet_id", json!("other-fleet")),
+        ("job_id", json!("job-other")),
+    ] {
+        let mut body = descriptor_json();
+        body[field] = value;
+        let base = http_fixture("200 OK", body);
+        let profile = fixture_profile(base);
+        assert!(
+            fetch_descriptor(&Client::new(), &profile, "job-123", "test-token").is_err(),
+            "{field} mismatch must fail closed"
+        );
+    }
+}
+
+fn capturing_fixture(
+    body: serde_json::Value,
+) -> (&'static str, std::sync::mpsc::Receiver<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = body.to_string();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            request.extend_from_slice(&chunk[..read]);
+            let text = String::from_utf8_lossy(&request);
+            if let Some(header_end) = text.find("\r\n\r\n") {
+                let length = text[..header_end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + length || read == 0 {
+                    break;
+                }
+            } else if read == 0 {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        sender.send(request).unwrap();
+    });
+    (
+        Box::leak(format!("http://{address}").into_boxed_str()),
+        receiver,
+    )
+}
+
+fn moved_import(session_file: Vec<u8>) -> MovedSessionImport<'static> {
+    MovedSessionImport {
+        agent_name: "staging-claude-interactive-rw",
+        session_id: "abc-123",
+        session_file,
+        repo_url: "https://git.example.com/org/repo.git",
+        handoff_branch: "handoff/abc-123",
+        source_cwd: "/home/user/project",
+        idempotency_key: "warpspeed-key-1".to_owned(),
+    }
+}
+
+#[test]
+fn import_sends_multipart_and_returns_job_id() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted", "job_id": "job-1" }));
+    let profile = fixture_profile(base);
+    let job_id =
+        import_moved_session_with(&profile, "token", moved_import(b"{\"a\":1}\n".to_vec()))
+            .unwrap();
+    assert_eq!(job_id, "job-1");
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    let lower = raw.to_ascii_lowercase();
+    assert!(raw.starts_with("POST /api/agent-control/runs/import "));
+    assert!(lower.contains("content-type: multipart/form-data"));
+    assert!(lower.contains("idempotency-key: warpspeed-key-1"));
+    assert!(lower.contains("x-stozn-client: warpspeed"));
+    assert!(lower.contains("authorization: bearer token"));
+    for part in [
+        "agent_name",
+        "session_id",
+        "repo_url",
+        "handoff_branch",
+        "source_cwd",
+        "session_file",
+    ] {
+        assert!(
+            raw.contains(&format!("name=\"{part}\"")),
+            "missing part {part}"
+        );
+    }
+    assert!(raw.contains("filename=\"session.jsonl\""));
+    assert!(raw.contains("handoff/abc-123"));
+}
+
+#[test]
+fn import_refuses_oversized_file_before_sending() {
+    let profile = fixture_profile("http://127.0.0.1:1");
+    let error = import_moved_session_with(
+        &profile,
+        "token",
+        moved_import(vec![0; MAX_SESSION_FILE_BYTES + 1]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("32 MiB"), "{error}");
+}
+
+fn resumed_page(content: &str, terminal: bool) -> serde_json::Value {
+    json!({
+        "items": [{
+            "event_id": "e1", "job_id": "job-1", "sequence": 1, "timestamp": "t",
+            "type": "status", "content": content, "redacted": false, "truncated": false
+        }],
+        "next_cursor": "c1",
+        "terminal": terminal,
+        "gap": false,
+        "earliest_cursor": null
+    })
+}
+
+#[test]
+fn resume_wait_succeeds_on_resumed_status() {
+    let profile = fixture_profile(http_fixture("200 OK", resumed_page("resumed", false)));
+    let client = Client::new();
+    wait_until_resumed_with(
+        &client,
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+}
+
+#[test]
+fn resume_wait_fails_on_terminal_page() {
+    let profile = fixture_profile(http_fixture("200 OK", resumed_page("started", true)));
+    let client = Client::new();
+    let error = wait_until_resumed_with(
+        &client,
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("ended before resuming"),
+        "{error}"
+    );
+}
+
+type RequestLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Serves `responses` in order, one per connection, repeating the last one; logs request lines.
+fn sequence_fixture(
+    responses: Vec<(&'static str, serde_json::Value)>,
+) -> (&'static str, RequestLog) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let log = RequestLog::default();
+    let served = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut request = [0_u8; 8192];
+            let read = stream.read(&mut request).unwrap();
+            let line = String::from_utf8_lossy(&request[..read])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let index = {
+                let mut served = served.lock().unwrap();
+                served.push(line);
+                served.len() - 1
+            };
+            let (status, body) = &responses[index.min(responses.len() - 1)];
+            let body = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (Box::leak(format!("http://{address}").into_boxed_str()), log)
+}
+
+#[test]
+fn resume_wait_can_start_after_the_pre_resume_cursor() {
+    let (base, requests) = sequence_fixture(vec![("200 OK", resumed_page("resumed", false))]);
+    let profile = fixture_profile(base);
+
+    wait_until_resumed_after(
+        &Client::new(),
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Some("before-resume".to_owned()),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+
+    assert!(requests.lock().unwrap()[0].contains("after=before-resume"));
+}
+
+fn empty_page() -> serde_json::Value {
+    json!({
+        "items": [],
+        "next_cursor": null,
+        "terminal": false,
+        "gap": false,
+        "earliest_cursor": null
+    })
+}
+
+#[test]
+fn resume_wait_retries_a_transient_error() {
+    let (base, log) = sequence_fixture(vec![
+        ("503 Service Unavailable", json!({ "error": "busy" })),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(log.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn resume_wait_gives_up_at_the_deadline_without_spinning() {
+    let (base, log) = sequence_fixture(vec![("200 OK", empty_page())]);
+    let profile = fixture_profile(base);
+    let error = wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Instant::now() + Duration::from_millis(1200),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("did not resume within"),
+        "{error}"
+    );
+    let requests = log.lock().unwrap().len();
+    assert!(requests <= 5, "polled {requests} times in 1.2s");
+}
+
+#[test]
+fn resume_wait_fails_fast_on_a_client_error() {
+    for status in [
+        "401 Unauthorized",
+        "403 Forbidden",
+        "404 Not Found",
+        "422 Unprocessable Entity",
+    ] {
+        let (base, log) = sequence_fixture(vec![(status, json!({ "error": "denied" }))]);
+        let profile = fixture_profile(base);
+        let started = Instant::now();
+        let error = wait_until_resumed_with(
+            &Client::new(),
+            &profile,
+            &|| Ok("token".to_owned()),
+            "job-1",
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap_err();
+        let code = &status[..3];
+        assert!(format!("{error:#}").contains(code), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{status}");
+        assert_eq!(log.lock().unwrap().len(), 1, "{status}");
+    }
+}
+
+#[test]
+fn resume_wait_retries_rate_limiting() {
+    let (base, log) = sequence_fixture(vec![
+        ("429 Too Many Requests", json!({ "error": "slow down" })),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(log.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn resume_wait_restarts_without_a_cursor_after_a_history_gap() {
+    let gap_page = json!({
+        "items": [],
+        "next_cursor": "c9",
+        "terminal": false,
+        "gap": true,
+        "earliest_cursor": "c5"
+    });
+    let (base, log) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [], "next_cursor": "c1", "terminal": false, "gap": false,
+                "earliest_cursor": null
+            }),
+        ),
+        ("410 Gone", gap_page),
+        ("200 OK", resumed_page("resumed", false)),
+    ]);
+    let profile = fixture_profile(base);
+    wait_until_resumed_with(
+        &Client::new(),
+        &profile,
+        &|| Ok("token".to_owned()),
+        "job-1",
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    assert!(log[1].contains("after=c1"), "{}", log[1]);
+    assert!(!log[2].contains("after="), "{}", log[2]);
+}
+
+#[test]
+fn start_on_repo_sends_repo_fields_and_no_task() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted", "job_id": "job-7" }));
+    let profile = fixture_profile(base);
+    let job_id = start_run_on_repo_with(
+        &profile,
+        "token",
+        "staging-claude-interactive-rw",
+        "https://gitlab.com/pseekoo/x.git",
+        Some("main"),
+        Some("hello"),
+    )
+    .unwrap();
+    assert_eq!(job_id, "job-7");
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(raw.starts_with("POST /api/agent-control/runs "), "{raw}");
+    let body: Value = serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "agent_name": "staging-claude-interactive-rw",
+            "interactive": true,
+            "repo_url": "https://gitlab.com/pseekoo/x.git",
+            "base_branch": "main",
+            "prompt": "hello"
+        })
+    );
+}
+
+#[test]
+fn start_on_repo_rejects_a_bad_branch_locally() {
+    let profile = fixture_profile("http://127.0.0.1:1");
+    let error = start_run_on_repo_with(
+        &profile,
+        "token",
+        "staging-claude-interactive-rw",
+        "https://gitlab.com/pseekoo/x.git",
+        Some("../x"),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("base branch"), "{error}");
+}
+
+#[test]
+fn base_branch_rule_matches_the_server() {
+    for valid in [
+        "main",
+        "release/1.2",
+        "feature/a-b_c.d",
+        "a",
+        &"x".repeat(100),
+    ] {
+        assert!(valid_base_branch(valid), "rejected {valid}");
+    }
+    for invalid in [
+        "",
+        "-main",
+        "/main",
+        "a/.hidden",
+        ".git",
+        "a..b",
+        "a b",
+        "a//b",
+        "main/",
+        "ma~in",
+        &"x".repeat(101),
+    ] {
+        assert!(!valid_base_branch(invalid), "accepted {invalid}");
+    }
+}
+
+#[test]
+fn start_on_repo_surfaces_node_at_capacity() {
+    let base = http_fixture(
+        "409 Conflict",
+        json!({ "error": "node at capacity", "code": "node_at_capacity" }),
+    );
+    let error = start_run_on_repo_with(
+        &fixture_profile(base),
+        "token",
+        "staging-pi-interactive-rw",
+        "https://gitlab.com/pseekoo/x",
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(is_node_at_capacity(&error), "{error:#}");
+    let status = error.downcast_ref::<HttpStatusError>().unwrap();
+    assert_eq!(status.status, StatusCode::CONFLICT);
+    assert!(!is_node_at_capacity(&anyhow::anyhow!("other")));
+}
+
+#[test]
+fn list_repositories_parses_items() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "items": [
+            { "name": "kaizen", "url": "https://gitlab.com/pseekoo/kaizen", "branch": "main", "reachable": true, "error": null },
+            { "name": "x", "url": "https://gitlab.com/pseekoo/x", "branch": "dev", "reachable": false, "error": "auth failed" }
+        ] }),
+    );
+    let repositories = list_repositories_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(
+        repositories,
+        vec![
+            RepositoryInfo {
+                name: "kaizen".to_owned(),
+                url: "https://gitlab.com/pseekoo/kaizen".to_owned(),
+                branch: "main".to_owned(),
+                reachable: true,
+                error: None,
+            },
+            RepositoryInfo {
+                name: "x".to_owned(),
+                url: "https://gitlab.com/pseekoo/x".to_owned(),
+                branch: "dev".to_owned(),
+                reachable: false,
+                error: Some("auth failed".to_owned()),
+            },
+        ]
+    );
+}
+
+#[test]
+fn list_runs_parses_repo_and_branch() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "items": [
+            {
+                "job_id": "job-repo",
+                "state": "running",
+                "agent_name": "staging-claude-interactive-rw",
+                "interactive": true,
+                "repo_url": "https://gitlab.com/pseekoo/kaizen.git",
+                "branch": "agent/job-repo",
+                "last_activity_at": "2026-10-05T10:00:00.000Z",
+                "created_at": "2026-10-05T09:00:00.000Z"
+            },
+            {
+                "job_id": "job-plain",
+                "state": "completed",
+                "agent_name": "staging-pi-inspector",
+                "interactive": false,
+                "repo_url": null,
+                "branch": null,
+                "last_activity_at": null
+            }
+        ] }),
+    );
+    let runs = list_runs_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(
+        runs,
+        vec![
+            RunSummary {
+                job_id: "job-repo".to_owned(),
+                state: "running".to_owned(),
+                agent_name: "staging-claude-interactive-rw".to_owned(),
+                repo_url: Some("https://gitlab.com/pseekoo/kaizen.git".to_owned()),
+                branch: Some("agent/job-repo".to_owned()),
+                interactive: true,
+                last_activity_at: Some("2026-10-05T10:00:00.000Z".to_owned()),
+                node_name: None,
+                paused_at: None,
+                pause_allowed: None,
+            },
+            RunSummary {
+                job_id: "job-plain".to_owned(),
+                state: "completed".to_owned(),
+                agent_name: "staging-pi-inspector".to_owned(),
+                repo_url: None,
+                branch: None,
+                interactive: false,
+                last_activity_at: None,
+                node_name: None,
+                paused_at: None,
+                pause_allowed: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn send_input_posts_the_text() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
+    post_input_with(&fixture_profile(base), "token", "job-1", Some("hi")).unwrap();
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(
+        raw.starts_with("POST /api/agent-control/runs/job-1/input "),
+        "{raw}"
+    );
+    assert!(raw.ends_with("{\"text\":\"hi\"}"), "{raw}");
+}
+
+#[test]
+fn normalize_repo_url_matches_server_rule() {
+    let https = normalize_repo_url("https://gitlab.com/pseekoo/x");
+    assert_eq!(https, "https://gitlab.com/pseekoo/x");
+    assert_eq!(normalize_repo_url("git@gitlab.com:pseekoo/x.git"), https);
+    assert_eq!(
+        normalize_repo_url("https://user:tok@gitlab.com/pseekoo/x.git/"),
+        https
+    );
+    assert_eq!(normalize_repo_url("deploy@GitLab.com:pseekoo/x"), https);
+    assert_eq!(
+        normalize_repo_url("dev:glpat-SECRET@git.example.com:team/repo.git"),
+        "https://git.example.com/team/repo"
+    );
+    assert_eq!(
+        normalize_repo_url("https://User@Git-Dev.Obachan.dev/stozn/warpspeed.git/"),
+        "https://git-dev.obachan.dev/stozn/warpspeed"
+    );
+    assert_eq!(normalize_repo_url(r"C:\repos\x"), r"C:\repos\x");
+}
+
+#[test]
+fn agent_ctrl_profiles_are_the_interactive_rw_profiles() {
+    assert_eq!(
+        agent_ctrl_profile("claude"),
+        Some("staging-claude-interactive-rw")
+    );
+    assert_eq!(agent_ctrl_profile("pi"), Some("staging-pi-interactive-rw"));
+    assert_eq!(
+        agent_ctrl_profile("codex"),
+        Some("staging-codex-interactive-rw")
+    );
+    assert_eq!(
+        agent_ctrl_profile("kimi"),
+        Some("staging-kimi-interactive-rw")
+    );
+    assert_eq!(
+        agent_ctrl_profile("dsh"),
+        Some("staging-dsh-interactive-rw")
+    );
+    assert_eq!(agent_ctrl_profile("gemini"), None);
+    for kind in AGENT_KINDS {
+        assert!(agent_ctrl_profile(kind).is_some(), "{kind}");
+    }
+}
+
+#[test]
+fn agent_kinds_resolve_to_their_profiles_and_profile_names_pass_through() {
+    let resolve = |agent| resolve_agent_name(ManagedEnvironment::Staging, agent).unwrap();
+    assert_eq!(resolve("claude"), "staging-claude-interactive-rw");
+    assert_eq!(resolve("pi"), "staging-pi-interactive-rw");
+    assert_eq!(resolve("codex"), "staging-codex-interactive-rw");
+    assert_eq!(resolve("kimi"), "staging-kimi-interactive-rw");
+    assert_eq!(resolve("dsh"), "staging-dsh-interactive-rw");
+    assert_eq!(resolve("staging-pi-lander"), "staging-pi-lander");
+    assert_eq!(
+        resolve("staging-claude-interactive-rw"),
+        "staging-claude-interactive-rw"
+    );
+}
+
+#[test]
+fn an_unknown_agent_fails_with_the_accepted_values() {
+    for unknown in [
+        "gemini",
+        "Claude",
+        "staging-",
+        "prod-claude",
+        "staging-a b",
+        "",
+    ] {
+        let error = resolve_agent_name(ManagedEnvironment::Staging, unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("claude, pi, codex, kimi, dsh"),
+            "{unknown:?}: {error}"
+        );
+        assert!(error.contains("staging-"), "{unknown:?}: {error}");
+    }
+}
+
+#[test]
+fn start_with_an_unknown_agent_fails_before_any_request() {
+    let error = run(&ManagedSessionsArgs {
+        command: ManagedSessionsCommand::Start {
+            agent: "gemini".to_owned(),
+            task: Some("task-1".to_owned()),
+            repo: None,
+            branch: None,
+            prompt: None,
+            interactive: false,
+            environment: ManagedEnvironment::Staging,
+        },
+        json: false,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown agent"), "{error}");
+}
+
+#[test]
+fn stop_run_posts_a_stop_request() {
+    let (base, request) = capturing_fixture(json!({ "status": "accepted" }));
+    let profile = fixture_profile(base);
+    stop_run_with(&profile, "token", "job-1", true).unwrap();
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(
+        raw.starts_with("POST /api/agent-control/runs/job-1/stop "),
+        "{raw}"
+    );
+    assert!(raw.contains("\"force\":true"), "{raw}");
+}
+
+#[test]
+fn archive_posts_to_the_run_route() {
+    let (base, request) = capturing_fixture(json!({
+        "status": "accepted",
+        "action": "archive",
+        "job_id": "job-1",
+        "request_id": "request-1",
+        "replayed": false,
+        "archived_at": "2026-10-11T00:00:00Z"
+    }));
+    archive_run_with(&fixture_profile(base), "token", "job-1").unwrap();
+    let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+    assert!(
+        raw.starts_with("POST /api/agent-control/runs/job-1/archive "),
+        "{raw}"
+    );
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("idempotency-key: warpspeed-"),
+        "{raw}"
+    );
+    assert!(raw.ends_with("{}"), "{raw}");
+}
+
+#[test]
+fn archive_requires_confirmation_before_authentication() {
+    let error = run(&ManagedSessionsArgs {
+        command: ManagedSessionsCommand::Archive {
+            job_id: "job-1".to_owned(),
+            yes: false,
+            environment: ManagedEnvironment::Staging,
+        },
+        json: false,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("--yes"), "{error}");
+}
+
+#[test]
+fn pause_and_resume_post_to_the_run_routes() {
+    for (call, route) in [
+        (
+            pause_run_with as fn(&EnvironmentProfile, &str, &str) -> Result<Value>,
+            "pause",
+        ),
+        (resume_run_with, "resume"),
+    ] {
+        let (base, request) = capturing_fixture(
+            json!({ "job_id": "job-1", "state": "paused", "accepted": true, "node_name": "node-1" }),
+        );
+        let result = call(&fixture_profile(base), "token", "job-1").unwrap();
+        let outcome = run_control_outcome(&result);
+        assert_eq!(outcome.state, "paused");
+        assert_eq!(outcome.node_name.as_deref(), Some("node-1"));
+        let raw = String::from_utf8_lossy(&request.recv().unwrap()).into_owned();
+        assert!(
+            raw.starts_with(&format!("POST /api/agent-control/runs/job-1/{route} ")),
+            "{raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("idempotency-key: warpspeed-"),
+            "{raw}"
+        );
+        assert!(raw.ends_with("{}"), "{raw}");
+    }
+}
+
+#[test]
+fn a_rejected_pause_fails_with_the_dashboard_reason() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "status": "rejected", "error": { "error": "run is not interactive" } }),
+    );
+    let error = pause_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(
+        error.to_string().contains("run is not interactive"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pause_without_a_known_session_is_recognized() {
+    let base = http_fixture(
+        "412 Precondition Failed",
+        json!({ "error": "session id unknown", "code": "session_unknown" }),
+    );
+    let error = pause_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(is_session_unknown(&error), "{error:#}");
+    assert!(!is_node_at_capacity(&error));
+    let message = pause_failure_message(&error);
+    assert!(message.contains("cannot be paused"), "{message}");
+    assert!(!is_session_unknown(&anyhow::anyhow!("other")));
+}
+
+#[test]
+fn a_resume_with_every_node_full_is_recognized() {
+    let base = http_fixture(
+        "409 Conflict",
+        json!({ "error": "node at capacity", "code": "node_at_capacity" }),
+    );
+    let error = resume_run_with(&fixture_profile(base), "token", "job-1").unwrap_err();
+    assert!(is_node_at_capacity(&error), "{error:#}");
+    assert!(!is_session_unknown(&error));
+    let message = resume_failure_message(&error);
+    assert!(message.contains("at capacity"), "{message}");
+}
+
+#[test]
+fn other_pause_and_resume_failures_keep_their_cause() {
+    let error = anyhow::anyhow!("dashboard request failed");
+    assert_eq!(
+        pause_failure_message(&error),
+        "Could not pause the run: dashboard request failed"
+    );
+    assert_eq!(
+        resume_failure_message(&error),
+        "Could not resume the run: dashboard request failed"
+    );
+}
+
+#[test]
+fn pause_and_resume_reject_a_bad_job_id_before_any_request() {
+    for result in [
+        pause_run(ManagedEnvironment::Staging, "../x"),
+        resume_run(ManagedEnvironment::Staging, "job-a b"),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("invalid AgentCtrl job id"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn list_runs_parses_node_and_pause_time() {
+    let base = http_fixture(
+        "200 OK",
+        json!({ "items": [{
+            "job_id": "job-paused",
+            "state": "paused",
+            "agent_name": "staging-claude-interactive-rw",
+            "interactive": true,
+            "repo_url": "https://gitlab.com/pseekoo/kaizen",
+            "branch": "agent/job-paused",
+            "last_activity_at": "2026-10-07T09:00:00.000Z",
+            "node_name": "agent-ctrl-node-1",
+            "paused_at": "2026-10-07T09:05:00.000Z"
+        }] }),
+    );
+    let runs = list_runs_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(runs[0].state, "paused");
+    assert_eq!(runs[0].node_name.as_deref(), Some("agent-ctrl-node-1"));
+    assert_eq!(
+        runs[0].paused_at.as_deref(),
+        Some("2026-10-07T09:05:00.000Z")
+    );
+}
+
+#[test]
+fn a_pause_or_resume_must_say_accepted_true() {
+    for body in [
+        json!({ "job_id": "job-1", "state": "running", "accepted": false }),
+        json!({ "job_id": "job-1", "state": "running" }),
+    ] {
+        let base = http_fixture("200 OK", body);
+        assert!(pause_run_with(&fixture_profile(base), "token", "job-1").is_err());
+        let base = http_fixture("200 OK", json!({ "state": "running" }));
+        assert!(resume_run_with(&fixture_profile(base), "token", "job-1").is_err());
+    }
+}
+
+#[test]
+fn pause_and_resume_commands_check_the_job_id_before_any_request() {
+    for command in [
+        ManagedSessionsCommand::Pause {
+            job_id: "../x".to_owned(),
+            environment: ManagedEnvironment::Staging,
+        },
+        ManagedSessionsCommand::Resume {
+            job_id: "../x".to_owned(),
+            environment: ManagedEnvironment::Staging,
+        },
+    ] {
+        let error = run(&ManagedSessionsArgs {
+            command,
+            json: false,
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid AgentCtrl job id"),
+            "{error}"
+        );
+    }
+}
+
+fn outcome(state: &str, node_name: Option<&str>) -> RunControlOutcome {
+    RunControlOutcome {
+        state: state.to_owned(),
+        node_name: node_name.map(str::to_owned),
+    }
+}
+
+#[test]
+fn run_control_summary_names_state_and_node() {
+    assert_eq!(
+        run_control_summary("Paused", "job-1", &outcome("paused", Some("node-a"))),
+        "Paused job-1 (paused) on node-a"
+    );
+}
+
+#[test]
+fn run_control_summary_omits_an_absent_node() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("running", None)),
+        "Resumed job-1 (running)"
+    );
+}
+
+#[test]
+fn run_control_summary_reports_an_empty_state_as_unknown() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("", Some("node-a"))),
+        "Resume requested for job-1; still unknown on node-a"
+    );
+}
+
+#[test]
+fn a_pause_that_has_not_landed_says_the_run_is_still_running() {
+    assert_eq!(
+        run_control_summary("Paused", "job-1", &outcome("running", Some("node-a"))),
+        "Pause requested for job-1; still running on node-a"
+    );
+}
+
+#[test]
+fn a_resume_that_has_not_landed_says_the_run_is_still_paused() {
+    assert_eq!(
+        run_control_summary("Resumed", "job-1", &outcome("paused", None)),
+        "Resume requested for job-1; still paused"
+    );
+}
+
+#[test]
+fn failure_messages_never_show_url_credentials() {
+    let body = json!({
+        "error": "git fetch https://user:token@host/repo.git failed",
+        "code": "command_rejected"
+    })
+    .to_string();
+    let rejected = || {
+        anyhow::Error::new(HttpStatusError {
+            status: StatusCode::CONFLICT,
+            body: body.clone(),
+        })
+    };
+    for message in [
+        pause_failure_message(&rejected()),
+        resume_failure_message(&rejected()),
+        stop_failure_message(&rejected()),
+    ] {
+        assert!(!message.contains("token"), "{message}");
+        assert!(message.contains("https://host/repo.git"), "{message}");
+        assert!(!message.contains("command_rejected"), "{message}");
+    }
+    let unstructured = anyhow::anyhow!("failed: https://user:token@host/x");
+    assert!(!pause_failure_message(&unstructured).contains("token"));
+}
+
+#[test]
+fn a_resume_without_a_known_session_is_recognized() {
+    let error = anyhow::Error::new(HttpStatusError {
+        status: StatusCode::PRECONDITION_FAILED,
+        body: json!({ "error": "session id unknown", "code": "session_unknown" }).to_string(),
+    });
+    let message = resume_failure_message(&error);
+    assert!(message.contains("cannot be resumed"), "{message}");
+}
+
+#[test]
+fn a_failed_viewer_command_does_not_end_the_viewer() {
+    keep_viewing(Err(anyhow::anyhow!("dashboard returned 409")));
+    keep_viewing(Ok(()));
+}
+
+#[test]
+fn run_control_json_has_exactly_job_id_state_and_node_name() {
+    assert_eq!(
+        run_control_json("job-1", &outcome("paused", Some("node-a"))),
+        json!({ "job_id": "job-1", "state": "paused", "node_name": "node-a" })
+    );
+    assert_eq!(
+        run_control_json("job-1", &outcome("", None)),
+        json!({ "job_id": "job-1", "state": "", "node_name": null })
+    );
+}
+
+#[test]
+fn a_paused_run_is_attached_with_a_resume_notice() {
+    let mut body = descriptor_json();
+    body["state"] = json!("paused");
+    let base = http_fixture("200 OK", body);
+    let descriptor = fetch_descriptor(
+        &Client::new(),
+        &fixture_profile(base),
+        "job-123",
+        "test-token",
+    )
+    .unwrap();
+
+    assert!(is_paused_state(&descriptor.state));
+    let banner = attach_banner(&descriptor);
+    assert!(
+        banner.contains("Paused — resume with: warpspeed agent-ctrl resume job-123"),
+        "{banner}"
+    );
+    let commands = viewer_commands(&descriptor.state);
+    assert!(commands.contains("resume"), "{commands}");
+    assert!(!commands.contains("send"), "{commands}");
+}
+
+#[test]
+fn a_running_run_is_attached_without_a_pause_notice() {
+    let base = http_fixture("200 OK", descriptor_json());
+    let descriptor = fetch_descriptor(
+        &Client::new(),
+        &fixture_profile(base),
+        "job-123",
+        "test-token",
+    )
+    .unwrap();
+
+    let banner = attach_banner(&descriptor);
+    assert!(
+        banner.starts_with("Attached to Inspector (running, capabilities: watch,input,close).")
+    );
+    assert!(!banner.contains("Paused"), "{banner}");
+    assert!(viewer_commands("running").contains("send <text>"));
+}

@@ -151,6 +151,7 @@ warp_logging.workspace = true
 sentry = { workspace = true, optional = true }
 lz4_flex = "0.11"
 markdown_parser.workspace = true
+managed_agent_sessions.workspace = true
 mcp.workspace = true
 memchr.workspace = true
 memo-map.workspace = true
@@ -346,10 +347,12 @@ rquickjs = { workspace = true, optional = true }
 rustls.workspace = true
 syntect = "5.0"
 sysinfo.workspace = true
+tar = "0.4"
 warp-command-signatures = { workspace = true, features = ["embed-signatures"] }
 is_executable = "1.0.1"
 watcher.workspace = true
 warp_files.workspace = true
+zstd = "0.13.3"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 console_error_panic_hook = { version = "0.1.6" }
@@ -451,6 +454,7 @@ warp_files = { workspace = true, features = ["test-util"] }
 repo_metadata = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+flate2 = "1.0"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time"] }
 
 [build-dependencies]
@@ -468,7 +472,7 @@ embed-resource = "3.0"
 
 # Note that we support channel-specific enables for these features
 [features]
-tui = ["warp_terminal/tui", "warpui_core/tui"]
+tui = ["managed_agent_sessions/tui", "warp_terminal/tui", "warpui_core/tui"]
 ai_resume_button = []
 autoupdate = []
 figma_detection = []

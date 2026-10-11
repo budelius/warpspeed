@@ -136,6 +136,39 @@ impl<A: Action + Clone> DismissibleToastStack<A> {
         ctx.notify();
     }
 
+    #[cfg(test)]
+    pub fn toast_texts(&self) -> Vec<&str> {
+        self.toasts
+            .iter()
+            .map(|toast| toast.dismissible_toast.main_text())
+            .collect()
+    }
+
+    /// Each toast's links as `(text, onclick action)`, in the order of [`Self::toast_texts`].
+    #[cfg(test)]
+    pub fn toast_links(&self) -> Vec<Vec<(&str, Option<&A>)>> {
+        self.toasts
+            .iter()
+            .map(|toast| {
+                toast
+                    .dismissible_toast
+                    .links
+                    .iter()
+                    .map(|link| (link.text.as_str(), link.action.as_ref()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn persistent_toast_texts(&self) -> Vec<&str> {
+        self.toasts
+            .iter()
+            .filter(|toast| toast.abort_handle.is_none())
+            .map(|toast| toast.dismissible_toast.main_text())
+            .collect()
+    }
+
     fn evict_oldest_toasts(&mut self) {
         while self.toasts.len() > MAX_VISIBLE_TOASTS {
             let evicted = self.toasts.remove(0);
@@ -399,7 +432,7 @@ pub type OnBodyClickCallback<A> = Rc<dyn Fn(&mut ViewContext<DismissibleToastSta
 pub struct DismissibleToast<A: Action + Clone> {
     flavor: ToastFlavor,
     main_text: String,
-    link: Option<ToastLink<A>>,
+    links: Vec<ToastLink<A>>,
     expand_button_mouse_state: MouseStateHandle,
     close_button_mouse_state: MouseStateHandle,
     close_button_hover_state: MouseStateHandle,
@@ -421,7 +454,7 @@ impl<A: Action + Clone> DismissibleToast<A> {
         Self {
             flavor,
             main_text,
-            link: None,
+            links: Vec::new(),
             expand_button_mouse_state: Default::default(),
             close_button_mouse_state: Default::default(),
             close_button_hover_state: Default::default(),
@@ -449,8 +482,9 @@ impl<A: Action + Clone> DismissibleToast<A> {
         Self::new(main_text, ToastFlavor::Error)
     }
 
+    /// Adds a link after any added before it.
     pub fn with_link(mut self, link: ToastLink<A>) -> Self {
-        self.link = Some(link);
+        self.links.push(link);
         self
     }
 
@@ -566,7 +600,7 @@ impl<A: Action + Clone> DismissibleToast<A> {
             );
         }
 
-        if let Some(link) = &self.link {
+        for link in &self.links {
             right_aligned.add_child(
                 Container::new(
                     ConstrainedBox::new(

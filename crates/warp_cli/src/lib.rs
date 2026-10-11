@@ -20,6 +20,8 @@ mod sort_order;
 pub use sort_order::SortOrderArg;
 
 pub mod agent;
+#[cfg(not(target_family = "wasm"))]
+pub mod agent_event;
 pub mod api_key;
 pub mod completions;
 pub mod config_file;
@@ -30,6 +32,8 @@ pub mod harness_support;
 pub mod integration;
 pub mod json_filter;
 pub mod local_control;
+#[cfg(not(target_family = "wasm"))]
+pub mod managed_sessions;
 pub mod mcp;
 pub mod memory_store;
 pub mod model;
@@ -709,6 +713,16 @@ pub enum Command {
     /// in running Warp windows.
     #[cfg(not(target_family = "wasm"))]
     Sessions(sessions::SessionsArgs),
+
+    /// Open self-hosted AgentCtrl managed sessions through the dashboard.
+    #[cfg(not(target_family = "wasm"))]
+    AgentCtrl(managed_sessions::ManagedSessionsArgs),
+
+    /// Forward one CLI agent event, read as JSON from standard input, to the Warp pane its agent
+    /// runs in. Run by agent hooks and plugins that cannot write to the terminal.
+    #[cfg(not(target_family = "wasm"))]
+    #[command(hide = true)]
+    AgentEvent(agent_event::AgentEventArgs),
 }
 
 impl Command {
@@ -723,7 +737,9 @@ impl Command {
             #[cfg(not(target_family = "wasm"))]
             Command::PrintTelemetryEvents => true,
             #[cfg(not(target_family = "wasm"))]
-            Command::Sessions(_) => true,
+            Command::Sessions(_) | Command::AgentCtrl(_) => true,
+            #[cfg(not(target_family = "wasm"))]
+            Command::AgentEvent(_) => false,
         }
     }
 }

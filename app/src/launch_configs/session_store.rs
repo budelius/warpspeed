@@ -17,7 +17,8 @@ use crate::ai::blocklist::SerializedBlockListItem;
 #[cfg(feature = "local_fs")]
 use crate::app_state::LeafSnapshot;
 use crate::app_state::{
-    LeafContents, PaneNodeSnapshot, PaneUuid, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+    CliAgentResumeDescriptor, LeafContents, PaneNodeSnapshot, PaneUuid, TabSnapshot,
+    TerminalPaneSnapshot, WindowSnapshot,
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::terminal::CLIAgent;
@@ -266,6 +267,95 @@ fn collect_panes(node: &PaneNodeSnapshot, panes: &mut Vec<StoredPaneSummary>) {
                 return;
             };
             panes.push(pane_summary(panes.len() + 1, terminal));
+        }
+    }
+}
+
+#[cfg(feature = "local_fs")]
+fn unidentified_agents(node: &mut PaneNodeSnapshot) -> Vec<&mut CliAgentResumeDescriptor> {
+    match node {
+        PaneNodeSnapshot::Branch(branch) => branch
+            .children
+            .iter_mut()
+            .flat_map(|(_, child)| unidentified_agents(child))
+            .collect(),
+        PaneNodeSnapshot::Leaf(leaf) => match &mut leaf.contents {
+            LeafContents::Terminal(terminal) => terminal
+                .cli_agent_resume_descriptor
+                .as_mut()
+                .filter(|descriptor| descriptor.session_id.is_none())
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        },
+    }
+}
+
+#[cfg(feature = "local_fs")]
+fn identified_agent_session_ids(node: &PaneNodeSnapshot, ids: &mut HashSet<String>) {
+    match node {
+        PaneNodeSnapshot::Branch(branch) => {
+            for (_, child) in &branch.children {
+                identified_agent_session_ids(child, ids);
+            }
+        }
+        PaneNodeSnapshot::Leaf(leaf) => {
+            if let LeafContents::Terminal(terminal) = &leaf.contents
+                && let Some(session_id) = terminal
+                    .cli_agent_resume_descriptor
+                    .as_ref()
+                    .and_then(|descriptor| descriptor.session_id.clone())
+            {
+                ids.insert(session_id);
+            }
+        }
+    }
+}
+
+/// Fills in the session of each agent pane whose snapshot predates session IDs being recorded,
+/// from the agents' own conversation history, so that reopening the window resumes them.
+#[cfg(feature = "local_fs")]
+fn identify_agent_sessions(window: &mut WindowSnapshot, saved_at_unix_seconds: i64) {
+    use crate::terminal::agent_session_history::{UnidentifiedAgent, find_all, match_for_restore};
+
+    let mut excluded = crate::terminal::cli_agent_sessions::process_registry::running_session_ids();
+    for tab in &window.tabs {
+        identified_agent_session_ids(&tab.root, &mut excluded);
+    }
+    let mut descriptors = window
+        .tabs
+        .iter_mut()
+        .flat_map(|tab| unidentified_agents(&mut tab.root))
+        .collect::<Vec<_>>();
+    if descriptors.is_empty() {
+        return;
+    }
+    let wanted = descriptors
+        .iter()
+        .map(|descriptor| UnidentifiedAgent {
+            agent: descriptor.agent,
+            cwd: descriptor.cwd.clone(),
+            title: descriptor.title.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut agents = wanted.iter().map(|wanted| wanted.agent).collect::<Vec<_>>();
+    agents.sort_by_key(|agent| agent.display_name());
+    agents.dedup();
+    let candidates = agents.into_iter().flat_map(find_all).collect::<Vec<_>>();
+    let saved_at = SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_secs(u64::try_from(saved_at_unix_seconds).unwrap_or(0));
+    for (descriptor, session_id) in
+        descriptors
+            .iter_mut()
+            .zip(match_for_restore(&wanted, saved_at, &candidates, &excluded))
+    {
+        if let Some(session_id) = session_id {
+            log::info!(
+                "Resuming {} in {} as session {session_id}, matched from its history",
+                descriptor.agent.display_name(),
+                descriptor.cwd.display()
+            );
+            descriptor.session_id = Some(session_id);
         }
     }
 }
@@ -769,6 +859,18 @@ pub(crate) fn list_summaries() -> Vec<StoredSessionSummary> {
     }
 }
 
+pub(crate) fn list_interrupted_summaries() -> Vec<StoredSessionSummary> {
+    list_summaries()
+        .into_iter()
+        .filter(|summary| summary.is_current())
+        .filter(|summary| {
+            summary
+                .first_source()
+                .is_some_and(crate::session_configs::was_open_when_process_ended)
+        })
+        .collect()
+}
+
 fn is_safe_relative_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && path
@@ -778,10 +880,11 @@ fn is_safe_relative_path(path: &Path) -> bool {
 
 #[cfg(feature = "local_fs")]
 fn load_from_path(path: &Path, source: &LaunchConfigWindowSource) -> Result<RestoredWindowSession> {
-    let stored = read_stored_window(path)?;
+    let mut stored = read_stored_window(path)?;
     if !sources_match(&stored.source, source) {
         bail!("Session config snapshot source does not match {path:?}");
     }
+    identify_agent_sessions(&mut stored.window, stored.saved_at_unix_seconds);
     Ok(RestoredWindowSession {
         window: stored.window,
         block_lists: Arc::new(

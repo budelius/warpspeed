@@ -2475,6 +2475,7 @@ pub fn test_exit_multiple_tabs() -> Builder {
     };
 
     new_builder()
+        .expect_app_exit()
         .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
         .with_step(
             new_step_with_default_assertions("Add a new session using cmd-t")

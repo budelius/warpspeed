@@ -1,5 +1,12 @@
 #![allow(clippy::doc_lazy_continuation)]
 
+mod agent_ctrl;
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+mod agent_ctrl_fleet_cli;
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+mod agent_ctrl_move_session_cli;
+#[cfg(not(target_family = "wasm"))]
+mod agent_event_cli;
 #[cfg(feature = "local_fs")]
 mod agent_session_registry;
 mod ai;
@@ -145,6 +152,7 @@ pub mod root_view;
 pub mod search;
 pub mod settings;
 pub mod settings_view;
+mod stozn_auth;
 pub mod tab_configs;
 pub mod terminal;
 pub mod themes;
@@ -247,7 +255,7 @@ use warp_logging::{LogDestination, LogFrontend};
 use warp_managed_secrets::ManagedSecretManager;
 use warp_server_client::iap::{IapManager, IapManagerEvent, IapState, ManagedIapMint};
 use warp_server_client::network_logging::NetworkLogModel;
-use warpui::integration::TestDriver;
+use warpui::integration::{TestDriver, app_exit_expected, test_in_progress};
 use warpui::modals::{AlertDialogWithCallbacks, AppModalCallback};
 use warpui::platform::TerminationMode;
 use warpui::platform::app::{ApproveTerminateResult, TerminationRequestSource};
@@ -305,7 +313,8 @@ use crate::persistence::PersistenceWriter;
 use crate::persistence::model::AgentConversationData;
 use crate::projects::ProjectManagementModel;
 use crate::root_view::{
-    OpenFromRestoredArg, OpenPath, quake_mode_window_id, quake_mode_window_is_open,
+    OpenFromRestoredArg, OpenPath, OpenStoredSessionArg, quake_mode_window_id,
+    quake_mode_window_is_open,
 };
 use crate::server::cloud_objects::listener::Listener;
 use crate::server::cloud_objects::update_manager::UpdateManager;
@@ -316,7 +325,9 @@ use crate::server::sync_queue::{QueueItem, SyncQueue};
 pub use crate::server::telemetry::{
     AgentModeEntrypoint, AgentModeEntrypointSelectionType, TelemetryEvent,
 };
-use crate::server::telemetry::{AppStartupInfo, CloseTarget, PaletteSource, TelemetryCollector};
+use crate::server::telemetry::{
+    AppStartupInfo, CloseTarget, LaunchConfigUiLocation, PaletteSource, TelemetryCollector,
+};
 use crate::session_management::{RunningSessionSummary, SessionNavigationData};
 use crate::settings::cloud_preferences_syncer::initialize_cloud_preferences_syncer;
 use crate::settings::manager::SettingsManager;
@@ -763,7 +774,16 @@ pub fn run() -> Result<()> {
     features::init_feature_flags();
     #[cfg(all(feature = "local_tty", windows))]
     if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
-        return warp_terminal::local_tty::windows::supervisor_daemon::run();
+        return warp_terminal::local_tty::windows::supervisor_daemon::run(|| {
+            if let Err(error) = warp_logging::init(warp_logging::LogConfig {
+                frontend: warp_logging::LogFrontend::TerminalSupervisor,
+                log_destination: Some(warp_logging::LogDestination::File),
+                ..Default::default()
+            }) {
+                eprintln!("Failed to initialize terminal supervisor logging: {error:#}");
+            }
+            log::info!("Terminal supervisor {} is listening", std::process::id());
+        });
     }
     #[cfg(all(feature = "local_tty", unix))]
     if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
@@ -773,6 +793,14 @@ pub fn run() -> Result<()> {
         #[cfg(windows)]
         warp_util::windows::attach_to_parent_console();
         warp_cli::local_control::run_and_exit(args);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(parsed) = warp_cli::agent_event::from_argv(std::env::args_os()) {
+        if let Ok(args) = parsed {
+            agent_event_cli::run(&args);
+        }
+        return Ok(());
     }
 
     // Parse command-line arguments.
@@ -846,6 +874,23 @@ pub fn run() -> Result<()> {
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::Sessions(args) => {
                 return sessions_cli::run(args);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::AgentEvent(args) => {
+                agent_event_cli::run(args);
+                return Ok(());
+            }
+            #[cfg(not(target_family = "wasm"))]
+            warp_cli::Command::AgentCtrl(args) => {
+                #[cfg(feature = "local_fs")]
+                if let Some(request) = agent_ctrl_fleet_cli::move_all_request(args) {
+                    return agent_ctrl_fleet_cli::run(request);
+                }
+                #[cfg(feature = "local_fs")]
+                if let Some(request) = agent_ctrl_move_session_cli::move_session_request(args) {
+                    return agent_ctrl_move_session_cli::run(request);
+                }
+                return managed_agent_sessions::run(args);
             }
             #[cfg(not(target_family = "wasm"))]
             warp_cli::Command::PrintTelemetryEvents => {
@@ -1623,6 +1668,7 @@ pub(crate) fn initialize_app(
             ctx,
         )
     });
+    ctx.add_singleton_model(|_ctx| stozn_auth::StoznAuthManager::new());
 
     ctx.add_singleton_model(|_ctx| GPUState::new());
 
@@ -1894,6 +1940,8 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|_| RecordingController::new());
     ctx.add_singleton_model(|_| ExecutionProfileEditorManager::default());
     ctx.add_singleton_model(|_| NetworkLogPaneManager::default());
+    ctx.add_singleton_model(|_| agent_ctrl::FleetPaneManager::default());
+    ctx.add_singleton_model(|_| agent_ctrl::fleet_model::FleetModel::new());
     ctx.add_singleton_model(|_| pricing::PricingInfoModel::new());
     ctx.add_singleton_model(ai::pricing_promotion::PricingPromotionState::new);
     ctx.add_singleton_model(|ctx| {
@@ -2294,6 +2342,22 @@ pub(crate) fn initialize_app(
     // loads metadata.
     ctx.add_singleton_model(|_| RestoredAgentConversations::new());
     ctx.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    ctx.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
+    #[cfg(not(target_family = "wasm"))]
+    ctx.background_executor()
+        .spawn(async {
+            use crate::terminal::cli_agent_sessions::process_registry;
+            match process_registry::install_pi_extension() {
+                Ok(true) => log::info!("Installed the Pi session registry extension"),
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("Failed to install the Pi session registry extension: {error:#}")
+                }
+            }
+        })
+        .detach();
     // ActiveAgentViewsModel is used to track active agent conversations and notify listeners when they change.
     ctx.add_singleton_model(|_| ActiveAgentViewsModel::new());
     ctx.add_singleton_model(AgentNotificationsModel::new);
@@ -2730,6 +2794,16 @@ pub(crate) fn app_callbacks(
             );
         })),
         on_will_terminate: Some(Box::new(move |ctx| {
+            if is_integration_test && test_in_progress() {
+                if !app_exit_expected() {
+                    eprintln!("Test failure: the app quit before the test's steps finished.");
+                    std::process::exit(1);
+                }
+                log::info!("The app quit during a final step that expects it; the test passes.");
+            }
+
+            crate::session_configs::preserve_open_sessions_for_restart();
+
             NotebookManager::handle(ctx).update(ctx, |manager, ctx| {
                 // Notebooks are only saved periodically, so ensure that any pending changes have
                 // been sent to the writer thread before terminating.
@@ -2855,6 +2929,12 @@ pub(crate) fn app_callbacks(
                 "close requested for {window_id:?}: {open_window_count} open, quit_on_last={quit_on_last_window_closed}"
             );
             if open_window_count == 1 && quit_on_last_window_closed {
+                if is_integration_test && test_in_progress() && !app_exit_expected() {
+                    eprintln!(
+                        "Test failure: the last window closed before the test's steps finished."
+                    );
+                    std::process::exit(1);
+                }
                 log::info!("No windows left, terminating app");
                 ctx.terminate_app(TerminationMode::Cancellable, None);
                 return ApproveTerminateResult::Cancel;
@@ -2904,6 +2984,7 @@ pub(crate) fn app_callbacks(
             // update check re-detects it (autoupdate state isn't persisted
             // across restarts, so the artifact may be re-downloaded).
             if source == TerminationRequestSource::System {
+                crate::session_configs::preserve_open_sessions_for_restart();
                 return ApproveTerminateResult::Terminate;
             }
 
@@ -3212,6 +3293,24 @@ fn launch(
                 .iter()
                 .any(is_cloud_agent_web_home_launch_url);
             let force_restore = incoming_window_handoff.is_some();
+            #[cfg(not(target_family = "wasm"))]
+            let starts_empty = matches!(launch_mode, LaunchMode::App { .. })
+                && !force_restore
+                && !remote_control::should_restore_at_startup();
+            #[cfg(target_family = "wasm")]
+            let starts_empty = false;
+            let interrupted_sessions = if matches!(launch_mode, LaunchMode::App { .. })
+                && !should_skip_restore
+                && !starts_empty
+                && !force_restore
+                && launch_mode.args().urls.is_empty()
+                && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
+                && *GeneralSettings::as_ref(ctx).restore_session
+            {
+                crate::launch_configs::session_store::list_interrupted_summaries()
+            } else {
+                Vec::new()
+            };
             if let Some(handoff) = incoming_window_handoff.as_ref() {
                 let conversation_ids = handoff.window().conversation_ids_to_restore();
                 BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
@@ -3221,7 +3320,7 @@ fn launch(
                     conversations.release_conversations(&conversation_ids)
                 });
             }
-            let app_state = match incoming_window_handoff.as_ref() {
+            let mut app_state = match incoming_window_handoff.as_ref() {
                 Some(handoff) => {
                     let (block_lists, running_mcp_servers) = app_state
                         .map(|state| (state.block_lists, state.running_mcp_servers))
@@ -3233,16 +3332,42 @@ fn launch(
                         running_mcp_servers,
                     })
                 }
-                None if should_skip_restore => None,
+                None if should_skip_restore || starts_empty => None,
                 None => app_state,
             };
-            // Attempt to restore windows from the persisted application state.
-            let arg = OpenFromRestoredArg {
-                app_state,
-                force_restore,
-                defer_shell_start: force_restore,
-            };
-            ctx.dispatch_global_action("root_view:open_from_restored", &arg);
+            if !interrupted_sessions.is_empty()
+                && let Some(app_state) = app_state.as_mut()
+            {
+                app_state.windows.retain(|window| {
+                    window.launch_config_source.as_ref().is_none_or(|source| {
+                        !interrupted_sessions
+                            .iter()
+                            .any(|summary| summary.contains_source(source))
+                    })
+                });
+            }
+            if app_state
+                .as_ref()
+                .is_some_and(|app_state| !app_state.windows.is_empty())
+                || interrupted_sessions.is_empty()
+            {
+                let arg = OpenFromRestoredArg {
+                    app_state,
+                    force_restore,
+                    defer_shell_start: force_restore,
+                };
+                ctx.dispatch_global_action("root_view:open_from_restored", &arg);
+            }
+
+            for summary in interrupted_sessions {
+                ctx.dispatch_global_action(
+                    "root_view:open_stored_session",
+                    &OpenStoredSessionArg {
+                        summary: Arc::new(summary),
+                        ui_location: LaunchConfigUiLocation::Uri,
+                    },
+                );
+            }
 
             if let Some(handoff) = incoming_window_handoff {
                 let workspace = ctx

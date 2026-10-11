@@ -46,6 +46,13 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
             instance,
         } => quit(instance.pid, *terminate, json),
         SessionsCommand::Kill { session } => kill_session(session.session_id, json),
+        SessionsCommand::Stored { instance } => list_stored(instance.pid, json),
+        SessionsCommand::Open { name, instance } => act(
+            instance.pid,
+            Request::OpenStoredSession { name: name.clone() },
+            json,
+            &format!("Opened saved session {name}"),
+        ),
     }
 }
 
@@ -58,19 +65,11 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
 /// for" is the question a failed detach actually raises -- most often the
 /// answer is that `WARPSPEED_PROFILE` differs between the shell and the window.
 fn supervisor_channel() -> String {
-    #[cfg(all(feature = "local_tty", windows))]
-    {
-        warp_terminal::local_tty::windows::pipe_transport::supervisor_pipe_name()
-    }
-    #[cfg(all(feature = "local_tty", unix))]
-    {
-        warp_terminal::local_tty::unix_supervisor::socket::socket_path()
-            .to_string_lossy()
-            .into_owned()
-    }
-    #[cfg(not(feature = "local_tty"))]
-    {
+    let channel = crate::terminal::local_tty::session_holder::current_channel();
+    if channel.is_empty() {
         "none (this build has no local terminals)".to_owned()
+    } else {
+        channel
     }
 }
 
@@ -91,7 +90,9 @@ fn supervisor_channel() -> String {
 fn supervisor_reachable() -> bool {
     use warp_terminal::local_tty::windows::pipe_transport::{PipeTransport, supervisor_pipe_name};
 
-    let Ok(mut transport) = PipeTransport::connect(&supervisor_pipe_name()) else {
+    let Ok(Some(mut transport)) =
+        PipeTransport::connect_waiting(&supervisor_pipe_name(), std::time::Duration::from_secs(15))
+    else {
         return false;
     };
     finish_probe(&mut transport)
@@ -440,9 +441,54 @@ fn attach(pid: Option<u32>, session_id: u64, json: bool) -> Result<()> {
     }
 
     bail!(
-        "A tab was opened for session {session_id}, but nothing is holding it: taking the session          over failed and the tab has a new shell in it instead. The session itself is unharmed and          `{} sessions list` will still show it. On Windows this is expected for now -- a session's          pipe can only ever be read by one process, so a session cannot be attached once the pane          that started it has gone.",
+        "A tab was opened for session {session_id}, but nothing is holding it: taking the session          over failed and the tab has a new shell in it instead. The session itself is unharmed and          `{} sessions list` will still show it; retry the attach after the failed tab closes.",
         crate::remote_control::program_name()
     )
+}
+
+fn list_stored(pid: Option<u32>, json: bool) -> Result<()> {
+    let instance = client::select_instance(pid)?;
+    let sessions = match instance.call(Request::ListStoredSessions)? {
+        Response::StoredSessions { sessions } => sessions,
+        Response::Failed { error } => bail!(error),
+        other => bail!(unexpected(other)),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+    if sessions.is_empty() {
+        println!("There are no saved sessions.");
+        return Ok(());
+    }
+    println!(
+        "{:<20}  {:<10}  {:<17}  {:>4}  {:>5}  {:>6}",
+        "NAME", "KIND", "SAVED", "TABS", "PANES", "AGENTS"
+    );
+    for session in &sessions {
+        let saved = chrono::DateTime::from_timestamp(session.saved_at_unix_seconds, 0)
+            .map(|time| {
+                time.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        println!(
+            "{:<20}  {:<10}  {:<17}  {:>4}  {:>5}  {:>6}",
+            truncate(&session.name, 20),
+            if session.autosaved {
+                "autosaved"
+            } else {
+                "stored"
+            },
+            saved,
+            session.tabs,
+            session.panes,
+            session.agents,
+        );
+    }
+    Ok(())
 }
 
 fn act(pid: Option<u32>, request: Request, json: bool, done: &str) -> Result<()> {

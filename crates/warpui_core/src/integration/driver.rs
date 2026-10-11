@@ -9,15 +9,30 @@ const RUNTIME_TAG_FAILED_STEP_GROUP_NAME: &str = "failed_step_group_name";
 const RUNTIME_TAG_FAILED_ASSERTION_NAME: &str = "failed_assertion_name";
 pub const RUNTIME_TAG_FAILURE_REASON: &str = "failure_reason";
 
+/// Set while a test's steps are running. The app quitting inside that span means it exited on its
+/// own before the test's assertions could run, which must fail the test rather than exit cleanly.
+static TEST_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Set while the final step of a test built with [`Builder::expect_app_exit`] is running.
+static APP_EXIT_EXPECTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a test's steps are still running.
+pub fn test_in_progress() -> bool {
+    TEST_IN_PROGRESS.load(Ordering::SeqCst)
+}
+
+/// Whether the app quitting now is the declared outcome of the running test's final step.
+pub fn app_exit_expected() -> bool {
+    APP_EXIT_EXPECTED.load(Ordering::SeqCst)
+}
+
 use std::backtrace::BacktraceStatus;
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-#[cfg(not(target_family = "wasm"))]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context as _;
 use futures::{Future, FutureExt};
@@ -51,6 +66,7 @@ pub struct Builder {
     root_dir: RootDirKind,
     step_group_name_to_apply_to_new_steps: Option<String>,
     static_persisted_data: PersistedDataMap,
+    expect_app_exit: bool,
 }
 
 impl Builder {
@@ -72,6 +88,7 @@ impl Builder {
             root_dir: RootDirKind::Named { work_dir },
             step_group_name_to_apply_to_new_steps: None,
             static_persisted_data: persisted_data,
+            expect_app_exit: false,
         }
     }
 
@@ -156,6 +173,13 @@ impl Builder {
         self
     }
 
+    /// Declares that the test's last step ends with the app quitting, so that quit passes the test
+    /// instead of failing it. The step's assertions still fail the test if the app does not quit.
+    pub fn expect_app_exit(mut self) -> Self {
+        self.expect_app_exit = true;
+        self
+    }
+
     /// Configures the test to run with its root directory under the /tmp
     /// directory instead of under CARGO_TARGET_TMPDIR.
     pub fn use_tmp_filesystem_for_test_root_directory(mut self) -> Self {
@@ -176,6 +200,7 @@ impl Builder {
             on_finish: self.on_finish,
             timeout: self.timeout,
             persisted_data: self.static_persisted_data,
+            expect_app_exit: self.expect_app_exit,
         };
 
         driver.setup(create_temp_dir_for_test);
@@ -222,6 +247,7 @@ pub struct TestDriver {
     on_finish: Option<OnFinishFn>,
     timeout: Option<Duration>,
     persisted_data: PersistedDataMap,
+    expect_app_exit: bool,
 }
 
 pub const RERUN_EXIT_CODE: i32 = 127;
@@ -321,6 +347,8 @@ impl TestDriver {
                         "Test reached timeout after {}s; terminating...",
                         timeout.as_secs()
                     );
+                    TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
+                    APP_EXIT_EXPECTED.store(false, Ordering::SeqCst);
                     std::process::exit(2);
                 });
         }
@@ -328,22 +356,37 @@ impl TestDriver {
         let mut step_data_map = StepDataMap::default();
         self.configure_capture_recording(app, &mut step_data_map);
 
-        for mut step in steps {
+        let step_count = steps.len();
+        TEST_IN_PROGRESS.store(true, Ordering::SeqCst);
+        for (index, mut step) in steps.into_iter().enumerate() {
+            let is_last_step = index + 1 == step_count;
+            if is_last_step && self.expect_app_exit {
+                APP_EXIT_EXPECTED.store(true, Ordering::SeqCst);
+            }
             match self
                 .run_single_step_with_retries(&mut step, app, &mut step_data_map, &sigint_received)
                 .await
             {
                 StepResult::Success => {
+                    if is_last_step {
+                        // Every assertion has run, so the app quitting from here on hides nothing.
+                        TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
+                    }
+                    APP_EXIT_EXPECTED.store(false, Ordering::SeqCst);
                     self.handle_post_step_capture(app, &mut step_data_map).await;
                 }
                 StepResult::PreconditionFailed => {
+                    APP_EXIT_EXPECTED.store(false, Ordering::SeqCst);
                     self.finalize_recording(&mut step_data_map).await;
+                    TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
                     return true;
                 }
             }
         }
 
         self.finalize_recording(&mut step_data_map).await;
+        TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
+        APP_EXIT_EXPECTED.store(false, Ordering::SeqCst);
         false
     }
     fn configure_capture_recording(&self, app: &mut App, step_data_map: &mut StepDataMap) {
@@ -648,6 +691,8 @@ impl TestDriver {
                         self.persisted_data
                             .insert(RUNTIME_TAG_FAILURE_REASON.to_owned(), message.clone());
                         self.run_on_finish_and_export_tags(app, window_id).await;
+                        TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
+                        APP_EXIT_EXPECTED.store(false, Ordering::SeqCst);
                         panic!(
                             "Test step '{}' failed after {} attempts: {message}\nFailed in step group: {step_group_name}\n{backtrace_message}",
                             step.name(),
@@ -690,6 +735,8 @@ impl TestDriver {
                         self.persisted_data
                             .insert(RUNTIME_TAG_FAILURE_REASON.to_owned(), message.clone());
                         self.run_on_finish_and_export_tags(app, window_id).await;
+                        TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
+                        APP_EXIT_EXPECTED.store(false, Ordering::SeqCst);
                         panic!(
                             "Test step '{}' failed after {} attempts: {message}\nFailed in step group: {step_group_name}\n{backtrace_message}",
                             step.name(),
@@ -702,6 +749,8 @@ impl TestDriver {
                     log::info!("Test step '{}' canceled, running on_finish...", step.name());
                     self.run_on_finish_and_export_tags(app, window_id).await;
                     log::info!("on_finish complete, exiting");
+                    TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
+                    APP_EXIT_EXPECTED.store(false, Ordering::SeqCst);
                     std::process::exit(0);
                 }
                 AssertionOutcome::PreconditionFailed(msg) => {

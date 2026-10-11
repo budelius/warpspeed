@@ -261,6 +261,9 @@ pub fn initialize_app(app: &mut App) {
         )
     });
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
     // The blocklist controller created during terminal bootstrap subscribes to
     // OrchestrationEventService and OrchestrationEventStreamer unconditionally,
     // so both singletons must be registered before bootstrap.
@@ -373,6 +376,7 @@ fn bootstrap_terminal(
                 restored_block_commands,
                 rcfiles_duration_seconds,
                 spawning_command,
+                ..
             } = bootstrapped_event;
             sessions.initialize_bootstrapped_session(
                 *session_info,
@@ -442,6 +446,7 @@ pub async fn add_window_with_bootstrapped_terminal_and_window_id(
             .collect_vec(),
         rcfiles_duration_seconds: None,
         spawning_command: "test command".to_string(),
+        restored: false,
     };
     bootstrap_terminal(&terminal, bootstrapped_event, app);
 

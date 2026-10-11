@@ -14,6 +14,174 @@ use crate::secret::{CodexMethod, CreateProvider, SecretCommand};
 use crate::task::{MessageCommand, TaskCommand};
 
 #[test]
+fn managed_agent_start_requires_task_attachment() {
+    let missing = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "staging-pi-lander",
+        "--interactive",
+    ]);
+    assert!(missing.is_err());
+
+    let attached = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "staging-pi-lander",
+        "--task",
+        "64f111111111111111111111",
+        "--interactive",
+    ]);
+    assert!(attached.is_ok());
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "ui"]).is_err());
+    assert!(
+        Args::try_parse_from([
+            "warpspeed",
+            "agent-ctrl",
+            "open",
+            "job-ca9b590c-979c-4d46-b19f-f6f50fc852d3",
+        ])
+        .is_ok()
+    );
+}
+
+fn agent_ctrl_command(arguments: &[&str]) -> managed_sessions::ManagedSessionsCommand {
+    let args = Args::try_parse_from(["warpspeed", "agent-ctrl"].iter().chain(arguments)).unwrap();
+    match args.command() {
+        Some(Command::AgentCtrl(managed)) => managed.command.clone(),
+        other => panic!("expected an agent-ctrl command, got {other:?}"),
+    }
+}
+
+#[test]
+fn managed_agent_start_on_a_repository_needs_no_task() {
+    let command = agent_ctrl_command(&[
+        "start",
+        "--agent",
+        "a",
+        "--repo",
+        "https://x/y.git",
+        "--branch",
+        "main",
+    ]);
+    let managed_sessions::ManagedSessionsCommand::Start {
+        task, repo, branch, ..
+    } = command
+    else {
+        panic!("expected start, got {command:?}");
+    };
+    assert_eq!(task, None);
+    assert_eq!(repo.as_deref(), Some("https://x/y.git"));
+    assert_eq!(branch.as_deref(), Some("main"));
+
+    let without_target = Args::try_parse_from(["warpspeed", "agent-ctrl", "start", "--agent", "a"]);
+    assert!(without_target.is_err());
+    let branch_without_repo = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "a",
+        "--task",
+        "task-1",
+        "--branch",
+        "main",
+    ]);
+    assert!(branch_without_repo.is_err());
+    let task_and_repo = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "a",
+        "--task",
+        "task-1",
+        "--repo",
+        "https://x/y.git",
+    ]);
+    assert!(task_and_repo.is_err());
+    let interactive_on_repo = Args::try_parse_from([
+        "warpspeed",
+        "agent-ctrl",
+        "start",
+        "--agent",
+        "a",
+        "--repo",
+        "https://x/y.git",
+        "--interactive",
+    ]);
+    assert!(interactive_on_repo.is_err());
+    let interactive_task =
+        agent_ctrl_command(&["start", "--agent", "a", "--task", "task-1", "--interactive"]);
+    assert!(matches!(
+        interactive_task,
+        managed_sessions::ManagedSessionsCommand::Start {
+            interactive: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn managed_agent_repos_and_move_all_parse() {
+    assert!(matches!(
+        agent_ctrl_command(&["repos"]),
+        managed_sessions::ManagedSessionsCommand::Repos { .. }
+    ));
+    let command = agent_ctrl_command(&["move-all", "--under", r"T:\p"]);
+    let managed_sessions::ManagedSessionsCommand::MoveAll { under, yes, .. } = command else {
+        panic!("expected move-all, got {command:?}");
+    };
+    assert_eq!(under, std::path::PathBuf::from(r"T:\p"));
+    assert!(!yes);
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "move-all"]).is_err());
+}
+
+#[test]
+fn managed_agent_archive_and_remove_alias_parse() {
+    for name in ["archive", "remove"] {
+        let command = agent_ctrl_command(&[name, "job-1", "--yes"]);
+        let managed_sessions::ManagedSessionsCommand::Archive {
+            job_id,
+            yes,
+            environment,
+        } = command
+        else {
+            panic!("expected archive, got {command:?}");
+        };
+        assert_eq!(job_id, "job-1");
+        assert!(yes);
+        assert_eq!(environment, managed_sessions::ManagedEnvironment::Staging);
+    }
+}
+
+#[test]
+fn managed_agent_pause_and_resume_parse() {
+    let command = agent_ctrl_command(&["pause", "job-1"]);
+    let managed_sessions::ManagedSessionsCommand::Pause {
+        job_id,
+        environment,
+    } = command
+    else {
+        panic!("expected pause, got {command:?}");
+    };
+    assert_eq!(job_id, "job-1");
+    assert_eq!(environment, managed_sessions::ManagedEnvironment::Staging);
+
+    let command = agent_ctrl_command(&["resume", "job-2"]);
+    let managed_sessions::ManagedSessionsCommand::Resume { job_id, .. } = command else {
+        panic!("expected resume, got {command:?}");
+    };
+    assert_eq!(job_id, "job-2");
+
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "pause"]).is_err());
+    assert!(Args::try_parse_from(["warpspeed", "agent-ctrl", "resume"]).is_err());
+}
+
+#[test]
 fn identifies_worker_subcommands() {
     assert!(is_worker_invocation("minidump-server"));
     #[cfg(unix)]
@@ -3257,5 +3425,102 @@ fn report_external_reference_missing_reference_type_fails() {
     assert!(
         result.is_err(),
         "missing --reference-type should fail to parse"
+    );
+}
+
+#[test]
+fn managed_agent_start_takes_an_agent_kind() {
+    let command = agent_ctrl_command(&["start", "--agent", "claude", "--repo", "https://x/y"]);
+    let managed_sessions::ManagedSessionsCommand::Start { agent, .. } = command else {
+        panic!("expected start, got {command:?}");
+    };
+    assert_eq!(agent, "claude");
+}
+
+#[test]
+fn agent_event_takes_one_of_two_formats() {
+    for (spelling, expected) in [
+        ("kimi-hook", agent_event::AgentEventFormat::KimiHook),
+        ("protocol", agent_event::AgentEventFormat::Protocol),
+    ] {
+        let args =
+            Args::try_parse_from(["warpspeed", "agent-event", "--format", spelling]).unwrap();
+        match args.command() {
+            Some(Command::AgentEvent(event)) => {
+                assert_eq!(event.format, expected);
+                assert_eq!(event.hooks_version, None);
+                assert!(!Command::AgentEvent(event.clone()).prints_to_stdout());
+            }
+            other => panic!("expected agent-event, got {other:?}"),
+        }
+    }
+    let versioned = Args::try_parse_from([
+        "warpspeed",
+        "agent-event",
+        "--format",
+        "kimi-hook",
+        "--hooks-version",
+        "1.0.0",
+    ])
+    .unwrap();
+    let Some(Command::AgentEvent(event)) = versioned.command() else {
+        panic!("expected agent-event");
+    };
+    assert_eq!(event.hooks_version.as_deref(), Some("1.0.0"));
+    assert!(Args::try_parse_from(["warpspeed", "agent-event"]).is_err());
+    assert!(Args::try_parse_from(["warpspeed", "agent-event", "--format", "osc"]).is_err());
+}
+
+#[test]
+fn agent_event_argv_is_parsed_apart_from_the_rest_of_the_cli() {
+    let parsed = agent_event::from_argv([
+        "warpspeed",
+        "agent-event",
+        "--format",
+        "protocol",
+        "--hooks-version",
+        "2.0.0",
+    ])
+    .expect("it is agent-event")
+    .expect("it parses");
+    assert_eq!(parsed.format, agent_event::AgentEventFormat::Protocol);
+    assert_eq!(parsed.hooks_version.as_deref(), Some("2.0.0"));
+
+    for bad in [
+        vec!["warpspeed", "agent-event", "--format", "osc"],
+        vec![
+            "warpspeed",
+            "agent-event",
+            "--format",
+            "kimi-hook",
+            "--from-the-future",
+        ],
+        vec!["warpspeed", "agent-event", "--format"],
+        vec!["warpspeed", "agent-event"],
+        vec!["warpspeed", "agent-event", "--help"],
+    ] {
+        assert!(
+            matches!(agent_event::from_argv(bad.clone()), Some(Err(_))),
+            "{bad:?}"
+        );
+    }
+
+    assert!(agent_event::from_argv(["warpspeed"]).is_none());
+    assert!(agent_event::from_argv(["warpspeed", "sessions", "panes"]).is_none());
+    assert!(agent_event::from_argv(["warpspeed", "--format", "agent-event"]).is_none());
+}
+
+#[test]
+fn managed_agent_move_session_parses() {
+    let command = agent_ctrl_command(&["move-session", "--agent", "dsh", "--session", "0b6c"]);
+    let managed_sessions::ManagedSessionsCommand::MoveSession { agent, session, .. } = command
+    else {
+        panic!("expected move-session, got {command:?}");
+    };
+    assert_eq!(agent, "dsh");
+    assert_eq!(session, "0b6c");
+    assert!(
+        Args::try_parse_from(["warpspeed", "agent-ctrl", "move-session", "--agent", "dsh"])
+            .is_err()
     );
 }

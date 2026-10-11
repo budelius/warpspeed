@@ -14,8 +14,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, HTMAXBUTTON, PostMessageW, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCHITTEST,
-    WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    GetCursorPos, HTMAXBUTTON, PostMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
 };
 use winit::window::Window as WinitWindow;
 
@@ -38,6 +39,8 @@ pub struct SnapLayoutsState {
     /// Only ever touched from the message thread; the `Mutex` is here to match the field above and
     /// to keep the state shareable, not because there is contention to resolve.
     hovered: Mutex<bool>,
+    /// Whether the synthetic client-area press is waiting for its release.
+    pressed: Mutex<bool>,
 }
 
 impl SnapLayoutsState {
@@ -70,6 +73,22 @@ impl SnapLayoutsState {
             Ok(mut hovered) => std::mem::replace(&mut hovered, false),
             Err(_) => false,
         }
+    }
+
+    fn note_pressed(&self) {
+        if let Ok(mut pressed) = self.pressed.lock() {
+            *pressed = true;
+        }
+    }
+
+    fn clear_pressed(&self) {
+        if let Ok(mut pressed) = self.pressed.lock() {
+            *pressed = false;
+        }
+    }
+
+    fn is_pressed(&self) -> bool {
+        self.pressed.lock().is_ok_and(|pressed| *pressed)
     }
 }
 
@@ -153,17 +172,27 @@ unsafe extern "system" fn subclass_proc(
                 default_answer
             }
         }
+        WM_LBUTTONUP => {
+            state.clear_pressed();
+            unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+        }
         WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP
         | WM_NCLBUTTONDBLCLK => {
-            let Some(synthetic) = synthetic_message(message, wparam.0 as u32) else {
-                // Non-client activity that has nothing to do with the button. If we still believe
-                // the button is hovered, this move is the pointer leaving it, and it is the only
-                // notice we are going to get: winit answers our synthetic `WM_MOUSEMOVE` by arming
-                // its own client-only `TrackMouseEvent`, which replaces the `TME_NONCLIENT` request
-                // below, so `WM_NCMOUSELEAVE` may never arrive. End the hover here, and let the
-                // message itself go on to `DefSubclassProc` so the resize borders and the rest of
-                // the non-client area keep working exactly as before.
-                if message == WM_NCMOUSEMOVE && state.take_hovered() {
+            let button_pressed = state.is_pressed();
+            let Some(synthetic) = synthetic_message(message, wparam.0 as u32, button_pressed)
+            else {
+                // Non-client activity that should not be translated. If we still believe the
+                // button is hovered, an unpressed move outside it is the pointer leaving it, and it
+                // is the only notice we are going to get: winit answers our synthetic
+                // `WM_MOUSEMOVE` by arming its own client-only `TrackMouseEvent`, which replaces
+                // the `TME_NONCLIENT` request below, so `WM_NCMOUSELEAVE` may never arrive. End the
+                // hover here, and let the message itself go on to `DefSubclassProc` so the resize
+                // borders and the rest of the non-client area keep working exactly as before.
+                //
+                // While pressed, even a move posted only to end the hover becomes a drag in winit
+                // and changes the position used for the eventual release. Wait for the real client
+                // release instead.
+                if message == WM_NCMOUSEMOVE && !button_pressed && state.take_hovered() {
                     let (screen_x, screen_y) = unpack_coords(lparam);
                     if let Some(cursor) = screen_to_client(hwnd, screen_x, screen_y) {
                         let (x, y) = leave_position(cursor, state.button_rect());
@@ -173,6 +202,10 @@ unsafe extern "system" fn subclass_proc(
 
                 return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
             };
+
+            if message == WM_NCLBUTTONUP {
+                state.clear_pressed();
+            }
 
             let position = if message == WM_NCMOUSELEAVE {
                 // WM_NCMOUSELEAVE carries no position of its own.
@@ -197,9 +230,17 @@ unsafe extern "system" fn subclass_proc(
                 WM_NCMOUSELEAVE => {
                     state.take_hovered();
                 }
+                WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => state.note_pressed(),
+                WM_NCLBUTTONUP => {}
                 _ => {}
             }
 
+            if synthetic.message == WM_LBUTTONDOWN {
+                // winit's mouse-button event has no position and reuses its last `WM_MOUSEMOVE`.
+                // A hover-leave may have deliberately moved that position below the button, so
+                // restore the real press position before replaying the button down.
+                post_synthetic(hwnd, WM_MOUSEMOVE, 0, x, y);
+            }
             post_synthetic(hwnd, synthetic.message, synthetic.wparam, x, y);
 
             // Swallow the original. Left alone, `DefWindowProc` would open the system menu on a
@@ -250,8 +291,8 @@ fn cursor_client_position(hwnd: HWND) -> Option<(i32, i32)> {
 /// the hover from the first non-client move away from the button, and treats `WM_NCMOUSELEAVE` as
 /// the tidier of two paths rather than as the only one.
 ///
-/// Called on every `WM_NCMOUSEMOVE`, so a failure is only logged once per process rather than on
-/// every mouse move.
+/// Called on every unpressed `WM_NCMOUSEMOVE` over the button, so a failure is only logged once per
+/// process rather than on every mouse move.
 fn track_mouse_leave(hwnd: HWND) {
     static WARNED: Once = Once::new();
 

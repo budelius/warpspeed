@@ -2,12 +2,15 @@ pub mod event;
 pub mod listener;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod plugin_manager;
+#[cfg(not(target_family = "wasm"))]
+pub(crate) mod process_registry;
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use event::{CLIAgentEvent, CLIAgentEventSource, CLIAgentEventType};
-use warpui::r#async::SpawnedFutureHandle;
+use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use self::listener::CLIAgentSessionListener;
@@ -18,6 +21,9 @@ use crate::ai::blocklist::InputConfig;
 /// CLI agent session's PTY, for further plugin activity before concluding the
 /// interrupt silently cancelled the session. See `observe_ctrl_c_write`.
 pub const CTRL_C_CANCEL_WINDOW: Duration = Duration::from_secs(2);
+const SESSION_RECOVERY_LOOKBACK: Duration = Duration::from_secs(120);
+const SESSION_RECOVERY_ATTEMPTS: usize = 5;
+const SESSION_RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Status of a tracked CLI agent session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +65,8 @@ pub struct CLIAgentSessionContext {
     pub cwd: Option<String>,
     pub project: Option<String>,
     pub session_id: Option<String>,
+    /// The session file the agent last reported.
+    pub transcript_path: Option<PathBuf>,
     pub tool_name: Option<String>,
     pub tool_input_preview: Option<String>,
     pub summary: Option<String>,
@@ -205,6 +213,12 @@ impl CLIAgentSession {
             .session_id
             .clone()
             .or(self.session_context.session_id.take());
+        self.session_context.transcript_path = event
+            .payload
+            .transcript_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or(self.session_context.transcript_path.take());
 
         let new_status = match &event.event {
             CLIAgentEventType::PromptSubmit => {
@@ -361,6 +375,9 @@ pub struct CLIAgentSessionsModel {
     /// Source of `CtrlCCancelState::armed_token` values. Monotonically increasing;
     /// never reused, so a stale callback can never alias a newer window.
     next_ctrl_c_token: u64,
+    recovered_session_ids: HashMap<EntityId, String>,
+    session_recovery_tokens: HashMap<EntityId, u64>,
+    next_session_recovery_token: u64,
 }
 
 impl Entity for CLIAgentSessionsModel {
@@ -376,11 +393,116 @@ impl CLIAgentSessionsModel {
             plugin_auto_failures: HashSet::new(),
             ctrl_c_cancel_state: HashMap::new(),
             next_ctrl_c_token: 0,
+            recovered_session_ids: HashMap::new(),
+            session_recovery_tokens: HashMap::new(),
+            next_session_recovery_token: 0,
         }
     }
 
     pub fn session(&self, terminal_view_id: EntityId) -> Option<&CLIAgentSession> {
         self.sessions.get(&terminal_view_id)
+    }
+
+    pub(crate) fn session_id(&self, terminal_view_id: EntityId) -> Option<&str> {
+        self.sessions
+            .get(&terminal_view_id)?
+            .session_context
+            .session_id
+            .as_deref()
+            .or_else(|| {
+                self.recovered_session_ids
+                    .get(&terminal_view_id)
+                    .map(String::as_str)
+            })
+    }
+
+    pub(crate) fn recover_session_id_from_history(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(session) = self.sessions.get(&terminal_view_id) else {
+            return;
+        };
+        if session.session_context.session_id.is_some() || session.is_remote() {
+            return;
+        }
+        let agent = session.agent;
+        if !agent.supports_history_recovery() {
+            return;
+        }
+        let Some(cwd) = session.session_context.cwd.as_deref().map(PathBuf::from) else {
+            return;
+        };
+        let not_before = SystemTime::now()
+            .checked_sub(SESSION_RECOVERY_LOOKBACK)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let token = self.next_session_recovery_token;
+        self.next_session_recovery_token += 1;
+        self.session_recovery_tokens.insert(terminal_view_id, token);
+
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        ctx.background_executor()
+            .spawn(async move {
+                for attempt in 0..SESSION_RECOVERY_ATTEMPTS {
+                    let sessions = crate::terminal::agent_session_history::find_recent(
+                        agent, &cwd, not_before,
+                    );
+                    if !sessions.is_empty() || attempt + 1 == SESSION_RECOVERY_ATTEMPTS {
+                        let _ = sender.send(sessions);
+                        return;
+                    }
+                    Timer::after(SESSION_RECOVERY_INTERVAL).await;
+                }
+            })
+            .detach();
+
+        ctx.spawn(receiver, move |model, recovered, ctx| {
+            if model.session_recovery_tokens.get(&terminal_view_id) != Some(&token) {
+                return;
+            }
+            model.session_recovery_tokens.remove(&terminal_view_id);
+            let Ok(recovered) = recovered else {
+                return;
+            };
+            let used_ids = model
+                .sessions
+                .iter()
+                .filter(|(view_id, _)| **view_id != terminal_view_id)
+                .filter_map(|(_, session)| session.session_context.session_id.as_deref())
+                .chain(
+                    model
+                        .recovered_session_ids
+                        .iter()
+                        .filter(|(view_id, _)| **view_id != terminal_view_id)
+                        .map(|(_, session_id)| session_id.as_str()),
+                )
+                .collect::<HashSet<_>>();
+            let Some(recovered) = recovered
+                .into_iter()
+                .find(|session| !used_ids.contains(session.session_id.as_str()))
+            else {
+                return;
+            };
+            let Some(session) = model.sessions.get_mut(&terminal_view_id) else {
+                return;
+            };
+            if session.agent != recovered.agent || session.session_context.session_id.is_some() {
+                return;
+            }
+            if session.session_context.display_title().is_none() {
+                session.session_context.summary = recovered.title;
+            }
+            let agent = session.agent;
+            model
+                .recovered_session_ids
+                .insert(terminal_view_id, recovered.session_id);
+            ctx.emit(CLIAgentSessionsModelEvent::SessionUpdated {
+                terminal_view_id,
+                agent,
+            });
+            ctx.dispatch_global_action("workspace:save_app", &());
+        });
     }
 
     /// Returns `true` if the rich input editor is currently open for this terminal.
@@ -459,6 +581,8 @@ impl CLIAgentSessionsModel {
     pub fn remove_session(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
         self.abort_pending_cancel(terminal_view_id);
         self.ctrl_c_cancel_state.remove(&terminal_view_id);
+        self.recovered_session_ids.remove(&terminal_view_id);
+        self.session_recovery_tokens.remove(&terminal_view_id);
         if let Some(session) = self.sessions.remove(&terminal_view_id) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
@@ -747,6 +871,8 @@ impl CLIAgentSessionsModel {
         // arm, and any pending window belonged to the session being replaced.
         self.abort_pending_cancel(terminal_view_id);
         self.ctrl_c_cancel_state.remove(&terminal_view_id);
+        self.recovered_session_ids.remove(&terminal_view_id);
+        self.session_recovery_tokens.remove(&terminal_view_id);
         if let Some(old) = self.sessions.insert(terminal_view_id, session) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
@@ -757,6 +883,39 @@ impl CLIAgentSessionsModel {
         ctx.emit(CLIAgentSessionsModelEvent::Started {
             terminal_view_id,
             agent,
+        });
+    }
+
+    /// Records the session an agent process reported in its own process registry.
+    ///
+    /// A plugin-backed session already reports its session through events, which stay the
+    /// source of truth for it.
+    pub fn set_process_registry_session(
+        &mut self,
+        terminal_view_id: EntityId,
+        session_id: String,
+        cwd: Option<String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(session) = self.sessions.get_mut(&terminal_view_id) else {
+            return;
+        };
+        if session.received_rich_notification {
+            return;
+        }
+        let context = &mut session.session_context;
+        let changed = context.session_id.as_deref() != Some(session_id.as_str())
+            || (cwd.is_some() && context.cwd != cwd);
+        if !changed {
+            return;
+        }
+        context.session_id = Some(session_id);
+        if cwd.is_some() {
+            context.cwd = cwd;
+        }
+        ctx.emit(CLIAgentSessionsModelEvent::SessionUpdated {
+            terminal_view_id,
+            agent: session.agent,
         });
     }
 

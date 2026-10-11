@@ -1,6 +1,7 @@
 use super::*;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty::screen::HeadlessScreen;
+use crate::model::ansi;
 
 /// The repaint must put the terminal into a known state before drawing.
 /// Without that, a snapshot fed into a screen still carrying state from earlier
@@ -25,5 +26,41 @@ fn repaint_erases_before_drawing() {
         receiver.visible_text().trim_end(),
         source.visible_text().trim_end(),
         "repaint did not erase what the receiving screen already held"
+    );
+}
+
+#[test]
+fn repaint_ignores_scrollback_when_rendering_visible_screen() {
+    let mut source = GridHandler::new_for_test_with_scroll_limit(2, 10, 10);
+    ansi::Processor::new().parse_bytes(
+        &mut source,
+        b"old\r\nvisible1\r\nvisible2",
+        &mut std::io::sink(),
+    );
+    assert_eq!(source.history_size(), 1);
+
+    let bytes = render_screen(&source);
+    let mut receiver = HeadlessScreen::new(10, 2, ChannelEventListener::new_for_test());
+    receiver.feed(&bytes);
+
+    assert_eq!(receiver.visible_text().trim_end(), "visible1\nvisible2");
+}
+
+#[test]
+fn repaint_cursor_position_is_relative_to_visible_screen() {
+    let mut source = GridHandler::new_for_test_with_scroll_limit(2, 10, 10);
+    ansi::Processor::new().parse_bytes(
+        &mut source,
+        b"old\r\nvisible1\r\nvisible2\x1b[1;3H",
+        &mut std::io::sink(),
+    );
+    assert_eq!(source.history_size(), 1);
+
+    let bytes = render_screen(&source);
+
+    assert!(
+        bytes.ends_with(b"\x1b[1;3H"),
+        "repaint restored the cursor outside the visible screen: {:?}",
+        String::from_utf8_lossy(&bytes)
     );
 }

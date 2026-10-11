@@ -110,16 +110,28 @@ returns 0 to swallow the original:
 
 | Received | Posted |
 | --- | --- |
-| `WM_NCMOUSEMOVE`, wParam `HTMAXBUTTON` | `WM_MOUSEMOVE` at the client coordinate |
-| `WM_NCMOUSEMOVE`, any other wParam, while the button is hovered | `WM_MOUSEMOVE` at the client coordinate, or one pixel below the rectangle if that coordinate is still inside it |
-| `WM_NCMOUSELEAVE` | `WM_MOUSEMOVE` at the current cursor position, or one pixel below the rectangle if that position is still inside it |
-| `WM_NCLBUTTONDOWN`, wParam `HTMAXBUTTON` | `WM_LBUTTONDOWN` |
-| `WM_NCLBUTTONDBLCLK`, wParam `HTMAXBUTTON` | `WM_LBUTTONDOWN` |
+| `WM_NCMOUSEMOVE`, wParam `HTMAXBUTTON`, with no maximize-button press active | `WM_MOUSEMOVE` at the client coordinate |
+| `WM_NCMOUSEMOVE`, any other wParam, while the button is hovered and not pressed | `WM_MOUSEMOVE` at the client coordinate, or one pixel below the rectangle if that coordinate is still inside it |
+| `WM_NCMOUSELEAVE`, with no maximize-button press active | `WM_MOUSEMOVE` at the current cursor position, or one pixel below the rectangle if that position is still inside it |
+| `WM_NCLBUTTONDOWN`, wParam `HTMAXBUTTON` | `WM_MOUSEMOVE` at the press coordinate, then `WM_LBUTTONDOWN` |
+| `WM_NCLBUTTONDBLCLK`, wParam `HTMAXBUTTON` | `WM_MOUSEMOVE` at the press coordinate, then `WM_LBUTTONDOWN` |
 | `WM_NCLBUTTONUP`, wParam `HTMAXBUTTON` | `WM_LBUTTONUP` |
 
-Every row but the second is swallowed. The second is not: the pointer is over the resize border or some
-other part of the non-client area, and that area has to keep behaving exactly as it did before, so the
-message goes on to `DefSubclassProc` and only the synthetic move is added.
+Messages received for the button are swallowed after translation. A non-client move that no longer belongs
+to the button is not: the pointer is over the resize border or some other part of the non-client area, and
+that area has to keep behaving exactly as it did before. When no press is active, the message goes on to
+`DefSubclassProc` and the synthetic hover-ending move is added. During a press it goes on untouched.
+
+Each replayed down is preceded by a client move at the down message's coordinates. winit's client mouse
+button event carries no coordinates and reuses its last `WM_MOUSEMOVE`; without the preceding move, a
+fabricated hover-leave below the button can make the press hit the UI underneath it instead.
+
+Non-client moves and leaves are not replayed between the synthetic down and its matching up. winit treats
+every `WM_MOUSEMOVE` in that interval as a drag and stores its coordinates for the eventual release. A
+fabricated hover-leave in that interval therefore leaks a drag into the UI and makes the release miss the
+button, intermittently dropping maximize clicks and leaving stale layout behind until the next resize.
+Mouse capture supplies real client moves during an actual drag; an ordinary click needs no additional move
+before its release.
 
 `WM_NCLBUTTONDBLCLK` has to be translated for the same reason `WM_NCLBUTTONDOWN` does, and more urgently.
 Left to `DefWindowProc` with an `HTMAXBUTTON` hit code it enters a caption-button tracking loop — a nested

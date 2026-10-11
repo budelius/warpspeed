@@ -632,6 +632,9 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                         } => {
                             if paused {
                                 log::info!("Ignoring event as SQLite Writer is on pause");
+                                if include_blocks {
+                                    release_session_leases(&windows);
+                                }
                                 continue;
                             }
                             let block_lists = if include_blocks {
@@ -648,6 +651,9 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                                     history_id.as_deref(),
                                 )
                             });
+                            if include_blocks {
+                                release_session_leases(&windows);
+                            }
                             if let Err(error) = result {
                                 safe_error!(
                                     safe: ("Failed to save launch config window sessions"),
@@ -943,6 +949,18 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     log_access("Database", database_path);
 
     report_error!(err.context(format!("SQLite {err_kind} error")));
+}
+
+fn release_session_leases(windows: &[WindowSnapshot]) {
+    for window in windows {
+        if let Some(source) = window
+            .launch_config_source
+            .as_ref()
+            .filter(|source| source.is_session_config())
+        {
+            crate::session_configs::release_session(source);
+        }
+    }
 }
 
 /// Filter a collection of model events to remove superseded snapshots.
@@ -1283,7 +1301,9 @@ fn save_pane_state(
         }
         LeafContents::GetStarted => GET_STARTED_PANE_KIND,
         LeafContents::AIDocument(_) => AI_DOCUMENT_PANE_KIND,
-        LeafContents::EnvironmentManagement(_) | LeafContents::NetworkLog => {
+        LeafContents::EnvironmentManagement(_)
+        | LeafContents::NetworkLog
+        | LeafContents::AgentCtrlFleet => {
             // These pane types are filtered out before this function is
             // called; see `LeafContents::is_persisted` and the skip in
             // `save_app_state`. Reaching this arm would mean a `pane_nodes`
@@ -1361,6 +1381,18 @@ fn save_pane_state(
                         Err(error) => {
                             log::warn!(
                                 "Dropping the CLI agent resume descriptor from a persisted terminal pane: {error}"
+                            );
+                            None
+                        }
+                    }),
+                session_holder: terminal_snapshot
+                    .session_holder
+                    .as_ref()
+                    .and_then(|holder| match serde_json::to_string(holder) {
+                        Ok(serialized) => Some(serialized),
+                        Err(error) => {
+                            log::warn!(
+                                "Dropping the session holder from a persisted terminal pane: {error}"
                             );
                             None
                         }
@@ -1533,7 +1565,7 @@ fn save_pane_state(
                 .values(ambient_agent_pane)
                 .execute(conn)?;
         }
-        LeafContents::NetworkLog => {
+        LeafContents::NetworkLog | LeafContents::AgentCtrlFleet => {
             // Unreachable: filtered by `is_persisted` in `save_app_state`.
         }
     }
@@ -2362,6 +2394,17 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                                     // fix.
                                     log::warn!(
                                         "Ignoring an unreadable CLI agent resume descriptor for a restored terminal pane: {error}"
+                                    );
+                                    None
+                                }
+                            }),
+                        session_holder: terminal_pane
+                            .session_holder
+                            .and_then(|serialized| match serde_json::from_str(&serialized) {
+                                Ok(holder) => Some(holder),
+                                Err(error) => {
+                                    log::warn!(
+                                        "Ignoring an unreadable session holder for a restored terminal pane: {error}"
                                     );
                                     None
                                 }

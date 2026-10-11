@@ -1,0 +1,181 @@
+# AgentCtrl: pause/resume, a second node, and two WarpSpeed follow-ups — Design
+
+Date: 2026-10-07
+Status: approved in discussion (2026-10-07)
+Builds on: `2026-10-04-agentctrl-fleet-design.md` (fleet runs, per-run worktrees, start-on-repo).
+Target: the Hetzner staging cluster (`agent-ctrl` namespace), dashboard `dash-backend-dev.stozn.ai`.
+
+## Goal
+
+Run more sessions than one node holds, and let the operator pause a session so it stops costing a
+slot and resume it later with its conversation intact, from the dashboard and from WarpSpeed.
+
+## Non-goals
+
+- Prod AgentCtrl.
+- Auto-pausing idle runs; pausing non-interactive (ticket) workers.
+- Live migration of a running process between nodes.
+- Changing the move flow (`move-all`) beyond what the shared scheduling gives it.
+
+## Three specs, three plans
+
+- **Spec A (stoz3n-agent-ctrl):** capacity-aware scheduling across a node pool, pause/resume, the
+  StatefulSet node deployment with per-node workspaces. Prerequisite for B and C.
+- **Spec B (stoz3n-agent-dash):** pause/resume routes and buttons, `paused` state, repos union.
+- **Spec C (warp):** fleet pane and CLI pause/resume, viewer notice, `--agent` kind names, GUI
+  `attach_detached_session`.
+
+---
+
+## Spec A — agent-ctrl
+
+### A·1 Node pool and scheduling
+
+- An agent's `node:` value is a **pool prefix**: every connected node whose `node_name` starts with
+  it is a candidate (`agent-ctrl-node` matches `agent-ctrl-node-0` and `agent-ctrl-node-1`; the
+  single node of today, named exactly `agent-ctrl-node`, still matches).
+- `NodeRegistration` gains `max_interactive_runs` (the node's `AGENT_CTRL_MAX_INTERACTIVE_RUNS`);
+  `HeartbeatRequest` gains `running_interactive` (current count). The controller keeps both per
+  node.
+- `SpawnAgent`, `ImportSession` and `ResumeAgent` pick the connected candidate with the most free
+  interactive slots (ties: lowest name). Only when no candidate has a free slot does the call fail
+  with `RESOURCE_EXHAUSTED "node at capacity"` (the dashboard keeps mapping it to 409
+  `node_at_capacity`). The node-side cap check stays as the last line of defence; its NACK is
+  surfaced unchanged.
+- `req.node_name`, when given, must name a candidate in the pool (it replaces the "must equal the
+  configured node" check).
+- `StopAgent`, `SendInput`, `GetAgentStatus`, `TailAgentLogs` keep routing by the job's recorded
+  `node_name`. Every other place that matches a node by name (triggers, work-source dispatch,
+  controller-startup recovery) uses the same pool rule, so a pool of `agent-ctrl-node-0/-1`
+  satisfies agents configured with `agent-ctrl-node`; `obachan-worker` is unaffected.
+- The node reports `running_interactive` in its health report (nodes do not call the `Heartbeat`
+  RPC); the registry server's message limit is raised to 32 MiB so a pause can upload a session
+  file.
+- `ListRepositories` returns the union over connected pool nodes: a repository is `reachable` only
+  if every node that lists it reports it reachable; `error` names the failing node.
+
+### A·2 Pause and resume
+
+- New `JobState::Paused` (`"paused"`), non-terminal, excluded from every capacity count. Persisted
+  like the other states (controller job record, Mongo read model, `GET /runs`).
+- New RPCs `PauseAgent { job_id, request_id, actor, source }` and
+  `ResumeAgent { job_id, request_id, actor, source }` on FleetControl, both operator mutations
+  (same `mutation_context` audit handling as `StopAgent`), both idempotent: pausing a paused run
+  and resuming a running run are no-ops that return the current state.
+- `StopAgent` on a paused run ends it: the job becomes `Stopped`, and the node that holds the
+  worktree removes the marker and the worktree (nothing new to push; the pause already pushed).
+  The dashboard keeps Stop enabled for paused runs because `paused` is not terminal.
+- Every interactive run records its agent session id on the job at spawn (Claude via the
+  `--session-id` the node generates; Pi and Codex from their first status hook), so the read model
+  can offer Pause; the Mongo job's `node` field is updated on resume and `paused_at` is written
+  as a date.
+- **Pause** (controller → node holding the job): the node asks the agent process to exit cleanly
+  (the platform `graceful_stop`; `force` after 60 s), waits for exit, then runs the same work as
+  run end minus the removal: commit any dirty tree as `agent-ctrl run <job> pause`, push to the
+  run's branch (`agent/<job>` or the handoff branch), write `.runs/<job>.paused`, release the
+  worktree lock, report `Paused` with the agent's session id. A pause that cannot push keeps the
+  worktree, reports `Paused` with `push_failed` in the status message, and the next resume on the
+  same node still works from the local worktree.
+- A paused run's worktree is never swept: the startup sweep skips `.runs/<job>` while
+  `.runs/<job>.paused` exists, however old and however pushed.
+- **Resume** (controller): scheduled like a new interactive run on the pool. The `SpawnCommand`
+  carries `job_id` (same job), `resume_session_id`, the run's `repo_url` and `branch`, and whether
+  the worktree is expected locally. The node:
+  - on the original node: removes the marker, reacquires the worktree lock, spawns the backend in
+    `.runs/<job>` with its resume flag (`claude --resume <id>`, `pi --session <id>`,
+    `codex resume <id>`);
+  - on another node: creates `.runs/<job>` from `origin/<branch>` (the move path's worktree
+    creation), places the session file the way `ImportSession` does (the pause step uploads the
+    session file to the controller's import store so another node can fetch it), then spawns with
+    the resume flag.
+  - The job returns to `Running` with the same job id; its `node_name` is updated. When the
+    resume landed on another node, the controller then tells the original node to discard its
+    stale worktree and marker (the same discard command Stop uses on a paused run).
+- A pause whose push failed pins the run to its node (`pause_push_failed`); the node retries the
+  push every `AGENT_CTRL_PROGRESS_PUSH_SECS` while the marker exists and reports success, which
+  lifts the pin.
+- **Session ids** must be known for every interactive run, not only moved ones: Claude is spawned
+  with `--session-id <uuid>` generated by the node; Pi and Codex report theirs through the existing
+  status hooks. A run whose session id is unknown cannot be paused: `PauseAgent` fails with
+  `FAILED_PRECONDITION "session id unknown"` and the dashboard disables Pause for it.
+- Dashboard run view (`GET /runs`, `/runs/:id`): `state: paused`, `paused_at`, `node_name`.
+
+### A·3 Deployment: StatefulSet node pool
+
+- `node-deployment.tmpl.yaml` becomes a StatefulSet (`serviceName: agent-ctrl-node`, headless
+  Service added) with `replicas = node_replicas` and a `volumeClaimTemplates` entry for the
+  workspace (`shared_checkouts_storage_size`, `shared_checkouts_storage_class`). The pod's
+  hostname (`agent-ctrl-node-0`, `-1`) is passed as `--node-name`.
+- Each pod's node clones the configured repositories at startup as today, so a new volume
+  self-populates; `workspace-sync` runs its fetch loop once per node volume (one CronJob per
+  replica, rendered from `node_replicas`).
+- `staging.toml`: `node_replicas = 2`, `max_interactive_runs = 8` (per node → 16 interactive
+  slots). Memory limit per pod stays 12 GiB; the two pods must land on different hosts
+  (`podAntiAffinity` on the app label, `requiredDuringScheduling`).
+- **Rollout**: the existing Deployment and its PVC `agent-ctrl-workspace` are retired. Before
+  switching, every live run is paused (its work is then on its branch and its session in the
+  import store); after the StatefulSet is up, the runs are resumed and land on the new volumes.
+  The old PVC is deleted one day later.
+
+### A·4 Testing
+
+- Scheduling: two pool nodes with caps 2/2 — four spawns land two each; the fifth fails
+  `node at capacity`; a paused run frees a slot; `node_name` outside the pool is rejected;
+  the single-node name `agent-ctrl-node` still matches the pool prefix.
+- Pause/resume on the node: pause pushes `agent-ctrl run <job> pause`, writes the marker, releases
+  the lock; sweep keeps a paused worktree; resume on the same node spawns with the resume flag in
+  the same directory; resume on another node builds the worktree from the branch and places the
+  session file; pause with an unknown session id is refused.
+- Repos union: reachable on both → reachable; unreachable on one → unreachable with the node named.
+- Render: `node_replicas = 2` yields a StatefulSet with two replicas, a headless Service, a claim
+  template, two sync CronJobs, and anti-affinity; `test_shared_workspaces.py` extended.
+- Staging E2E: second pod registers; nine IWAKAN starts spread over both nodes (most free slots),
+  the seventeenth fails `node at capacity`; pause one, confirm the slot is free and the branch has
+  the pause commit; resume it, confirm the conversation continues (the agent answers a question
+  about its earlier turn); pause and resume a Pi run and show its session file path on the node.
+- Prerequisite for A·3: two hosts labelled `obachan.dev/agent-sandbox=bwrap-v1` (the bwrap
+  sandbox is node-local); the rollout stops if fewer exist. CI RBAC gains StatefulSets and the
+  deploy workflow waits on `statefulset/agent-ctrl-node`.
+
+---
+
+## Spec B — dashboard
+
+- `POST /api/agent-control/runs/:id/pause` and `/resume` → `PauseAgent` / `ResumeAgent`. Empty
+  JSON body, the same `Idempotency-Key` handling as `/stop`; response
+  `200 { job_id, state, accepted: true, node_name }`.
+- `GET /runs/:id/session` and `/runs/:id/events` keep serving a paused run (capabilities `resume`
+  and `stop`, never `input`/`close`), so an attached viewer keeps polling instead of failing.
+- `paused` joins `ALLOWED_JOB_STATES`; it is **not** terminal. Capabilities: `pause` when
+  `state == running`, the run is interactive, its session id is known and it runs on a branch
+  (task-bound and shared-checkout inspector runs can never pause); `resume` when
+  `state == paused`.
+- Run row and detail: Pause / Resume buttons next to Stop; a `paused` badge; the overview's
+  `active_runs` excludes paused runs, which are listed under a separate `paused_runs`.
+- Error codes: 404 unknown job; 409 `terminal_run`, `not_interactive`, `invalid_state`
+  (pause of a non-running run, resume of a non-paused run), `node_at_capacity` (resume);
+  412 `session_unknown` (pause), taken from the controller's `FAILED_PRECONDITION`, since the read
+  model may lag behind the spawn.
+- `/repos` passes the union through unchanged (the controller does the merge).
+- `/runs` items gain `node_name` and `paused_at`.
+
+## Spec C — WarpSpeed
+
+- `managed_agent_sessions`: `pause_run(env, job)`, `resume_run(env, job)`; `RunSummary.node_name`
+  and `paused_at`; `is_finished_state` stays as is (paused is live).
+- CLI: `agent-ctrl pause <job>`, `agent-ctrl resume <job>`; `agent-ctrl start --agent` accepts
+  `claude|pi|codex` (mapped through `agent_ctrl_profile`) as well as a profile name; an unknown
+  name fails locally with the list of accepted values.
+- Fleet pane: rows show `paused` as a live state (sorted after running), row actions Pause (on
+  running rows) and Resume (on paused rows), the node name in the row.
+- Viewer: when the attached run reports `paused`, the viewer prints "paused — resume with …" and
+  offers the resume action; `attach` to a paused run does not fail.
+- GUI terminal manager implements `attach_detached_session` (sets `repaint_screen_on_attach` and
+  restores the persistent session), with a test alongside the restore-resume one.
+
+## Rollout order
+
+1. Spec A merged to `dev` → staging (scheduling + pause RPCs), then the StatefulSet switch with
+   the pause-all / resume-all step described in A·3.
+2. Spec B merged → staging.
+3. Spec C merged → install; IWAKAN runs started from the fleet pane / CLI across both nodes.

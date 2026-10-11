@@ -62,6 +62,7 @@ use crate::terminal::shared_session::SharedSessionSource;
 use crate::terminal::shared_session::manager::{Manager, ManagerEvent};
 use crate::terminal::shared_session::role_change_modal::RoleChangeOpenSource;
 use crate::terminal::shared_session::{SharedSessionStatus, join_link};
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::terminal::view::Event;
 use crate::terminal::{ShellLaunchData, TerminalManager, TerminalView};
 use crate::view_components::ToastFlavor;
@@ -99,6 +100,10 @@ pub(in crate::pane_group) struct RestoredShellSnapshotFields {
     /// so a shell that is momentarily unresolvable (an unregistered WSL
     /// distro, say) is not erased from the session.
     pub shell_launch_data: Option<ShellLaunchData>,
+    /// The agent this pane was restored running, kept until the agent is running again. A
+    /// restored agent registers only once its resume command runs, which waits for the shell to
+    /// start, so without this every save before then would drop it from the session.
+    pub cli_agent_resume_descriptor: Option<CliAgentResumeDescriptor>,
 }
 
 /// Data kept for terminal panes.
@@ -110,8 +115,9 @@ pub struct TerminalPane {
 
     pane_configuration: ModelHandle<PaneConfiguration>,
 
-    /// Set only on the session-restore path. Consulted by [`Self::snapshot`]
-    /// while (and only while) this pane's shell is still parked.
+    /// Set only on the session-restore path. Consulted by [`Self::snapshot`] in
+    /// place of the live values while this pane's shell is still parked, and in
+    /// place of any live value the shell has not reported yet after that.
     restored_shell_snapshot_fields: Option<RestoredShellSnapshotFields>,
 
     /// Defining `terminal_manager` before `view` means that `terminal_manager`
@@ -225,6 +231,62 @@ impl TerminalPane {
             .then_some(fields)
     }
 
+    /// The directory this pane was restored with, whether or not its shell has started.
+    ///
+    /// A shell that has started reports no directory until it bootstraps, and one that dies
+    /// first never does. Saving `None` for such a pane would bring it back in the process's
+    /// own working directory, which is then what the shell reports and what gets saved.
+    fn restored_cwd(&self) -> Option<String> {
+        self.restored_shell_snapshot_fields
+            .as_ref()
+            .and_then(|fields| fields.cwd.clone())
+    }
+
+    /// The agent this pane was restored with, while its resume command has yet to start or is
+    /// still running. Once it has finished, the agent has exited and is no longer the pane's.
+    pub(crate) fn pending_agent_resume(
+        &self,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
+        let descriptor = self
+            .restored_shell_snapshot_fields
+            .as_ref()?
+            .cli_agent_resume_descriptor
+            .clone()?;
+        let shell_parked = self
+            .terminal_manager(app)
+            .read(app, |manager, _| manager.has_deferred_shell());
+        let resume_pending = self
+            .terminal_view(app)
+            .as_ref(app)
+            .has_pending_command_or_awaiting_completion(app);
+        (shell_parked || resume_pending).then_some(descriptor)
+    }
+
+    /// The agent a withheld resume would reopen: the descriptor the pane was restored with, or
+    /// one rebuilt from the held agent.
+    fn withheld_agent_resume(
+        &self,
+        agent: Option<HeldAgent>,
+        cwd: Option<String>,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
+        let restored = self
+            .restored_shell_snapshot_fields
+            .as_ref()
+            .and_then(|fields| fields.cli_agent_resume_descriptor.clone());
+        restored.or_else(|| {
+            let agent = agent?;
+            Some(CliAgentResumeDescriptor {
+                agent: agent.agent,
+                session_id: Some(agent.session_id),
+                cwd: cwd.or_else(|| self.working_directory(app))?.into(),
+                title: None,
+                captured_unix_seconds: Some(Utc::now().timestamp()),
+            })
+        })
+    }
+
     fn deferred_shell_startup_directory(&self, app: &AppContext) -> Option<String> {
         self.terminal_manager(app)
             .read(app, |manager, _| manager.deferred_shell_startup_directory())
@@ -238,10 +300,7 @@ impl TerminalPane {
             .pwd()
             .or_else(|| terminal_view.display_working_directory(app))
             .or_else(|| self.deferred_shell_startup_directory(app))
-            .or_else(|| {
-                self.restored_shell_snapshot_fields(app)
-                    .and_then(|fields| fields.cwd.clone())
-            })
+            .or_else(|| self.restored_cwd())
     }
 
     pub(crate) fn display_working_directory(&self, app: &AppContext) -> Option<String> {
@@ -250,10 +309,7 @@ impl TerminalPane {
             .as_ref(app)
             .display_working_directory(app)
             .or_else(|| self.deferred_shell_startup_directory(app))
-            .or_else(|| {
-                self.restored_shell_snapshot_fields(app)
-                    .and_then(|fields| fields.cwd.clone())
-            })
+            .or_else(|| self.restored_cwd())
     }
 
     /// The [`PaneView<TerminalView>`] for this pane.
@@ -552,6 +608,7 @@ impl PaneContent for TerminalPane {
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id: None,
+                session_holder: None,
                 cli_agent_resume_descriptor: None,
                 cwd: None,
                 is_active,
@@ -584,6 +641,7 @@ impl PaneContent for TerminalPane {
                 LeafContents::Terminal(TerminalPaneSnapshot {
                     uuid: self.uuid.clone(),
                     persistent_session_id: None,
+                    session_holder: None,
                     cli_agent_resume_descriptor: None,
                     cwd: None,
                     is_active,
@@ -628,14 +686,28 @@ impl PaneContent for TerminalPane {
             // so fall back to what it was restored with.
             let (cwd, shell_launch_data) = match self.restored_shell_snapshot_fields(app) {
                 Some(restored) => (restored.cwd.clone(), restored.shell_launch_data.clone()),
-                None => (view.pwd_if_local(app), view.shell_launch_data_if_local(app)),
+                None => (
+                    view.pwd_if_local(app).or_else(|| self.restored_cwd()),
+                    view.shell_launch_data_if_local(app).or_else(|| {
+                        self.restored_shell_snapshot_fields
+                            .as_ref()
+                            .and_then(|fields| fields.shell_launch_data.clone())
+                    }),
+                ),
             };
 
-            let persistent_session_id = self
-                .terminal_manager(app)
-                .read(app, |manager, _| manager.persistent_session_id());
-            let cli_agent_resume_descriptor = CLIAgentSessionsModel::as_ref(app)
-                .session(self.terminal_view(app).id())
+            let (persistent_session_id, session_holder, withheld_restore) =
+                self.terminal_manager(app).read(app, |manager, _| {
+                    (
+                        manager.persistent_session_id(),
+                        manager.session_holder(),
+                        manager.withheld_restore(),
+                    )
+                });
+            let terminal_view_id = self.terminal_view(app).id();
+            let cli_agent_sessions = CLIAgentSessionsModel::as_ref(app);
+            let cli_agent_resume_descriptor = cli_agent_sessions
+                .session(terminal_view_id)
                 .filter(|session| !session.is_remote())
                 .and_then(|session| {
                     let session_cwd = session
@@ -645,16 +717,38 @@ impl PaneContent for TerminalPane {
                         .or_else(|| cwd.clone())?;
                     Some(CliAgentResumeDescriptor {
                         agent: session.agent,
-                        session_id: session.session_context.session_id.clone(),
+                        session_id: cli_agent_sessions
+                            .session_id(terminal_view_id)
+                            .map(str::to_owned),
                         cwd: session_cwd.into(),
                         title: session.session_context.display_title(),
                         captured_unix_seconds: Some(Utc::now().timestamp()),
                     })
                 });
 
+            let cli_agent_resume_descriptor =
+                cli_agent_resume_descriptor.or_else(|| self.pending_agent_resume(app));
+
+            // While the resume is withheld this pane's shell is a stand-in: the agent still runs in
+            // the held session, which is what the next restore must find again.
+            let (persistent_session_id, session_holder, cli_agent_resume_descriptor) =
+                match withheld_restore {
+                    Some(restore) => (
+                        restore.session_id,
+                        restore.holder,
+                        self.withheld_agent_resume(restore.agent, cwd.clone(), app),
+                    ),
+                    None => (
+                        persistent_session_id,
+                        session_holder,
+                        cli_agent_resume_descriptor,
+                    ),
+                };
+
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 persistent_session_id,
+                session_holder,
                 cli_agent_resume_descriptor,
                 cwd,
                 is_active,
@@ -1039,10 +1133,15 @@ fn handle_terminal_view_event(
                 // keep the pane open.  There might be useful information visible
                 // in the output, and if this was the first shell spawned when the
                 // user started the app, it will prevent it from suddenly quitting.
+                //
+                // A shell that crashed keeps its pane too, so the pane stays in its saved
+                // session and can be restarted in place instead of being added back by hand.
                 if group
                     .terminal_view_from_pane_id(terminal_pane_id, ctx)
                     .is_some_and(|terminal_view| {
-                        !terminal_view.as_ref(ctx).is_login_shell_bootstrapped()
+                        let terminal_view = terminal_view.as_ref(ctx);
+                        !terminal_view.is_login_shell_bootstrapped()
+                            || !terminal_view.shell_exit_was_requested()
                     })
                 {
                     return;

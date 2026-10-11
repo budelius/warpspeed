@@ -1206,6 +1206,7 @@ impl SettingsWidget for LogoutWidget {
         !AuthStateProvider::as_ref(app)
             .get()
             .is_anonymous_or_logged_out()
+            || managed_agent_sessions::stored_stozn_identity().is_some()
     }
 
     fn render(

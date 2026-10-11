@@ -59,6 +59,10 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Install release tools
+        shell: bash
+        run: ./script/install_cargo_release_deps
+
       - name: Build app bundle
         shell: bash
         run: |

@@ -1412,3 +1412,25 @@ fn a_running_run_is_attached_without_a_pause_notice() {
     assert!(!banner.contains("Paused"), "{banner}");
     assert!(viewer_commands("running").contains("send <text>"));
 }
+
+#[test]
+fn only_allowlisted_origins_override_the_managed_session_base_url() {
+    assert_eq!(staging_base_url(None), STAGING_BASE_URL);
+    assert_eq!(staging_base_url(Some("")), STAGING_BASE_URL);
+    assert_eq!(
+        staging_base_url(Some("https://agents-dev.obachan.dev")),
+        "https://agents-dev.obachan.dev"
+    );
+    assert_eq!(
+        staging_base_url(Some("https://agents-dev.obachan.dev/")),
+        "https://agents-dev.obachan.dev"
+    );
+    assert_eq!(
+        staging_base_url(Some("https://evil.example")),
+        STAGING_BASE_URL
+    );
+    assert_eq!(
+        staging_base_url(Some("http://agents-dev.obachan.dev")),
+        STAGING_BASE_URL
+    );
+}

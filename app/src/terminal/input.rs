@@ -1580,12 +1580,6 @@ enum CanExecuteCommand {
     No(DenyExecutionReason),
 }
 
-impl CanExecuteCommand {
-    pub fn is_no(&self) -> bool {
-        matches!(self, CanExecuteCommand::No(_))
-    }
-}
-
 pub struct Input {
     model: Arc<FairMutex<TerminalModel>>,
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
@@ -7413,7 +7407,8 @@ impl Input {
         }
 
         let command = self.get_command(ctx);
-        if self.can_execute_command(ctx).is_no() {
+        if let CanExecuteCommand::No(reason) = self.can_execute_command(ctx) {
+            log::debug!("Holding the pending command: {reason:?}");
             return;
         }
 

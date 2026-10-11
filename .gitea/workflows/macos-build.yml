@@ -2,7 +2,7 @@ name: macOS build
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
@@ -25,6 +25,33 @@ jobs:
       WARP_SKIP_SUDO_PROMPT: "1"
 
     steps:
+      # The runner is a launchd daemon whose PATH has neither Homebrew nor Cargo.
+      - name: Prepare host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in "$HOME/.cargo/bin" /opt/homebrew/bin /usr/local/bin; do
+            echo "$dir" >> "$GITHUB_PATH"
+          done
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v git-lfs || brew install git-lfs
+          git lfs install --skip-repo
+          for tool in cargo rustup cargo-bundle xcodebuild; do
+            printf '%s: %s\n' "$tool" "$(command -v "$tool" || echo missing)"
+          done
+
+      # The runner is a shared Mac that also builds iOS apps; refuse to fill its disk.
+      - name: Check free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          free_gib=$(( $(df -k "$HOME" | awk 'NR==2 {print $4}') / 1024 / 1024 ))
+          echo "Free: ${free_gib} GiB"
+          if (( free_gib < 15 )); then
+            echo "::error::Only ${free_gib} GiB free on the runner; a WarpSpeed build needs 15 GiB."
+            exit 1
+          fi
+
       - name: Check out source and LFS assets
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -32,11 +59,30 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Install release tools
+        shell: bash
+        run: ./script/install_cargo_release_deps
+
       - name: Build app bundle
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          # Stop the build before it fills the shared runner's disk.
+          workspace=$PWD
+          # Not the step's own stdout: a lingering `sleep` holding it makes the runner fail the step.
+          watchdog_log=$(mktemp)
+          (
+            while sleep 15; do
+              if (( $(df -k "$HOME" | awk 'NR==2 {print $4}') < 3 * 1024 * 1024 )); then
+                echo "::error::Under 3 GiB free on the runner; stopping the build."
+                pkill -TERM -f "$workspace/" || true
+                exit
+              fi
+            done
+          ) </dev/null >"$watchdog_log" 2>&1 &
+          watchdog=$!
+          trap 'kill $watchdog 2>/dev/null || true; cat "$watchdog_log"' EXIT
           ./script/bundle --channel oss --debug --nouniversal --selfsign --no-dmg
           codesign --verify --deep --strict target/debug/bundle/osx/WarpOss.app
 

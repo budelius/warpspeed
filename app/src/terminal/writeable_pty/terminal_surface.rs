@@ -11,6 +11,8 @@ use crate::terminal::event::AfterBlockCompletedEvent;
 use crate::terminal::model::completions::ShellCompletion;
 #[cfg(unix)]
 use crate::terminal::model::terminal_model::BlockIndex;
+#[cfg(feature = "local_tty")]
+use crate::terminal::terminal_manager::WithheldRestore;
 use crate::terminal::view::ExecuteCommandEvent;
 use crate::terminal::{ShellLaunchData, SizeUpdate};
 
@@ -67,6 +69,11 @@ where
         false
     }
 
+    /// Called with the process ID of the shell once its PTY has started, and again whenever a
+    /// restarted session replaces it.
+    #[cfg(feature = "local_tty")]
+    fn on_shell_pid_determined(&mut self, _pid: u32, _ctx: &mut ViewContext<Self>) {}
+
     /// Called once the shell starter has been determined and the PTY event loop
     /// has started, so the surface can react to shell launch metadata.
     #[cfg(feature = "local_tty")]
@@ -75,6 +82,32 @@ where
     /// Queues a command that resumes state after a restored PTY could not be reattached.
     #[cfg(feature = "local_tty")]
     fn set_pending_restore_command(&mut self, _command: String, _ctx: &mut ViewContext<Self>) {}
+
+    /// Called with the token the shell's agent hooks address this pane by, once the session the
+    /// pane runs (or adopted) is known.
+    #[cfg(feature = "local_tty")]
+    fn on_agent_event_token_determined(&mut self, _token: String, _ctx: &mut ViewContext<Self>) {}
+
+    /// Holds a restore command back because another build's supervisor still holds the session.
+    #[cfg(feature = "local_tty")]
+    fn withhold_restore_command(
+        &mut self,
+        _restore: WithheldRestore,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
+
+    /// Called when a take-over has started ending the held session.
+    #[cfg(feature = "local_tty")]
+    fn on_take_over_started(&mut self, _ctx: &mut ViewContext<Self>) {}
+
+    /// Called when taking over a held session failed, with the reason.
+    #[cfg(feature = "local_tty")]
+    fn on_take_over_failed(&mut self, _error: String, _ctx: &mut ViewContext<Self>) {}
+
+    /// Called just before a withheld restore command runs here.
+    #[cfg(feature = "local_tty")]
+    fn on_withheld_restore_resolved(&mut self, _ctx: &mut ViewContext<Self>) {}
 
     /// Called when the active shell launch data is updated (e.g. shell indicator metadata).
     fn on_active_shell_launch_data_updated(

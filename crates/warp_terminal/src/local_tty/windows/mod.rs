@@ -1,3 +1,4 @@
+mod attachment_relay;
 mod child;
 mod conpty_api;
 pub mod daemon_spawn;
@@ -11,14 +12,14 @@ pub mod pipe_transport;
 mod pipes;
 mod proc_thread_attribute_list;
 pub mod supervised_pty;
-pub(crate) mod supervisor_client;
+pub mod supervisor_client;
 pub mod supervisor_daemon;
 mod supervisor_host;
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::FromRawHandle as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -44,6 +45,7 @@ use super::event_loop::{PTY_TOKEN, SIGNALS_TOKEN};
 use super::shell::{DirectShellStarter, ShellStarter, WslShellStarter};
 use super::spawner::PtyHandle;
 use super::{EventedPty, EventedReadWrite, PtyOptions, SizeInfo, mio_channel};
+use crate::local_tty::screen::ScreenSnapshot;
 use crate::local_tty::spawner::{PtySpawnInfo, PtySpawner};
 use crate::local_tty::supervisor::message::SessionMetadata;
 use crate::local_tty::windows::proc_thread_attribute_list::ProcThreadAttributeList;
@@ -214,6 +216,21 @@ pub enum PtySpawnError {
     UnsupportedShellStarter(String),
 }
 
+/// The directory a shell starts in: `requested` if it exists, else the user's home.
+///
+/// Never `None` while the home exists, because a shell started without a directory inherits
+/// the starting process's own -- for the supervisor and the app, the install directory.
+pub(super) fn shell_start_directory(requested: Option<&Path>) -> Option<PathBuf> {
+    requested
+        .filter(|path| path.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+        })
+}
+
 pub(super) fn spawn(
     options: PtyOptions,
     event_loop_tx: mio_channel::Sender<writeable_pty::Message>,
@@ -273,14 +290,7 @@ pub(super) fn spawn(
     };
     let mut process_information = PROCESS_INFORMATION::default();
 
-    let start_directory = options
-        .start_dir
-        .filter(|start_dir| start_dir.is_dir())
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(PathBuf::from)
-                .filter(|path| path.is_dir())
-        })
+    let start_directory = shell_start_directory(options.start_dir.as_deref())
         .map(|path| HSTRING::from(path.as_os_str()));
 
     let base_flags =
@@ -631,6 +641,21 @@ impl EventedReadWrite for Pty {
     }
 }
 
+fn next_polled_child_event(handle: &mut dyn PtyHandle) -> Option<super::ChildEvent> {
+    if !handle.requires_exit_polling() {
+        return None;
+    }
+
+    match handle.has_process_terminated() {
+        Ok(true) => Some(super::ChildEvent::Exited),
+        Ok(false) => None,
+        Err(error) => {
+            log::warn!("Failed to poll supervised terminal process status: {error:#}");
+            None
+        }
+    }
+}
+
 impl EventedPty for Pty {
     fn child_event_token(&self) -> mio::Token {
         SIGNALS_TOKEN
@@ -647,7 +672,7 @@ impl EventedPty for Pty {
     }
 
     fn next_child_event(&mut self) -> Option<super::ChildEvent> {
-        None
+        next_polled_child_event(self.handle.as_mut())
     }
 
     fn on_resize(&mut self, size: &crate::SizeInfo, forced: bool) {
@@ -679,6 +704,20 @@ impl EventedPty for Pty {
         if applied {
             self.last_applied_size = Some(next);
         }
+    }
+
+    fn detach(&mut self) -> anyhow::Result<()> {
+        let (client, session_id) = self
+            .supervisor
+            .as_ref()
+            .context("This terminal session is not held by a supervisor")?;
+        // The pane keeps its own grid, so a reattach into it needs no snapshot, and the
+        // bootstrap is rebuilt for an orphaned shell when the session is attached again.
+        client.detach(
+            *session_id,
+            ScreenSnapshot::default(),
+            SessionMetadata::default(),
+        )
     }
 
     fn kill(mut self) -> anyhow::Result<()> {

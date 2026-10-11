@@ -427,6 +427,7 @@ pub enum PaletteSource {
     PaneHeader,
     AgentTip,
     TitleBarSearchBar,
+    AgentSessionsWindow,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -469,6 +470,8 @@ pub enum CLIAgentType {
     Hermes,
     Vibe,
     Antigravity,
+    Kimi,
+    DeepSeekHarness,
     /// Warp's own headless TUI, targeted by the code review panel as a CLI-agent-equivalent destination.
     WarpTui,
     Unknown,

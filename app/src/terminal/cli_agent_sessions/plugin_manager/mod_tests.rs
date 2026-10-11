@@ -78,3 +78,26 @@ fn compare_versions_partial_version_string() {
 fn compare_versions_empty_string() {
     assert_eq!(compare_versions("", "2.0.0"), Ordering::Less);
 }
+
+#[test]
+fn returns_manager_for_kimi() {
+    let _hoa_guard = crate::features::FeatureFlag::HOANotifications.override_enabled(true);
+    let _kimi_guard = crate::features::FeatureFlag::KimiNotifications.override_enabled(true);
+    assert!(plugin_manager_for(CLIAgent::Kimi).is_some());
+}
+
+#[test]
+fn returns_none_for_kimi_and_deepseek_harness_without_their_flags() {
+    let _hoa_guard = crate::features::FeatureFlag::HOANotifications.override_enabled(true);
+    let _kimi_guard = crate::features::FeatureFlag::KimiNotifications.override_enabled(false);
+    let _dsh_guard = crate::features::FeatureFlag::DshNotifications.override_enabled(false);
+    assert!(plugin_manager_for(CLIAgent::Kimi).is_none());
+    assert!(plugin_manager_for(CLIAgent::DeepSeekHarness).is_none());
+}
+
+#[test]
+fn returns_manager_for_deepseek_harness() {
+    let _hoa_guard = crate::features::FeatureFlag::HOANotifications.override_enabled(true);
+    let _dsh_guard = crate::features::FeatureFlag::DshNotifications.override_enabled(true);
+    assert!(plugin_manager_for(CLIAgent::DeepSeekHarness).is_some());
+}

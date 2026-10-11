@@ -19,6 +19,8 @@
 //! reachable from the UI, so nothing here can put a window into a state a user
 //! could not have reached themselves.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 pub(crate) mod address;
 pub(crate) mod client;
 mod handler;
@@ -26,6 +28,39 @@ pub(crate) mod protocol;
 mod server;
 
 pub(crate) use server::RemoteControlServer;
+
+/// Whether this process started while other instances were running and so opened empty instead
+/// of restoring the shared session.
+static STARTED_BESIDE_OTHER_INSTANCES: AtomicBool = AtomicBool::new(false);
+
+/// Decides whether this process should restore the saved session at startup.
+///
+/// Every instance shares one saved session, so an instance started while others are running
+/// would reopen windows those instances are already showing. It opens empty instead.
+pub(crate) fn should_restore_at_startup() -> bool {
+    let others = address::other_running_instance_pids();
+    if others.is_empty() {
+        return true;
+    }
+    log::info!("Not restoring the saved session: other instances are running ({others:?})");
+    STARTED_BESIDE_OTHER_INSTANCES.store(true, Ordering::Relaxed);
+    false
+}
+
+/// Whether this process may overwrite the shared saved session.
+///
+/// Saving replaces the whole session with this process's windows. An instance that opened empty
+/// beside others leaves it to them until it is the last one running.
+pub(crate) fn may_save_shared_session() -> bool {
+    if !STARTED_BESIDE_OTHER_INSTANCES.load(Ordering::Relaxed) {
+        return true;
+    }
+    if !address::other_running_instance_pids().is_empty() {
+        return false;
+    }
+    STARTED_BESIDE_OTHER_INSTANCES.store(false, Ordering::Relaxed);
+    true
+}
 
 /// The name this executable was invoked as.
 ///
@@ -45,7 +80,7 @@ pub(crate) fn program_name() -> String {
 
 /// Which build this process is, for telling an installed Warp apart from one
 /// started out of a build directory.
-fn build_identity() -> String {
+pub(crate) fn build_identity() -> String {
     crate::build_info::changelog_version().unwrap_or_else(|| "unknown".to_owned())
 }
 

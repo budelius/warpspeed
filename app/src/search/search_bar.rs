@@ -119,6 +119,9 @@ pub struct SearchBar<T: Action + Clone> {
     /// Font family to use when rendering the editor and query filters. If `None` the monospace font
     /// family is used.
     font_family_override: Option<FamilyId>,
+    /// Whether the next results should keep the selected result selected rather than resetting
+    /// the selection.
+    keep_selection_on_next_results: bool,
 }
 
 #[derive(Debug)]
@@ -282,6 +285,14 @@ impl<T: Action + Clone> SearchBarState<T> {
         }
     }
 
+    fn select_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+        if self.selected_index != Some(index) {
+            self.selected_index = Some(index);
+            ctx.emit(SearchBarEvent::ResultSelected { index });
+        }
+        ctx.notify();
+    }
+
     /// Returns an `Option` containing the currently selected result, if there is one.
     pub fn selected_result(&self) -> Option<&QueryResult<T>> {
         self.selected_result_renderer()
@@ -370,6 +381,7 @@ impl<T: Action + Clone> SearchBar<T> {
             state,
             create_query_result_renderer_fn,
             font_family_override: None,
+            keep_selection_on_next_results: false,
         };
 
         me.update_placeholder_text(ctx);
@@ -610,7 +622,7 @@ impl<T: Action + Clone> SearchBar<T> {
         });
 
         if self.should_run_query(ctx) {
-            self.run_query_internal(ctx);
+            self.run_query_internal(false, ctx);
         }
 
         // Update the editor placeholder text if necessary.
@@ -624,7 +636,8 @@ impl<T: Action + Clone> SearchBar<T> {
 
     /// Runs a search query using the editor's current contents as the query string with filters
     /// applied.
-    fn run_query_internal(&mut self, ctx: &mut ViewContext<Self>) {
+    fn run_query_internal(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
+        self.keep_selection_on_next_results = keep_selection;
         let current_editor_text = self
             .editor_handle
             .read(ctx, |editor, ctx| editor.buffer_text(ctx));
@@ -646,11 +659,27 @@ impl<T: Action + Clone> SearchBar<T> {
 
     pub fn run_query(&mut self, ctx: &mut ViewContext<Self>) {
         if self.should_run_query(ctx) {
-            self.run_query_internal(ctx);
+            self.run_query_internal(false, ctx);
+        }
+    }
+
+    /// Re-runs the current query for data that changed under it, keeping the selected result
+    /// selected while it is still among the results.
+    pub fn rerun_query_keeping_selection(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.should_run_query(ctx) {
+            self.run_query_internal(true, ctx);
         }
     }
 
     fn on_mixer_results_changed(&mut self, ctx: &mut ViewContext<Self>) {
+        let kept_selection = std::mem::take(&mut self.keep_selection_on_next_results)
+            .then(|| {
+                self.state
+                    .as_ref(ctx)
+                    .selected_result()
+                    .and_then(QueryResult::selection_key)
+            })
+            .flatten();
         let results = self.mixer.read(ctx, |mixer, _ctx| mixer.results().clone());
         let create_query_result_renderer = self.create_query_result_renderer_fn;
 
@@ -675,12 +704,22 @@ impl<T: Action + Clone> SearchBar<T> {
             .map(|(index, result)| create_query_result_renderer(index, result))
             .collect_vec();
 
+        let kept_index = kept_selection.and_then(|key| {
+            query_result_renderers
+                .iter()
+                .position(|renderer| renderer.search_result.selection_key().as_ref() == Some(&key))
+        });
         self.state.update(ctx, |state, ctx| {
             state.query_result_renderers = Some(query_result_renderers);
             ctx.notify();
         });
 
-        self.handle_selection_update(selection_start, ctx);
+        match kept_index {
+            Some(index) => self
+                .state
+                .update(ctx, |state, ctx| state.select_index(index, ctx)),
+            None => self.handle_selection_update(selection_start, ctx),
+        }
 
         // Re-render the view with the updated results.
         ctx.notify();
@@ -736,7 +775,7 @@ impl<T: Action + Clone> SearchBar<T> {
         if self.should_show_zero_state(ctx) {
             self.handle_selection_update(SelectionUpdate::Clear, ctx);
             if self.should_run_query(ctx) {
-                self.run_query_internal(ctx);
+                self.run_query_internal(false, ctx);
             }
         } else {
             if self.state.as_ref(ctx).query_filter.is_none() {
@@ -760,7 +799,7 @@ impl<T: Action + Clone> SearchBar<T> {
                     }
                 }
             }
-            self.run_query_internal(ctx);
+            self.run_query_internal(false, ctx);
         }
         self.update_placeholder_text(ctx);
         self.update_filter_autosuggestion_text(ctx);

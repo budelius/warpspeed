@@ -279,6 +279,24 @@ pub fn is_tab_config_toml(path: &Path) -> bool {
         .any(|dir| path.starts_with(dir))
 }
 
+/// Removes the retired WarpSpeed task picker. Task selection and launch are
+/// owned by the STOZN Dashboard; WarpSpeed opens only dashboard-issued session links.
+#[cfg(feature = "local_fs")]
+pub(crate) fn remove_stozn_managed_agent_config() {
+    if !warp_core::channel::ChannelState::app_id()
+        .application_name()
+        .starts_with("WarpSpeed")
+    {
+        return;
+    }
+    let path = tab_configs_dir().join("stozn-managed-agent.toml");
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("Failed to remove retired STOZN managed-agent picker at {path:?}: {error:?}");
+    }
+}
+
 /// Ensures `~/.warp/default_tab_configs/worktree.toml` exists, creating it
 /// from the embedded template if missing. Returns the path to the file.
 #[cfg(feature = "local_fs")]

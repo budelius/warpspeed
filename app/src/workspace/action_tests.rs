@@ -67,6 +67,17 @@ fn primary_info_change_does_not_save_workspace_state() {
 }
 
 #[test]
+fn new_tab_actions_save_workspace_state() {
+    assert!(WorkspaceAction::AddDefaultTab.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::AddTerminalTab {
+            hide_homepage: false,
+        }
+        .should_save_app_state_on_action()
+    );
+}
+
+#[test]
 fn pane_name_actions_save_workspace_state() {
     let locator = PaneViewLocator {
         pane_group_id: EntityId::new(),
@@ -79,4 +90,46 @@ fn pane_name_actions_save_workspace_state() {
     // same conditions as the locator-based one, since both ultimately drive
     // `rename_pane` which mutates `pane_configuration`.
     assert!(WorkspaceAction::RenameActivePane.should_save_app_state_on_action());
+}
+
+#[test]
+fn move_session_actions_save_workspace_state() {
+    let terminal_view_id = EntityId::new();
+    assert!(WorkspaceAction::MoveSessionToAgentCtrl.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::MoveSessionToAgentCtrlForTerminalView { terminal_view_id }
+            .should_save_app_state_on_action()
+    );
+    assert!(
+        WorkspaceAction::ConfirmMoveSessionToAgentCtrl { terminal_view_id }
+            .should_save_app_state_on_action()
+    );
+}
+
+#[test]
+fn start_agent_on_agent_ctrl_actions_save_workspace_state() {
+    let terminal_view_id = EntityId::new();
+    assert!(WorkspaceAction::StartAgentOnAgentCtrl.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::StartAgentOnAgentCtrlForTerminalView { terminal_view_id }
+            .should_save_app_state_on_action()
+    );
+    assert!(
+        WorkspaceAction::ConfirmStartAgentOnAgentCtrl {
+            terminal_view_id,
+            agent: crate::terminal::CLIAgent::Claude,
+        }
+        .should_save_app_state_on_action()
+    );
+}
+
+#[test]
+fn move_all_agent_sessions_actions_save_workspace_state() {
+    assert!(WorkspaceAction::MoveAllAgentSessionsHere.should_save_app_state_on_action());
+    assert!(
+        WorkspaceAction::ConfirmMoveAllAgentSessions {
+            folder: std::path::PathBuf::from("/work"),
+        }
+        .should_save_app_state_on_action()
+    );
 }

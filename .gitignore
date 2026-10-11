@@ -73,3 +73,5 @@ __pycache__/
 # Project notes
 .note/
 .claude/scheduled_tasks.lock
+app/resources/dsh-warp/node_modules/
+app/resources/dsh-warp/dist/

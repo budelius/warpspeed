@@ -13,6 +13,7 @@ fn terminal_pane(
     let terminal = TerminalPaneSnapshot {
         uuid: vec![uuid],
         persistent_session_id: None,
+        session_holder: None,
         cli_agent_resume_descriptor: descriptor,
         cwd: None,
         shell_launch_data: None,

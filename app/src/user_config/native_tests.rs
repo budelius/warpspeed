@@ -81,6 +81,32 @@ fn overwriting_window_preserves_other_windows_and_documents() {
 }
 
 #[test]
+fn overwriting_window_accepts_a_case_only_config_name_change() {
+    let dir = tempfile::tempdir().expect("launch config directory should be created");
+    let path = dir.path().join("SYS.yaml");
+    fs::write(
+        &path,
+        "name: Sys\nwindows:\n  - tabs:\n      - layout:\n          cwd: /system/old\n",
+    )
+    .expect("launch config should be written");
+    let source = LaunchConfigWindowSource {
+        path: path.clone(),
+        document_index: 0,
+        window_index: 0,
+        config_name: "SYS".to_string(),
+    };
+
+    let updated = overwrite_launch_config_window_in_dir(dir.path(), &source, window("/system/new"))
+        .expect("case-only name changes should not detach an open window from its config");
+
+    assert_eq!(updated.name, "Sys");
+    assert_eq!(updated.windows[0], window("/system/new"));
+    let stored = read_configs(&path);
+    assert_eq!(stored[0].name, "Sys");
+    assert_eq!(stored[0].windows[0], window("/system/new"));
+}
+
+#[test]
 fn saving_a_new_launch_config_writes_a_single_document() {
     let dir = tempfile::tempdir().expect("launch config directory should be created");
 

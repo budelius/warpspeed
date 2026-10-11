@@ -96,6 +96,9 @@ pub enum ExitReason {
     PtySpawnFailed,
     /// PTY connection was lost/disconnected
     PtyDisconnected,
+    /// The connection to a supervised shell was lost while the shell kept running, and the
+    /// session was handed back to the supervisor instead of being ended. It can be reattached.
+    PtyDetached,
     /// Process was killed/terminated
     ProcessKilled,
     /// Shell could not be found/determined

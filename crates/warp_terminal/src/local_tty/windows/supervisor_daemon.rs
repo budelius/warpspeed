@@ -22,7 +22,10 @@ struct Request {
 }
 
 /// Runs the Windows terminal supervisor until it has been idle with no live sessions.
-pub fn run() -> Result<()> {
+///
+/// `on_listening` runs once this process owns the supervisor pipe. A supervisor that loses the
+/// race for the pipe exits before it, so it never touches state the winner owns, such as its log.
+pub fn run(on_listening: impl FnOnce()) -> Result<()> {
     let pipe_name = supervisor_pipe_name();
     let (request_tx, request_rx) = mpsc::channel::<Request>();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -75,7 +78,7 @@ pub fn run() -> Result<()> {
         .context("Failed to start the terminal supervisor control thread")?;
 
     match ready_rx.recv_timeout(CONTROL_TIMEOUT) {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => on_listening(),
         Ok(Err(error)) => bail!(error),
         Err(error) => return Err(error).context("Terminal supervisor control pipe did not start"),
     }

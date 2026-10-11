@@ -1,5 +1,7 @@
 mod action;
 mod active_session;
+pub mod agent_session_actions;
+pub(crate) mod agent_sessions_view;
 pub(crate) mod auto_handoff;
 pub mod bonus_grant_notification_model;
 #[cfg(target_os = "macos")]
@@ -104,6 +106,7 @@ pub fn init(app: &mut AppContext) {
     view::right_panel::RightPanelView::init(app);
     header_toolbar_editor::init(app);
     view::conversation_list::view::register_conversation_list_view_bindings(app);
+    agent_sessions_view::init(app);
 
     settings_view::init_actions_from_parent_view(app, &id!("Workspace"), |settings_action| {
         WorkspaceAction::DispatchToSettingsTab(settings_action)
@@ -1026,6 +1029,42 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(id!("Workspace")),
     ]);
 
+    // Offered only on panes running a local agent session that can be moved, for the same reason
+    // as `Workspace_PaneCanDetachSession`.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:move_session_to_agent_ctrl",
+        "Move session to AgentCtrl",
+        WorkspaceAction::MoveSessionToAgentCtrl,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanMoveSessionToAgentCtrl"))]);
+
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:open_agent_ctrl_fleet",
+        "Open AgentCtrl fleet",
+        WorkspaceAction::OpenAgentCtrlFleetPane,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace"))]);
+
+    // Offered only on local panes inside a git work tree, whose repository the run starts in.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:start_agent_on_agent_ctrl",
+        "Start agent on AgentCtrl in this repo",
+        WorkspaceAction::StartAgentOnAgentCtrl,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanStartAgentOnAgentCtrl"))]);
+
+    // Offered only on local panes inside a git work tree, whose parent folder is the one moved.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:move_all_agent_sessions_here",
+        "Move all agent sessions in this project folder to AgentCtrl",
+        WorkspaceAction::MoveAllAgentSessionsHere,
+    )
+    .with_group(bindings::BindingGroup::Terminal.as_str())
+    .with_context_predicate(id!("Workspace") & id!("Workspace_PaneCanMoveAllAgentSessions"))]);
+
     app.register_editable_bindings([EditableBinding::new(
         "workspace:restart_window_in_new_process",
         "Restart window in new process",
@@ -1139,7 +1178,7 @@ pub fn init(app: &mut AppContext) {
     app.register_editable_bindings([
         EditableBinding::new(
             "workspace:terminate_app",
-            "Quit Warp",
+            "Quit WarpSpeed by STOZN",
             WorkspaceAction::TerminateApp,
         )
         .with_context_predicate(id!("Workspace"))
@@ -1253,6 +1292,24 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Workspace"))
         .with_custom_action(CustomAction::SearchDrive),
+        EditableBinding::new(
+            "workspace:search_agent_sessions",
+            "Sessions: search",
+            WorkspaceAction::OpenPalette {
+                mode: PaletteMode::AgentSessions,
+                source: PaletteSource::Keybinding,
+                query: None,
+            },
+        )
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))
+        .with_enabled(|| cfg!(feature = "local_tty")),
+        EditableBinding::new(
+            "workspace:show_agent_sessions",
+            "Sessions: show window",
+            WorkspaceAction::ShowAgentSessions { focus: None },
+        )
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))
+        .with_enabled(|| cfg!(feature = "local_tty")),
     ]);
 
     if FeatureFlag::Autoupdate.is_enabled() {
@@ -1645,7 +1702,7 @@ fn add_open_setting_pages_as_editable_binding(app: &mut AppContext) {
         EditableBinding::new(
             "workspace:show_settings_about_page",
             BindingDescription::new("Open Settings: About")
-                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "About Warp"),
+                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "About WarpSpeed by STOZN"),
             WorkspaceAction::ShowSettingsPage(SettingsSection::About),
         )
         .with_group(bindings::BindingGroup::Settings.as_str())

@@ -51,3 +51,47 @@ fn wsl_env_allowlist_includes_cli_agent_protocol_when_notifications_flag_is_enab
         ],
     );
 }
+
+fn entry(key: &str, value: &str) -> (OsString, EnvEntry) {
+    (
+        map_key(key.into()),
+        EnvEntry {
+            preferred_key: key.into(),
+            value: value.into(),
+        },
+    )
+}
+
+#[test]
+fn inherited_agent_event_vars_are_dropped_when_the_caller_sets_none() {
+    let mut env = BTreeMap::from([
+        entry("Warp_Agent_Event_Token", "fedcba9876543210fedcba9876543210"),
+        entry(WARP_AGENT_EVENT_BIN_ENV, r"C:\Old\warpspeed.exe"),
+        entry("PATH", r"C:\Windows"),
+    ]);
+
+    apply_caller_env_vars(&mut env, &HashMap::new());
+
+    assert!(!env.contains_key(&map_key(WARP_AGENT_EVENT_TOKEN_ENV.into())));
+    assert!(!env.contains_key(&map_key(WARP_AGENT_EVENT_BIN_ENV.into())));
+    assert!(env.contains_key(&map_key("PATH".into())));
+}
+
+#[test]
+fn caller_agent_event_vars_replace_inherited_ones() {
+    let mut env = BTreeMap::from([entry(
+        WARP_AGENT_EVENT_TOKEN_ENV,
+        "fedcba9876543210fedcba9876543210",
+    )]);
+    let overrides = HashMap::from([(
+        OsString::from(WARP_AGENT_EVENT_TOKEN_ENV),
+        OsString::from("0123456789abcdef0123456789abcdef"),
+    )]);
+
+    apply_caller_env_vars(&mut env, &overrides);
+
+    assert_eq!(
+        env[&map_key(WARP_AGENT_EVENT_TOKEN_ENV.into())].value,
+        OsString::from("0123456789abcdef0123456789abcdef")
+    );
+}

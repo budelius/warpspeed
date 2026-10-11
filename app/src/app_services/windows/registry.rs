@@ -23,63 +23,73 @@ pub(super) fn register_uri_handler() {
     //      open
     //         command
     //            (Default) = "{path_to_executable}" "%0"
-    let uri_scheme = ChannelState::url_scheme();
-    match classes_key.create(uri_scheme) {
-        Ok(parent_key) => {
-            // The empty string represents the "(Default)" value for a registry key.
-            if let Err(err) = parent_key.set_string("", ChannelState::app_id().application_name()) {
-                report_error!(
-                    anyhow::Error::new(err).context("Could not set URI Scheme display name")
-                );
-                return;
-            }
-            if let Err(err) = parent_key.set_string("URL Protocol", "") {
-                report_error!(
-                    anyhow::Error::new(err).context("Could not set URI Scheme URL Protocol Key")
-                );
-                return;
-            };
-
-            // TODO(CORE-2861): Add the `DefaultIcon` Default value here with the file path to
-            // Warp's icon once we figure out distribution on Windows.
-
-            let command_key = match parent_key.create("shell\\open\\command") {
-                Ok(command_key) => command_key,
-                Err(err) => {
+    let mut uri_schemes = vec![ChannelState::url_scheme()];
+    if ChannelState::app_id().application_name() == "WarpSpeed" {
+        // Stable STOZN Dashboard handoff. This is deliberately separate from
+        // the channel-specific scheme used by the rest of the application.
+        uri_schemes.push(managed_agent_sessions::MANAGED_SESSION_DEEP_LINK_SCHEME);
+    }
+    for uri_scheme in uri_schemes {
+        match classes_key.create(uri_scheme) {
+            Ok(parent_key) => {
+                // The empty string represents the "(Default)" value for a registry key.
+                if let Err(err) =
+                    parent_key.set_string("", ChannelState::app_id().application_name())
+                {
                     report_error!(
-                        anyhow::Error::new(err)
-                            .context("Could not create shell\\open\\command key")
+                        anyhow::Error::new(err).context("Could not set URI Scheme display name")
                     );
                     return;
                 }
-            };
-            let command = match std::env::current_exe() {
-                Ok(path) => {
-                    let mut command = OsString::new();
-                    command.push("\"");
-                    command.push(path.as_os_str());
-                    command.push("\" \"%0\"");
-                    HSTRING::from(command.as_os_str())
-                }
-                Err(err) => {
-                    report_error!(anyhow::Error::new(err).context(
-                        "Could not get path to current executable for registering URI scheme"
-                    ));
+                if let Err(err) = parent_key.set_string("URL Protocol", "") {
+                    report_error!(
+                        anyhow::Error::new(err)
+                            .context("Could not set URI Scheme URL Protocol Key")
+                    );
                     return;
+                };
+
+                // TODO(CORE-2861): Add the `DefaultIcon` Default value here with the file path to
+                // Warp's icon once we figure out distribution on Windows.
+
+                let command_key = match parent_key.create("shell\\open\\command") {
+                    Ok(command_key) => command_key,
+                    Err(err) => {
+                        report_error!(
+                            anyhow::Error::new(err)
+                                .context("Could not create shell\\open\\command key")
+                        );
+                        return;
+                    }
+                };
+                let command = match std::env::current_exe() {
+                    Ok(path) => {
+                        let mut command = OsString::new();
+                        command.push("\"");
+                        command.push(path.as_os_str());
+                        command.push("\" \"%1\"");
+                        HSTRING::from(command.as_os_str())
+                    }
+                    Err(err) => {
+                        report_error!(anyhow::Error::new(err).context(
+                            "Could not get path to current executable for registering URI scheme"
+                        ));
+                        return;
+                    }
+                };
+                // The empty string represents the "(Default)" value for a registry key.
+                if let Err(err) = command_key.set_hstring("", &command) {
+                    report_error!(
+                        anyhow::Error::new(err)
+                            .context("Could not set shell command path for URI Scheme")
+                    );
                 }
-            };
-            // The empty string represents the "(Default)" value for a registry key.
-            if let Err(err) = command_key.set_hstring("", &command) {
+            }
+            Err(err) => {
                 report_error!(
-                    anyhow::Error::new(err)
-                        .context("Could not set shell command path for URI Scheme")
+                    anyhow::Error::new(err).context("Failed to create URI Scheme registry entry")
                 );
             }
-        }
-        Err(err) => {
-            report_error!(
-                anyhow::Error::new(err).context("Failed to create URI Scheme registry entry")
-            );
         }
     }
 }

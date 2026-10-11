@@ -1,10 +1,12 @@
 //! This module contains the implementation of `BackingView` for `TerminalView`, as well as
 //! business logic for integrating the terminal view with the pane infra (`crate::pane_group`).
+use std::path::PathBuf;
+
 use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warpui::elements::{
     ConstrainedBox, CrossAxisAlignment, Empty, Flex, MainAxisAlignment, MainAxisSize,
-    ParentElement, Shrinkable,
+    ParentElement, SavePosition, Shrinkable,
 };
 use warpui::prelude::{ChildView, Container};
 use warpui::text_layout::ClipConfig;
@@ -41,6 +43,10 @@ use crate::pane_group::{BackingView, SplitPaneState, TOGGLE_MAXIMIZE_PANE_BINDIN
 use crate::settings::app_installation_detection::{
     UserAppInstallDetectionSettings, UserAppInstallStatus,
 };
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_handoff::{HandoffSource, agent_ctrl_profile};
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_history;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shared_session::manager::Manager;
@@ -66,6 +72,10 @@ impl TerminalView {
     /// Returns a reference to the focus handle if one has been set.
     pub fn focus_handle(&self) -> Option<&PaneFocusHandle> {
         self.focus_handle.as_ref()
+    }
+
+    pub(crate) fn pane_maximize_button_position_id(&self) -> String {
+        format!("terminal_pane_maximize_button:{}", self.view_id)
     }
 
     fn handle_focus_state_event(
@@ -462,10 +472,41 @@ impl TerminalView {
         if let Some(sharing) = sharing_element {
             right_row.add_child(sharing);
         }
-        let show_close_button = self
-            .focus_handle
-            .as_ref()
-            .is_some_and(|h| h.is_in_split_pane(app));
+
+        let split_pane_state = self.split_pane_state(app);
+        if split_pane_state.is_in_split_pane() {
+            let (icon, tooltip) = if split_pane_state.is_maximized() {
+                (icons::Icon::Minimize, "Restore pane")
+            } else {
+                (icons::Icon::Maximize, "Maximize pane")
+            };
+            let ui_builder = appearance.ui_builder().clone();
+            let button = icon_button_with_color(
+                appearance,
+                icon,
+                false,
+                self.pane_maximize_mouse_state.clone(),
+                appearance
+                    .theme()
+                    .sub_text_color(appearance.theme().background()),
+            )
+            .with_tooltip(move || ui_builder.tool_tip(tooltip.to_string()).build().finish())
+            .build()
+            .on_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(
+                    PaneHeaderAction::<TerminalAction, TerminalAction>::CustomAction(
+                        TerminalAction::ToggleMaximizePane,
+                    ),
+                );
+            })
+            .finish();
+            right_row.add_child(
+                SavePosition::new(button, &self.pane_maximize_button_position_id()).finish(),
+            );
+            icon_button_count += 1;
+        }
+
+        let show_close_button = split_pane_state.is_in_split_pane();
         right_row.add_child(
             render_pane_header_buttons::<TerminalAction, TerminalAction>(
                 header_ctx,
@@ -634,6 +675,115 @@ impl TerminalView {
             .flatten()
             .is_some()
     }
+
+    /// The local agent session in this pane that can be moved into an AgentCtrl managed run.
+    ///
+    /// Its directory is the shell's, else `fallback_cwd`: a restored pane, or one whose directory
+    /// has gone, still holds the agent.
+    ///
+    /// Locks the terminal model, so callers must not already hold that lock.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn agent_ctrl_move_source(
+        &self,
+        fallback_cwd: Option<&std::path::Path>,
+        ctx: &AppContext,
+    ) -> Option<HandoffSource> {
+        // The shell's directory first: the agent-reported one follows the agent's own `cd`s, while
+        // the session file stays keyed by the directory the agent was launched from.
+        let cwd = self
+            .active_session_path_if_local(ctx)
+            .or_else(|| self.agent_recorded_cwd(fallback_cwd?, ctx));
+        self.agent_ctrl_move_source_in(cwd, ctx)
+    }
+
+    /// `cwd` only if this pane's agent itself recorded it, as its hook-reported directory or in
+    /// its session history, so a remote-control caller cannot choose which repository is pushed.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn agent_recorded_cwd(&self, cwd: &std::path::Path, ctx: &AppContext) -> Option<PathBuf> {
+        let sessions = CLIAgentSessionsModel::as_ref(ctx);
+        let session = sessions.session(self.view_id)?;
+        let session_id = sessions.session_id(self.view_id)?;
+        let hook_reported = session
+            .session_context
+            .cwd
+            .as_deref()
+            .is_some_and(|hook_cwd| std::path::Path::new(hook_cwd) == cwd);
+        let recorded = hook_reported
+            || agent_session_history::find_all(session.agent)
+                .iter()
+                .any(|past| past.session_id == session_id && past.cwd == cwd);
+        recorded.then(|| cwd.to_path_buf())
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn agent_ctrl_move_source_in(
+        &self,
+        cwd: Option<PathBuf>,
+        ctx: &AppContext,
+    ) -> Option<HandoffSource> {
+        let sessions = CLIAgentSessionsModel::as_ref(ctx);
+        let session = sessions.session(self.view_id)?;
+        if session.remote_host.is_some() {
+            return None;
+        }
+        agent_ctrl_profile(session.agent)?;
+        let session_id = sessions.session_id(self.view_id)?.to_owned();
+        Some(HandoffSource {
+            agent: session.agent,
+            session_id,
+            cwd: cwd?,
+            transcript_path: session.session_context.transcript_path.clone(),
+        })
+    }
+
+    /// Which AgentCtrl actions this pane offers.
+    ///
+    /// Reads the shell's directory once for all of them, because that checks the directory still
+    /// exists and this runs on the main thread for every keymap-context evaluation. Locks the
+    /// terminal model, so callers must not already hold that lock.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn agent_ctrl_pane_actions(&self, ctx: &AppContext) -> AgentCtrlPaneActions {
+        let local_path = self.active_session_path_if_local(ctx);
+        let repo = local_path
+            .as_ref()
+            .and_then(|_| self.current_local_repo_path());
+        AgentCtrlPaneActions {
+            can_start_agent: repo.is_some(),
+            can_move_all: repo.and_then(std::path::Path::parent).is_some(),
+            can_move_session: self.agent_ctrl_move_source_in(local_path, ctx).is_some(),
+        }
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    pub(crate) fn agent_ctrl_pane_actions(&self, _: &AppContext) -> AgentCtrlPaneActions {
+        AgentCtrlPaneActions::default()
+    }
+
+    /// The folder holding this local pane's repository, whose agent sessions "move all" moves:
+    /// sibling checkouts of one project live side by side there.
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    pub(crate) fn move_all_agent_sessions_folder(&self, ctx: &AppContext) -> Option<PathBuf> {
+        self.active_session_path_if_local(ctx)?;
+        self.current_local_repo_path()?
+            .parent()
+            .map(std::path::Path::to_path_buf)
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    pub(crate) fn move_all_agent_sessions_folder(&self, _: &AppContext) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// The AgentCtrl actions a terminal pane offers.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AgentCtrlPaneActions {
+    /// Its agent session can be moved to AgentCtrl.
+    pub(crate) can_move_session: bool,
+    /// A fresh run can be started in its repository.
+    pub(crate) can_start_agent: bool,
+    /// The agent sessions in the folder holding its repository can be moved.
+    pub(crate) can_move_all: bool,
 }
 
 impl BackingView for TerminalView {
@@ -677,6 +827,8 @@ impl BackingView for TerminalView {
         &self,
         ctx: &AppContext,
     ) -> Vec<MenuItem<Self::PaneHeaderOverflowMenuAction>> {
+        // Checked before taking the model lock, which it takes itself.
+        let agent_ctrl_actions = self.agent_ctrl_pane_actions(ctx);
         let model = self.model.lock();
         let mut items = vec![];
         let source = SharedSessionActionSource::PaneHeader;
@@ -748,6 +900,28 @@ impl BackingView for TerminalView {
                         .into_item(),
                 );
             }
+        }
+        if agent_ctrl_actions.can_move_session {
+            items.push(
+                MenuItemFields::new("Move session to AgentCtrl")
+                    .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
+                    .into_item(),
+            );
+        }
+        if agent_ctrl_actions.can_start_agent {
+            items.push(
+                MenuItemFields::new("Start agent on AgentCtrl in this repo")
+                    .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
+                    .into_item(),
+            );
+        }
+        // Every agent-session action works on local shells and agents.
+        if !shared_session_status.is_viewer() && cfg!(feature = "local_tty") {
+            items.push(
+                MenuItemFields::new("Sessions…")
+                    .with_on_select_action(TerminalAction::ShowAgentSessions)
+                    .into_item(),
+            );
         }
 
         // Split-pane related items.

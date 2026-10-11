@@ -90,8 +90,8 @@ use crate::settings::{
 };
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::settings_view::{OpenTeamsSettingsModalArgs, SettingsSection, flags};
+use crate::stozn_auth::StoznAuthManager;
 use crate::terminal::available_shells::AvailableShell;
-use crate::terminal::general_settings::GeneralSettings;
 use crate::terminal::keys_settings::KeysSettings;
 use crate::terminal::shell::ShellType;
 use crate::terminal::view::{TerminalAction, cell_size_and_padding};
@@ -118,7 +118,7 @@ use crate::{
     send_telemetry_from_app_ctx, send_telemetry_from_ctx,
 };
 
-const WINDOW_TITLE: &str = "Warp";
+const WINDOW_TITLE: &str = "WarpSpeed by STOZN";
 
 lazy_static! {
     static ref FALLBACK_WINDOW_SIZE: Vector2F = vec2f(800.0, 600.0);
@@ -324,6 +324,10 @@ pub fn init(app: &mut AppContext) {
     app.add_global_action(
         "root_view:open_new_tab_insert_subshell_command_and_bootstrap_if_supported",
         open_new_tab_insert_subshell_command_and_bootstrap_if_supported,
+    );
+    app.add_global_action(
+        "root_view:open_new_tab_execute_managed_session_command",
+        open_new_tab_execute_managed_session_command,
     );
     app.add_global_action("root_view:open_launch_config", open_launch_config);
     app.add_global_action("root_view:open_stored_session", open_stored_session);
@@ -571,6 +575,21 @@ fn active_workspace(ctx: &mut AppContext) -> Option<ViewHandle<Workspace>> {
     WorkspaceRegistry::as_ref(ctx).get(window_id, ctx)
 }
 
+fn display_session_owned_error(ctx: &mut AppContext) {
+    let Some(window_id) = ctx.windows().active_window() else {
+        return;
+    };
+    crate::workspace::ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+        toast_stack.add_ephemeral_toast(
+            DismissibleToast::error(
+                "This session is already open in another WarpSpeed process.".to_owned(),
+            ),
+            window_id,
+            ctx,
+        );
+    });
+}
+
 fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
     let first_source = arg.launch_config.window_source(0);
     let session_source = first_source
@@ -602,6 +621,7 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
                     true,
                     ctx,
                 );
+                display_session_owned_error(ctx);
                 return;
             }
             Err(error) => {
@@ -730,6 +750,7 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
                     arg.summary.is_current(),
                     ctx,
                 );
+                display_session_owned_error(ctx);
                 return;
             }
             Err(error) => {
@@ -746,9 +767,16 @@ fn open_stored_session(arg: &OpenStoredSessionArg, ctx: &mut AppContext) {
                 safe: ("Failed to open autosaved terminal session"),
                 full: ("Failed to open autosaved terminal session: {error:#}")
             );
+            #[cfg(feature = "local_fs")]
+            crate::session_configs::release_session(source);
             return;
         }
     };
+    if sessions.is_empty() {
+        #[cfg(feature = "local_fs")]
+        crate::session_configs::release_session(source);
+        return;
+    }
     crate::launch_configs::session_store::begin_run(source);
     for session in sessions {
         open_new_with_workspace_source(restored_launch_config_workspace_source(session, ctx), ctx);
@@ -776,10 +804,12 @@ fn launch_config_workspace_source(
             .into_iter()
             .any(|(_, workspace)| workspace.as_ref(ctx).launch_config_source() == Some(source))
     });
+    // Opening a launch config that has an autosave reopens it: running shells are taken over
+    // and agents whose process has ended are resumed, rather than starting over from the
+    // template.
     if FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
         && !source_is_open
         && let Some(source) = launch_config_source.as_ref()
-        && source.is_session_config()
     {
         match crate::launch_configs::session_store::load(source) {
             Ok(Some(session)) => return restored_launch_config_workspace_source(session, ctx),
@@ -987,8 +1017,9 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
             )
         };
 
-        // Check whether user has enabled session restoration.
-        if arg.force_restore || *GeneralSettings::as_ref(ctx).restore_session {
+        // Saved windows are reopened by choice, from the session picker. Only a window handed
+        // over by another process is restored without being asked for.
+        if arg.force_restore {
             let mut active_index = None;
             let mut normal_window_count = 0;
             for (idx, window) in app_state.windows.iter().enumerate() {
@@ -1012,7 +1043,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         AddWindowOptions {
                             window_style: WindowStyle::Pin,
                             window_bounds: WindowBounds::ExactPosition(frame_args.window_bounds),
-                            title: Some("Warp".to_owned()),
+                            title: Some(WINDOW_TITLE.to_owned()),
                             fullscreen_state: window.fullscreen_state,
                             background_blur_radius_pixels,
                             background_blur_texture,
@@ -1056,7 +1087,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         ctx.add_window(
                             AddWindowOptions {
                                 window_bounds: WindowBounds::new(window.bounds),
-                                title: Some("Warp".to_owned()),
+                                title: Some(WINDOW_TITLE.to_owned()),
                                 fullscreen_state: window.fullscreen_state,
                                 background_blur_radius_pixels,
                                 background_blur_texture,
@@ -1109,7 +1140,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                 ctx.add_window(
                     AddWindowOptions {
                         window_bounds: WindowBounds::new(window.bounds),
-                        title: Some("Warp".to_owned()),
+                        title: Some(WINDOW_TITLE.to_owned()),
                         fullscreen_state: window.fullscreen_state,
                         background_blur_radius_pixels,
                         background_blur_texture,
@@ -1620,6 +1651,34 @@ fn open_new_tab_insert_subshell_command_and_bootstrap_if_supported(
     });
 }
 
+/// Opens a fresh terminal and executes an already validated managed-session command.
+fn open_new_tab_execute_managed_session_command(arg: &SubshellCommandArg, ctx: &mut AppContext) {
+    let root_view_handle: Option<ViewHandle<RootView>> = ctx
+        .windows()
+        .frontmost_window_id()
+        .and_then(|window_id| ctx.root_view(window_id));
+
+    let root_view_handle = match root_view_handle {
+        Some(root_view_handle) => {
+            root_view_handle.update(ctx, |root_view, ctx| {
+                if let AuthOnboardingState::Terminal(workspace_view_handle) =
+                    &root_view.auth_onboarding_state
+                {
+                    workspace_view_handle.update(ctx, |workspace, ctx| {
+                        workspace.add_terminal_tab(false /* hide_homepage */, ctx);
+                    });
+                }
+            });
+            root_view_handle
+        }
+        None => open_new_window_get_handles(None, ctx).1,
+    };
+
+    root_view_handle.update(ctx, |root_view, ctx| {
+        root_view.execute_managed_session_command(&arg.command, ctx);
+    });
+}
+
 /// Returns the common configuration for a new "regular" window (not Quake Mode).
 fn default_window_options(window_settings: &WindowSettings, ctx: &AppContext) -> AddWindowOptions {
     let (inherited_bounds, window_style) = ctx.next_window_bounds_and_style();
@@ -1629,7 +1688,7 @@ fn default_window_options(window_settings: &WindowSettings, ctx: &AppContext) ->
     AddWindowOptions {
         window_style,
         window_bounds: next_bounds,
-        title: Some("Warp".to_owned()),
+        title: Some(WINDOW_TITLE.to_owned()),
         background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
         background_blur_texture: *window_settings.background_blur_texture,
         on_gpu_driver_selected: on_gpu_driver_selected_callback(),
@@ -1814,7 +1873,7 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
                 AddWindowOptions {
                     window_style: WindowStyle::Pin,
                     window_bounds: WindowBounds::ExactPosition(config.window_bounds),
-                    title: Some("Warp".to_owned()),
+                    title: Some(WINDOW_TITLE.to_owned()),
                     background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
                     background_blur_texture: *window_settings.background_blur_texture,
                     // Ignore the quake window for positioning the next window
@@ -2202,6 +2261,7 @@ pub struct RootView {
     pending_account_first_settings_class: Option<FtueAccountClass>,
     pending_account_first_tutorial_after_settings: bool,
     pending_account_first_sso_login: Option<AccountFirstLoginContext>,
+    pending_managed_session_command: Option<String>,
     account_first_refresh_in_flight: bool,
     paste_auth_token_modal: Option<ViewHandle<PasteAuthTokenModalView>>,
 }
@@ -2220,6 +2280,7 @@ impl RootView {
         let server_api_provider = ServerApiProvider::as_ref(ctx);
         let server_api = server_api_provider.get();
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
+        let has_stozn_identity = managed_agent_sessions::stored_stozn_identity().is_some();
 
         ctx.subscribe_to_model(&AuthManager::handle(ctx), |me, _, event, ctx| {
             me.handle_auth_manager_event(event, ctx);
@@ -2251,7 +2312,7 @@ impl RootView {
             workspace_setting,
         };
 
-        let auth_onboarding_state = if auth_state.is_logged_in() {
+        let auth_onboarding_state = if auth_state.is_logged_in() || has_stozn_identity {
             AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
         } else {
             cfg_if! {
@@ -2312,6 +2373,7 @@ impl RootView {
             pending_account_first_settings_class: None,
             pending_account_first_tutorial_after_settings: false,
             pending_account_first_sso_login: None,
+            pending_managed_session_command: None,
             account_first_refresh_in_flight: false,
             paste_auth_token_modal: None,
         };
@@ -2859,6 +2921,7 @@ impl RootView {
 
         self.auth_onboarding_state = AuthOnboardingState::Terminal(target.to_workspace(ctx));
         ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
+        self.execute_pending_managed_session_command(ctx);
         if completion.starts_agent_tutorial() && settings_applied {
             self.start_pending_tutorial(ctx);
         }
@@ -2910,6 +2973,7 @@ impl RootView {
                 }
                 self.auth_onboarding_state = AuthOnboardingState::Terminal(workspace);
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
+                self.execute_pending_managed_session_command(ctx);
                 self.start_pending_tutorial(ctx);
                 self.start_autoupdate_polling(ctx);
                 self.focus(ctx);
@@ -3071,6 +3135,7 @@ impl RootView {
                 self.pending_tutorial = Some(tutorial);
                 self.auth_onboarding_state = AuthOnboardingState::Terminal(workspace);
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
+                self.execute_pending_managed_session_command(ctx);
                 self.start_pending_tutorial(ctx);
                 self.start_autoupdate_polling(ctx);
                 ctx.notify();
@@ -3094,6 +3159,7 @@ impl RootView {
                 let workspace = target.to_workspace(ctx);
                 self.auth_onboarding_state = AuthOnboardingState::Terminal(workspace);
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
+                self.execute_pending_managed_session_command(ctx);
                 self.start_autoupdate_polling(ctx);
                 ctx.notify();
             }
@@ -3232,12 +3298,6 @@ impl RootView {
                     .unwrap_or_else(|| "Dark".to_string());
                 let use_vertical_tabs = *TabSettings::as_ref(ctx).use_vertical_tabs;
 
-                // Open the sign-in URL in the browser for existing users.
-                AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-                    let sign_in_url = auth_manager.sign_in_url();
-                    ctx.open_url(&sign_in_url);
-                });
-
                 let login_slide_view = ctx.add_typed_action_view(|ctx| {
                     LoginSlideView::new(
                         ai_enabled,
@@ -3256,12 +3316,14 @@ impl RootView {
                 ctx.subscribe_to_view(&login_slide_view, |me, _view, event, ctx| {
                     me.handle_login_slide_event(event, ctx);
                 });
-
                 self.auth_onboarding_state = AuthOnboardingState::LoginSlide {
                     login_slide_view,
                     onboarding_view,
                     target,
                 };
+                StoznAuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
+                    auth_manager.start_login(ctx);
+                });
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
                 self.focus(ctx);
                 ctx.notify();
@@ -3672,6 +3734,40 @@ impl RootView {
         true
     }
 
+    /// Execute a dashboard-issued managed-session viewer command in the active terminal.
+    pub fn execute_managed_session_command(
+        &mut self,
+        command: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let window_id = ctx.window_id();
+        if let AuthOnboardingState::Terminal(handle) = &self.auth_onboarding_state {
+            handle.update(ctx, |workspace, ctx| {
+                workspace.execute_managed_session_command(command, ctx);
+                ctx.windows().show_window_and_focus_app(window_id);
+            })
+        } else {
+            // Preserve the validated identifier-only intent through the STOZN
+            // sign-in/onboarding transition, then execute it once a workspace exists.
+            self.pending_managed_session_command = Some(command.to_owned());
+            log::info!("Queued managed session until STOZN authentication completes");
+        }
+        true
+    }
+
+    fn execute_pending_managed_session_command(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(command) = self.pending_managed_session_command.take() else {
+            return;
+        };
+        let AuthOnboardingState::Terminal(handle) = &self.auth_onboarding_state else {
+            self.pending_managed_session_command = Some(command);
+            return;
+        };
+        handle.update(ctx, |workspace, ctx| {
+            workspace.execute_managed_session_command(&command, ctx);
+        });
+    }
+
     /// Insert a command that should create a subshell. If we support bootstrapping AKA
     /// "warpifying" its [`ShellType`], set a flag to automatically bootstrap it when the command's
     /// block receives the [`AfterBlockStarted`] event.
@@ -3999,6 +4095,7 @@ impl RootView {
                     }
                     self.auth_onboarding_state = AuthOnboardingState::Terminal(workspace);
                     ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
+                    self.execute_pending_managed_session_command(ctx);
                     self.start_pending_tutorial(ctx);
                 }
                 self.start_autoupdate_polling(ctx);

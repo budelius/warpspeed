@@ -512,3 +512,15 @@ fn insert_cli_agent_voice_text_hermes_multiline_uses_bracketed_paste_without_sub
         assert_eq!(writes[0], expected_paste);
     })
 }
+
+#[test]
+fn test_rich_input_submit_strategy_for_kimi_and_deepseek_harness() {
+    assert_eq!(
+        rich_input_submit_strategy(CLIAgent::Kimi),
+        RichInputSubmitStrategy::BracketedPaste
+    );
+    assert_eq!(
+        rich_input_submit_strategy(CLIAgent::DeepSeekHarness),
+        RichInputSubmitStrategy::Inline
+    );
+}

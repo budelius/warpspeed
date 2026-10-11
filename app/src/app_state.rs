@@ -193,6 +193,7 @@ pub struct LeafSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum LeafContents {
     Terminal(TerminalPaneSnapshot),
     Notebook(NotebookPaneSnapshot),
@@ -210,6 +211,9 @@ pub enum LeafContents {
     /// The in-app network log pane. Not persisted across restarts because the
     /// backing log is an in-memory ring buffer that starts empty on launch.
     NetworkLog,
+    /// The AgentCtrl fleet pane. Not persisted: it shows live dashboard state and is reopened
+    /// from the command palette.
+    AgentCtrlFleet,
     /// A new first-time user experience which prioritizes choosing a coding repository.
     GetStarted,
 }
@@ -231,6 +235,7 @@ impl LeafContents {
             // starts empty on launch; persisting would also regress back to
             // an on-disk log via the app-state database.
             LeafContents::NetworkLog
+            | LeafContents::AgentCtrlFleet
             // Environment management panes are opened on-demand via workspace
             // actions and have no persistable state.
             | LeafContents::EnvironmentManagement(_) => false,
@@ -300,6 +305,7 @@ impl CliAgentResumeDescriptor {
             CLIAgent::Codex => Some(format!("codex resume {session_id}")),
             CLIAgent::Vibe => Some(format!("vibe --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi --session {session_id}")),
+            CLIAgent::Kimi => Some(format!("kimi --session {session_id}")),
             // `gemini --resume` takes "latest" or a per-project index, never a session ID.
             CLIAgent::Gemini
             // `opencode session` can list and delete by ID but cannot open one.
@@ -313,10 +319,23 @@ impl CliAgentResumeDescriptor {
             | CLIAgent::Goose
             | CLIAgent::Hermes
             | CLIAgent::Antigravity
+            // DeepSeek Harness has no interactive surface to resume into.
+            | CLIAgent::DeepSeekHarness
             | CLIAgent::WarpTui
             | CLIAgent::Unknown => None,
         }
     }
+}
+
+/// The supervisor that was holding a pane's shell when the pane was saved.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionHolder {
+    /// The supervisor's pipe or socket name.
+    pub channel: String,
+    /// The build that started that supervisor, as its instance marker records it.
+    pub version: String,
+    /// The instance that saved the pane.
+    pub pid: u32,
 }
 
 /// Snapshot of the contents of a terminal pane.
@@ -325,6 +344,8 @@ pub struct TerminalPaneSnapshot {
     pub uuid: Vec<u8>,
     #[serde(default)]
     pub persistent_session_id: Option<SessionId>,
+    #[serde(default)]
+    pub session_holder: Option<SessionHolder>,
     #[serde(default)]
     pub cli_agent_resume_descriptor: Option<CliAgentResumeDescriptor>,
     pub cwd: Option<String>,

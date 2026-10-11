@@ -108,6 +108,22 @@ impl HeadlessScreen {
         self.processor = processor;
     }
 
+    /// Resizes both screens before a detached session is reattached.
+    ///
+    /// The supervisor must repaint at the receiving pane's dimensions: ANSI
+    /// cursor positions in a snapshot are absolute, so replaying an old-size
+    /// snapshot can address rows or columns that no longer exist.
+    pub fn resize(&mut self, columns: u16, rows: u16) {
+        if columns == 0 || rows == 0 || (columns == self.columns && rows == self.rows) {
+            return;
+        }
+        let size = SizeInfo::new_without_font_metrics(rows as usize, columns as usize);
+        self.primary.resize(size);
+        self.alternate.resize(size);
+        self.columns = columns;
+        self.rows = rows;
+    }
+
     /// Renders the current screen as a snapshot.
     pub fn snapshot(&self) -> ScreenSnapshot {
         let mut repaint = Vec::new();

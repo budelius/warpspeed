@@ -8,6 +8,7 @@ use warp_core::SessionId;
 
 use super::transport::Endpoint;
 use crate::local_tty::screen::ScreenSnapshot;
+use crate::shell::ShellLaunchData;
 
 /// The protocol version, carried in the socket and pipe name so a client never
 /// speaks one version of this protocol to a supervisor speaking another.
@@ -28,7 +29,12 @@ use crate::local_tty::screen::ScreenSnapshot;
 ///
 /// [`super::framing_tests`] pins the encoding so that changing it without
 /// coming here fails a test rather than a user's terminal.
-pub const PROTOCOL_VERSION: u32 = 4;
+// v5 makes pre-attach Resize reflow the supervisor's headless screen before
+// lending an endpoint. The wire shape is unchanged, but old v4 supervisors
+// discard replay when the receiving pane has different dimensions.
+// v6 carries whether the detached shell was waiting at its prompt, allowing
+// the adopting pane to reactivate its editor without sourcing bootstrap again.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A message in either direction between a client and the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +156,12 @@ pub struct SessionMetadata {
     /// The session's title, for telling two shells apart at a glance.
     pub title: String,
 
+    /// Whether the shell was waiting at its prompt when handed over.
+    ///
+    /// Restoring this lifecycle marker reactivates the editor without sending
+    /// the one-time bootstrap script to an already-running shell.
+    pub input_editor_active: bool,
+
     /// What the shell said about itself when it started.
     ///
     /// `None` for a session detached before it finished bootstrapping, and for
@@ -254,3 +266,52 @@ pub struct SessionSummary {
     /// but cannot be attached, because a second client would read the same PTY.
     pub attached: bool,
 }
+
+impl SessionMetadata {
+    /// Whether a pane adopting this session should treat its shell as waiting at the prompt.
+    ///
+    /// A shell running a program is never at its prompt, whatever the handover says. Without a
+    /// recorded bootstrap there was no real handover -- the client died, or never attached the
+    /// session -- so `input_editor_active` is only a default, and an idle shell is at its prompt.
+    pub fn adopted_shell_is_at_prompt(&self, has_running_child: bool) -> bool {
+        if has_running_child {
+            return false;
+        }
+        self.bootstrap.is_none() || self.input_editor_active
+    }
+}
+
+impl SessionBootstrap {
+    /// The announcement of a local shell supervised under `session_id`, rebuilt for a session
+    /// whose client vanished without handing it over.
+    ///
+    /// Only what a pane needs to accept the shell can be recovered. A supervised shell stamps its
+    /// hooks with the id it was spawned under, which is its supervisor session id, and a local
+    /// shell reports this machine's hostname, which is what makes the pane treat it as local.
+    /// Everything else the shell announced -- aliases, history file, `PATH` -- is unknown and left
+    /// empty. `None` for shells whose identity cannot be inferred this way, such as those inside
+    /// WSL or a container.
+    pub fn for_orphaned_local_shell(
+        session_id: SessionId,
+        launch: &ShellLaunchData,
+        user: String,
+        hostname: String,
+    ) -> Option<Self> {
+        let shell_type = match launch {
+            ShellLaunchData::Executable { shell_type, .. }
+            | ShellLaunchData::MSYS2 { shell_type, .. } => *shell_type,
+            ShellLaunchData::WSL { .. } | ShellLaunchData::DockerSandbox { .. } => return None,
+        };
+        Some(Self {
+            hook_session_id: session_id.as_u64(),
+            shell: shell_type.name().to_owned(),
+            user,
+            hostname,
+            ..Self::default()
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "message_tests.rs"]
+mod tests;

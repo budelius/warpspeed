@@ -79,6 +79,20 @@ impl<T> ListState<T> {
         inner.add_item();
     }
 
+    /// How many items the list holds.
+    ///
+    /// A caller that keeps its own collection alongside the list needs this to
+    /// check the two have not drifted apart: the render callback is asked for an
+    /// index, and an index the caller's collection no longer has renders as
+    /// nothing at all.
+    pub fn len(&self) -> usize {
+        self.0.borrow().content.summary().count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Invalidates the height of the item at the given index, forcing it
     /// to be re-measured on the next layout pass. If scroll preservation is
     /// configured and the current scroll item's height becomes `None`,

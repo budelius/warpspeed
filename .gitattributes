@@ -10,3 +10,6 @@ crates/input_classifier/models/**/*tokenizer.json -filter -diff -merge text ling
 script/** text eol=lf
 *.sh text eol=lf
 rust-toolchain.toml text eol=lf
+
+# The DeepSeek Harness plugin tarball embedded in the binary must stay byte-identical.
+app/resources/dsh-warp/*.tgz binary

@@ -1,4 +1,5 @@
 pub mod docker_sandbox;
+pub(crate) mod session_holder;
 pub mod terminal_manager;
 mod terminal_view_adaptor;
 
@@ -25,5 +26,9 @@ pub fn run_terminal_server(args: &warp_cli::TerminalServerArgs) {
 impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
     fn exit(&mut self, reason: crate::terminal::model::terminal_model::ExitReason) {
         crate::terminal::TerminalModel::exit(self, reason);
+    }
+
+    fn replay_complete(&mut self) {
+        self.restore_attached_state();
     }
 }

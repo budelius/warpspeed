@@ -72,9 +72,9 @@ use crate::ai_assistant::AskAIType;
 #[cfg(feature = "local_fs")]
 use crate::app_state::CodePaneSnapShot;
 use crate::app_state::{
-    self, AIFactPaneSnapshot, BranchSnapshot, EnvVarCollectionPaneSnapshot, LeafContents,
-    LeafSnapshot, NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot,
-    TerminalPaneSnapshot, WorkflowPaneSnapshot,
+    self, AIFactPaneSnapshot, BranchSnapshot, CliAgentResumeDescriptor,
+    EnvVarCollectionPaneSnapshot, LeafContents, LeafSnapshot, NotebookPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot, TerminalPaneSnapshot, WorkflowPaneSnapshot,
 };
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
@@ -124,6 +124,7 @@ use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::shell_indicator::ShellIndicatorType;
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 #[cfg(not(target_family = "wasm"))]
+use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::cli_agent_sessions::plugin_manager::PluginModalKind;
 use crate::terminal::general_settings::{GeneralSettings, GeneralSettingsChangedEvent};
 #[cfg(feature = "local_tty")]
@@ -146,6 +147,7 @@ use crate::terminal::shared_session::{
     self, IsSharedSessionCreator, SharedSessionActionSource, SharedSessionSource,
 };
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::terminal::view::inline_banner::{
     ZeroStatePromptSuggestionTriggeredFrom, ZeroStatePromptSuggestionType,
 };
@@ -192,6 +194,7 @@ use focus_state::PaneGroupFocusState;
 #[path = "mod_tests.rs"]
 mod tests;
 
+pub use pane::agent_ctrl_fleet_pane::AgentCtrlFleetPane;
 pub use pane::ai_document_pane::AIDocumentPane;
 pub use pane::ai_fact_pane::AIFactPane;
 pub use pane::code_diff_pane::CodeDiffPane;
@@ -590,6 +593,12 @@ pub enum Event {
     InvokeEnvVarCollection {
         env_var_collection: Arc<EnvVarCollectionType>,
         in_subshell: bool,
+    },
+    /// A pane whose supervised shell is running an agent or a long-running command is being
+    /// closed. Closing it hands the shell to the supervisor, which keeps it running, rather than
+    /// ending it.
+    DetachPaneOnCloseRequested {
+        pane_id: PaneId,
     },
     CloseSharedSessionPaneRequested {
         pane_id: PaneId,
@@ -1445,6 +1454,7 @@ impl PaneGroup {
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned()),
                     shell_launch_data: parked_shell_launch_data,
+                    cli_agent_resume_descriptor: None,
                 };
 
                 let (view, terminal_manager) = match pane_mode {
@@ -1763,6 +1773,9 @@ impl PaneGroup {
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned()),
                     shell_launch_data: terminal_snapshot.shell_launch_data.clone(),
+                    cli_agent_resume_descriptor: terminal_snapshot
+                        .cli_agent_resume_descriptor
+                        .clone(),
                 };
 
                 // Filter conversation IDs to only include those that have task messages
@@ -1828,6 +1841,16 @@ impl PaneGroup {
                     if let Some(command) = cli_agent_resume_command {
                         manager.restore_cli_agent_resume_command(command);
                     }
+                    let agent = terminal_snapshot
+                        .cli_agent_resume_descriptor
+                        .as_ref()
+                        .and_then(|descriptor| {
+                            Some(HeldAgent {
+                                agent: descriptor.agent,
+                                session_id: descriptor.session_id.clone()?,
+                            })
+                        });
+                    manager.restore_session_holder(terminal_snapshot.session_holder.clone(), agent);
                     if configure_before_start && shell_start == ShellStartPolicy::Eager {
                         manager.ensure_shell_started(ctx);
                     }
@@ -2126,6 +2149,9 @@ impl PaneGroup {
                     "Network log pane should not have been persisted, as it cannot be restored"
                 ))
             }
+            LeafContents::AgentCtrlFleet => Err(anyhow::anyhow!(
+                "AgentCtrl fleet pane should not have been persisted, as it cannot be restored"
+            )),
             LeafContents::GetStarted => {
                 if !FeatureFlag::GetStartedTab.is_enabled() {
                     Err(anyhow::anyhow!("GetStarted pane not supported"))
@@ -2295,6 +2321,7 @@ impl PaneGroup {
                         LeafContents::Terminal(TerminalPaneSnapshot {
                             uuid: Uuid::new_v4().as_bytes().to_vec(),
                             persistent_session_id: None,
+                            session_holder: None,
                             cli_agent_resume_descriptor: None,
                             cwd: None,
                             is_active: visible_leaf_is_active_session,
@@ -2333,6 +2360,35 @@ impl PaneGroup {
                     contents,
                 })
             }
+        }
+    }
+
+    /// The agent a restored terminal pane has yet to resume, if it is one.
+    pub(crate) fn pending_agent_resume(
+        &self,
+        pane_id: PaneId,
+        app: &AppContext,
+    ) -> Option<CliAgentResumeDescriptor> {
+        self.downcast_pane_by_id::<TerminalPane>(pane_id)?
+            .pending_agent_resume(app)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_restored_agent_for_test(
+        &mut self,
+        pane_id: PaneId,
+        descriptor: CliAgentResumeDescriptor,
+    ) {
+        if let Some(pane) = self
+            .pane_contents
+            .get_mut(&pane_id)
+            .and_then(|pane| pane.as_any_mut().downcast_mut::<TerminalPane>())
+        {
+            pane.set_restored_shell_snapshot_fields(RestoredShellSnapshotFields {
+                cwd: None,
+                shell_launch_data: None,
+                cli_agent_resume_descriptor: Some(descriptor),
+            });
         }
     }
 
@@ -4610,6 +4666,29 @@ impl PaneGroup {
 
     /// Emits an event for the workspace to show a confirmation dialog if necessary, or closes immediately if not.
     /// If a dialog is opened, the workspace may call back into pane group to close the pane after the user confirms.
+    /// Whether closing this pane should leave its shell running in the supervisor: the shell is
+    /// supervised and an agent or a long-running command is running in it.
+    fn pane_keeps_running_when_closed(&self, pane_id: PaneId, ctx: &AppContext) -> bool {
+        let Some(session) = self.terminal_session_by_id(pane_id) else {
+            return false;
+        };
+        let manager = session.terminal_manager(ctx);
+        let manager = manager.as_ref(ctx);
+        if manager.persistent_session_id().is_none() {
+            return false;
+        }
+        let terminal_view_id = session.terminal_view(ctx).id();
+        CLIAgentSessionsModel::as_ref(ctx)
+            .session(terminal_view_id)
+            .is_some()
+            || manager
+                .model()
+                .lock()
+                .block_list()
+                .active_block()
+                .is_active_and_long_running()
+    }
+
     pub fn close_pane_with_confirmation(&mut self, pane_id: PaneId, ctx: &mut ViewContext<Self>) {
         // Child agent panes are just hidden when closed, so skip the
         // "process running" warning—it doesn't apply.
@@ -4630,6 +4709,11 @@ impl PaneGroup {
             })
         {
             ctx.emit(Event::CloseSharedSessionPaneRequested { pane_id });
+            return;
+        }
+
+        if self.pane_keeps_running_when_closed(pane_id, ctx) {
+            ctx.emit(Event::DetachPaneOnCloseRequested { pane_id });
             return;
         }
 
@@ -6339,6 +6423,7 @@ impl PaneGroup {
                 );
                 let terminal_manager = terminal_init.manager;
                 let terminal_view = terminal_init.surface;
+                terminal_view.update(ctx, |view, _| view.set_terminal_session_uuid(terminal_session_uuid));
             } else {
                 use crate::terminal::{ShellLaunchState, shell::{ShellName, ShellType}};
 
@@ -6869,6 +6954,27 @@ impl PaneGroup {
         );
 
         (pane_data, view)
+    }
+
+    /// Splits a plain terminal pane to the right of `base`, starting its shell in `directory`.
+    pub fn split_terminal_in_directory(
+        &mut self,
+        base: PaneId,
+        directory: PathBuf,
+        ctx: &mut ViewContext<Self>,
+    ) -> TerminalPaneId {
+        // `Ignore`: the pane is about to run an agent CLI, so it must not open in agent view.
+        let new_pane_id = self.add_session_in_directory(
+            Direction::Right,
+            Some(base),
+            None, /* chosen_shell */
+            Some(directory),
+            None, /* conversation_restoration */
+            DefaultSessionModeBehavior::Ignore,
+            ctx,
+        );
+        ctx.emit(Event::AppStateChanged);
+        new_pane_id
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8397,8 +8503,11 @@ impl PaneGroup {
                     // codepath should only be invoked when focus has
                     // already changed, so we only want to update our own
                     // state, and not manipulate application focus.
-                    self.focus_pane(pane_id, false, ctx);
+                    let focus_changed = self.focus_pane(pane_id, false, ctx);
                     self.update_pane_history(pane_id);
+                    if focus_changed {
+                        ctx.emit(Event::AppStateChanged);
+                    }
                     ctx.emit(Event::PaneFocused);
                 };
                 break;

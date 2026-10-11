@@ -57,4 +57,24 @@ pub(crate) struct TerminalPaneInfo {
 
     /// Where the pane last was.
     pub(crate) working_directory: String,
+
+    /// The pane's terminal view.
+    pub(crate) terminal_view_id: EntityId,
+
+    /// The running agent, by its first command prefix, or the restored agent still to resume.
+    pub(crate) agent: Option<String>,
+
+    /// The agent's session id, as its hooks reported it or as recovered from its history, or the
+    /// restored agent's saved one.
+    pub(crate) agent_session_id: Option<String>,
+
+    /// The directory the agent's hooks reported.
+    pub(crate) agent_cwd: Option<String>,
+
+    /// The session file the agent last reported.
+    pub(crate) transcript_path: Option<String>,
+
+    /// Whether the pane was restored with an agent it has not resumed yet, its tab not having
+    /// been opened: there is no live agent session, only the one saved to resume.
+    pub(crate) agent_not_resumed: bool,
 }

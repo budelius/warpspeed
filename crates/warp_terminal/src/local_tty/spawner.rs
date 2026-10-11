@@ -79,6 +79,8 @@ pub trait PtyHandle: Send + Sync {
     fn kill(&mut self) -> Result<()>;
 }
 
+type AttachedPty = (PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata);
+
 /// A handle for a pty that is a direct child of the current process.
 #[cfg(unix)]
 struct DirectPtyHandle {
@@ -137,6 +139,7 @@ struct SupervisorOwnedPtyHandle {
     client: std::sync::Arc<UnixTerminalSupervisorClient>,
     session_id: SessionId,
     pid: u32,
+    preserved: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -161,7 +164,10 @@ impl PtyHandle for SupervisorOwnedPtyHandle {
     }
 
     fn kill(&mut self) -> Result<()> {
-        if self.client.take_preserved(self.session_id) {
+        if self
+            .preserved
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             Ok(())
         } else {
             self.client.kill(self.session_id)
@@ -174,6 +180,7 @@ struct SupervisorOwnedPtyHandle {
     client: std::sync::Arc<WindowsTerminalSupervisorClient>,
     session_id: SessionId,
     pid: u32,
+    preserved: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(windows)]
@@ -197,7 +204,10 @@ impl PtyHandle for SupervisorOwnedPtyHandle {
     }
 
     fn kill(&mut self) -> Result<()> {
-        if self.client.take_preserved(self.session_id) {
+        if self
+            .preserved
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             Ok(())
         } else {
             self.client.kill(self.session_id)
@@ -327,7 +337,12 @@ impl PtySpawner {
         #[cfg(unix)]
         if let Some(supervisor) = self.supervisor.as_ref() {
             for handover in handovers {
-                supervisor.detach(handover.session_id, handover.snapshot, handover.metadata)?;
+                let session_id = handover.session_id;
+                if let Err(error) =
+                    supervisor.detach(session_id, handover.snapshot, handover.metadata)
+                {
+                    skip_ended_session(session_id, error, |id| supervisor.is_running(id))?;
+                }
             }
             return Ok(());
         }
@@ -344,7 +359,12 @@ impl PtySpawner {
         #[cfg(windows)]
         if let Some(supervisor) = self.supervisor.as_ref() {
             for handover in handovers {
-                supervisor.detach(handover.session_id, handover.snapshot, handover.metadata)?;
+                let session_id = handover.session_id;
+                if let Err(error) =
+                    supervisor.detach(session_id, handover.snapshot, handover.metadata)
+                {
+                    skip_ended_session(session_id, error, |id| supervisor.is_running(id))?;
+                }
             }
         }
         Ok(())
@@ -538,6 +558,7 @@ impl PtySpawner {
                             client: client.clone(),
                             session_id: persistent_session_id,
                             pid,
+                            preserved: client.register_handle(persistent_session_id),
                         }),
                     ));
                 }
@@ -603,6 +624,7 @@ impl PtySpawner {
                             client: client.clone(),
                             session_id: persistent_session_id,
                             pid,
+                            preserved: client.register_handle(persistent_session_id),
                         }),
                     ));
                 }
@@ -687,6 +709,9 @@ impl PtySpawner {
     ) -> Result<Option<AttachedPty>> {
         #[cfg(unix)]
         if let Some(client) = self.supervisor.as_ref() {
+            // Resize while the supervisor is still the sole reader so its
+            // headless screen and the PTY can be repainted for this pane.
+            client.resize(session_id, pane_size.0, pane_size.1)?;
             let attached = client.attach(session_id)?;
             let endpoint = attached
                 .endpoint
@@ -712,6 +737,7 @@ impl PtySpawner {
                 client: client.clone(),
                 session_id,
                 pid: endpoint.pid,
+                preserved: client.register_handle(session_id),
             });
             return Ok(Some((result, handle, attached.metadata)));
         }
@@ -743,6 +769,10 @@ impl PtySpawner {
             let Some(client) = self.supervisor.as_ref() else {
                 return Ok(None);
             };
+            // Windows relays are fresh per attachment. Resize before borrowing
+            // one so replay is rendered at this pane's dimensions instead of
+            // being discarded as an unsafe old-size snapshot.
+            client.resize(session_id, pane_size.0, pane_size.1)?;
             let attached = client.attach(session_id)?;
             let endpoint = attached
                 .endpoint
@@ -768,6 +798,7 @@ impl PtySpawner {
                 client: client.clone(),
                 session_id,
                 pid: endpoint.pid,
+                preserved: client.register_handle(session_id),
             });
             Ok(Some((result, handle, attached.metadata)))
         }
@@ -865,3 +896,28 @@ fn log_env_var_diagnostics(extra_env_vars: &HashMap<OsString, OsString>) {
         log::error!("Inherited process env entry key={key:?} bytes={size}");
     }
 }
+
+/// Decides what a failed handover means for the rest of the window.
+///
+/// A pane can outlive its shell, so a window may name sessions the supervisor has already let
+/// go. Those have nothing to hand over and must not hold back the ones that are still running;
+/// a session that is still running and could not be handed over is a real failure.
+pub(crate) fn skip_ended_session(
+    session_id: SessionId,
+    error: anyhow::Error,
+    is_running: impl FnOnce(SessionId) -> Result<bool>,
+) -> Result<()> {
+    match is_running(session_id) {
+        Ok(true) => Err(error),
+        Ok(false) | Err(_) => {
+            log::info!(
+                "Not handing over terminal session {session_id:?}, which has already ended: {error:#}"
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "spawner_tests.rs"]
+mod tests;

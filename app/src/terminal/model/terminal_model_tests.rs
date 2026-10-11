@@ -1953,6 +1953,44 @@ fn reset_exit_state_lets_a_restarted_pane_become_writable_again() {
         "a real exit after reset_exit_state should still latch the model read-only"
     );
 }
+
+/// Changing a pane's shell tears the old session down (the event loop's last act is `exit`)
+/// and then starts a replacement in the same model. If the replacement's `InitShell` is
+/// dropped, the app never sends the bootstrap script, so the new shell never bootstraps and
+/// the pane refuses every keystroke.
+#[test]
+fn exit_for_restart_allows_the_replacement_shell_to_initialize() {
+    let mut terminal = TerminalModel::mock(None, None);
+    let replaced_session_id = SessionId::from(234);
+    terminal.block_list_mut().reinit_shell();
+    terminal.init_shell(InitShellValue {
+        shell: "bash".to_owned(),
+        session_id: replaced_session_id,
+        ..Default::default()
+    });
+    terminal.exit(ExitReason::PtyDisconnected);
+
+    let replacement_session_id = SessionId::from(456);
+    terminal.exit_for_restart();
+    terminal.register_session_id(replacement_session_id);
+    terminal.init_shell(InitShellValue {
+        shell: "pwsh".to_owned(),
+        session_id: replacement_session_id,
+        ..Default::default()
+    });
+
+    assert_eq!(
+        terminal.pending_session_id(),
+        Some(replacement_session_id),
+        "the replacement shell's InitShell must be accepted, not ignored as post-exit output"
+    );
+    assert_eq!(
+        terminal.block_list().active_block().bootstrap_stage(),
+        BootstrapStage::WarpInput
+    );
+    assert!(!terminal.block_list().active_block().finished());
+}
+
 #[test]
 fn test_alt_screen_selection_tracks_scroll() {
     let mut terminal: TerminalModel = TerminalModel::mock(None, None);
@@ -2356,8 +2394,20 @@ fn a_pane_adopting_a_running_shell_is_bootstrapped_by_what_it_is_told() {
         "a pane that has heard nothing from a shell starts out refusing input"
     );
 
-    adopting.restore_bootstrap(&captured);
+    adopting.prepare_attached_state(captured, true, Some("/workspace".to_owned()));
+    assert!(
+        matches!(
+            adopting.terminal_input_state(),
+            TerminalInputState::NotBootstrapped
+        ),
+        "attachment state must wait until replay has finished"
+    );
+    adopting.restore_attached_state();
 
+    assert!(
+        adopting.is_active_block_bootstrapped(),
+        "the bootstrap timeout must recognize the restored prompt as ready"
+    );
     assert!(
         !matches!(
             adopting.terminal_input_state(),
@@ -2365,6 +2415,35 @@ fn a_pane_adopting_a_running_shell_is_bootstrapped_by_what_it_is_told() {
         ),
         "after being told what the shell announced, the pane must accept input; \
          staying NotBootstrapped is the bug that made an attached session unusable"
+    );
+}
+
+/// A shell handed over while a program was running in it -- an agent, typically -- is not at its
+/// prompt. If the adopting pane treats it as idle, keystrokes go to Warp's own input editor,
+/// which is hidden behind the program's screen, and the program can never be typed into.
+#[test]
+fn a_pane_adopting_a_shell_mid_command_sends_input_to_the_command() {
+    let announced = TerminalModel::mock(None, None);
+    let captured = announced
+        .captured_bootstrap()
+        .cloned()
+        .expect("a model that saw a shell start must have captured the announcement");
+
+    let mut adopting = TerminalModel::mock_before_bootstrap();
+    adopting.prepare_attached_state(captured, false, Some("/workspace".to_owned()));
+    adopting.restore_attached_state();
+
+    assert!(adopting.is_active_block_bootstrapped());
+    assert!(
+        adopting.block_list().active_block().is_executing(),
+        "the program the shell was running must be the pane's executing command"
+    );
+    assert!(
+        !matches!(
+            adopting.terminal_input_state(),
+            TerminalInputState::NotBootstrapped
+        ),
+        "an adopted shell must accept input"
     );
 }
 

@@ -56,7 +56,7 @@ use crate::server::ids::{ClientId, SyncId};
 use crate::server::server_api::ai::SpawnAgentRequest;
 use crate::settings::import::model::ImportedConfigModel;
 use crate::settings::{AISettings, AppEditorSettings, RightClickBehavior, WarpPromptSeparator};
-use crate::terminal::alt_screen::should_intercept_mouse;
+use crate::terminal::alt_screen::{should_intercept_mouse, should_intercept_right_click};
 use crate::terminal::block_list_element::{SnackbarPoint, SnackbarTranslationMode};
 use crate::terminal::block_list_viewport::{ClampingMode, ScrollLines};
 use crate::terminal::cli_agent_sessions::event::{
@@ -102,6 +102,41 @@ fn add_window_with_cloud_mode_terminal(app: &mut App) -> ViewHandle<TerminalView
         view.model.lock().set_is_dummy_cloud_mode_session(true);
     });
     terminal
+}
+
+#[test]
+fn updating_active_shell_launch_data_requests_an_app_state_save() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let app_state_changed = Rc::new(RefCell::new(false));
+
+        app.update({
+            let app_state_changed = app_state_changed.clone();
+            |ctx| {
+                ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                    if matches!(event, Event::AppStateChanged) {
+                        *app_state_changed.borrow_mut() = true;
+                    }
+                });
+            }
+        });
+
+        terminal.update(&mut app, |terminal, ctx| {
+            <TerminalView as TerminalSurface>::on_active_shell_launch_data_updated(
+                terminal,
+                Some(ShellLaunchData::WSL {
+                    distro: "Ubuntu".to_owned(),
+                }),
+                ctx,
+            );
+        });
+
+        assert!(
+            *app_state_changed.borrow(),
+            "changing a pane's shell must update its persisted snapshot"
+        );
+    });
 }
 
 /// Builds a resumable, owned (created by the current test user) Oz cloud task so
@@ -778,6 +813,10 @@ fn block_list_right_click_forwards_to_pty_when_long_running_block_owns_mouse() {
         };
         let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
 
+        AltScreenReporting::handle(&app).update(&mut app, |reporting, ctx| {
+            let _ = reporting.right_click_reporting_enabled.set_value(true, ctx);
+        });
+
         let size_info = terminal.update(&mut app, |view, ctx| {
             let mut model = view.model.lock();
             model.simulate_long_running_block("cmd", "output");
@@ -787,6 +826,10 @@ fn block_list_right_click_forwards_to_pty_when_long_running_block_owns_mouse() {
             assert!(
                 !should_intercept_mouse(&model, false, ctx),
                 "the running command should own the mouse with SGR reporting enabled"
+            );
+            assert!(
+                !should_intercept_right_click(&model, false, ctx),
+                "right-click reporting is on, so the running command should own right-clicks too"
             );
             *view.size_info
         });
@@ -1059,6 +1102,128 @@ fn alt_screen_shift_right_click_opens_context_menu_when_right_click_pastes() {
                 "Shift+right-click must never paste into the input box"
             );
         });
+    })
+}
+
+/// Full-screen apps like Pi enable SGR mouse tracking, which hands them left-clicks and
+/// drags. Right-click stays Warp's by default so its context menu keeps working; only when
+/// `right_click_reporting_enabled` is on is the raw right-click forwarded to the app instead.
+#[test]
+fn alt_screen_right_click_opens_context_menu_even_when_app_tracks_mouse() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let (window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        let mut updated = EntityIdSet::default();
+        updated.insert(app.root_view_id(window_id).unwrap());
+        let invalidation = WindowInvalidation {
+            updated,
+            ..Default::default()
+        };
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+
+        let size_info = terminal.update(&mut app, |view, ctx| {
+            let mut model = view.model.lock();
+            model.set_mode(ansi::Mode::SwapScreen {
+                save_cursor_and_clear_screen: true,
+            });
+            model.set_mode(ansi::Mode::SgrMouse);
+            model.set_mode(ansi::Mode::ReportMouseClicks);
+            assert!(model.is_alt_screen_active());
+            assert!(
+                !should_intercept_mouse(&model, false, ctx),
+                "the full-screen app should own left-clicks with SGR reporting enabled"
+            );
+            *view.size_info
+        });
+
+        macro_rules! rerender {
+            () => {
+                app.update(enclose!((presenter, invalidation) move |ctx| {
+                    presenter
+                        .borrow_mut()
+                        .invalidate(invalidation, ctx);
+                    presenter.borrow_mut().build_scene(
+                        vec2f(size_info.pane_width_px, size_info.pane_height_px),
+                        1.,
+                        None,
+                        ctx,
+                    );
+                }));
+            };
+        }
+
+        macro_rules! right_click {
+            () => {
+                rerender!();
+                app.update(enclose!((presenter) move |ctx| {
+                    ctx.simulate_window_event(
+                        warpui::Event::RightMouseDown {
+                            position: vec2f(
+                                2. * size_info.cell_width_px.as_f32(),
+                                2. * size_info.cell_height_px.as_f32() - 1.,
+                            ),
+                            cmd: false,
+                            shift: false,
+                            click_count: 1,
+                        },
+                        window_id,
+                        presenter.clone(),
+                    );
+                }));
+            };
+        }
+
+        assert!(!terminal.read(&app, |view, _ctx| view.is_context_menu_open()));
+        right_click!();
+        assert!(
+            terminal.read(&app, |view, _ctx| view.is_context_menu_open()),
+            "a bare right-click must open Warp's context menu even though the app tracks the mouse"
+        );
+        assert!(
+            pty_writes.borrow().is_empty(),
+            "the right-click must not reach the PTY by default, got {:?}",
+            pty_writes.borrow()
+        );
+
+        terminal.update(&mut app, |view, ctx| view.close_context_menu(ctx, false));
+        AltScreenReporting::handle(&app).update(&mut app, |reporting, ctx| {
+            let _ = reporting.right_click_reporting_enabled.set_value(true, ctx);
+        });
+        terminal.read(&app, |view, ctx| {
+            assert!(!should_intercept_right_click(
+                &view.model.lock(),
+                false,
+                ctx
+            ));
+        });
+
+        right_click!();
+        assert!(
+            !terminal.read(&app, |view, _ctx| view.is_context_menu_open()),
+            "with right-click reporting on, the app owns the right-click instead of Warp's menu"
+        );
+        let writes = pty_writes.borrow();
+        assert_eq!(
+            writes.len(),
+            1,
+            "exactly one raw mouse report should reach the PTY, got {writes:?}"
+        );
+        assert!(
+            writes[0].starts_with(b"\x1b[<2;"),
+            "expected an SGR right-button-press mouse report, got {:?}",
+            writes[0]
+        );
     })
 }
 
@@ -10285,6 +10450,60 @@ fn up_and_down_navigate_blocks_when_no_command_is_running() {
     })
 }
 
+#[cfg(feature = "local_tty")]
+#[test]
+fn retry_removes_an_unbootstrapped_shells_terminated_banner() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |view, ctx| {
+            let initial_rich_content_count = view.rich_content_views.len();
+            view.insert_shell_process_terminated_banner(
+                shell_terminated_banner::TerminationType::Normal,
+                ctx,
+            );
+
+            let banner_id = view
+                .rich_content_views
+                .iter()
+                .find(|rich_content| rich_content.is_shell_process_terminated_banner())
+                .expect("an unbootstrapped shell exit should insert a rich-content banner")
+                .view_id();
+            assert_eq!(
+                view.rich_content_views.len(),
+                initial_rich_content_count + 1
+            );
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .rich_content_row_range(banner_id)
+                    .is_some(),
+                "the banner must also be present in the block list"
+            );
+
+            view.on_session_restart_started(ctx);
+
+            assert_eq!(view.rich_content_views.len(), initial_rich_content_count);
+            assert!(
+                view.rich_content_views
+                    .iter()
+                    .all(|rich_content| !rich_content.is_shell_process_terminated_banner()),
+                "restart must discard the failed shell's banner view"
+            );
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .rich_content_row_range(banner_id)
+                    .is_none(),
+                "restart must discard the failed shell's banner block-list entry"
+            );
+        });
+    });
+}
+
 /// `ModelEvent::Exit` is written for a shell that died: it inserts the "process
 /// terminated" banner, disables the input editor, and emits `Event::Exited` (which
 /// closes the pane, per `terminal_pane.rs`). A deliberate restart needs none of that
@@ -10459,5 +10678,179 @@ fn finish_restart_re_enables_an_editor_disabled_by_the_exit_it_is_replacing() {
                 });
             });
         });
+    });
+}
+
+/// A pane whose supervised shell outlived its connection must offer to reattach it, not report a
+/// dead shell: the pane stays open, and the reattach (a restart) takes the banner away again.
+#[cfg(feature = "local_tty")]
+#[test]
+fn a_detached_shell_shows_the_reattach_banner_and_keeps_the_pane_open() {
+    use crate::terminal::model::terminal_model::ExitReason;
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let exited_count = Rc::new(RefCell::new(0usize));
+        let exited_count_handle = exited_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::Exited = event {
+                    *exited_count_handle.borrow_mut() += 1;
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            view.is_login_shell_bootstrapped = true;
+            view.model.lock().exit(ExitReason::PtyDetached);
+            view.handle_terminal_event(
+                &ModelEvent::Exit {
+                    reason: ExitReason::PtyDetached,
+                },
+                ctx,
+            );
+
+            assert!(view.inline_banners_state.shell_detached_banner.is_some());
+            assert!(
+                view.inline_banners_state
+                    .shell_process_terminated_banner
+                    .is_none(),
+                "a shell that is still running must not be reported as exited"
+            );
+            view.input.read(ctx, |input, ctx| {
+                input.editor().read(ctx, |editor, ctx| {
+                    assert_eq!(
+                        editor.interaction_state(ctx),
+                        crate::editor::InteractionState::Disabled,
+                        "nothing can be typed into a pane with no connection to its shell"
+                    );
+                });
+            });
+
+            view.on_session_restart_started(ctx);
+            assert!(
+                view.inline_banners_state.shell_detached_banner.is_none(),
+                "reattaching must take the banner away"
+            );
+        });
+
+        assert_eq!(
+            *exited_count.borrow(),
+            0,
+            "a detached shell must not emit Event::Exited, which can close the pane"
+        );
+    });
+}
+
+/// A pending command refused because the session's history was not registered yet must run
+/// once it is; nothing else would retry it at an idle prompt.
+#[test]
+fn pending_command_runs_once_history_is_initialized() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let cwd = std::env::temp_dir();
+        let session_id = terminal.update(&mut app, |view, ctx| {
+            view.set_active_local_session_for_test(&cwd, ctx);
+            view.set_login_shell_bootstrapped_for_test();
+            // The session's own id, which is what `History` registers it under.
+            let session_id = view
+                .active_block_session_id()
+                .and_then(|id| view.sessions.as_ref(ctx).get(id))
+                .unwrap()
+                .id();
+            let mut model = view.model.lock();
+            model.block_list_mut().set_bootstrapped();
+            model
+                .block_list_mut()
+                .active_block_mut()
+                .set_session_id(session_id);
+            drop(model);
+            view.set_pending_command("echo resumed", ctx);
+            view.execute_pending_command((), ctx);
+            session_id
+        });
+        // Let any retry an earlier block completion queued fire while history is still
+        // unregistered; at an idle prompt in the app nothing else retries the command.
+        warpui::r#async::Timer::after(EXECUTE_PENDING_COMMAND_DELAY * 5).await;
+        assert!(
+            terminal.read(&app, |view, ctx| view
+                .input
+                .as_ref(ctx)
+                .has_pending_command()),
+            "with no history registered for the session the command must stay pending"
+        );
+
+        let session = terminal
+            .read(&app, |view, ctx| view.sessions.as_ref(ctx).get(session_id))
+            .unwrap();
+        app.update(|ctx| {
+            History::handle(ctx).update(ctx, |history, ctx| {
+                history.init_session_with(session, async { Vec::new() }, ctx)
+            })
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) =>
+                !terminal.read(&app, |view, ctx| view.input.as_ref(ctx).has_pending_command()),
+            "the pending command must run once the session's history is initialized"
+        );
+    });
+}
+
+/// A pending command refused because the session's history was not appendable yet must run once
+/// it becomes appendable, even when no event announces that change: on a real restore the
+/// bootstrap precmd can arrive before the session is registered, and the registration's own
+/// `Initialized` event is not guaranteed to reach the pane afterwards.
+#[test]
+fn pending_command_retries_until_the_session_history_is_appendable() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let cwd = std::env::temp_dir();
+        let session_id = terminal.update(&mut app, |view, ctx| {
+            view.set_active_local_session_for_test(&cwd, ctx);
+            view.set_login_shell_bootstrapped_for_test();
+            let session_id = view
+                .active_block_session_id()
+                .and_then(|id| view.sessions.as_ref(ctx).get(id))
+                .unwrap()
+                .id();
+            let mut model = view.model.lock();
+            model.block_list_mut().set_bootstrapped();
+            model
+                .block_list_mut()
+                .active_block_mut()
+                .set_session_id(session_id);
+            drop(model);
+            view.set_pending_command("echo resumed", ctx);
+            view.execute_pending_command((), ctx);
+            session_id
+        });
+        warpui::r#async::Timer::after(EXECUTE_PENDING_COMMAND_DELAY * 5).await;
+        assert!(
+            terminal.read(&app, |view, ctx| view
+                .input
+                .as_ref(ctx)
+                .has_pending_command()),
+            "with no history registered for the session the command must stay pending"
+        );
+
+        let session = terminal
+            .read(&app, |view, ctx| view.sessions.as_ref(ctx).get(session_id))
+            .unwrap();
+        app.update(|ctx| {
+            History::handle(ctx).update(ctx, |history, _ctx| {
+                history.register_shell_host_for_test(&session)
+            })
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) =>
+                !terminal.read(&app, |view, ctx| view.input.as_ref(ctx).has_pending_command()),
+            "the pending command must run once the session's history became appendable"
+        );
     });
 }

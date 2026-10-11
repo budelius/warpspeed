@@ -245,6 +245,9 @@ fn build_input_model(
 ) {
     initialize_history_persistence_for_tests(app);
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    app.add_singleton_model(|_| {
+        crate::terminal::agent_session_history_model::AgentSessionHistoryModel::new()
+    });
 
     let terminal_model = Arc::new(FairMutex::new(TerminalModel::new_for_test(
         block_size(),

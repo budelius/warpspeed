@@ -261,8 +261,6 @@ pub(super) struct PtySpawnInfo {
     pub child: PseudoConsoleChild,
 }
 
-type AttachedPty = (PtySpawnResult, Box<dyn PtyHandle>, SessionMetadata);
-
 /// A global singleton that provides the ability to spawn ptys.
 ///
 /// This abstracts away from callers the manner in which the pty is spawned -

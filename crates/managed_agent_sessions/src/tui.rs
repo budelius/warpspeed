@@ -863,7 +863,7 @@ impl ManagedSessionsTui {
             )
         } else if self.input.is_empty() {
             (
-                "Type a follow-up message…",
+                " Type a follow-up message…",
                 Style::default().fg(Color::DarkGray),
             )
         } else {

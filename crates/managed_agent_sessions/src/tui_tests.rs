@@ -73,6 +73,7 @@ fn full_screen_contains_header_transcript_composer_and_controls() {
     assert!(lines[4].starts_with("┌ Conversation · 1 events "));
     assert!(lines.iter().any(|line| line.contains("AGENT  #7")));
     assert!(lines[14].starts_with("┌ Message "));
+    assert!(lines[15].starts_with("│ Type a follow-up message…"));
     assert!(lines[17].contains("Enter send"));
     assert!(lines[17].contains("/help commands"));
     assert!(lines[17].contains("Ctrl-O shell"));

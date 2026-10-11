@@ -14,7 +14,7 @@
 
 - Staging only: namespace `agent-ctrl`, host `agents-dev.obachan.dev`. The `prod` instance renders no API resources.
 - Zitadel issuer `https://id-dev.obachan.dev`, project `394361582064240430`, WarpSpeed client `394361583406417710`. Roles only from claim `urn:zitadel:iam:org:project:394361582064240430:roles`: `agent-admin` → admin, `agent-user` → member, neither → 401.
-- Contract parity: paths, JSON shapes, status codes, error codes and messages identical to the dashboard on stoz3n-agent-dash `origin/dev` 9c33330 (`server/agent-control.ts`). The only API-side additions are: `owner_sub`/`owner_email` on run objects, `GET …/runs/{job}/events/stream`, members (not only admins) being served, and 422 `task_launch_unsupported` (Task 10).
+- Contract parity: paths, JSON shapes, status codes, error codes and messages identical to the dashboard on stoz3n-agent-dash `origin/dev` 92b091e (`server/agent-control.ts`; was 9c33330 until Task 10b). The only API-side additions are: `owner_sub`/`owner_email` on run objects, `GET …/runs/{job}/events/stream`, members (not only admins) being served, and 422 `task_launch_unsupported` (Task 10).
 - Idempotency key `^[A-Za-z0-9._:-]{16,128}$` → gRPC `request_id`; `Idempotency-Replayed` response header; 64 KiB JSON body cap; 32 MiB session file cap; 30 mutations / 60 s / actor → 429 `rate_limited` with `Retry-After: 60`.
 - Never a 500 for dependency failures: controller → 503 `controller_unavailable`, Mongo → 503 `storage_unavailable`, JWKS unreachable → 401 (fail closed).
 - Never log a bearer token, an `X-Userinfo` payload, a userinfo response or the control token. Tests use only the test key committed in Task 5.
@@ -6522,6 +6522,43 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
+
+### Task 10b: Catch up with agent-ctrl dev and the dashboard's run archival
+
+Added 2026-10-11. While P1 ran, agent-ctrl `dev` merged #42 (divorce workspace), #43 (secrets-only Passiv routes) and
+#44 (archive terminal managed runs: `ArchiveJob` RPC, `jobs.archived_at`/`archived_by`, `CONTROL_API_VERSION = 3`),
+and the dashboard `dev` (92b091e, PR #83) exposed archival. WarpSpeed `dev` already ships `agent-ctrl archive`, so
+the API must serve it to stay a drop-in replacement. The contract pin moves from 9c33330 to 92b091e.
+
+**Files (agent-ctrl worktree, branch `feat/p1-agentctrl-api`):**
+- Merge: `origin/dev` (4f9d376) into the branch; resolve conflicts keeping both sides (owner fields + archive fields
+  in proto, Job, JobInfo, Mongo upsert, controller).
+- Modify: `src/api/handlers/reads.rs` (`REQUIRED_CONTROL_API_VERSION = 3`; overview recent/paused queries and the runs
+  list exclude archived runs; runs list accepts `include_archived` = `0|1|false|true`, else 422 `validation_error`
+  "include_archived must be a boolean"), `src/api/project.rs` (`public_run` gains `archived_at` (iso or null) and
+  `archived_by` (nullable string)), `src/api/store.rs` + `src/api/fakes.rs` (`archived_at: null` filter unless
+  included), `src/api/handlers/mutations.rs` + router (`POST /api/agent-control/runs/{job}/archive`), `src/api/control.rs`
+  + `FakeControl` (`archive_job`).
+- Test: `src/api/handlers/tests.rs`, `src/api/project.rs` tests, store/fake tests.
+
+**Behavior (identical to dashboard 92b091e `server/agent-control.ts`, `archiveRun` and the list filter):**
+- Archive is a mutation: Idempotency-Key, per-`sub` rate limit, readiness gate, ownership (member: own runs only,
+  else 404; admin: any).
+- A run that is not terminal → 409 `run_not_terminal` "Stop the run before archiving it".
+- Calls `ArchiveJob` with request_id/actor/source; a rejected result → 409 `command_rejected` with the safe error text
+  (≤500) or "Archive was rejected"; success returns the dashboard's command response shape with `action: "archive"`
+  and `archived_at`.
+- Map gRPC errors with the existing mapper.
+
+- [ ] **Step 1:** `git fetch origin && git merge origin/dev`; resolve conflicts; `cargo test --locked` green before any
+  new code; commit the merge.
+- [ ] **Step 2:** Failing tests for: list hides archived by default, `include_archived=1` shows them, bad value → 422;
+  overview hides archived; `public_run` archive fields; archive success (admin, owner), member on another's run → 404,
+  non-terminal → 409 `run_not_terminal`, rejected → 409 `command_rejected`, missing Idempotency-Key → 400, version 2
+  controller → 503 `controller_incompatible`.
+- [ ] **Step 3:** Implement per Files above, porting the dashboard's `archiveRun` and filter literally.
+- [ ] **Step 4:** `cargo test --locked`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
+- [ ] **Step 5:** Commit `feat(api): serve run archival like the dashboard` and push.
 
 ### Task 11: SSE event stream
 

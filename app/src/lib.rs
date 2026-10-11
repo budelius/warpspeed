@@ -255,7 +255,7 @@ use warp_logging::{LogDestination, LogFrontend};
 use warp_managed_secrets::ManagedSecretManager;
 use warp_server_client::iap::{IapManager, IapManagerEvent, IapState, ManagedIapMint};
 use warp_server_client::network_logging::NetworkLogModel;
-use warpui::integration::TestDriver;
+use warpui::integration::{TestDriver, app_exit_expected, test_in_progress};
 use warpui::modals::{AlertDialogWithCallbacks, AppModalCallback};
 use warpui::platform::TerminationMode;
 use warpui::platform::app::{ApproveTerminateResult, TerminationRequestSource};
@@ -2794,6 +2794,14 @@ pub(crate) fn app_callbacks(
             );
         })),
         on_will_terminate: Some(Box::new(move |ctx| {
+            if is_integration_test && test_in_progress() {
+                if !app_exit_expected() {
+                    eprintln!("Test failure: the app quit before the test's steps finished.");
+                    std::process::exit(1);
+                }
+                log::info!("The app quit during a final step that expects it; the test passes.");
+            }
+
             crate::session_configs::preserve_open_sessions_for_restart();
 
             NotebookManager::handle(ctx).update(ctx, |manager, ctx| {
@@ -2921,6 +2929,12 @@ pub(crate) fn app_callbacks(
                 "close requested for {window_id:?}: {open_window_count} open, quit_on_last={quit_on_last_window_closed}"
             );
             if open_window_count == 1 && quit_on_last_window_closed {
+                if is_integration_test && test_in_progress() && !app_exit_expected() {
+                    eprintln!(
+                        "Test failure: the last window closed before the test's steps finished."
+                    );
+                    std::process::exit(1);
+                }
                 log::info!("No windows left, terminating app");
                 ctx.terminate_app(TerminationMode::Cancellable, None);
                 return ApproveTerminateResult::Cancel;

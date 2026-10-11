@@ -79,6 +79,14 @@ impl Builder {
         }
     }
 
+    /// See [`integration::Builder::expect_app_exit`].
+    pub fn expect_app_exit(self) -> Self {
+        Self {
+            inner: self.inner.expect_app_exit(),
+            ..self
+        }
+    }
+
     pub fn with_step(self, step: TestStep) -> Self {
         Self {
             inner: self.inner.with_step(step),

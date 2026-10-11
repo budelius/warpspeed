@@ -30,9 +30,11 @@ pub fn test_ctrl_d_eot() -> Builder {
         )
 }
 
-// TODO(zheng) Add ctrl-d to exit the window too, after stopping this from beachballing.
+/// ctrl-d in the only pane closes the pane, tab, and window, which quits the app. The assertions
+/// cannot be observed passing once the app is gone, but they still fail the test if it never quits.
 pub fn test_ctrl_d_exit() -> Builder {
     new_builder()
+        .expect_app_exit()
         .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
         .with_step(
             TestStep::new(
@@ -99,12 +101,11 @@ pub fn test_ctrl_d_during_bootstrapping_exits_shell_upon_completion() -> Builder
     // is to exit upon completion.
     // However, this differs on Linux where the common behaviour is to
     // ignore ctrl-d (and the corresponding EOF) while bootstrapping.
-    let final_assertion = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-        assert_terminal_bootstrapped(0, 0)
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        test.with_step(final_test_step.add_assertion(assert_terminal_bootstrapped(0, 0)))
     } else {
         // TODO: figure out what the right behaviour is on windows.
-        assert_no_views_of_type::<TerminalView>()
-    };
-
-    test.with_step(final_test_step.add_assertion(final_assertion))
+        test.expect_app_exit()
+            .with_step(final_test_step.add_assertion(assert_no_views_of_type::<TerminalView>()))
+    }
 }

@@ -58,7 +58,10 @@ warpspeed agent-ctrl close <job-id>
 warpspeed agent-ctrl pause <job-id>
 warpspeed agent-ctrl resume <job-id>
 warpspeed agent-ctrl stop <job-id>
+warpspeed agent-ctrl archive <job-id> --yes  # `remove` is an alias
 ```
+
+Only terminal runs can be archived; stop a live or paused run first. Archiving removes the run from default managed-session lists while retaining its server-side events and command audit.
 
 `open` and a following `attach` use a full-screen conversation UI when stdin and stdout are connected to a terminal. Type a follow-up and press Enter, scroll with the arrow or page keys, close agent input with Ctrl-D, request a stop with Ctrl-X, and detach without stopping the run with Esc or Ctrl-C. Type `/help` or press F1 for run-control and local-shell commands. `/shell` or Ctrl-O opens an interactive local shell; `!<command>`, `/ssh`, and `/tmux` suspend the UI and run against the local terminal, returning to AgentCtrl when the program exits. Use `//` to send an agent message that begins with `/`. Use `attach --once`, `--json`, or redirected input/output for the line-oriented interface.
 

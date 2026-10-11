@@ -182,6 +182,7 @@ pub(crate) fn move_all_request(args: &ManagedSessionsArgs) -> Option<MoveAllRequ
         | ManagedSessionsCommand::Input { .. }
         | ManagedSessionsCommand::Close { .. }
         | ManagedSessionsCommand::Stop { .. }
+        | ManagedSessionsCommand::Archive { .. }
         | ManagedSessionsCommand::Pause { .. }
         | ManagedSessionsCommand::Resume { .. } => None,
     }

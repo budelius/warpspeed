@@ -50,6 +50,7 @@ pub(crate) fn move_session_request(args: &ManagedSessionsArgs) -> Option<MoveSes
         | ManagedSessionsCommand::Input { .. }
         | ManagedSessionsCommand::Close { .. }
         | ManagedSessionsCommand::Stop { .. }
+        | ManagedSessionsCommand::Archive { .. }
         | ManagedSessionsCommand::Pause { .. }
         | ManagedSessionsCommand::Resume { .. } => None,
     }

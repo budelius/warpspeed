@@ -141,6 +141,24 @@ fn managed_agent_repos_and_move_all_parse() {
 }
 
 #[test]
+fn managed_agent_archive_and_remove_alias_parse() {
+    for name in ["archive", "remove"] {
+        let command = agent_ctrl_command(&[name, "job-1", "--yes"]);
+        let managed_sessions::ManagedSessionsCommand::Archive {
+            job_id,
+            yes,
+            environment,
+        } = command
+        else {
+            panic!("expected archive, got {command:?}");
+        };
+        assert_eq!(job_id, "job-1");
+        assert!(yes);
+        assert_eq!(environment, managed_sessions::ManagedEnvironment::Staging);
+    }
+}
+
+#[test]
 fn managed_agent_pause_and_resume_parse() {
     let command = agent_ctrl_command(&["pause", "job-1"]);
     let managed_sessions::ManagedSessionsCommand::Pause {

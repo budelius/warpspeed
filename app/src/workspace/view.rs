@@ -2306,13 +2306,13 @@ impl Workspace {
                 .close_modal_button_disabled()
                 .with_dismiss_on_click()
                 .with_modal_style(UiComponentStyles {
-                    width: Some(1040.),
-                    height: Some(620.),
+                    width: Some(f32::INFINITY),
+                    height: Some(f32::INFINITY),
                     ..Default::default()
                 })
                 .with_body_style(UiComponentStyles {
                     padding: Some(Coords::uniform(0.)),
-                    height: Some(620.),
+                    height: Some(f32::INFINITY),
                     ..Default::default()
                 })
                 .with_header_style(UiComponentStyles {

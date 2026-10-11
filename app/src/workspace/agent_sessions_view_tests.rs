@@ -327,6 +327,36 @@ fn managed_runs_are_searchable_and_keep_state_specific_actions() {
 }
 
 #[test]
+fn managed_session_details_include_last_activity_age_and_date() {
+    let mut run = managed("job-running", "running");
+    run.last_activity_at = Some("2020-01-15T12:00:00Z".to_owned());
+
+    let (_, detail) = preview_heading(&ViewRow::Managed { run });
+    let detail = detail.expect("a managed session has details");
+
+    assert!(detail.contains("last active"));
+    assert!(detail.contains("2020-01-15"));
+}
+
+#[test]
+fn local_session_details_include_last_activity_age_and_date() {
+    let rows = build_rows(&[], &[], &[past("old", "/proj", 5)]);
+    let row = rows.first().expect("the past session is indexed").clone();
+
+    let (_, detail) = preview_heading(&ViewRow::Past {
+        row,
+        target: PaneViewLocator {
+            pane_group_id: EntityId::from_usize(1),
+            pane_id: PaneId::dummy_pane_id(),
+        },
+    });
+    let detail = detail.expect("a local session has details");
+
+    assert!(detail.contains("last active"));
+    assert!(detail.contains("1970-"));
+}
+
+#[test]
 fn a_managed_error_stays_visible_without_runs() {
     let rows = managed_view_rows(&[], Some("sign in required"), "");
     assert_eq!(kinds(&rows), ["managed-header", "managed-error"]);

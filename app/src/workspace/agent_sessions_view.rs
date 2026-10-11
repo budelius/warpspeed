@@ -12,14 +12,16 @@ use warp_core::ui::Icon;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
     Border, ChildView, Clipped, ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox,
-    Container, CornerRadius, CrossAxisAlignment, Element, Expanded, Fill, Flex, Hoverable,
-    MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius, ScrollStateHandle, Scrollable,
-    ScrollableElement, ScrollbarWidth, Shrinkable, Text, UniformList, UniformListState,
+    Container, CornerRadius, CrossAxisAlignment, DragBarSide, Element, Expanded, Fill, Flex,
+    Hoverable, MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius, Resizable,
+    ResizableStateHandle, ScrollStateHandle, Scrollable, ScrollableElement, ScrollbarWidth,
+    Shrinkable, Text, UniformList, UniformListState, resizable_state_handle,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::keymap::FixedBinding;
 use warpui::keymap::macros::*;
 use warpui::platform::Cursor;
+use warpui::text_layout::ClipConfig;
 use warpui::{
     AppContext, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView, View,
     ViewContext, ViewHandle,
@@ -39,6 +41,7 @@ use crate::terminal::agent_sessions_index::{
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::detached_sessions::DetachedListError;
 use crate::util::time_format::format_approx_duration_from_now;
+use crate::util::truncation::truncate_from_end;
 use crate::view_components::action_button::{ActionButtonTheme, SecondaryTheme};
 use crate::workspace::PaneViewLocator;
 use crate::workspace::agent_session_actions::{AgentSessionAction, action_for};
@@ -375,6 +378,16 @@ pub(crate) fn managed_view_rows(
 const ROW_HEIGHT: f32 = 30.;
 const PANE_INDENT: f32 = 24.;
 const PAST_INDENT: f32 = 40.;
+const INITIAL_WIDTH: f32 = 1040.;
+const INITIAL_HEIGHT: f32 = 620.;
+const MIN_WIDTH: f32 = 720.;
+const MIN_HEIGHT: f32 = 400.;
+const WINDOW_MARGIN: f32 = 80.;
+const ROW_TITLE_MAX_CHARS: usize = 80;
+const ROW_DETAIL_MAX_CHARS: usize = 100;
+const PREVIEW_TITLE_MAX_CHARS: usize = 160;
+const PREVIEW_DETAIL_MAX_CHARS: usize = 240;
+const PREVIEW_MESSAGE_MAX_CHARS: usize = 1_200;
 
 pub enum AgentSessionsViewEvent {
     Act(AgentSessionAction),
@@ -437,6 +450,8 @@ pub struct AgentSessionsView {
     list_state: UniformListState,
     scroll_state: ScrollStateHandle,
     preview_scroll_state: ClippedScrollStateHandle,
+    resizable_width: ResizableStateHandle,
+    resizable_height: ResizableStateHandle,
     pending_managed_open: Option<String>,
 }
 
@@ -494,6 +509,8 @@ impl AgentSessionsView {
             list_state: UniformListState::new(),
             scroll_state: Arc::new(Mutex::new(Default::default())),
             preview_scroll_state: ClippedScrollStateHandle::new(),
+            resizable_width: resizable_state_handle(INITIAL_WIDTH),
+            resizable_height: resizable_state_handle(INITIAL_HEIGHT),
             pending_managed_open: None,
         }
     }
@@ -869,16 +886,24 @@ impl AgentSessionsView {
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_spacing(12.)
             .with_child(
-                Text::new(title, font, font_size + 2.)
-                    .with_style(Properties::default().weight(Weight::Bold))
-                    .with_color(main_color)
-                    .finish(),
+                Text::new(
+                    truncate_from_end(&title, PREVIEW_TITLE_MAX_CHARS),
+                    font,
+                    font_size + 2.,
+                )
+                .with_style(Properties::default().weight(Weight::Bold))
+                .with_color(main_color)
+                .finish(),
             );
         if let Some(detail) = detail {
             content.add_child(
-                Text::new(detail, font, font_size - 1.)
-                    .with_color(sub_color)
-                    .finish(),
+                Text::new(
+                    truncate_from_end(&detail, PREVIEW_DETAIL_MAX_CHARS),
+                    font,
+                    font_size - 1.,
+                )
+                .with_color(sub_color)
+                .finish(),
             );
         }
         if let Some(error) = self.fleet_model.as_ref(app).action_error() {
@@ -1049,10 +1074,9 @@ fn preview_heading(row: &ViewRow) -> (String, Option<String>) {
             ..
         } => (
             session_label(row),
-            Some(format!(
-                "Local · {} · {}",
-                row.state.label(),
-                input.cwd.as_ref().unwrap_or(&row.cwd).display()
+            Some(local_preview_detail(
+                row,
+                input.cwd.as_ref().unwrap_or(&row.cwd),
             )),
         ),
         ViewRow::Pane {
@@ -1063,16 +1087,22 @@ fn preview_heading(row: &ViewRow) -> (String, Option<String>) {
         ),
         ViewRow::Past { row, .. } | ViewRow::Detached { row } => (
             session_label(row),
-            Some(format!(
-                "Local · {} · {}",
-                row.state.label(),
-                row.cwd.display()
-            )),
+            Some(local_preview_detail(row, &row.cwd)),
         ),
-        ViewRow::Managed { run } => (
-            managed_run_title(run),
-            Some(format!("AgentCtrl · {}", managed_run_detail(run))),
-        ),
+        ViewRow::Managed { run } => {
+            let mut details = vec![
+                "AgentCtrl".to_owned(),
+                managed_agent_label(&run.agent_name).to_owned(),
+                run.state.clone(),
+            ];
+            if let Some(activity) = managed_activity(run) {
+                details.push(activity_detail_label(activity));
+            }
+            if let Some(branch) = run.branch.as_deref().filter(|branch| !branch.is_empty()) {
+                details.push(branch.to_owned());
+            }
+            (managed_run_title(run), Some(details.join(" · ")))
+        }
         ViewRow::TabHeader { title, .. } => (title.clone(), None),
         ViewRow::PastToggle { .. } => ("Past sessions".to_owned(), None),
         ViewRow::DetachedHeader { .. } => ("Detached sessions".to_owned(), None),
@@ -1080,6 +1110,36 @@ fn preview_heading(row: &ViewRow) -> (String, Option<String>) {
         ViewRow::ManagedError(error) => ("AgentCtrl unavailable".to_owned(), Some(error.clone())),
         ViewRow::SupervisorUnreachable => ("Supervisor unreachable".to_owned(), None),
     }
+}
+
+fn local_preview_detail(row: &AgentSessionRow, cwd: &Path) -> String {
+    let mut details = vec!["Local".to_owned(), row.state.label().to_owned()];
+    if let Some(last_used) = row.last_used {
+        details.push(activity_detail_label(DateTime::<Local>::from(last_used)));
+    }
+    details.push(cwd.display().to_string());
+    details.join(" · ")
+}
+
+fn managed_activity(run: &RunSummary) -> Option<DateTime<Local>> {
+    DateTime::parse_from_rfc3339(run.last_activity_at.as_deref()?)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Local))
+}
+
+fn activity_age_label(last_active: DateTime<Local>) -> String {
+    format!(
+        "last active {}",
+        format_approx_duration_from_now(last_active)
+    )
+}
+
+fn activity_detail_label(last_active: DateTime<Local>) -> String {
+    let age = format_approx_duration_from_now(last_active);
+    format!(
+        "last active {age} ({})",
+        last_active.format("%Y-%m-%d %H:%M")
+    )
 }
 
 fn preview_action(row: &ViewRow) -> Option<(RowKey, &'static str)> {
@@ -1145,9 +1205,13 @@ fn render_preview_message(label: &str, message: &str, app: &AppContext) -> Box<d
                     .finish(),
             )
             .with_child(
-                Text::new(message.to_owned(), font, font_size)
-                    .with_color(theme.active_ui_text_color().into_solid())
-                    .finish(),
+                Text::new(
+                    truncate_from_end(message, PREVIEW_MESSAGE_MAX_CHARS),
+                    font,
+                    font_size,
+                )
+                .with_color(theme.active_ui_text_color().into_solid())
+                .finish(),
             )
             .finish(),
     )
@@ -1166,13 +1230,6 @@ fn render_managed_preview_event(event: &RunPreviewEvent, app: &AppContext) -> Bo
         label.push_str(" · truncated");
     }
     render_preview_message(&label, &event.content, app)
-}
-
-fn last_used_label(last_used: std::time::SystemTime) -> String {
-    format!(
-        "last used {}",
-        format_approx_duration_from_now(DateTime::<Local>::from(last_used))
-    )
 }
 
 fn is_interactive(row: &ViewRow) -> bool {
@@ -1231,17 +1288,25 @@ fn render_row_contents(
     let main_color = theme.active_ui_text_color().into_solid();
     let sub_color = theme.sub_text_color(theme.surface_2()).into_solid();
     let text = |text: String, color| Text::new_inline(text, font, font_size).with_color(color);
+    let clipped_text =
+        |content: String, color| text(content, color).with_clip(ClipConfig::ellipsis());
     let bold = || Properties::default().weight(Weight::Bold);
 
-    let (last_used, state) = match row {
+    let (activity, state) = match row {
         ViewRow::Pane { row, .. } => (
-            row.as_ref().and_then(|row| row.last_used),
+            row.as_ref()
+                .and_then(|row| row.last_used)
+                .map(DateTime::<Local>::from)
+                .map(activity_age_label),
             Some(row.as_ref().map_or("—", |row| row.state.label())),
         ),
-        ViewRow::Past { row, .. } | ViewRow::Detached { row } => {
-            (row.last_used, Some(row.state.label()))
-        }
-        ViewRow::Managed { .. } => (None, None),
+        ViewRow::Past { row, .. } | ViewRow::Detached { row } => (
+            row.last_used
+                .map(DateTime::<Local>::from)
+                .map(activity_age_label),
+            Some(row.state.label()),
+        ),
+        ViewRow::Managed { run } => (managed_activity(run).map(activity_age_label), None),
         ViewRow::TabHeader { .. }
         | ViewRow::PastToggle { .. }
         | ViewRow::DetachedHeader { .. }
@@ -1253,7 +1318,9 @@ fn render_row_contents(
         match row {
             ViewRow::TabHeader { title, .. } => (
                 12.,
-                text(title.clone(), main_color).with_style(bold()).finish(),
+                clipped_text(truncate_from_end(title, ROW_TITLE_MAX_CHARS), main_color)
+                    .with_style(bold())
+                    .finish(),
                 None,
                 None,
             ),
@@ -1270,7 +1337,17 @@ fn render_row_contents(
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_spacing(8.)
                     .with_child(text(format!("pane {}", input.pane_number), sub_color).finish())
-                    .with_child(text(label, main_color).finish())
+                    .with_child(
+                        Shrinkable::new(
+                            1.,
+                            clipped_text(
+                                truncate_from_end(&label, ROW_TITLE_MAX_CHARS),
+                                main_color,
+                            )
+                            .finish(),
+                        )
+                        .finish(),
+                    )
                     .finish();
                 (
                     PANE_INDENT,
@@ -1297,14 +1374,19 @@ fn render_row_contents(
                             .finish(),
                     )
                     .with_child(
-                        text(format!("Past sessions in this folder ({count})"), sub_color).finish(),
+                        clipped_text(format!("Past sessions in this folder ({count})"), sub_color)
+                            .finish(),
                     )
                     .finish();
                 (PANE_INDENT, label, None, None)
             }
             ViewRow::Past { row, .. } => (
                 PAST_INDENT,
-                text(session_label(row), main_color).finish(),
+                clipped_text(
+                    truncate_from_end(&session_label(row), ROW_TITLE_MAX_CHARS),
+                    main_color,
+                )
+                .finish(),
                 None,
                 action_for(row, None).map(|action| action.label()),
             ),
@@ -1315,14 +1397,18 @@ fn render_row_contents(
                 };
                 (
                     12.,
-                    text(title, main_color).with_style(bold()).finish(),
+                    clipped_text(title, main_color).with_style(bold()).finish(),
                     None,
                     None,
                 )
             }
             ViewRow::Detached { row } => (
                 PANE_INDENT,
-                text(session_label(row), main_color).finish(),
+                clipped_text(
+                    truncate_from_end(&session_label(row), ROW_TITLE_MAX_CHARS),
+                    main_color,
+                )
+                .finish(),
                 Some(row.cwd.display().to_string()).filter(|cwd| !cwd.is_empty()),
                 Some("Attach"),
             ),
@@ -1336,13 +1422,17 @@ fn render_row_contents(
             ),
             ViewRow::Managed { run } => (
                 PANE_INDENT,
-                text(managed_run_title(run), main_color).finish(),
+                clipped_text(managed_run_title(run), main_color).finish(),
                 Some(managed_run_detail(run)),
                 Some(managed_action_label(&run.state)),
             ),
             ViewRow::ManagedError(error) => (
                 PANE_INDENT,
-                text(error.clone(), theme.ui_error_color()).finish(),
+                clipped_text(
+                    truncate_from_end(error, ROW_TITLE_MAX_CHARS),
+                    theme.ui_error_color(),
+                )
+                .finish(),
                 None,
                 None,
             ),
@@ -1356,16 +1446,16 @@ fn render_row_contents(
 
     let detail = detail.map_or_else(
         || Flex::row().finish(),
-        |detail| Clipped::new(text(detail, sub_color).finish()).finish(),
+        |detail| clipped_text(truncate_from_end(&detail, ROW_DETAIL_MAX_CHARS), sub_color).finish(),
     );
     let mut line = Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_main_axis_size(MainAxisSize::Max)
         .with_spacing(8.)
-        .with_child(label)
-        .with_child(Shrinkable::new(1.0, detail).finish());
-    if let Some(last_used) = last_used {
-        line = line.with_child(text(last_used_label(last_used), sub_color).finish());
+        .with_child(Shrinkable::new(1., label).finish())
+        .with_child(Shrinkable::new(1., detail).finish());
+    if let Some(activity) = activity {
+        line = line.with_child(text(activity, sub_color).finish());
     }
     if let Some(state) = state {
         line = line.with_child(text(state.to_owned(), sub_color).finish());
@@ -1511,11 +1601,27 @@ impl View for AgentSessionsView {
         let master = Container::new(master.finish())
             .with_border(Border::right(1.).with_border_fill(theme.outline()))
             .finish();
-        Flex::row()
+        let content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_child(ConstrainedBox::new(master).with_width(430.).finish())
             .with_child(Expanded::new(1., self.render_preview(app)).finish())
+            .finish();
+        let width_resizable = Resizable::new(self.resizable_width.clone(), content)
+            .with_dragbar_side(DragBarSide::Right)
+            .with_bounds_callback(Box::new(|window_size| {
+                let max = (window_size.x() - WINDOW_MARGIN).max(MIN_WIDTH);
+                (MIN_WIDTH, max)
+            }))
+            .on_resize(|ctx, _| ctx.notify())
+            .finish();
+        Resizable::new(self.resizable_height.clone(), width_resizable)
+            .with_dragbar_side(DragBarSide::Bottom)
+            .with_bounds_callback(Box::new(|window_size| {
+                let max = (window_size.y() - WINDOW_MARGIN).max(MIN_HEIGHT);
+                (MIN_HEIGHT, max)
+            }))
+            .on_resize(|ctx, _| ctx.notify())
             .finish()
     }
 }

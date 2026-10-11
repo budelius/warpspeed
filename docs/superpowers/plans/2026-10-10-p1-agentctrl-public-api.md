@@ -7828,6 +7828,45 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
+### Spike result and Task 14 amendment (2026-10-11)
+
+Task 0 ran 2026-10-10 (evidence: `.superpowers/sdd/2026-10-10-p1-agentctrl-public-api/task-0-report.md`, to be
+copied to `docs/p1-litellm-attribution-spike.md` in agent-ctrl by Task 14 Step 6): `MECHANISM: tags-header`
+(`x-litellm-tags: owner:<email>`), PASS for all five CLIs, no LiteLLM/passiv change. The precondition below is met by
+that report. Wiring per CLI:
+
+| CLI | Setting (proven in the spike) | Task |
+|---|---|---|
+| claude 2.1.201 | env `ANTHROPIC_CUSTOM_HEADERS` (newline-separated `Name: value`) | 14 (as written) |
+| kimi 2.1.1 | env `KIMI_CODE_CUSTOM_HEADERS` (same format; undocumented, found in `dist/main.mjs`) | 14, added like claude in `apply_owner_env`, with a test |
+| codex 0.142.5 | `model_providers.passiv.env_http_headers = { "x-litellm-tags" = "AGENT_CTRL_OWNER_ATTRIBUTION" }` in the rendered config (Step 5). The spike proved the literal `http_headers` form; Step 5's env form must be verified once in a node pod before merge (run codex one-shot with `AGENT_CTRL_OWNER_ATTRIBUTION` set and check the spend log). If codex ignores `env_http_headers`, the node adds `-c model_providers.passiv.http_headers.x-litellm-tags="<value>"` to the codex command line for owned runs instead. | 14 |
+| pi 0.52.6 | `headers` on the passiv provider in `models.json` (literal values) | 14b |
+| dsh 0.2.1-alpha.1 | `headers:` dict on the `llm-pi-ai` provider block of the `--patch` overlay | 14b |
+
+"Untagged in P1" in Step 6 is therefore empty; "Wired in P1" lists all five.
+
+### Task 14b: Per-run attribution for pi and dsh
+
+pi and dsh read request headers only from config files, so owned runs need a per-run copy of the provider config.
+
+**Files:** `src/agent/pi.rs`, `src/agent/dsh.rs` (or wherever each backend builds its command and config — locate by
+`PI_CODING_AGENT_DIR` / `--patch`), the node's per-run workspace setup in `src/remote/node.rs`, tests next to each.
+
+**Behavior:**
+- When the spawn env contains `AGENT_CTRL_OWNER_ATTRIBUTION` (set by Task 14 for owned runs), the node writes a per-run
+  copy of the backend's provider config into the run's private directory (`.runs/<job>/…` or a temp dir removed with the
+  run), adds `"x-litellm-tags": "<attribution>"` to the passiv provider's `headers` (pi `models.json`) or to the
+  `llm-pi-ai` provider's `headers:` (dsh patch overlay), and points the CLI at the copy (pi: `PI_CODING_AGENT_DIR` set to
+  a per-run dir containing the merged config; dsh: `--patch <per-run file>`). Existing provider headers are preserved.
+- Unowned runs keep the shared config unchanged; no per-run files are written.
+- The per-run file is never logged and is removed when the run's worktree is cleaned up.
+
+- [ ] **Step 1:** Failing tests: owned pi run → per-run models.json has the provider header and `PI_CODING_AGENT_DIR`
+  points at it; owned dsh run → per-run patch has the header and the command uses it; unowned → no per-run file, shared
+  config untouched; existing headers preserved.
+- [ ] **Step 2:** Implement; **Step 3:** `cargo test --locked`, clippy -D warnings, fmt --check.
+- [ ] **Step 4:** Commit `feat(node): tag pi and dsh model requests with the run owner` and push.
+
 ### Task 14: Model spend attribution (branches on Task 0)
 
 **Precondition:** `docs/p1-litellm-attribution-spike.md` exists with `MECHANISM`. If `MECHANISM: none`, skip this task and report the gap.

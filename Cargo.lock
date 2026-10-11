@@ -8090,6 +8090,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "instant",
+ "log",
  "ratatui",
  "reqwest",
  "serde",

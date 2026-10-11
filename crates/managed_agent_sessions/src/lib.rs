@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::{fs, thread};
 
@@ -20,6 +21,11 @@ mod tui;
 mod zitadel_auth;
 
 const STAGING_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
+/// Debug override of the staging managed-session origin, used to exercise the AgentCtrl public
+/// API before WarpSpeed switches to it. Only these origins are accepted because every request
+/// carries the user's access token.
+const BASE_URL_OVERRIDE_ENV: &str = "STOZN_BASE_URL";
+const BASE_URL_OVERRIDES: &[&str] = &["https://agents-dev.obachan.dev"];
 const STAGING_FLEET_ID: &str = "stoz3n-agent-ctrl-staging";
 const SUPPORTED_PROTOCOL: u32 = 1;
 const BOOKMARK_FORMAT: u32 = 1;
@@ -1638,15 +1644,36 @@ struct EnvironmentProfile {
     zitadel: &'static ZitadelProfile,
 }
 
-fn profile(environment: ManagedEnvironment) -> &'static EnvironmentProfile {
-    static STAGING: EnvironmentProfile = EnvironmentProfile {
-        alias: "staging",
-        base_url: STAGING_BASE_URL,
-        fleet_id: STAGING_FLEET_ID,
-        zitadel: &STAGING_ZITADEL,
+fn staging_base_url(override_value: Option<&str>) -> &'static str {
+    let requested = override_value
+        .map(|value| value.trim().trim_end_matches('/'))
+        .filter(|value| !value.is_empty());
+    let Some(requested) = requested else {
+        return STAGING_BASE_URL;
     };
+    match BASE_URL_OVERRIDES
+        .iter()
+        .find(|allowed| **allowed == requested)
+    {
+        Some(allowed) => allowed,
+        None => {
+            log::warn!(
+                "{BASE_URL_OVERRIDE_ENV}={requested} is not an allowed managed-session origin; using {STAGING_BASE_URL}"
+            );
+            STAGING_BASE_URL
+        }
+    }
+}
+
+fn profile(environment: ManagedEnvironment) -> &'static EnvironmentProfile {
+    static STAGING: OnceLock<EnvironmentProfile> = OnceLock::new();
     match environment {
-        ManagedEnvironment::Staging => &STAGING,
+        ManagedEnvironment::Staging => STAGING.get_or_init(|| EnvironmentProfile {
+            alias: "staging",
+            base_url: staging_base_url(std::env::var(BASE_URL_OVERRIDE_ENV).ok().as_deref()),
+            fleet_id: STAGING_FLEET_ID,
+            zitadel: &STAGING_ZITADEL,
+        }),
     }
 }
 

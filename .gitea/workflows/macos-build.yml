@@ -70,6 +70,8 @@ jobs:
           export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
           # Stop the build before it fills the shared runner's disk.
           workspace=$PWD
+          # Not the step's own stdout: a lingering `sleep` holding it makes the runner fail the step.
+          watchdog_log=$(mktemp)
           (
             while sleep 15; do
               if (( $(df -k "$HOME" | awk 'NR==2 {print $4}') < 3 * 1024 * 1024 )); then
@@ -78,9 +80,9 @@ jobs:
                 exit
               fi
             done
-          ) &
+          ) </dev/null >"$watchdog_log" 2>&1 &
           watchdog=$!
-          trap 'kill $watchdog 2>/dev/null || true' EXIT
+          trap 'kill $watchdog 2>/dev/null || true; cat "$watchdog_log"' EXIT
           ./script/bundle --channel oss --debug --nouniversal --selfsign --no-dmg
           codesign --verify --deep --strict target/debug/bundle/osx/WarpOss.app
 

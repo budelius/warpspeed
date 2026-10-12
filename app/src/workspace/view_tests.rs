@@ -6845,6 +6845,7 @@ pub(crate) fn initialize_app_for_move_session(app: &mut App) {
                 resume: resume_nothing,
                 resume_for_attach: resume_nothing,
                 preview: preview_nothing,
+                stream_preview: None,
             })
         });
     }
@@ -9199,6 +9200,7 @@ fn fleet_row_pause_and_resume_reach_agent_ctrl() {
                 resume: resume_recording,
                 resume_for_attach: resume_recording,
                 preview: preview_nothing,
+                stream_preview: None,
             })
         });
         app.add_singleton_model(|_| FleetPaneManager::default());

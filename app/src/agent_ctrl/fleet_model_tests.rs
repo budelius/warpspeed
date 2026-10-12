@@ -207,6 +207,7 @@ fn backend(list: fn() -> anyhow::Result<FleetSnapshot>) -> FleetBackend {
         resume: no_resume,
         resume_for_attach: no_resume,
         preview: no_preview,
+        stream_preview: None,
     }
 }
 
@@ -317,6 +318,77 @@ fn a_failed_refresh_keeps_the_old_runs_and_records_the_error() {
             let error = model.last_error().expect("the failure is recorded");
             assert!(error.contains("dashboard unreachable"), "{error}");
         });
+    });
+}
+
+#[test]
+fn deselecting_a_live_preview_clears_its_loading_state() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                stream_preview: Some(|_| Err(anyhow::anyhow!("stream unavailable"))),
+                ..backend(list_two_runs)
+            })
+        });
+        let view = EntityId::new();
+        model.update(&mut app, |model, ctx| {
+            model.attach_view(view, ctx);
+            model.select_preview(view, Some("job-a".to_owned()), false, ctx);
+            assert!(model.is_previewing("job-a"));
+            model.select_preview(view, None, false, ctx);
+            assert!(!model.is_previewing("job-a"));
+            assert!(model.preview("job-a").is_none());
+        });
+    });
+}
+
+#[test]
+fn closing_the_last_preview_view_stops_loading_and_hidden_views_cannot_restart_it() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                stream_preview: Some(|_| Err(anyhow::anyhow!("stream unavailable"))),
+                ..backend(list_two_runs)
+            })
+        });
+        let first = EntityId::new();
+        let second = EntityId::new();
+        model.update(&mut app, |model, ctx| {
+            model.attach_view(first, ctx);
+            model.attach_view(second, ctx);
+            model.select_preview(first, Some("job-a".to_owned()), false, ctx);
+            model.select_preview(second, Some("job-a".to_owned()), false, ctx);
+            model.detach_view(first);
+            assert!(model.is_previewing("job-a"));
+            model.detach_view(second);
+            assert!(!model.is_previewing("job-a"));
+            model.select_preview(first, Some("job-a".to_owned()), false, ctx);
+            assert!(!model.is_previewing("job-a"));
+        });
+    });
+}
+
+#[test]
+fn live_preview_failure_is_visible_without_staying_in_the_loading_state() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                stream_preview: Some(|_| Err(anyhow::anyhow!("stream unavailable"))),
+                ..backend(list_two_runs)
+            })
+        });
+        let view = EntityId::new();
+        model.update(&mut app, |model, ctx| {
+            model.attach_view(view, ctx);
+            model.select_preview(view, Some("job-a".to_owned()), false, ctx);
+        });
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => model.read(&app, |model, _| {
+                model.preview("job-a").is_some_and(Result::is_err)
+            }),
+            "the stream failure never reached the preview"
+        );
+        assert!(!model.read(&app, |model, _| model.is_previewing("job-a")));
     });
 }
 

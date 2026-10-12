@@ -46,6 +46,8 @@ Use the graphical **Sign in with STOZN** flow. WarpSpeed opens a one-time dashbo
 
 Create or select the task in the STOZN Dashboard, choose the configured agent there, and start the managed session. After AgentCtrl accepts the launch, the dashboard opens a strict `warpspeed://agent-ctrl/attach?...` deep link. WarpSpeed validates the compiled staging environment, fleet, and job ID. An eligible Pi run opens Pi's actual remote full-screen terminal over private, host-key-pinned SSH; other states and backends open the clearly labelled Event history / fallback viewer. WarpSpeed deliberately has no duplicate task picker or task-creation UI.
 
+Until the compiled staging origin switches to AgentCtrl's public API, start WarpSpeed with `STOZN_BASE_URL=https://agents-dev.obachan.dev` for native-terminal acceptance. This is the only allowlisted debug origin; callers cannot provide an arbitrary API or SSH target.
+
 The lower-level CLI remains available for automation and recovery:
 
 ```bash

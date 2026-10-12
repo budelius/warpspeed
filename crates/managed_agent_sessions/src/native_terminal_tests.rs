@@ -139,6 +139,19 @@ fn authorization_response_must_echo_every_binding() {
 }
 
 #[test]
+fn descriptor_requests_cannot_extend_the_thirty_second_poll_deadline() {
+    assert_eq!(
+        descriptor_request_timeout(Duration::from_secs(8)),
+        Some(Duration::from_secs(5))
+    );
+    assert_eq!(
+        descriptor_request_timeout(Duration::from_millis(250)),
+        Some(Duration::from_millis(250))
+    );
+    assert_eq!(descriptor_request_timeout(Duration::ZERO), None);
+}
+
+#[test]
 fn renewal_interval_is_never_longer_than_twenty_seconds() {
     let response = AuthorizationResponse {
         authorization_id: "authorization-123".to_string(),

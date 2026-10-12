@@ -96,9 +96,12 @@ pub(super) fn attach_if_available(
         ));
     }
     let profile = profile(environment);
-    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
     let deadline = Instant::now() + ATTACH_WAIT;
-    let mut descriptor = wait_for_ready_descriptor(&client, profile, job_id, deadline)?;
+    let Some(mut descriptor) = wait_for_ready_descriptor(profile, job_id, deadline)? else {
+        return Ok(NativeAttachOutcome::Fallback(
+            "Native terminal descriptor is temporarily unavailable".to_string(),
+        ));
+    };
     for attempt in 0..2 {
         if let Some(reason) = descriptor_unavailable_reason(&descriptor) {
             return Ok(NativeAttachOutcome::Fallback(reason));
@@ -106,7 +109,12 @@ pub(super) fn attach_if_available(
         match attach_descriptor(profile, &descriptor, takeover) {
             Ok(()) => return Ok(NativeAttachOutcome::Attached),
             Err(error) if attempt == 0 && is_stale_generation(&error) => {
-                descriptor = wait_for_ready_descriptor(&client, profile, job_id, deadline)?;
+                let Some(refreshed) = wait_for_ready_descriptor(profile, job_id, deadline)? else {
+                    return Ok(NativeAttachOutcome::Fallback(
+                        "Native terminal descriptor is temporarily unavailable".to_string(),
+                    ));
+                };
+                descriptor = refreshed;
             }
             Err(error) => {
                 if let Some(reason) = unavailable_reason(&error) {
@@ -120,39 +128,63 @@ pub(super) fn attach_if_available(
 }
 
 fn wait_for_ready_descriptor(
-    client: &Client,
     profile: &'static EnvironmentProfile,
     job_id: &str,
     deadline: Instant,
-) -> Result<SessionDescriptor> {
+) -> Result<Option<SessionDescriptor>> {
     loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
         let token = dashboard_token()?;
-        let descriptor = fetch_descriptor(client, profile, job_id, &token)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(timeout) = descriptor_request_timeout(remaining) else {
+            return Ok(None);
+        };
+        let client = Client::builder().timeout(timeout).build()?;
+        let descriptor = match fetch_descriptor(&client, profile, job_id, &token) {
+            Ok(descriptor) => descriptor,
+            Err(error) if request_timed_out(&error) && Instant::now() < deadline => continue,
+            Err(error) if request_timed_out(&error) || unavailable_reason(&error).is_some() => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         match descriptor
             .terminal
             .as_ref()
             .map(|terminal| terminal.availability.as_str())
         {
-            Some("ready" | "attached") => return Ok(descriptor),
-            Some("starting") if Instant::now() < deadline => thread::sleep(ATTACH_POLL),
-            Some("starting") => {
-                return Ok(fallback_descriptor(
-                    descriptor,
-                    "Native Pi terminal is still starting",
-                ));
+            Some("ready" | "attached") => return Ok(Some(descriptor)),
+            Some("starting") if Instant::now() < deadline => {
+                thread::sleep(ATTACH_POLL.min(deadline.saturating_duration_since(Instant::now())));
             }
+            Some("starting") => return Ok(None),
             Some("paused") => {
-                return Ok(fallback_descriptor(
+                return Ok(Some(fallback_descriptor(
                     descriptor,
                     "Run is paused; resume it to create a new native terminal",
-                ));
+                )));
             }
             Some("completed" | "stopped" | "failed" | "lost" | "unsupported") | None => {
-                return Ok(descriptor);
+                return Ok(Some(descriptor));
             }
-            Some(_) => return Ok(descriptor),
+            Some(_) => return Ok(Some(descriptor)),
         }
     }
+}
+
+fn descriptor_request_timeout(remaining: Duration) -> Option<Duration> {
+    (!remaining.is_zero()).then(|| remaining.min(Duration::from_secs(5)))
+}
+
+fn request_timed_out(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+    })
 }
 
 fn fallback_descriptor(mut descriptor: SessionDescriptor, reason: &str) -> SessionDescriptor {

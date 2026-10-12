@@ -16,6 +16,9 @@ use serde_json::{Value, json};
 use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, ManagedSessionsCommand};
 use zitadel_auth::{RefreshRejected, ZitadelProfile};
 
+mod event_stream;
+mod preview_stream;
+pub use preview_stream::RunPreviewStream;
 #[cfg(feature = "tui")]
 mod tui;
 mod zitadel_auth;
@@ -1259,12 +1262,16 @@ fn attach(
     }
 
     let mut cursor = existing_cursor;
+    let mut feed = event_stream::EventFeed::new()?;
     let mut known_events = HashSet::new();
     loop {
         let wait_ms = if once { 0 } else { 15_000 };
         let token = dashboard_token()?;
-        let (page, history_gap) =
-            fetch_event_page(&client, profile, job_id, &token, cursor.as_deref(), wait_ms)?;
+        let (page, history_gap) = if once {
+            fetch_event_page(&client, profile, job_id, &token, cursor.as_deref(), wait_ms)?
+        } else {
+            feed.next(profile, job_id, &token, cursor.as_deref(), wait_ms)?
+        };
         if history_gap || page.gap {
             if json_output {
                 println!(

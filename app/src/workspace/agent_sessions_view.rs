@@ -547,6 +547,7 @@ impl AgentSessionsView {
         if let Some(index) = self.selected_index {
             self.list_state.scroll_to(index);
         }
+        self.request_selected_preview(false, ctx);
         ctx.notify();
     }
 
@@ -718,15 +719,25 @@ impl AgentSessionsView {
     }
 
     fn request_selected_preview(&mut self, force: bool, ctx: &mut ViewContext<Self>) {
-        let Some(ViewRow::Managed { run }) = self
+        let job_id = self
             .selected_index
             .and_then(|index| self.view_rows.get(index))
-        else {
-            return;
-        };
-        let job_id = run.job_id.clone();
-        self.fleet_model
-            .update(ctx, |model, ctx| model.request_preview(job_id, force, ctx));
+            .and_then(|row| match row {
+                ViewRow::Managed { run } => Some(run.job_id.clone()),
+                ViewRow::Pane { .. }
+                | ViewRow::TabHeader { .. }
+                | ViewRow::PastToggle { .. }
+                | ViewRow::Past { .. }
+                | ViewRow::DetachedHeader { .. }
+                | ViewRow::Detached { .. }
+                | ViewRow::ManagedHeader
+                | ViewRow::ManagedError(_)
+                | ViewRow::SupervisorUnreachable => None,
+            });
+        let view_id = ctx.view_id();
+        self.fleet_model.update(ctx, |model, ctx| {
+            model.select_preview(view_id, job_id, force, ctx)
+        });
     }
 
     fn select(&mut self, index: usize, ctx: &mut ViewContext<Self>) {

@@ -17,10 +17,11 @@ use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr as _;
 use warp_cli::managed_sessions::ManagedEnvironment;
 
+use super::event_stream::EventFeed;
 use super::{
     EnvironmentProfile, ManagedSessionBookmark, OpenedManagedSession, RunEvent, SessionDescriptor,
-    dashboard_token, fetch_event_page, open_managed_session, pause_run_with, post_input_with,
-    resume_run_with, retain_new_events, save_bookmarks, stop_run_with, update_bookmark_cursor,
+    dashboard_token, open_managed_session, pause_run_with, post_input_with, resume_run_with,
+    retain_new_events, save_bookmarks, stop_run_with, update_bookmark_cursor,
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -33,13 +34,18 @@ pub(super) fn can_run() -> bool {
 pub(super) fn run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
     let OpenedManagedSession {
         profile,
-        client,
         descriptor,
         bookmarks,
+        client: _,
         existing_cursor: _,
     } = open_managed_session(environment, job_id)?;
     let (updates_tx, updates_rx) = mpsc::channel();
-    spawn_event_poller(client, profile, job_id.to_owned(), updates_tx.clone());
+    spawn_event_poller(
+        EventFeed::new()?,
+        profile,
+        job_id.to_owned(),
+        updates_tx.clone(),
+    );
 
     let display_name = descriptor.display_name.clone();
     let mut app = ManagedSessionsTui::new(
@@ -103,7 +109,7 @@ fn run_local_shell(command: Option<&str>) -> io::Result<ExitStatus> {
 }
 
 fn spawn_event_poller(
-    client: reqwest::blocking::Client,
+    mut feed: EventFeed,
     profile: &'static EnvironmentProfile,
     job_id: String,
     updates: Sender<TuiUpdate>,
@@ -115,16 +121,8 @@ fn spawn_event_poller(
         let mut retry_delay = Duration::from_millis(500);
         loop {
             let wait_ms = if first_request { 0 } else { 15_000 };
-            let page = dashboard_token().and_then(|token| {
-                fetch_event_page(
-                    &client,
-                    profile,
-                    &job_id,
-                    &token,
-                    cursor.as_deref(),
-                    wait_ms,
-                )
-            });
+            let page = dashboard_token()
+                .and_then(|token| feed.next(profile, &job_id, &token, cursor.as_deref(), wait_ms));
             match page {
                 Ok((page, history_gap)) => {
                     first_request = false;

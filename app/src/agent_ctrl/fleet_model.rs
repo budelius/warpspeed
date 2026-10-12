@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use managed_agent_sessions::{
-    RepositoryInfo, RunPreview, RunSummary, is_paused_state, normalize_repo_url,
+    RepositoryInfo, RunPreview, RunPreviewStream, RunSummary, is_paused_state, normalize_repo_url,
 };
 use warp_cli::managed_sessions::ManagedEnvironment;
 use warpui::{Entity, EntityId, ModelContext, SingletonEntity};
@@ -44,6 +44,7 @@ pub struct FleetBackend {
     pub resume: fn(&str) -> anyhow::Result<()>,
     pub resume_for_attach: fn(&str) -> anyhow::Result<()>,
     pub preview: fn(&str) -> anyhow::Result<RunPreview>,
+    pub stream_preview: Option<fn(&str) -> anyhow::Result<RunPreviewStream>>,
 }
 
 impl FleetBackend {
@@ -80,6 +81,9 @@ impl FleetBackend {
                     Duration::from_secs(60),
                 )
             },
+            stream_preview: Some(|job_id| {
+                RunPreviewStream::new(ManagedEnvironment::Staging, job_id)
+            }),
             preview: |job_id| {
                 managed_agent_sessions::fetch_run_preview(ManagedEnvironment::Staging, job_id, 12)
             },
@@ -160,6 +164,9 @@ pub struct FleetModel {
     refresh_again: bool,
     previews: HashMap<String, Result<RunPreview, String>>,
     previewing: HashSet<String>,
+    preview_selections: HashMap<EntityId, String>,
+    preview_streams: HashMap<String, u64>,
+    preview_generation: u64,
     attached_views: HashSet<EntityId>,
     /// Whether a refresh timer is pending, so re-attaching within an interval does not start a
     /// second polling chain.
@@ -182,6 +189,9 @@ impl FleetModel {
             refresh_again: false,
             previews: HashMap::new(),
             previewing: HashSet::new(),
+            preview_selections: HashMap::new(),
+            preview_streams: HashMap::new(),
+            preview_generation: 0,
             attached_views: HashSet::new(),
             refresh_scheduled: false,
         }
@@ -247,6 +257,119 @@ impl FleetModel {
     /// then closed), so detaching a detached view changes nothing.
     pub fn detach_view(&mut self, view_id: EntityId) {
         self.attached_views.remove(&view_id);
+        self.preview_selections.remove(&view_id);
+        self.prune_preview_streams();
+    }
+
+    fn prune_preview_streams(&mut self) {
+        self.preview_streams.retain(|job_id, _| {
+            let selected = self.preview_selections.values().any(|job| job == job_id);
+            if !selected {
+                self.previewing.remove(job_id);
+            }
+            selected
+        });
+    }
+
+    pub fn select_preview(
+        &mut self,
+        view_id: EntityId,
+        job_id: Option<String>,
+        force: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.preview_selections.remove(&view_id);
+        if !self.attached_views.contains(&view_id) {
+            self.prune_preview_streams();
+            return;
+        }
+        if let Some(job_id) = &job_id {
+            self.preview_selections.insert(view_id, job_id.clone());
+        }
+        self.prune_preview_streams();
+        let Some(job_id) = job_id else {
+            return;
+        };
+        let Some(open) = self.backend.stream_preview else {
+            self.request_preview(job_id, force, ctx);
+            return;
+        };
+        if self.preview_streams.contains_key(&job_id) && !force {
+            return;
+        }
+        let finished = self
+            .runs
+            .iter()
+            .find(|run| run.job_id == job_id)
+            .is_some_and(|run| is_finished_state(&run.state));
+        if !force
+            && finished
+            && self
+                .previews
+                .get(&job_id)
+                .is_some_and(|preview| preview.as_ref().is_ok_and(|preview| preview.terminal))
+        {
+            return;
+        }
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
+        self.preview_streams.insert(job_id.clone(), generation);
+        self.previewing.insert(job_id.clone());
+        ctx.emit(FleetModelEvent::PreviewUpdated);
+        let requested_job = job_id.clone();
+        ctx.spawn(
+            async move { blocking::unblock(move || open(&requested_job)).await },
+            move |me, stream, ctx| {
+                if me.preview_streams.get(&job_id) != Some(&generation) {
+                    return;
+                }
+                match stream {
+                    Ok(stream) => me.read_preview_stream(job_id, generation, stream, ctx),
+                    Err(error) => {
+                        me.previewing.remove(&job_id);
+                        me.preview_streams.remove(&job_id);
+                        me.previews
+                            .insert(job_id, Err(format!("Could not load transcript: {error:#}")));
+                        ctx.emit(FleetModelEvent::PreviewUpdated);
+                    }
+                }
+            },
+        );
+    }
+
+    fn read_preview_stream(
+        &mut self,
+        job_id: String,
+        generation: u64,
+        mut stream: RunPreviewStream,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    let result = stream.read_next();
+                    (stream, result)
+                })
+                .await
+            },
+            move |me, (stream, result), ctx| {
+                if me.preview_streams.get(&job_id) != Some(&generation) {
+                    return;
+                }
+                me.previewing.remove(&job_id);
+                let follow = result.as_ref().is_ok_and(|preview| !preview.terminal);
+                me.previews.insert(
+                    job_id.clone(),
+                    result.map_err(|error| format!("Could not load transcript: {error:#}")),
+                );
+                ctx.emit(FleetModelEvent::PreviewUpdated);
+                if follow {
+                    me.read_preview_stream(job_id, generation, stream, ctx);
+                } else {
+                    me.preview_streams.remove(&job_id);
+                }
+            },
+        );
     }
 
     pub fn request_preview(&mut self, job_id: String, force: bool, ctx: &mut ModelContext<Self>) {

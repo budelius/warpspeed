@@ -111,6 +111,8 @@ fn bookmark_serialization_contains_only_safe_fields() {
         fleet_id: "fleet".to_owned(),
         job_id: "job-123".to_owned(),
         last_cursor: Some("cursor".to_owned()),
+        execution_generation: Some("pi-123".to_owned()),
+        transport: Some("native_ssh".to_owned()),
         display_name: Some("inspector".to_owned()),
         agent_name: Some("staging-pi-inspector".to_owned()),
         last_known_state: Some("running".to_owned()),
@@ -125,6 +127,8 @@ fn bookmark_serialization_contains_only_safe_fields() {
         "fleet_id",
         "job_id",
         "last_cursor",
+        "execution_generation",
+        "transport",
         "display_name",
         "agent_name",
         "last_known_state",
@@ -180,6 +184,8 @@ fn bookmark_upsert_preserves_creation_and_resume_cursor() {
         fleet_id: STAGING_FLEET_ID.to_owned(),
         job_id: "job-123".to_owned(),
         last_cursor: Some("old".to_owned()),
+        execution_generation: Some("pi-old".to_owned()),
+        transport: Some("events".to_owned()),
         display_name: None,
         agent_name: None,
         last_known_state: Some("running".to_owned()),
@@ -194,6 +200,8 @@ fn bookmark_upsert_preserves_creation_and_resume_cursor() {
             fleet_id: STAGING_FLEET_ID.to_owned(),
             job_id: "job-123".to_owned(),
             last_cursor: Some("next".to_owned()),
+            execution_generation: Some("pi-next".to_owned()),
+            transport: Some("native_ssh".to_owned()),
             display_name: Some("run".to_owned()),
             agent_name: Some("agent".to_owned()),
             last_known_state: Some("running".to_owned()),
@@ -218,6 +226,8 @@ fn descriptor_must_match_compiled_environment_identity() {
         state: "running".to_owned(),
         capabilities: vec!["watch".to_owned()],
         next_cursor: None,
+        execution_generation: None,
+        terminal: None,
     };
     assert!(
         validate_descriptor(profile(ManagedEnvironment::Staging), "job-123", &descriptor).is_ok()
@@ -1406,9 +1416,9 @@ fn a_running_run_is_attached_without_a_pause_notice() {
     .unwrap();
 
     let banner = attach_banner(&descriptor);
-    assert!(
-        banner.starts_with("Attached to Inspector (running, capabilities: watch,input,close).")
-    );
+    assert!(banner.starts_with(
+        "Event history / fallback for Inspector (running, capabilities: watch,input,close)."
+    ));
     assert!(!banner.contains("Paused"), "{banner}");
     assert!(viewer_commands("running").contains("send <text>"));
 }

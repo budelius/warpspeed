@@ -8088,6 +8088,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "command",
  "dirs 6.0.0",
  "instant",
  "log",

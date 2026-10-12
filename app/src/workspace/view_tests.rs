@@ -7500,7 +7500,7 @@ fn start_agent_on_agent_ctrl_is_offered(workspace: &ViewHandle<Workspace>, app: 
             .pane_header_overflow_menu_items(ctx);
         let labelled = items.iter().any(|item| {
             item.fields()
-                .is_some_and(|fields| fields.label() == "Start agent on AgentCtrl in this repo")
+                .is_some_and(|fields| fields.label() == "Start in Obachan")
         });
         let mapped = items.iter().any(|item| {
             matches!(
@@ -7617,7 +7617,7 @@ fn start_agent_on_agent_ctrl_binding_is_registered_for_the_palette() {
                 editable
                     .description
                     .in_context(warpui::keymap::DescriptionContext::Default)
-                    .eq_ignore_ascii_case("Start agent on AgentCtrl in this repo")
+                    .eq_ignore_ascii_case("Start in Obachan")
             );
             let context = |flags: &[&'static str]| warpui::keymap::Context {
                 set: flags.iter().copied().collect(),

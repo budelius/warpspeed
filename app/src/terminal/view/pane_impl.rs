@@ -910,7 +910,7 @@ impl BackingView for TerminalView {
         }
         if agent_ctrl_actions.can_start_agent {
             items.push(
-                MenuItemFields::new("Start agent on AgentCtrl in this repo")
+                MenuItemFields::new("Start in Obachan")
                     .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
                     .into_item(),
             );

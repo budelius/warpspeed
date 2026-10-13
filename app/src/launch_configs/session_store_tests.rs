@@ -44,6 +44,7 @@ fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
                         title: Some("wire up the supervisor".to_owned()),
                         captured_unix_seconds: Some(1_767_225_600),
                     }),
+                    managed_session_job_id: None,
                     cwd: Some("/workspace/devops".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {
                         executable_path: PathBuf::from("/bin/zsh"),

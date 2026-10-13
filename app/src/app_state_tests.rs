@@ -171,12 +171,14 @@ fn test_code_pane_snapshot_with_multiple_tabs() {
 }
 
 #[test]
-fn a_snapshot_without_a_session_holder_still_deserializes() {
+fn a_snapshot_without_optional_session_metadata_still_deserializes() {
     let json = r#"{"uuid":[1,2],"persistent_session_id":7,"cwd":null,"shell_launch_data":null,
         "is_active":true,"is_read_only":false,"input_config":null,"llm_model_override":null,
         "active_profile_id":null,"conversation_ids_to_restore":[],"active_conversation_id":null}"#;
     let snapshot: TerminalPaneSnapshot = serde_json::from_str(json).unwrap();
     assert_eq!(snapshot.session_holder, None);
+    assert_eq!(snapshot.cli_agent_resume_descriptor, None);
+    assert_eq!(snapshot.managed_session_job_id, None);
 }
 
 #[test]

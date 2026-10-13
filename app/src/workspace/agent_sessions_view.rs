@@ -389,6 +389,11 @@ const PREVIEW_TITLE_MAX_CHARS: usize = 160;
 const PREVIEW_DETAIL_MAX_CHARS: usize = 240;
 const PREVIEW_MESSAGE_MAX_CHARS: usize = 1_200;
 
+pub(crate) struct AgentSessionsFocus {
+    pub locator: PaneViewLocator,
+    pub managed_job_id: Option<String>,
+}
+
 pub enum AgentSessionsViewEvent {
     Act(AgentSessionAction),
     ResumeInFolder {
@@ -452,6 +457,7 @@ pub struct AgentSessionsView {
     preview_scroll_state: ClippedScrollStateHandle,
     resizable_width: ResizableStateHandle,
     resizable_height: ResizableStateHandle,
+    preferred_managed_job_id: Option<String>,
     pending_managed_open: Option<String>,
 }
 
@@ -511,6 +517,7 @@ impl AgentSessionsView {
             preview_scroll_state: ClippedScrollStateHandle::new(),
             resizable_width: resizable_state_handle(INITIAL_WIDTH),
             resizable_height: resizable_state_handle(INITIAL_HEIGHT),
+            preferred_managed_job_id: None,
             pending_managed_open: None,
         }
     }
@@ -523,12 +530,18 @@ impl AgentSessionsView {
         detached: Result<Vec<DetachedInput>, DetachedListError>,
         past: &[PastAgentSession],
         history_loaded: bool,
-        focus: Option<PaneViewLocator>,
+        focus: Option<AgentSessionsFocus>,
         ctx: &mut ViewContext<Self>,
     ) {
+        let (focus, preferred_managed_job_id) = match focus {
+            Some(focus) => (Some(focus.locator), focus.managed_job_id),
+            None => (None, None),
+        };
         self.panes = panes;
         self.history_loaded = history_loaded;
+        self.preferred_managed_job_id = preferred_managed_job_id;
         self.pending_managed_open = None;
+        self.selected_index = None;
         (self.detached, self.supervisor_error) = match detached {
             Ok(detached) => (detached, None),
             Err(error) => (Vec::new(), Some(error)),
@@ -539,11 +552,13 @@ impl AgentSessionsView {
             editor.clear_buffer_and_reset_undo_stack(ctx)
         });
         self.rebuild_view_rows(ctx);
-        self.selected_index = focus.and_then(|focus| {
-            self.view_rows.iter().position(
-                |row| matches!(row, ViewRow::Pane { input, .. } if input.locator == focus),
-            )
-        });
+        if self.selected_index.is_none() {
+            self.selected_index = focus.and_then(|focus| {
+                self.view_rows.iter().position(
+                    |row| matches!(row, ViewRow::Pane { input, .. } if input.locator == focus),
+                )
+            });
+        }
         if let Some(index) = self.selected_index {
             self.list_state.scroll_to(index);
         }
@@ -555,16 +570,11 @@ impl AgentSessionsView {
     pub(crate) fn refresh_past(&mut self, past: &[PastAgentSession], ctx: &mut ViewContext<Self>) {
         let expand_loaded_history = !self.history_loaded;
         self.history_loaded = true;
-        let selected = self
-            .selected_index
-            .and_then(|index| self.view_rows.get(index))
-            .map(ViewRow::key);
         self.set_rows(past);
         if expand_loaded_history {
             self.expanded_folders = folders_with_past(&self.panes, &self.past_by_folder);
         }
         self.rebuild_view_rows(ctx);
-        self.selected_index = selected.and_then(|selected| self.index_of(&selected));
     }
 
     fn set_rows(&mut self, past: &[PastAgentSession]) {
@@ -576,6 +586,22 @@ impl AgentSessionsView {
     pub(crate) fn set_query(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
         self.query_editor
             .update(ctx, |editor, ctx| editor.set_buffer_text(query, ctx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_managed_job_id(&self) -> Option<&str> {
+        match self.view_rows.get(self.selected_index?)? {
+            ViewRow::Managed { run } => Some(&run.job_id),
+            ViewRow::TabHeader { .. }
+            | ViewRow::Pane { .. }
+            | ViewRow::PastToggle { .. }
+            | ViewRow::Past { .. }
+            | ViewRow::DetachedHeader { .. }
+            | ViewRow::Detached { .. }
+            | ViewRow::ManagedHeader
+            | ViewRow::ManagedError(_)
+            | ViewRow::SupervisorUnreachable => None,
+        }
     }
 
     #[cfg(test)]
@@ -619,7 +645,18 @@ impl AgentSessionsView {
             self.button_states.entry(key).or_default();
         }
         self.view_rows = Arc::new(rows);
-        self.selected_index = selected.and_then(|selected| self.index_of(&selected));
+        let preferred_index = self
+            .preferred_managed_job_id
+            .as_deref()
+            .and_then(|job_id| self.index_of(&RowKey::Managed(job_id.to_owned())));
+        if preferred_index.is_some() {
+            self.preferred_managed_job_id = None;
+        }
+        self.selected_index =
+            preferred_index.or_else(|| selected.and_then(|selected| self.index_of(&selected)));
+        if let Some(index) = self.selected_index {
+            self.list_state.scroll_to(index);
+        }
         self.request_selected_preview(false, ctx);
         ctx.notify();
     }
@@ -632,6 +669,7 @@ impl AgentSessionsView {
                 if self.query_editor.as_ref(ctx).buffer_text(ctx) == self.built_query {
                     return;
                 }
+                self.preferred_managed_job_id = None;
                 self.rebuild_view_rows(ctx);
                 self.selected_index = self.next_selectable(0);
                 if let Some(index) = self.selected_index {
@@ -711,6 +749,7 @@ impl AgentSessionsView {
             (Some(index), false) => (0..index).rev().find(|index| self.is_selectable(*index)),
         };
         if let Some(index) = next {
+            self.preferred_managed_job_id = None;
             self.selected_index = Some(index);
             self.list_state.scroll_to(index);
             self.request_selected_preview(false, ctx);
@@ -744,6 +783,7 @@ impl AgentSessionsView {
         if !self.is_selectable(index) {
             return;
         }
+        self.preferred_managed_job_id = None;
         self.selected_index = Some(index);
         self.list_state.scroll_to(index);
         self.request_selected_preview(false, ctx);

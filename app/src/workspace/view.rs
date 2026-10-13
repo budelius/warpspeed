@@ -526,7 +526,9 @@ use crate::workflows::{
     WorkflowViewMode,
 };
 use crate::workspace::action::CommandSearchOptions;
-use crate::workspace::agent_sessions_view::{AgentSessionsView, AgentSessionsViewEvent};
+use crate::workspace::agent_sessions_view::{
+    AgentSessionsFocus, AgentSessionsView, AgentSessionsViewEvent,
+};
 use crate::workspace::bonus_grant_notification_model::BonusGrantNotificationEvent;
 #[cfg(target_os = "macos")]
 use crate::workspace::cli_install;
@@ -17814,6 +17816,17 @@ impl Workspace {
             })
         });
         self.agent_sessions_target = focus;
+        let focus = focus.map(|locator| AgentSessionsFocus {
+            managed_job_id: self
+                .get_pane_group_view_with_id(locator.pane_group_id)
+                .and_then(|pane_group| {
+                    pane_group
+                        .as_ref(ctx)
+                        .managed_session_job_id(locator.pane_id)
+                        .map(str::to_owned)
+                }),
+            locator,
+        });
         let (panes, detached) = self.agent_session_inputs(ctx);
         let history = AgentSessionHistoryModel::as_ref(ctx);
         let (past, history_loaded) = (history.sessions().to_vec(), history.is_loaded());
@@ -18875,6 +18888,13 @@ impl Workspace {
                 model.set_action_error(format!("Could not attach to the run: {error}"), ctx)
             });
             return;
+        }
+        if let Some(locator) = locator
+            && let Some(pane_group) = self.get_pane_group_view_with_id(locator.pane_group_id)
+        {
+            pane_group.update(ctx, |pane_group, _| {
+                pane_group.set_managed_session_job_id(locator.pane_id, Some(job_id.to_owned()));
+            });
         }
         self.hide_agent_sessions_modal(ctx);
         if let Some(locator) = locator {

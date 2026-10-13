@@ -4971,6 +4971,7 @@ fn test_parked_restored_pane_reports_the_agent_it_has_not_resumed() {
             && let LeafContents::Terminal(terminal) = &mut leaf.contents
         {
             terminal.cli_agent_resume_descriptor = Some(descriptor.clone());
+            terminal.managed_session_job_id = Some("job-restored".to_owned());
         }
         let pane_group = mock_pane_group(
             &mut app,
@@ -4988,10 +4989,14 @@ fn test_parked_restored_pane_reports_the_agent_it_has_not_resumed() {
                 let pane_id = group
                     .pane_id_from_index(0)
                     .expect("the restored tab has a pane");
-                group.pending_agent_resume(pane_id, ctx)
+                (
+                    group.pending_agent_resume(pane_id, ctx),
+                    group.managed_session_job_id(pane_id).map(str::to_owned),
+                )
             })
         });
-        assert_eq!(restored, Some(descriptor));
+        assert_eq!(restored.0, Some(descriptor));
+        assert_eq!(restored.1.as_deref(), Some("job-restored"));
     });
 }
 

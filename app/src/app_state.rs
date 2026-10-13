@@ -348,6 +348,8 @@ pub struct TerminalPaneSnapshot {
     pub session_holder: Option<SessionHolder>,
     #[serde(default)]
     pub cli_agent_resume_descriptor: Option<CliAgentResumeDescriptor>,
+    #[serde(default)]
+    pub managed_session_job_id: Option<String>,
     pub cwd: Option<String>,
     pub shell_launch_data: Option<ShellLaunchData>,
     pub is_active: bool,

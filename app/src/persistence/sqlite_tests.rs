@@ -459,6 +459,7 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
                     persistent_session_id: None,
                     session_holder: None,
                     cli_agent_resume_descriptor: None,
+                    managed_session_job_id: None,
                     cwd: Some("/tmp".to_string()),
                     shell_launch_data: Some(ShellLaunchData::Executable {
                         executable_path: PathBuf::from("/bin/zsh"),
@@ -628,6 +629,45 @@ fn test_sqlite_round_trips_cli_agent_resume_descriptor() {
 }
 
 #[test]
+fn test_sqlite_round_trips_managed_session_job_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let mut window = test_terminal_window_snapshot(false);
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &mut window.tabs[0].root
+    else {
+        panic!("expected terminal pane");
+    };
+    let job_id = "job-8f05d099-c259-440d-9cfa-1902ee199797".to_owned();
+    terminal.managed_session_job_id = Some(job_id.clone());
+    let app_state = AppState {
+        windows: vec![window],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+    let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::Full)
+        .expect("app state should load")
+        .app_state
+        .expect("app state should be present for the full scope");
+
+    let PaneNodeSnapshot::Leaf(LeafSnapshot {
+        contents: LeafContents::Terminal(terminal),
+        ..
+    }) = &restored.windows[0].tabs[0].root
+    else {
+        panic!("expected restored terminal pane");
+    };
+    assert_eq!(terminal.managed_session_job_id, Some(job_id));
+}
+
+#[test]
 fn test_sqlite_round_trips_session_holder() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let database_path = tempdir.path().join("warp.sqlite");
@@ -717,6 +757,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
                         persistent_session_id: None,
                         session_holder: None,
                         cli_agent_resume_descriptor: None,
+                        managed_session_job_id: None,
                         cwd: Some("/tmp".to_string()),
                         shell_launch_data: Some(ShellLaunchData::Executable {
                             executable_path: PathBuf::from("/bin/zsh"),
@@ -888,6 +929,7 @@ fn test_sqlite_round_trips_tab_groups() {
                 persistent_session_id: None,
                 session_holder: None,
                 cli_agent_resume_descriptor: None,
+                managed_session_job_id: None,
                 cwd: Some("/tmp/grouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -919,6 +961,7 @@ fn test_sqlite_round_trips_tab_groups() {
                 persistent_session_id: None,
                 session_holder: None,
                 cli_agent_resume_descriptor: None,
+                managed_session_job_id: None,
                 cwd: Some("/tmp/ungrouped".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -1019,6 +1062,7 @@ fn test_sqlite_round_trips_pinned_state() {
                 persistent_session_id: None,
                 session_holder: None,
                 cli_agent_resume_descriptor: None,
+                managed_session_job_id: None,
                 cwd: Some("/tmp/pinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -1050,6 +1094,7 @@ fn test_sqlite_round_trips_pinned_state() {
                 persistent_session_id: None,
                 session_holder: None,
                 cli_agent_resume_descriptor: None,
+                managed_session_job_id: None,
                 cwd: Some("/tmp/unpinned".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),
@@ -1081,6 +1126,7 @@ fn test_sqlite_round_trips_pinned_state() {
                 persistent_session_id: None,
                 session_holder: None,
                 cli_agent_resume_descriptor: None,
+                managed_session_job_id: None,
                 cwd: Some("/tmp/pinned-group".to_string()),
                 shell_launch_data: Some(ShellLaunchData::Executable {
                     executable_path: PathBuf::from("/bin/zsh"),

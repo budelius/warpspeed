@@ -1866,6 +1866,7 @@ impl PaneGroup {
                     ctx,
                 );
                 pane_data.set_restored_shell_snapshot_fields(restored_shell_snapshot_fields);
+                pane_data.set_managed_session_job_id(terminal_snapshot.managed_session_job_id);
 
                 let terminal_pane_id = pane_data.terminal_pane_id();
                 let pane_id = terminal_pane_id.into();
@@ -2323,6 +2324,7 @@ impl PaneGroup {
                             persistent_session_id: None,
                             session_holder: None,
                             cli_agent_resume_descriptor: None,
+                            managed_session_job_id: None,
                             cwd: None,
                             is_active: visible_leaf_is_active_session,
                             is_read_only: false,
@@ -2361,6 +2363,27 @@ impl PaneGroup {
                 })
             }
         }
+    }
+
+    pub(crate) fn managed_session_job_id(&self, pane_id: PaneId) -> Option<&str> {
+        self.downcast_pane_by_id::<TerminalPane>(pane_id)?
+            .managed_session_job_id()
+    }
+
+    pub(crate) fn set_managed_session_job_id(
+        &mut self,
+        pane_id: PaneId,
+        job_id: Option<String>,
+    ) -> bool {
+        let Some(pane) = self
+            .pane_contents
+            .get_mut(&pane_id)
+            .and_then(|pane| pane.as_any_mut().downcast_mut::<TerminalPane>())
+        else {
+            return false;
+        };
+        pane.set_managed_session_job_id(job_id);
+        true
     }
 
     /// The agent a restored terminal pane has yet to resume, if it is one.

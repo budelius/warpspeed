@@ -84,7 +84,7 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
     },
 
-    /// Open the managed-session viewer (full-screen when attached to a terminal).
+    /// Open the native Pi terminal when available, otherwise event history/fallback.
     Open {
         job_id: String,
 
@@ -92,7 +92,7 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
     },
 
-    /// Follow a managed session (full-screen when attached to a terminal).
+    /// Attach to the native Pi terminal when available, otherwise follow event history.
     Attach {
         job_id: String,
 
@@ -100,8 +100,12 @@ pub enum ManagedSessionsCommand {
         environment: ManagedEnvironment,
 
         /// Fetch currently available events and return instead of following.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "takeover")]
         once: bool,
+
+        /// Explicitly replace the current writable terminal client.
+        #[arg(long)]
+        takeover: bool,
     },
 
     /// Send one audited follow-up turn to a live interactive run.

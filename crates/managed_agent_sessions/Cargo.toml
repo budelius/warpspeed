@@ -13,6 +13,7 @@ tui = ["dep:ratatui", "dep:unicode-width"]
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
+command.workspace = true
 dirs.workspace = true
 instant.workspace = true
 log.workspace = true

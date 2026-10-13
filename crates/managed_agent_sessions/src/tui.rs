@@ -213,17 +213,7 @@ fn parse_composer_command(input: &str) -> ComposerCommand {
         ("status", "") => ComposerCommand::Status,
         ("shell" | "local", "") => ComposerCommand::LocalShell(None),
         ("shell" | "local", command) => ComposerCommand::LocalShell(Some(command.to_owned())),
-        ("ssh", arguments) => ComposerCommand::LocalShell(Some(local_command("ssh", arguments))),
-        ("tmux", arguments) => ComposerCommand::LocalShell(Some(local_command("tmux", arguments))),
         _ => ComposerCommand::Unknown(input.to_owned()),
-    }
-}
-
-fn local_command(program: &str, arguments: &str) -> String {
-    if arguments.is_empty() {
-        program.to_owned()
-    } else {
-        format!("{program} {arguments}")
     }
 }
 
@@ -832,7 +822,10 @@ impl ManagedSessionsTui {
         let text = Text::from(transcript_lines(&self.events, self.history_gap));
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Conversation · {} events ", self.events.len()))
+            .title(format!(
+                " Event history / fallback · {} events ",
+                self.events.len()
+            ))
             .border_style(Style::default().fg(Color::DarkGray));
         let inner = block.inner(area);
         let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
@@ -929,8 +922,6 @@ impl ManagedSessionsTui {
             Line::default(),
             Line::from("/shell              open an interactive local shell"),
             Line::from("/shell <command>    run a local shell command"),
-            Line::from("/ssh <args>         run local ssh interactively"),
-            Line::from("/tmux <args>        run local tmux interactively"),
             Line::from("!<command>          local shell command (same as /shell)"),
             Line::default(),
             Line::from(Span::styled(

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{self, Write as _};
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -17,6 +17,7 @@ use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, Manage
 use zitadel_auth::{RefreshRejected, ZitadelProfile};
 
 mod event_stream;
+mod native_terminal;
 mod preview_stream;
 pub use preview_stream::RunPreviewStream;
 #[cfg(feature = "tui")]
@@ -169,6 +170,10 @@ struct ManagedSessionBookmark {
     fleet_id: String,
     job_id: String,
     last_cursor: Option<String>,
+    #[serde(default)]
+    execution_generation: Option<String>,
+    #[serde(default)]
+    transport: Option<String>,
     display_name: Option<String>,
     agent_name: Option<String>,
     last_known_state: Option<String>,
@@ -176,7 +181,7 @@ struct ManagedSessionBookmark {
     last_opened_at: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SessionDescriptor {
     protocol_version: u32,
     environment: String,
@@ -187,6 +192,19 @@ struct SessionDescriptor {
     state: String,
     capabilities: Vec<String>,
     next_cursor: Option<String>,
+    #[serde(default)]
+    execution_generation: Option<String>,
+    #[serde(default)]
+    terminal: Option<NativeTerminalDescriptor>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NativeTerminalDescriptor {
+    availability: String,
+    #[serde(default)]
+    execution_generation: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -347,7 +365,8 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             job_id,
             environment,
             once,
-        } => attach(*environment, job_id, *once, args.json),
+            takeover,
+        } => attach(*environment, job_id, *once, *takeover, args.json),
         ManagedSessionsCommand::Input {
             job_id,
             text,
@@ -864,17 +883,24 @@ fn launch_request_with(
 }
 
 fn ui_session(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
+    if json_output {
+        return attach(environment, job_id, false, false, true);
+    }
+
+    match native_terminal::attach_if_available(environment, job_id, false)? {
+        native_terminal::NativeAttachOutcome::Attached => return Ok(()),
+        native_terminal::NativeAttachOutcome::Fallback(reason) => {
+            eprintln!("{reason}. Opening Event history / fallback.");
+        }
+    }
+
     #[cfg(feature = "tui")]
-    if !json_output && tui::can_run() {
+    if tui::can_run() {
         return tui::run(environment, job_id);
     }
 
-    if json_output {
-        return attach(environment, job_id, false, true);
-    }
-
     loop {
-        attach(environment, job_id, true, false)?;
+        attach(environment, job_id, true, false, false)?;
         let profile = profile(environment);
         let token = dashboard_token()?;
         let descriptor = fetch_descriptor(&Client::new(), profile, job_id, &token)?;
@@ -938,7 +964,7 @@ fn paused_notice(job_id: &str) -> String {
 fn attach_banner(descriptor: &SessionDescriptor) -> String {
     let capabilities = descriptor.capabilities.join(",");
     let mut banner = format!(
-        "Attached to {} ({}, capabilities: {capabilities}). Closing this view does not stop the run.",
+        "Event history / fallback for {} ({}, capabilities: {capabilities}). Closing this view does not stop the run.",
         descriptor.display_name, descriptor.state
     );
     if is_paused_state(&descriptor.state) {
@@ -1242,8 +1268,23 @@ fn attach(
     environment: ManagedEnvironment,
     job_id: &str,
     once: bool,
+    takeover: bool,
     json_output: bool,
 ) -> Result<()> {
+    if takeover
+        && (once || json_output || !io::stdin().is_terminal() || !io::stdout().is_terminal())
+    {
+        bail!("--takeover requires an interactive native-terminal attachment");
+    }
+    if !once && !json_output {
+        match native_terminal::attach_if_available(environment, job_id, takeover)? {
+            native_terminal::NativeAttachOutcome::Attached => return Ok(()),
+            native_terminal::NativeAttachOutcome::Fallback(reason) => {
+                eprintln!("{reason}. Opening Event history / fallback.");
+            }
+        }
+    }
+
     #[cfg(feature = "tui")]
     if !once && !json_output && tui::can_run() {
         return tui::run(environment, job_id);
@@ -1339,6 +1380,19 @@ fn open_managed_session(
             fleet_id: descriptor.fleet_id.clone(),
             job_id: descriptor.job_id.clone(),
             last_cursor: existing_cursor.clone(),
+            execution_generation: descriptor.execution_generation.clone(),
+            transport: Some(
+                if descriptor
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "terminal")
+                {
+                    "native_ssh"
+                } else {
+                    "events"
+                }
+                .to_string(),
+            ),
             display_name: Some(descriptor.display_name.clone()),
             agent_name: Some(descriptor.agent_name.clone()),
             last_known_state: Some(descriptor.state.clone()),

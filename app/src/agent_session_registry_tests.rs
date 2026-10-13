@@ -15,6 +15,7 @@ fn terminal_pane(
         persistent_session_id: None,
         session_holder: None,
         cli_agent_resume_descriptor: descriptor,
+        managed_session_job_id: None,
         cwd: None,
         shell_launch_data: None,
         is_active: false,

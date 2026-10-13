@@ -8087,6 +8087,24 @@ fn list_no_runs() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapsho
     Ok(Default::default())
 }
 
+fn list_associated_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    Ok(crate::agent_ctrl::fleet_model::FleetSnapshot {
+        runs: vec![managed_agent_sessions::RunSummary {
+            job_id: "job-associated".to_owned(),
+            state: "running".to_owned(),
+            agent_name: "staging-claude-interactive-rw".to_owned(),
+            repo_url: Some("https://gitlab.com/acme/warp.git".to_owned()),
+            branch: Some("feat/sessions".to_owned()),
+            interactive: true,
+            last_activity_at: None,
+            node_name: None,
+            paused_at: None,
+            pause_allowed: Some(true),
+        }],
+        repos: Vec::new(),
+    })
+}
+
 fn start_nothing(_: &str, _: &str) -> anyhow::Result<String> {
     anyhow::bail!("tests never start a run")
 }
@@ -8110,6 +8128,26 @@ fn preview_nothing(_: &str) -> anyhow::Result<managed_agent_sessions::RunPreview
 /// Registers the fleet singletons with a backend that never reaches the dashboard.
 fn initialize_app_for_fleet(app: &mut App) {
     initialize_app_for_move_session(app);
+}
+
+fn initialize_app_for_associated_run(app: &mut App) {
+    use crate::agent_ctrl::FleetPaneManager;
+    use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
+
+    initialize_app_with_stozn(app);
+    app.add_singleton_model(|_| {
+        FleetModel::with_backend(FleetBackend {
+            list: list_associated_run,
+            start: start_nothing,
+            stop: stop_nothing,
+            pause: pause_nothing,
+            resume: resume_nothing,
+            resume_for_attach: resume_nothing,
+            preview: preview_nothing,
+            stream_preview: None,
+        })
+    });
+    app.add_singleton_model(|_| FleetPaneManager::default());
 }
 
 fn fleet_pane_ids(workspace: &ViewHandle<Workspace>, app: &mut App) -> Vec<PaneId> {
@@ -8376,6 +8414,45 @@ fn agent_session_resume_runs_in_an_idle_shell() {
 }
 
 #[test]
+fn associated_managed_session_is_selected_when_the_browser_opens() {
+    App::test((), |mut app| async move {
+        initialize_app_for_associated_run(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let (target, sessions_view) =
+            workspace.update(&mut app, |workspace, ctx| {
+                let pane_group = workspace.active_tab_pane_group();
+                let target = PaneViewLocator {
+                    pane_group_id: pane_group.id(),
+                    pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+                };
+                pane_group.update(ctx, |pane_group, _| {
+                    assert!(pane_group.set_managed_session_job_id(
+                        target.pane_id,
+                        Some("job-associated".to_owned()),
+                    ));
+                });
+                workspace.show_agent_sessions(Some(target), ctx);
+                (
+                    target,
+                    workspace.agent_sessions_modal.as_ref(ctx).body().clone(),
+                )
+            });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => sessions_view
+                .read(&app, |view, _| view.selected_managed_job_id().map(str::to_owned))
+                .as_deref()
+                == Some("job-associated"),
+            "associated run was not selected"
+        );
+        assert_eq!(
+            workspace.read(&app, |workspace, _| workspace.agent_sessions_target),
+            Some(target)
+        );
+    });
+}
+
+#[test]
 fn managed_session_attach_reuses_the_requesting_idle_pane() {
     App::test((), |mut app| async move {
         initialize_app_for_fleet(&mut app);
@@ -8404,8 +8481,21 @@ fn managed_session_attach_reuses_the_requesting_idle_pane() {
 
         assert_eq!(active_tab_pane_count(&workspace, &mut app), 1);
         assert!(pending_command_in(&workspace, target.pane_id, &mut app));
-        workspace.read(&app, |workspace, _| {
-            assert!(!workspace.is_agent_sessions_modal_open())
+        workspace.read(&app, |workspace, ctx| {
+            assert!(!workspace.is_agent_sessions_modal_open());
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            assert_eq!(
+                pane_group.managed_session_job_id(target.pane_id),
+                Some("job-test")
+            );
+            let PaneNodeSnapshot::Leaf(LeafSnapshot {
+                contents: LeafContents::Terminal(snapshot),
+                ..
+            }) = pane_group.snapshot(ctx)
+            else {
+                panic!("expected one terminal pane");
+            };
+            assert_eq!(snapshot.managed_session_job_id.as_deref(), Some("job-test"));
         });
     });
 }
@@ -8449,6 +8539,14 @@ fn managed_session_attach_splits_instead_of_overwriting_a_busy_pane() {
             )
         });
         assert!(pending_command_in(&workspace, new_pane, &mut app));
+        workspace.read(&app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            assert_eq!(pane_group.managed_session_job_id(target.pane_id), None);
+            assert_eq!(
+                pane_group.managed_session_job_id(new_pane),
+                Some("job-test")
+            );
+        });
     });
 }
 
@@ -8469,6 +8567,9 @@ fn managed_session_attach_failure_keeps_the_browser_open_with_an_error() {
                     .action_error()
                     .is_some()
             );
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            let pane_id = pane_group.focused_pane_id(ctx);
+            assert_eq!(pane_group.managed_session_job_id(pane_id), None);
         });
     });
 }
@@ -8491,6 +8592,7 @@ fn managed_session_attach_falls_back_to_a_new_tab_when_the_target_disappeared() 
             assert_eq!(workspace.tabs.len(), 2);
             let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
             let pane_id = pane_group.focused_pane_id(ctx);
+            assert_eq!(pane_group.managed_session_job_id(pane_id), Some("job-test"));
             assert!(
                 pane_group
                     .terminal_view_from_pane_id(pane_id, ctx)
@@ -8715,7 +8817,10 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
                 Ok(Vec::new()),
                 &[],
                 true,
-                Some(target),
+                Some(AgentSessionsFocus {
+                    locator: target,
+                    managed_job_id: None,
+                }),
                 ctx,
             );
         });

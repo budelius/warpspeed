@@ -1397,6 +1397,7 @@ fn save_pane_state(
                             None
                         }
                     }),
+                managed_session_job_id: terminal_snapshot.managed_session_job_id.clone(),
             };
 
             diesel::insert_into(schema::terminal_panes::dsl::terminal_panes)
@@ -2409,6 +2410,7 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                                     None
                                 }
                             }),
+                        managed_session_job_id: terminal_pane.managed_session_job_id,
                         cwd: terminal_pane.cwd,
                         is_active: terminal_pane.is_active,
                         is_read_only: false,

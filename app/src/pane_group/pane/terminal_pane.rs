@@ -120,6 +120,8 @@ pub struct TerminalPane {
     /// place of any live value the shell has not reported yet after that.
     restored_shell_snapshot_fields: Option<RestoredShellSnapshotFields>,
 
+    managed_session_job_id: Option<String>,
+
     /// Defining `terminal_manager` before `view` means that `terminal_manager`
     /// gets dropped first (guaranteed by the language), which halts the event
     /// loop and avoids possible deadlocks during session cleanup. This is enforced
@@ -197,6 +199,7 @@ impl TerminalPane {
             uuid,
             pane_configuration,
             restored_shell_snapshot_fields: None,
+            managed_session_job_id: None,
             view,
         }
     }
@@ -211,6 +214,14 @@ impl TerminalPane {
         fields: RestoredShellSnapshotFields,
     ) {
         self.restored_shell_snapshot_fields = Some(fields);
+    }
+
+    pub(in crate::pane_group) fn managed_session_job_id(&self) -> Option<&str> {
+        self.managed_session_job_id.as_deref()
+    }
+
+    pub(in crate::pane_group) fn set_managed_session_job_id(&mut self, job_id: Option<String>) {
+        self.managed_session_job_id = job_id;
     }
 
     /// The restored `cwd`/`shell_launch_data` to snapshot instead of the live
@@ -610,6 +621,7 @@ impl PaneContent for TerminalPane {
                 persistent_session_id: None,
                 session_holder: None,
                 cli_agent_resume_descriptor: None,
+                managed_session_job_id: self.managed_session_job_id.clone(),
                 cwd: None,
                 is_active,
                 is_read_only: false,
@@ -643,6 +655,7 @@ impl PaneContent for TerminalPane {
                     persistent_session_id: None,
                     session_holder: None,
                     cli_agent_resume_descriptor: None,
+                    managed_session_job_id: self.managed_session_job_id.clone(),
                     cwd: None,
                     is_active,
                     is_read_only: false,
@@ -750,6 +763,7 @@ impl PaneContent for TerminalPane {
                 persistent_session_id,
                 session_holder,
                 cli_agent_resume_descriptor,
+                managed_session_job_id: self.managed_session_job_id.clone(),
                 cwd,
                 is_active,
                 is_read_only: view.model.lock().is_read_only(),

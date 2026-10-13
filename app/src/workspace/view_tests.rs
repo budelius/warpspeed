@@ -8670,13 +8670,19 @@ fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
 }
 
 #[test]
-fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
+fn choosing_from_agent_sessions_opens_the_unfiltered_palette_on_the_clicked_pane() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
         // Opening the palette reads these, which `initialize_app` leaves out.
         app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
         app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
         let workspace = mock_workspace(&mut app);
+        AgentSessionHistoryModel::handle(&app).update(&mut app, |history, ctx| {
+            history.set_sessions_for_test(
+                vec![past_conversation("elsewhere", "available session", 10)],
+                ctx,
+            )
+        });
 
         let target = workspace.update(&mut app, |workspace, ctx| {
             let pane_group = workspace.active_tab_pane_group();
@@ -8732,21 +8738,29 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
 
         workspace.update(&mut app, |workspace, ctx| {
             assert!(!workspace.is_agent_sessions_modal_open());
-            assert_eq!(workspace.active_tab_index(), 0);
-            assert_eq!(
-                workspace
-                    .active_tab_pane_group()
-                    .as_ref(ctx)
-                    .focused_pane_id(ctx),
-                target.pane_id
-            );
             assert!(workspace.current_workspace_state.is_palette_open);
-            assert!(
-                workspace
-                    .palette
-                    .as_ref(ctx)
-                    .is_mode_enabled(PaletteMode::AgentSessions, ctx)
-            );
+            let palette = workspace.palette.as_ref(ctx);
+            assert!(palette.is_mode_enabled(PaletteMode::AgentSessions, ctx));
+            assert_eq!(palette.search_bar.as_ref(ctx).query(ctx), "");
+            workspace.palette.update(ctx, |palette, ctx| {
+                palette.insert_query_text("available session", ctx)
+            });
+        });
+        workspace.update(&mut app, |workspace, ctx| {
+            let result = workspace
+                .palette
+                .as_ref(ctx)
+                .selected_search_result(ctx)
+                .expect("sessions outside the pane folder remain available to choose");
+            assert!(matches!(
+                result.accept_result(),
+                crate::search::command_palette::mixer::CommandPaletteItemAction::AgentSession {
+                    action: AgentSessionAction::Resume {
+                        target: Some(actual),
+                        ..
+                    }
+                } if actual == target
+            ));
         });
     });
 }

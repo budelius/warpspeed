@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use warpui::{App, EntityId};
 
-use super::score_row;
+use super::{score_row, text_has_exact_words};
 use crate::pane_group::PaneId;
 use crate::search::QueryFilter;
 use crate::search::command_palette::CommandPaletteMixer;
@@ -72,6 +72,24 @@ fn score_row_matches_a_session_id_prefix() {
 fn score_row_is_none_without_a_match() {
     let row = past_row("untitled", "/work/other");
     assert_eq!(score_row(&row, "zzqx"), None);
+}
+
+#[test]
+fn exact_full_words_rank_above_partial_matches() {
+    let exact = past_row("help me choose", "/work/other");
+    let partial = past_row("memo cleanup", "/work/other");
+
+    assert!(score_row(&exact, "me") > score_row(&partial, "me"));
+    assert!(text_has_exact_words("help me choose", "me"));
+    assert!(!text_has_exact_words("memo cleanup", "me"));
+}
+
+#[test]
+fn quoted_queries_match_full_words() {
+    let row = past_row("help me choose", "/work/other");
+
+    assert!(score_row(&row, "\"me\"").is_some());
+    assert!(text_has_exact_words("help me choose", "\"me\""));
 }
 
 #[test]

@@ -12431,16 +12431,12 @@ impl Workspace {
         self.current_workspace_state
             .is_launch_config_save_modal_open = true;
 
-        let window_snapshot = self.snapshot(ctx.window_id(), false, ctx);
-        // Rewriting the YAML this window came from is not part of session persistence, so it
-        // isn't gated on `PersistentLaunchConfigSessions`; the one step that is — writing the
-        // session alongside it — checks the flag itself in the modal.
         let launch_config_source = self
             .launch_config_source
             .clone()
             .filter(|source| !source.is_session_config());
         self.launch_config_save_modal.view.update(ctx, |view, ctx| {
-            view.set_window_snapshot(window_snapshot, launch_config_source);
+            view.request_snapshot(ctx.window_id(), launch_config_source, ctx);
             view.reset_editor(ctx);
             ctx.notify();
         });
@@ -17672,6 +17668,7 @@ impl Workspace {
 
         self.palette.update(ctx, |view, ctx| {
             view.reset(ctx);
+            view.set_active_query_filter(QueryFilter::Actions, ctx);
         });
     }
 

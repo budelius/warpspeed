@@ -17,8 +17,8 @@ use warpui::keymap::FixedBinding;
 use warpui::ui_components::button::{Button, ButtonVariant};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
-    AppContext, Entity, FocusContext, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle,
+    AppContext, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView, View,
+    ViewContext, ViewHandle, WindowId,
 };
 
 use crate::app_state::WindowSnapshot;
@@ -42,6 +42,7 @@ use crate::user_config::{
 use crate::util::bindings::keybinding_name_to_display_string;
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::FileTarget;
+use crate::workspace::WorkspaceRegistry;
 
 const MODAL_WIDTH: f32 = 660.;
 const SIDE_PADDING: f32 = 16.;
@@ -69,6 +70,18 @@ pub fn init(app: &mut AppContext) {
     )]);
 }
 
+/// Defers snapshotting until the workspace action handler has put the workspace back in the view
+/// registry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotRequest {
+    None,
+    Window(WindowId),
+}
+
+impl Entity for SnapshotRequest {
+    type Event = ();
+}
+
 #[derive(Default)]
 struct SaveModalMouseStates {
     close_button_state: MouseStateHandle,
@@ -83,6 +96,7 @@ pub struct LaunchConfigSaveModal {
     editor: ViewHandle<EditorView>,
     mouse_states: SaveModalMouseStates,
     current_window_snapshot: Option<WindowSnapshot>,
+    snapshot_request: ModelHandle<SnapshotRequest>,
     launch_config_source: Option<LaunchConfigWindowSource>,
     save_state: SaveState,
     file_path: Option<std::path::PathBuf>,
@@ -173,10 +187,17 @@ impl LaunchConfigSaveModal {
             me.handle_editor_event(event, ctx);
         });
 
+        let snapshot_request = ctx.add_model(|_| SnapshotRequest::None);
+        ctx.observe(
+            &snapshot_request,
+            LaunchConfigSaveModal::on_snapshot_requested,
+        );
+
         LaunchConfigSaveModal {
             editor,
             mouse_states: Default::default(),
             current_window_snapshot: None,
+            snapshot_request,
             launch_config_source: None,
             save_state: SaveState::NotSaved,
             file_path: None,
@@ -188,13 +209,32 @@ impl LaunchConfigSaveModal {
         }
     }
 
-    pub fn set_window_snapshot(
+    pub fn request_snapshot(
         &mut self,
-        window_snapshot: WindowSnapshot,
+        window_id: WindowId,
         launch_config_source: Option<LaunchConfigWindowSource>,
+        ctx: &mut ViewContext<Self>,
     ) {
-        self.current_window_snapshot = Some(window_snapshot);
+        self.current_window_snapshot = None;
         self.launch_config_source = launch_config_source;
+        self.snapshot_request.update(ctx, |request, ctx| {
+            *request = SnapshotRequest::Window(window_id);
+            ctx.notify();
+        });
+    }
+
+    fn on_snapshot_requested(
+        &mut self,
+        request: ModelHandle<SnapshotRequest>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let SnapshotRequest::Window(window_id) = *request.as_ref(ctx) else {
+            return;
+        };
+        self.current_window_snapshot = WorkspaceRegistry::as_ref(ctx)
+            .get(window_id, ctx)
+            .map(|workspace| workspace.as_ref(ctx).snapshot(window_id, false, ctx));
+        ctx.notify();
     }
 
     fn handle_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {

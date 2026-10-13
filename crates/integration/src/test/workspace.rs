@@ -31,6 +31,7 @@ use warp::integration_testing::window::{
 use warp::integration_testing::workspace::{
     assert_focused_tab_index, assert_tab_count, press_native_modal_button,
 };
+use warp::search::QueryFilter;
 use warp::search::command_palette::mixer::CommandPaletteItemAction;
 use warp::settings::PaneSettings;
 use warp::terminal::shell::ShellType;
@@ -547,6 +548,26 @@ fn assert_total_tab_count(
 
 fn drag_tabs_feature_enabled() -> bool {
     cfg!(feature = "drag_tabs_to_windows")
+}
+
+pub fn test_command_palette_opens_with_actions() -> Builder {
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            TestStep::new("Open the Command Palette")
+                .with_keystrokes(&[cmd_or_ctrl_shift("p")])
+                .add_named_assertion("Command Palette lists actions", |app, window_id| {
+                    command_palette_view(app, window_id).read(app, |palette, ctx| {
+                        let action_count = palette.search_results(ctx).count();
+                        async_assert!(
+                            palette.active_query_filter(ctx) == Some(QueryFilter::Actions)
+                                && action_count > 10,
+                            "Expected the Actions filter and a populated action list, found filter {:?} and {action_count} results",
+                            palette.active_query_filter(ctx)
+                        )
+                    })
+                }),
+        )
 }
 
 pub fn test_cycle_active_tab_color_with_keybinding() -> Builder {

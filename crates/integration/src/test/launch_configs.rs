@@ -9,18 +9,52 @@ use warp::integration_testing::terminal::{
     validate_block_output, wait_until_bootstrapped_single_pane_for_tab,
 };
 use warp::integration_testing::type_getters::get_launch_config_ui_location;
+use warp::integration_testing::view_getters::workspace_view;
 use warp::integration_testing::window::assert_num_windows_open;
 use warp::integration_testing::workspace::{assert_focused_tab_index, assert_tab_count};
 use warp::integration_testing::{self};
 use warp::search::SyncDataSource;
 use warp::search::command_palette::launch_config;
 use warp::search::data_source::Query;
-use warp::workspace::NEW_TAB_BUTTON_POSITION_ID;
+use warp::workspace::{NEW_TAB_BUTTON_POSITION_ID, WorkspaceAction};
 use warpui_core::integration::{AssertionOutcome, TestStep};
-use warpui_core::{ModelHandle, async_assert};
+use warpui_core::{ModelHandle, TypedActionView, async_assert};
 
 use super::{TEST_ONLY_ASSETS, assert_approx_eq, new_builder};
 use crate::Builder;
+
+/// Saves the active window from the launch configuration modal.
+pub fn test_save_current_window_as_launch_config() -> Builder {
+    const FILE_NAME: &str = "saved-window.yaml";
+
+    new_builder()
+        .with_setup(|_utils| {
+            std::fs::create_dir_all(integration_testing::launch_configs::launch_configs_dir())
+                .expect("Should be able to create launch configs dir");
+        })
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open the save launch configuration modal")
+                .with_action(|app, window_id, _| {
+                    workspace_view(app, window_id).update(app, |workspace, ctx| {
+                        workspace.handle_action(&WorkspaceAction::OpenLaunchConfigSaveModal, ctx);
+                    });
+                }),
+        )
+        .with_step(
+            new_step_with_default_assertions("Save the current window")
+                .with_typed_characters(&["saved-window"])
+                .with_keystrokes(&["enter"]),
+        )
+        .with_step(
+            new_step_with_default_assertions("The launch configuration was saved")
+                .add_named_assertion("Saved launch configuration exists", |_app, _window_id| {
+                    let path =
+                        integration_testing::launch_configs::launch_configs_dir().join(FILE_NAME);
+                    async_assert!(path.is_file(), "Expected {} to exist", path.display())
+                }),
+        )
+}
 
 /// Adds a launch config to the mocked out warp config directory and verifies that
 /// the launch config appears in the launch config palette.

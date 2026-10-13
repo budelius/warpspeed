@@ -100,6 +100,7 @@ integration_tests! {
     test_launch_warp_with_theme_in_warp_config,
     #[cfg(target_os="macos")]
     test_preview_config_dir_migration,
+    test_save_current_window_as_launch_config,
     #[ignore = "Flakes in CI"]
     test_add_launch_config_to_warp_config,
     #[ignore = "Flakes in CI"]
@@ -219,6 +220,7 @@ integration_tests! {
     test_osc8_file_scheme_opens_url,
     test_osc8_no_regression_on_url_autodetect,
 
+    test_command_palette_opens_with_actions,
     test_cycle_active_tab_color_with_keybinding,
     test_active_session_follows_focus,
     test_tab_context_menu_copies_metadata,

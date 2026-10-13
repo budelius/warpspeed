@@ -33,7 +33,9 @@ use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys,
     PropagateHorizontalNavigationKeys, SingleLineEditorOptions, TextOptions,
 };
-use crate::search::command_palette::agent_sessions::{row_title, score_row};
+use crate::search::command_palette::agent_sessions::{
+    normalized_query, row_has_exact_words, row_title, score_row, text_has_exact_words,
+};
 use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{
     AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows, is_row_within,
@@ -88,9 +90,8 @@ pub(crate) enum ViewRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ViewRowAction {
     Act(AgentSessionAction),
-    /// Pick a past conversation of `folder` to resume in `target`.
-    ResumeInFolder {
-        folder: PathBuf,
+    /// Pick a past conversation to resume in `target`.
+    ChooseSession {
         target: PaneViewLocator,
     },
     None,
@@ -217,9 +218,35 @@ pub(crate) fn view_rows(
     expanded_folders: &ExpandedFolders,
     query: &str,
 ) -> Vec<ViewRow> {
-    let query = query.trim();
-    let matches_row = |row: &AgentSessionRow| query.is_empty() || score_row(row, query).is_some();
-    let matches_text = |text: &str| match_indices_case_insensitive(text, query).is_some();
+    let query = normalized_query(query);
+    let visible_past = past_by_folder
+        .values()
+        .flatten()
+        .copied()
+        .collect::<HashSet<_>>();
+    let has_exact_match = panes.iter().any(|pane| {
+        text_has_exact_words(&pane.tab_title, query)
+            || pane_folder(pane)
+                .is_some_and(|folder| text_has_exact_words(&folder.to_string_lossy(), query))
+    }) || rows.iter().enumerate().any(|(index, row)| {
+        (!matches!(row.state, AgentSessionState::Past) || visible_past.contains(&index))
+            && row_has_exact_words(row, query)
+    });
+    let matches_row = |row: &AgentSessionRow| {
+        query.is_empty()
+            || if has_exact_match {
+                row_has_exact_words(row, query)
+            } else {
+                score_row(row, query).is_some()
+            }
+    };
+    let matches_text = |text: &str| {
+        if has_exact_match {
+            text_has_exact_words(text, query)
+        } else {
+            match_indices_case_insensitive(text, query).is_some()
+        }
+    };
     let mut lists_past_of_folder: HashMap<(usize, &Path), PaneViewLocator> = HashMap::new();
     for pane in panes {
         if let Some(folder) = pane_folder(pane) {
@@ -268,8 +295,7 @@ pub(crate) fn view_rows(
             (Some(row), _) => action_for(row, Some(pane.locator))
                 .map(ViewRowAction::Act)
                 .unwrap_or(ViewRowAction::None),
-            (None, Some(folder)) => ViewRowAction::ResumeInFolder {
-                folder: folder.to_path_buf(),
+            (None, Some(_)) => ViewRowAction::ChooseSession {
                 target: pane.locator,
             },
             (None, None) => ViewRowAction::None,
@@ -329,25 +355,41 @@ pub(crate) fn supervisor_rows(error: &DetachedListError) -> Vec<ViewRow> {
     }
 }
 
+fn managed_run_search_fields(run: &RunSummary) -> [Option<&str>; 6] {
+    [
+        Some("AgentCtrl"),
+        Some(run.job_id.as_str()),
+        Some(run.state.as_str()),
+        Some(run.agent_name.as_str()),
+        run.repo_url.as_deref(),
+        run.branch.as_deref(),
+    ]
+}
+
 pub(crate) fn managed_view_rows(
     runs: &[RunSummary],
     error: Option<&str>,
     query: &str,
 ) -> Vec<ViewRow> {
-    let query = query.trim();
-    let matches = |run: &RunSummary| {
-        query.is_empty()
-            || match_indices_case_insensitive("AgentCtrl", query).is_some()
-            || [
-                Some(run.job_id.as_str()),
-                Some(run.state.as_str()),
-                Some(run.agent_name.as_str()),
-                run.repo_url.as_deref(),
-                run.branch.as_deref(),
-            ]
+    let query = normalized_query(query);
+    let has_exact_match = runs.iter().any(|run| {
+        managed_run_search_fields(run)
             .into_iter()
             .flatten()
-            .any(|text| match_indices_case_insensitive(text, query).is_some())
+            .any(|text| text_has_exact_words(text, query))
+    });
+    let matches = |run: &RunSummary| {
+        query.is_empty()
+            || managed_run_search_fields(run)
+                .into_iter()
+                .flatten()
+                .any(|text| {
+                    if has_exact_match {
+                        text_has_exact_words(text, query)
+                    } else {
+                        match_indices_case_insensitive(text, query).is_some()
+                    }
+                })
     };
     let mut matching = runs
         .iter()
@@ -378,11 +420,11 @@ pub(crate) fn managed_view_rows(
 const ROW_HEIGHT: f32 = 30.;
 const PANE_INDENT: f32 = 24.;
 const PAST_INDENT: f32 = 40.;
-const INITIAL_WIDTH: f32 = 1040.;
-const INITIAL_HEIGHT: f32 = 620.;
-const MIN_WIDTH: f32 = 720.;
-const MIN_HEIGHT: f32 = 400.;
-const WINDOW_MARGIN: f32 = 80.;
+const INITIAL_WIDTH: f32 = 1260.;
+const INITIAL_HEIGHT: f32 = 760.;
+const MIN_WIDTH: f32 = 760.;
+const MIN_HEIGHT: f32 = 440.;
+const WINDOW_MARGIN: f32 = 48.;
 const ROW_TITLE_MAX_CHARS: usize = 80;
 const ROW_DETAIL_MAX_CHARS: usize = 100;
 const PREVIEW_TITLE_MAX_CHARS: usize = 160;
@@ -396,10 +438,7 @@ pub(crate) struct AgentSessionsFocus {
 
 pub enum AgentSessionsViewEvent {
     Act(AgentSessionAction),
-    ResumeInFolder {
-        folder: PathBuf,
-        target: PaneViewLocator,
-    },
+    ChooseSession { target: PaneViewLocator },
     OpenManaged(String),
     Close,
 }
@@ -819,8 +858,8 @@ impl AgentSessionsView {
         match row {
             ViewRow::Pane { action, .. } => match action {
                 ViewRowAction::Act(action) => ctx.emit(AgentSessionsViewEvent::Act(action)),
-                ViewRowAction::ResumeInFolder { folder, target } => {
-                    ctx.emit(AgentSessionsViewEvent::ResumeInFolder { folder, target })
+                ViewRowAction::ChooseSession { target } => {
+                    ctx.emit(AgentSessionsViewEvent::ChooseSession { target })
                 }
                 ViewRowAction::None => {}
             },
@@ -1197,7 +1236,7 @@ fn preview_action(row: &ViewRow) -> Option<(RowKey, &'static str)> {
     let label = match row {
         ViewRow::Pane { action, .. } => match action {
             ViewRowAction::Act(action) => action.label(),
-            ViewRowAction::ResumeInFolder { .. } => "Choose…",
+            ViewRowAction::ChooseSession { .. } => "Choose…",
             ViewRowAction::None => return None,
         },
         ViewRow::Past { row, target } => action_for(row, Some(*target))?.label(),
@@ -1381,7 +1420,7 @@ fn render_row_contents(
                     .map_or_else(|| "Shell".to_owned(), session_label);
                 let button = match action {
                     ViewRowAction::Act(action) => Some(action.label()),
-                    ViewRowAction::ResumeInFolder { .. } => Some("Choose…"),
+                    ViewRowAction::ChooseSession { .. } => Some("Choose…"),
                     ViewRowAction::None => None,
                 };
                 let label = Flex::row()

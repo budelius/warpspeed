@@ -178,8 +178,7 @@ fn each_pane_gets_the_action_its_state_calls_for() {
     );
     assert_eq!(
         pane_action(&view, 2),
-        ViewRowAction::ResumeInFolder {
-            folder: PathBuf::from("/s"),
+        ViewRowAction::ChooseSession {
             target: shell.locator,
         }
     );
@@ -247,6 +246,38 @@ fn past_rows_appear_only_when_their_folder_is_expanded() {
             "past:nested"
         ]
     );
+}
+
+#[test]
+fn exact_full_word_queries_exclude_partial_matches() {
+    let exact = PaneAgentInput {
+        tab_title: "ME".into(),
+        ..pane(0, "/projects/me")
+    };
+    let partial = PaneAgentInput {
+        tab_title: "memo".into(),
+        ..pane(1, "/projects/memo")
+    };
+    let panes = vec![exact, partial];
+    let rows = build_rows(&panes, &[], &[]);
+
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "me");
+
+    assert_eq!(kinds(&view), vec!["tab:ME", "pane:0"]);
+}
+
+#[test]
+fn fuzzy_queries_still_match_when_there_is_no_exact_word() {
+    let matching = PaneAgentInput {
+        tab_title: "backend".into(),
+        ..pane(0, "/projects/backend")
+    };
+    let panes = vec![matching];
+    let rows = build_rows(&panes, &[], &[]);
+
+    let view = layout(&panes, &rows, &ExpandedFolders::new(), "bcknd");
+
+    assert_eq!(kinds(&view), vec!["tab:backend", "pane:0"]);
 }
 
 #[test]

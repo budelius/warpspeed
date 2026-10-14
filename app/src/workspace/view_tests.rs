@@ -2763,7 +2763,7 @@ fn test_tab_context_menu_share_session_items() {
     let _guard = FeatureFlag::CreatingSharedSessions.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let workspace = mock_workspace(&mut app);
         let shared_pane_id = setup_session_sharing_test(&workspace, &mut app);
 
@@ -4108,7 +4108,7 @@ fn test_vertical_tabs_context_menu_does_not_show_hover_only_tab_bar() {
     let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
 
@@ -4137,7 +4137,7 @@ fn test_standard_tab_context_menu_shows_hover_only_tab_bar() {
     let _full_screen_zen_mode_guard = FeatureFlag::FullScreenZenMode.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
 
@@ -5429,7 +5429,7 @@ fn restart_window_in_new_process_is_available_to_the_command_palette() {
 #[test]
 fn restart_and_change_shell_appear_in_pane_context_menus() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
         let (tab_items, pane_header_items, terminal_view_id) =
@@ -6593,7 +6593,7 @@ fn change_shell_picker_opens_and_renders_for_a_targeted_terminal_view() {
 #[test]
 fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_view() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let _shell_selector = FeatureFlag::ShellSelector.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);
@@ -6633,7 +6633,7 @@ fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_vie
 #[test]
 fn terminal_pane_header_button_maximizes_and_restores_the_pane() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let _header = FeatureFlag::ContextWindowUsageV2.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);

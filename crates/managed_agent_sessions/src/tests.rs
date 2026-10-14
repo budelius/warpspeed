@@ -900,6 +900,85 @@ fn list_repositories_parses_items() {
 }
 
 #[test]
+fn list_runs_fetches_every_page_and_deduplicates_jobs() {
+    let (base, requests) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [{"job_id": "job-1", "state": "running", "agent_name": "pi"}],
+                "next_cursor": "next+page/="
+            }),
+        ),
+        (
+            "200 OK",
+            json!({
+                "items": [
+                    {"job_id": "job-1", "state": "running", "agent_name": "pi"},
+                    {"job_id": "job-2", "state": "paused", "agent_name": "claude"},
+                    {"job_id": "job-3", "state": "completed", "agent_name": "codex"}
+                ],
+                "next_cursor": null
+            }),
+        ),
+    ]);
+    let runs = list_runs_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(
+        runs.iter()
+            .map(|run| run.job_id.as_str())
+            .collect::<Vec<_>>(),
+        ["job-1", "job-2", "job-3"]
+    );
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "GET /api/agent-control/runs?limit=100 HTTP/1.1",
+            "GET /api/agent-control/runs?limit=100&cursor=next%2Bpage%2F%3D HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
+fn list_runs_rejects_a_malformed_cursor_instead_of_truncating_the_list() {
+    let base = http_fixture("200 OK", json!({"items": [], "next_cursor": 42}));
+    let error = list_runs_with(&fixture_profile(base), "token").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid managed-run list cursor")
+    );
+}
+
+#[test]
+fn list_runs_rejects_a_repeating_cursor() {
+    let (base, requests) = sequence_fixture(vec![(
+        "200 OK",
+        json!({"items": [], "next_cursor": "repeat"}),
+    )]);
+    let error = list_runs_with(&fixture_profile(base), "token").unwrap_err();
+    assert!(error.to_string().contains("pagination did not finish"));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn list_runs_does_not_hide_a_later_page_failure() {
+    let (base, _) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [{"job_id": "job-1", "state": "running", "agent_name": "pi"}],
+                "next_cursor": "next"
+            }),
+        ),
+        ("403 Forbidden", json!({"error": "forbidden"})),
+    ]);
+    let error = list_runs_with(&fixture_profile(base), "token").unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<HttpStatusError>().unwrap().status,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[test]
 fn list_runs_parses_repo_and_branch() {
     let base = http_fixture(
         "200 OK",

@@ -1,4 +1,5 @@
 mod data_source;
+mod managed_search_item;
 mod search;
 mod search_item;
 

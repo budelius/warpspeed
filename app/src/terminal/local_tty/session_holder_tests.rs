@@ -23,6 +23,8 @@ fn summary(id: u64, attached: bool) -> SessionSummary {
         },
         detached_for_seconds: 3,
         attached,
+        shell_pid: 42,
+        session_uuid_hex: "a1b2c3".to_owned(),
     }
 }
 

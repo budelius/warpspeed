@@ -15393,6 +15393,7 @@ impl Workspace {
                     title: session.title,
                     cwd: session.cwd,
                     detached_for_seconds: session.detached_for_seconds,
+                    session_uuid_hex: session.session_uuid_hex,
                 })
                 .collect()
         });
@@ -15410,6 +15411,9 @@ impl Workspace {
                 let Some(view) = pane_group.terminal_view_from_pane_id(pane_id, ctx) else {
                     continue;
                 };
+                let latest_user_prompt = agent_sessions
+                    .session(view.id())
+                    .and_then(|session| session.session_context.latest_user_prompt());
                 let running =
                     agent_sessions
                         .session(view.id())
@@ -15437,6 +15441,8 @@ impl Workspace {
                     cwd: pane_group
                         .terminal_working_directory(pane_id, ctx)
                         .map(PathBuf::from),
+                    session_uuid_hex: pane_group.terminal_session_uuid(pane_id).map(hex::encode),
+                    latest_user_prompt,
                     running,
                     pending: pane_group.pending_agent_resume(pane_id, ctx),
                 });
@@ -17793,10 +17799,18 @@ impl Workspace {
         let (panes, detached) = self.agent_session_inputs(ctx);
         // The palette has no place for an unreachable supervisor; it lists what it can.
         let detached = detached.unwrap_or_default();
-        let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
+        let history = AgentSessionHistoryModel::as_ref(ctx);
+        let past = history.sessions().to_vec();
+        let scanned_agents = history.scanned_agents().to_vec();
         self.agent_sessions_data_source(ctx)
             .update(ctx, |source, _| {
-                source.set_snapshot(panes, detached, Some(focused), &past);
+                source.set_snapshot_with_scan(
+                    panes,
+                    detached,
+                    Some(focused),
+                    &past,
+                    &scanned_agents,
+                );
             });
         self.refresh_palette_managed_sessions(ctx);
         let view_id = self.palette.id();
@@ -17853,10 +17867,21 @@ impl Workspace {
         });
         let (panes, detached) = self.agent_session_inputs(ctx);
         let history = AgentSessionHistoryModel::as_ref(ctx);
-        let (past, history_loaded) = (history.sessions().to_vec(), history.is_loaded());
+        let (past, scanned_agents, history_loaded) = (
+            history.sessions().to_vec(),
+            history.scanned_agents().to_vec(),
+            history.is_loaded(),
+        );
         self.agent_sessions_modal.update(ctx, |modal, ctx| {
             modal.body().update(ctx, |view, ctx| {
-                view.set_inputs(panes, detached, &past, history_loaded, focus, ctx);
+                view.set_inputs_with_scan(
+                    panes,
+                    detached,
+                    (&past, &scanned_agents),
+                    history_loaded,
+                    focus,
+                    ctx,
+                );
             });
         });
         self.current_workspace_state.is_agent_sessions_modal_open = true;
@@ -17919,6 +17944,60 @@ impl Workspace {
                 self.hide_agent_sessions_modal(ctx);
                 self.open_agent_sessions_palette(*target, ctx);
             }
+            AgentSessionsViewEvent::EndProcess {
+                agent,
+                pid,
+                session_id,
+            } => {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let agent = *agent;
+                    let pid = *pid;
+                    let session_id = session_id.clone();
+                    let (sender, receiver) = futures::channel::oneshot::channel();
+                    ctx.background_executor()
+                        .spawn(async move {
+                            let result = crate::terminal::cli_agent_sessions::process_registry::terminate_pid(
+                                agent,
+                                pid,
+                                &session_id,
+                            );
+                            let _ = sender.send(result);
+                        })
+                        .detach();
+                    ctx.spawn(receiver, move |workspace, result, ctx| {
+                        let error = match result {
+                            Ok(Ok(true)) => None,
+                            Ok(Ok(false)) => {
+                                log::warn!("Agent process {pid} was no longer registered");
+                                Some(format!(
+                                    "Could not end process {pid}: it is no longer registered as this {} session.",
+                                    agent.display_name()
+                                ))
+                            }
+                            Ok(Err(error)) => {
+                                log::warn!("Failed to end agent process {pid}: {error:#}");
+                                Some(format!("Could not end process {pid}: {error:#}"))
+                            }
+                            Err(error) => {
+                                log::warn!("Agent process {pid} end task was cancelled: {error}");
+                                Some(format!("Could not end process {pid}: the task was cancelled"))
+                            }
+                        };
+                        if let Some(error) = error {
+                            workspace.agent_sessions_modal.update(ctx, |modal, ctx| {
+                                modal.body().update(ctx, |view, ctx| {
+                                    view.set_process_end_error(pid, error, ctx)
+                                });
+                            });
+                        }
+                        AgentSessionHistoryModel::handle(ctx)
+                            .update(ctx, |history, ctx| history.refresh(ctx));
+                    });
+                }
+                #[cfg(target_family = "wasm")]
+                let _ = (agent, pid, session_id);
+            }
             AgentSessionsViewEvent::OpenManaged(job_id) if self.is_agent_sessions_modal_open() => {
                 self.open_managed_session_from_browser(job_id, ctx);
             }
@@ -17954,19 +18033,23 @@ impl Workspace {
     ) {
         match event {
             AgentSessionHistoryEvent::Updated => {
-                let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
+                let history = AgentSessionHistoryModel::as_ref(ctx);
+                let past = history.sessions().to_vec();
+                let scanned_agents = history.scanned_agents().to_vec();
                 if self.is_agent_sessions_modal_open() {
                     self.agent_sessions_modal.update(ctx, |modal, ctx| {
-                        modal
-                            .body()
-                            .update(ctx, |view, ctx| view.refresh_past(&past, ctx));
+                        modal.body().update(ctx, |view, ctx| {
+                            view.refresh_snapshot(&past, &scanned_agents, ctx)
+                        });
                     });
                 }
                 let source = self.agent_sessions_data_source(ctx);
                 if !source.as_ref(ctx).is_loaded() {
                     return;
                 }
-                source.update(ctx, |source, _| source.refresh_past(&past));
+                source.update(ctx, |source, _| {
+                    source.refresh_snapshot(&past, &scanned_agents)
+                });
                 if self
                     .palette
                     .as_ref(ctx)

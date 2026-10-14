@@ -16,13 +16,14 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use instant::Instant;
 use serde::Deserialize;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::terminal::CLIAgent;
 
 /// How long one process table read is reused. Every pane with an agent asks on its own
 /// schedule, and walking every process on the machine once per pane would be wasted work.
 const PROCESS_TABLE_TTL: Duration = Duration::from_secs(5);
+static PROCESS_TABLE_CACHE: Mutex<Option<(Instant, Arc<Vec<ProcessInfo>>)>> = Mutex::new(None);
 
 const PI_REGISTRY_DIRECTORY: &str = "warp-sessions";
 const PI_EXTENSION_FILE_NAME: &str = "warp-session-registry.ts";
@@ -40,8 +41,21 @@ pub(crate) struct ProcessInfo {
     pub pid: u32,
     pub parent: Option<u32>,
     pub name: String,
+    pub executable: Option<PathBuf>,
+    pub command: Vec<String>,
     /// When the process started, in seconds since the Unix epoch.
     pub start_time: u64,
+}
+
+/// A live agent process and the registry entry it owns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegisteredAgentProcess {
+    pub agent: CLIAgent,
+    pub session_id: String,
+    pub cwd: Option<PathBuf>,
+    pub pid: u32,
+    pub started_at_unix_seconds: u64,
+    pub warp_session_uuid: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -156,6 +170,32 @@ pub(crate) fn running_session_ids() -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Every currently registered agent process on this machine.
+pub(crate) fn registered_agent_processes_in(
+    processes: &[ProcessInfo],
+) -> Vec<RegisteredAgentProcess> {
+    DISCOVERABLE_AGENTS
+        .into_iter()
+        .filter_map(|agent| Some((agent, registry_directory(agent)?)))
+        .flat_map(|(agent, directory)| {
+            processes
+                .iter()
+                .filter_map(move |process| {
+                    let entry = live_entry(agent, process, &directory)?;
+                    Some(RegisteredAgentProcess {
+                        agent,
+                        session_id: entry.session.session_id,
+                        cwd: entry.session.cwd.map(PathBuf::from),
+                        pid: process.pid,
+                        started_at_unix_seconds: process.start_time,
+                        warp_session_uuid: entry.warp_session_uuid,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// The process of the `agent` that is running `session_id`, by its own registry entry.
 pub(crate) fn agent_pid_for_session(agent: CLIAgent, session_id: &str) -> Option<u32> {
     let directory = registry_directory(agent)?;
@@ -182,11 +222,15 @@ pub(crate) fn agent_pid_for_session_in(
 /// The pid comes from a cached table and an entry a crashed agent can leave behind, and Windows
 /// reuses pids, so the process is checked again, fresh, before it is ended.
 pub(crate) fn terminate_agent_for_session(agent: CLIAgent, session_id: &str) -> Result<bool> {
-    let Some(directory) = registry_directory(agent) else {
+    let Some(pid) = agent_pid_for_session(agent, session_id) else {
         return Ok(false);
     };
-    let Some(pid) = agent_pid_for_session_in(agent, session_id, &process_table(), &directory)
-    else {
+    terminate_pid(agent, pid, session_id)
+}
+
+/// Ends the exact registered process selected by the caller.
+pub(crate) fn terminate_pid(agent: CLIAgent, pid: u32, session_id: &str) -> Result<bool> {
+    let Some(directory) = registry_directory(agent) else {
         return Ok(false);
     };
     let mut system = System::new();
@@ -205,6 +249,7 @@ pub(crate) fn terminate_agent_for_session(agent: CLIAgent, session_id: &str) -> 
     if !process.kill() {
         bail!("Could not end the {} process {pid}", agent.display_name());
     }
+    invalidate_process_table();
     Ok(true)
 }
 
@@ -377,9 +422,14 @@ fn pi_agent_dir() -> Option<PathBuf> {
     }
 }
 
-fn process_table() -> Arc<Vec<ProcessInfo>> {
-    static CACHE: Mutex<Option<(Instant, Arc<Vec<ProcessInfo>>)>> = Mutex::new(None);
-    let mut cache = CACHE
+fn invalidate_process_table() {
+    *PROCESS_TABLE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+pub(crate) fn process_table() -> Arc<Vec<ProcessInfo>> {
+    let mut cache = PROCESS_TABLE_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some((read_at, table)) = cache.as_ref()
@@ -388,7 +438,13 @@ fn process_table() -> Arc<Vec<ProcessInfo>> {
         return table.clone();
     }
     let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::OnlyIfNotSet)
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
     let table: Arc<Vec<ProcessInfo>> = Arc::new(
         system
             .processes()
@@ -397,6 +453,12 @@ fn process_table() -> Arc<Vec<ProcessInfo>> {
                 pid: process.pid().as_u32(),
                 parent: process.parent().map(|parent| parent.as_u32()),
                 name: process.name().to_string_lossy().into_owned(),
+                executable: process.exe().map(Path::to_path_buf),
+                command: process
+                    .cmd()
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
                 start_time: process.start_time(),
             })
             .collect(),

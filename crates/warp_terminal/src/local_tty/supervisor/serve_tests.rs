@@ -1,7 +1,12 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use super::*;
+use crate::SizeInfo;
 use crate::local_tty::screen::HeadlessScreen;
+use crate::local_tty::shell::{DirectShellStarter, ShellStarter};
+use crate::shell::ShellType;
 
 /// A host with no processes behind it, so the supervisor's decisions can be
 /// tested on their own.
@@ -107,6 +112,29 @@ fn metadata() -> SessionMetadata {
         title: "build".to_owned(),
         input_editor_active: false,
         bootstrap: None,
+    }
+}
+
+fn options(session_uuid_hex: &str) -> PtyOptions {
+    PtyOptions {
+        size: SizeInfo::new_without_font_metrics(24, 80),
+        window_id: None,
+        shell_starter: ShellStarter::Direct(DirectShellStarter::new_for_test(
+            ShellType::Bash,
+            PathBuf::from("/bin/sh"),
+            Vec::new(),
+        )),
+        start_dir: None,
+        env_vars: HashMap::from([(
+            OsString::from(TERMINAL_SESSION_UUID_ENV),
+            OsString::from(session_uuid_hex),
+        )]),
+        enable_ssh_wrapper: false,
+        reuse_ssh_control_master: false,
+        shell_debug_mode: false,
+        honor_ps1: false,
+        node_version_chip_enabled: false,
+        close_fds: true,
     }
 }
 
@@ -466,6 +494,44 @@ fn listing_describes_held_sessions() {
 
 /// A detach over the wire has to land in the table, or a client that quits
 /// would lose the session it just handed over.
+#[test]
+fn a_spawned_sessions_process_identity_survives_detach_and_listing() {
+    let mut supervisor = Supervisor::new(FakeHost::default(), true);
+    let session_id = SessionId::from(5u64);
+    let spawn = supervisor.handle_message(
+        &Message::Spawn {
+            session_id,
+            options: bincode::serialize(&options("a1b2c3")).unwrap(),
+        },
+        9001,
+        0,
+        &listener(),
+    );
+    assert!(matches!(
+        spawn,
+        Some(Message::SpawnResponse { result: Ok(_) })
+    ));
+
+    supervisor.handle_message(
+        &Message::Detach {
+            session_id,
+            snapshot: snapshot_of(b"handed over"),
+            metadata: metadata(),
+        },
+        9001,
+        1,
+        &listener(),
+    );
+    let Some(Message::ListSessionsResponse { sessions }) =
+        supervisor.handle_message(&Message::ListSessions, 9001, 2, &listener())
+    else {
+        panic!("the detached session should be listed");
+    };
+
+    assert_eq!(sessions[0].shell_pid, 4242);
+    assert_eq!(sessions[0].session_uuid_hex, "a1b2c3");
+}
+
 #[test]
 fn a_detach_message_takes_over_the_session() {
     let mut supervisor = Supervisor::new(FakeHost::default(), true);

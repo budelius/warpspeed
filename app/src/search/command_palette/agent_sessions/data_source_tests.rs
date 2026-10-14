@@ -120,6 +120,7 @@ fn remote_failure_does_not_remove_local_history() {
                 cwd: "/work/local".into(),
                 canonical_cwd: None,
                 title: Some("local conversation".to_owned()),
+                last_prompt: None,
                 modified: std::time::SystemTime::UNIX_EPOCH,
                 preview: Vec::new(),
             }],

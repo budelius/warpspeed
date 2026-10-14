@@ -14,6 +14,7 @@ const MAX_CANDIDATES: usize = 200;
 const MAX_HEAD_LINES: usize = 200;
 const MAX_HEAD_BYTES: usize = 256 * 1024;
 const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+const MAX_LAST_PROMPT_BYTES: u64 = 64 * 1024;
 const MAX_PREVIEW_MESSAGES: usize = 8;
 const MAX_PREVIEW_MESSAGE_CHARS: usize = 1_200;
 const TITLE_MAX_CHARS: usize = 80;
@@ -50,6 +51,8 @@ pub(crate) struct PastAgentSession {
     /// filesystem. `None` when it could not be resolved.
     pub canonical_cwd: Option<PathBuf>,
     pub title: Option<String>,
+    /// The first line of the most recent user prompt.
+    pub last_prompt: Option<String>,
     pub modified: SystemTime,
     pub preview: Vec<AgentSessionPreviewMessage>,
 }
@@ -83,17 +86,21 @@ fn read_head(path: &Path) -> Vec<Value> {
 }
 
 fn read_tail(path: &Path) -> Vec<Value> {
+    read_tail_with_limit(path, MAX_PREVIEW_BYTES)
+}
+
+fn read_tail_with_limit(path: &Path, limit: u64) -> Vec<Value> {
     let Ok(mut file) = File::open(path) else {
         return Vec::new();
     };
     let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
         return Vec::new();
     };
-    let start = length.saturating_sub(MAX_PREVIEW_BYTES);
+    let start = length.saturating_sub(limit);
     if file.seek(SeekFrom::Start(start)).is_err() {
         return Vec::new();
     }
-    let mut reader = BufReader::new(file.take(MAX_PREVIEW_BYTES));
+    let mut reader = BufReader::new(file.take(limit));
     let mut line = Vec::new();
     if start > 0 {
         let _ = reader.read_until(b'\n', &mut line);
@@ -213,6 +220,7 @@ fn vibe_sessions(root: &Path) -> Vec<PastAgentSession> {
                 cwd,
                 canonical_cwd: None,
                 title: entry["title"].as_str().and_then(title),
+                last_prompt: None,
                 modified,
                 preview: Vec::new(),
             })
@@ -264,6 +272,7 @@ fn kimi_session(session_id: String, dir: &Path) -> Option<PastAgentSession> {
         cwd,
         canonical_cwd: None,
         title,
+        last_prompt: None,
         modified,
         preview: Vec::new(),
     })
@@ -321,6 +330,7 @@ fn dsh_session(dir: &Path) -> Option<PastAgentSession> {
         cwd,
         canonical_cwd: None,
         title,
+        last_prompt: None,
         modified,
         preview: Vec::new(),
     })
@@ -517,6 +527,39 @@ fn preview_message(agent: CLIAgent, entry: &Value) -> Option<AgentSessionPreview
     })
 }
 
+fn last_prompt_from_entries(agent: CLIAgent, entries: &[Value]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
+        let message = preview_message(agent, entry)?;
+        if message.role != AgentSessionPreviewRole::User {
+            return None;
+        }
+        let text = message.text.trim_start();
+        if matches!(text.trim(), "/clear" | "/exit" | "/quit") {
+            return None;
+        }
+        if [
+            "<task-notification>",
+            "<system-reminder>",
+            "<tool-result>",
+            "<local-command-",
+            "<command-name>",
+        ]
+        .into_iter()
+        .any(|prefix| text.starts_with(prefix))
+        {
+            return None;
+        }
+        title(text)
+    })
+}
+
+fn last_prompt_for_candidate(candidate: &Candidate) -> Option<String> {
+    last_prompt_from_entries(
+        candidate.agent,
+        &read_tail_with_limit(&candidate.path, MAX_LAST_PROMPT_BYTES),
+    )
+}
+
 fn preview(candidate: &Candidate) -> Vec<AgentSessionPreviewMessage> {
     let messages = read_tail(&candidate.path)
         .iter()
@@ -527,6 +570,7 @@ fn preview(candidate: &Candidate) -> Vec<AgentSessionPreviewMessage> {
 
 pub(super) fn describe(candidate: Candidate) -> PastAgentSession {
     let head = read_head(&candidate.path);
+    let last_prompt = last_prompt_for_candidate(&candidate);
     let preview = preview(&candidate);
     let (session_id, cwd, title) = match candidate.agent {
         CLIAgent::Claude => {
@@ -598,6 +642,7 @@ pub(super) fn describe(candidate: Candidate) -> PastAgentSession {
         cwd,
         canonical_cwd: None,
         title,
+        last_prompt,
         modified: candidate.modified,
         preview,
     }

@@ -1,3 +1,4 @@
+pub(crate) mod agent_process_scan;
 pub mod event;
 pub mod listener;
 #[cfg(not(target_family = "wasm"))]

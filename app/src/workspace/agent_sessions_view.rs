@@ -41,9 +41,11 @@ use crate::search::command_palette::agent_sessions::{
 };
 use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{
-    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows, is_row_within,
+    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows_with_scanned,
+    is_row_within,
 };
 use crate::terminal::cli_agent::CLIAgent;
+use crate::terminal::cli_agent_sessions::agent_process_scan::{SavedPane, ScannedAgent};
 use crate::terminal::detached_sessions::DetachedListError;
 use crate::util::time_format::format_approx_duration_from_now;
 use crate::util::truncation::truncate_from_end;
@@ -118,6 +120,7 @@ pub(crate) enum RowKey {
     DetachedHeader,
     Detached {
         detached_session: Option<warp_core::SessionId>,
+        process_pid: Option<u32>,
         title: Option<String>,
     },
     ManagedHeader,
@@ -148,6 +151,18 @@ impl ViewRow {
                     AgentSessionState::Detached { session_id } => Some(*session_id),
                     AgentSessionState::Running { .. }
                     | AgentSessionState::Pending { .. }
+                    | AgentSessionState::KnownProcess { .. }
+                    | AgentSessionState::HeldByOtherBuild { .. }
+                    | AgentSessionState::NoKnownPane { .. }
+                    | AgentSessionState::Past => None,
+                },
+                process_pid: match row.state {
+                    AgentSessionState::KnownProcess { pid }
+                    | AgentSessionState::HeldByOtherBuild { pid, .. }
+                    | AgentSessionState::NoKnownPane { pid, .. } => Some(pid),
+                    AgentSessionState::Running { .. }
+                    | AgentSessionState::Pending { .. }
+                    | AgentSessionState::Detached { .. }
                     | AgentSessionState::Past => None,
                 },
                 title: row.title.clone(),
@@ -264,7 +279,11 @@ pub(crate) fn view_rows(
             AgentSessionState::Running { locator } | AgentSessionState::Pending { locator } => {
                 *locator == pane.locator
             }
-            AgentSessionState::Detached { .. } | AgentSessionState::Past => false,
+            AgentSessionState::Detached { .. }
+            | AgentSessionState::KnownProcess { .. }
+            | AgentSessionState::HeldByOtherBuild { .. }
+            | AgentSessionState::NoKnownPane { .. }
+            | AgentSessionState::Past => false,
         });
         let folder = pane_folder(pane);
         let lists_past = folder.is_some_and(|folder| {
@@ -330,7 +349,15 @@ pub(crate) fn view_rows(
 
     let detached: Vec<&AgentSessionRow> = rows
         .iter()
-        .filter(|row| matches!(row.state, AgentSessionState::Detached { .. }) && matches_row(row))
+        .filter(|row| {
+            matches!(
+                row.state,
+                AgentSessionState::Detached { .. }
+                    | AgentSessionState::KnownProcess { .. }
+                    | AgentSessionState::HeldByOtherBuild { .. }
+                    | AgentSessionState::NoKnownPane { .. }
+            ) && matches_row(row)
+        })
         .collect();
     if !detached.is_empty() {
         view.push(ViewRow::DetachedHeader {
@@ -401,7 +428,14 @@ pub(crate) struct AgentSessionsFocus {
 
 pub enum AgentSessionsViewEvent {
     Act(AgentSessionAction),
-    ChooseSession { target: PaneViewLocator },
+    ChooseSession {
+        target: PaneViewLocator,
+    },
+    EndProcess {
+        agent: CLIAgent,
+        pid: u32,
+        session_id: String,
+    },
     OpenManaged(String),
     Close,
 }
@@ -441,6 +475,7 @@ pub struct AgentSessionsView {
     fleet_model: ModelHandle<FleetModel>,
     panes: Vec<PaneAgentInput>,
     detached: Vec<DetachedInput>,
+    scanned_agents: Vec<ScannedAgent>,
     supervisor_error: Option<DetachedListError>,
     rows: Vec<AgentSessionRow>,
     past_by_folder: PastByFolder,
@@ -461,6 +496,8 @@ pub struct AgentSessionsView {
     resizable_height: ResizableStateHandle,
     preferred_managed_job_id: Option<String>,
     pending_managed_open: Option<String>,
+    pending_process_end: Option<u32>,
+    process_end_errors: HashMap<u32, String>,
 }
 
 impl AgentSessionsView {
@@ -504,6 +541,7 @@ impl AgentSessionsView {
             fleet_model,
             panes: Vec::new(),
             detached: Vec::new(),
+            scanned_agents: Vec::new(),
             supervisor_error: None,
             rows: Vec::new(),
             past_by_folder: PastByFolder::new(),
@@ -521,11 +559,14 @@ impl AgentSessionsView {
             resizable_height: resizable_state_handle(INITIAL_HEIGHT),
             preferred_managed_job_id: None,
             pending_managed_open: None,
+            pending_process_end: None,
+            process_end_errors: HashMap::new(),
         }
     }
 
     /// Replaces what the view lists and selects `focus`'s pane, clearing the search and any
     /// expanded folders.
+    #[cfg(test)]
     pub(crate) fn set_inputs(
         &mut self,
         panes: Vec<PaneAgentInput>,
@@ -535,14 +576,30 @@ impl AgentSessionsView {
         focus: Option<AgentSessionsFocus>,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.set_inputs_with_scan(panes, detached, (past, &[]), history_loaded, focus, ctx);
+    }
+
+    pub(crate) fn set_inputs_with_scan(
+        &mut self,
+        panes: Vec<PaneAgentInput>,
+        detached: Result<Vec<DetachedInput>, DetachedListError>,
+        history: (&[PastAgentSession], &[ScannedAgent]),
+        history_loaded: bool,
+        focus: Option<AgentSessionsFocus>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let (past, scanned_agents) = history;
         let (focus, preferred_managed_job_id) = match focus {
             Some(focus) => (Some(focus.locator), focus.managed_job_id),
             None => (None, None),
         };
         self.panes = panes;
+        self.scanned_agents = scanned_agents.to_vec();
         self.history_loaded = history_loaded;
         self.preferred_managed_job_id = preferred_managed_job_id;
         self.pending_managed_open = None;
+        self.pending_process_end = None;
+        self.process_end_errors.clear();
         self.selected_index = None;
         (self.detached, self.supervisor_error) = match detached {
             Ok(detached) => (detached, None),
@@ -569,9 +626,15 @@ impl AgentSessionsView {
     }
 
     /// Rebuilds the rows with newly scanned past sessions, keeping the rest of the snapshot.
-    pub(crate) fn refresh_past(&mut self, past: &[PastAgentSession], ctx: &mut ViewContext<Self>) {
+    pub(crate) fn refresh_snapshot(
+        &mut self,
+        past: &[PastAgentSession],
+        scanned_agents: &[ScannedAgent],
+        ctx: &mut ViewContext<Self>,
+    ) {
         let expand_loaded_history = !self.history_loaded;
         self.history_loaded = true;
+        self.scanned_agents = scanned_agents.to_vec();
         self.set_rows(past);
         if expand_loaded_history {
             self.expanded_folders = folders_with_past(&self.panes, &self.past_by_folder);
@@ -580,8 +643,27 @@ impl AgentSessionsView {
     }
 
     fn set_rows(&mut self, past: &[PastAgentSession]) {
-        self.rows = build_rows(&self.panes, &self.detached, past);
+        self.rows =
+            build_rows_with_scanned(&self.panes, &self.detached, past, &self.scanned_agents);
         self.past_by_folder = past_by_folder(&self.panes, &self.rows);
+    }
+
+    pub(crate) fn set_process_end_error(
+        &mut self,
+        pid: u32,
+        error: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !self
+            .rows
+            .iter()
+            .any(|row| endable_process_pid(row) == Some(pid))
+        {
+            return;
+        }
+        self.pending_process_end = None;
+        self.process_end_errors.insert(pid, error);
+        ctx.notify();
     }
 
     #[cfg(test)]
@@ -752,6 +834,7 @@ impl AgentSessionsView {
         };
         if let Some(index) = next {
             self.preferred_managed_job_id = None;
+            self.pending_process_end = None;
             self.selected_index = Some(index);
             self.list_state.scroll_to(index);
             self.request_selected_preview(false, ctx);
@@ -786,6 +869,9 @@ impl AgentSessionsView {
             return;
         }
         self.preferred_managed_job_id = None;
+        if self.selected_index != Some(index) {
+            self.pending_process_end = None;
+        }
         self.selected_index = Some(index);
         self.list_state.scroll_to(index);
         self.request_selected_preview(false, ctx);
@@ -856,11 +942,34 @@ impl AgentSessionsView {
                     ctx.emit(AgentSessionsViewEvent::Act(action));
                 }
             }
-            ViewRow::Detached { row } => {
-                if let Some(action) = action_for(&row, None) {
-                    ctx.emit(AgentSessionsViewEvent::Act(action));
+            ViewRow::Detached { row } => match &row.state {
+                AgentSessionState::HeldByOtherBuild { pid, .. }
+                | AgentSessionState::NoKnownPane { pid, .. } => {
+                    if self.pending_process_end != Some(*pid) {
+                        self.process_end_errors.remove(pid);
+                    }
+                    if !confirm_process_end(&mut self.pending_process_end, *pid) {
+                        ctx.notify();
+                        return;
+                    }
+                    if let (Some(agent), Some(session_id)) = (row.agent, row.session_id) {
+                        ctx.emit(AgentSessionsViewEvent::EndProcess {
+                            agent,
+                            pid: *pid,
+                            session_id,
+                        });
+                    }
                 }
-            }
+                AgentSessionState::Detached { .. } => {
+                    if let Some(action) = action_for(&row, None) {
+                        ctx.emit(AgentSessionsViewEvent::Act(action));
+                    }
+                }
+                AgentSessionState::Running { .. }
+                | AgentSessionState::Pending { .. }
+                | AgentSessionState::KnownProcess { .. }
+                | AgentSessionState::Past => {}
+            },
             ViewRow::Managed { run } if run.state == "paused" => {
                 let requester = ctx.view_id();
                 self.pending_managed_open = Some(run.job_id.clone());
@@ -888,6 +997,7 @@ impl AgentSessionsView {
         let row_states = self.row_states.clone();
         let button_states = self.button_states.clone();
         let selected_index = self.selected_index;
+        let pending_process_end = self.pending_process_end;
         let list = UniformList::new(
             self.list_state.clone(),
             view_rows.len(),
@@ -904,6 +1014,7 @@ impl AgentSessionsView {
                             selected_index == Some(index),
                             row_state,
                             button_state,
+                            pending_process_end,
                             app,
                         ))
                     })
@@ -990,6 +1101,28 @@ impl AgentSessionsView {
         if let Some(action) = self.render_preview_action(row, app) {
             content.add_child(action);
         }
+        if let ViewRow::Pane { row: Some(row), .. }
+        | ViewRow::Past { row, .. }
+        | ViewRow::Detached { row } = row
+        {
+            if row.process_count > 1 {
+                content.add_child(preview_error(
+                    &format!(
+                        "Warning: {} live processes claim this session. End process affects only the selected PID.",
+                        row.process_count
+                    ),
+                    app,
+                ));
+            }
+            if let Some(pid) = endable_process_pid(row)
+                && let Some(error) = self.process_end_errors.get(&pid)
+            {
+                content.add_child(preview_error(error, app));
+            }
+            if let Some(message) = process_warning(row) {
+                content.add_child(preview_error(&message, app));
+            }
+        }
         match row {
             ViewRow::Pane { row: Some(row), .. }
             | ViewRow::Past { row, .. }
@@ -1067,7 +1200,7 @@ impl AgentSessionsView {
     }
 
     fn render_preview_action(&self, row: &ViewRow, app: &AppContext) -> Option<Box<dyn Element>> {
-        let (key, label) = preview_action(row)?;
+        let (key, label) = preview_action(row, self.pending_process_end)?;
         let state = self.button_states.get(&key)?.clone();
         Some(
             Hoverable::new(state, move |state| {
@@ -1115,7 +1248,7 @@ fn preview_heading(row: &ViewRow) -> (String, Option<String>) {
         ),
         ViewRow::Managed { run } => {
             let mut details = vec![
-                "AgentCtrl".to_owned(),
+                "Remote AgentCtrl".to_owned(),
                 managed_agent_label(&run.agent_name).to_owned(),
                 run.state.clone(),
             ];
@@ -1129,19 +1262,100 @@ fn preview_heading(row: &ViewRow) -> (String, Option<String>) {
         }
         ViewRow::TabHeader { title, .. } => (title.clone(), None),
         ViewRow::PastToggle { .. } => ("Past sessions".to_owned(), None),
-        ViewRow::DetachedHeader { .. } => ("Detached sessions".to_owned(), None),
+        ViewRow::DetachedHeader { .. } => ("Other local sessions".to_owned(), None),
         ViewRow::ManagedHeader => ("AgentCtrl sessions".to_owned(), None),
         ViewRow::ManagedError(error) => ("AgentCtrl unavailable".to_owned(), Some(error.clone())),
         ViewRow::SupervisorUnreachable => ("Supervisor unreachable".to_owned(), None),
     }
 }
 
+fn saved_pane_label(saved: &SavedPane) -> String {
+    format!("saved in {} / {}", saved.session_name, saved.tab_title)
+}
+
+fn placement_detail(row: &AgentSessionRow) -> Option<String> {
+    match &row.state {
+        AgentSessionState::KnownProcess { pid } => {
+            Some(format!("running under this WarpSpeed build · PID {pid}"))
+        }
+        AgentSessionState::HeldByOtherBuild {
+            build, saved_in, ..
+        } => Some(
+            [
+                Some(format!("held by WarpSpeed build {build}")),
+                saved_in.as_ref().map(saved_pane_label),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+        ),
+        AgentSessionState::NoKnownPane { saved_in, .. } => Some(
+            [
+                Some("no known terminal pane".to_owned()),
+                saved_in.as_ref().map(saved_pane_label),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+        ),
+        AgentSessionState::Running { .. }
+        | AgentSessionState::Pending { .. }
+        | AgentSessionState::Detached { .. }
+        | AgentSessionState::Past => None,
+    }
+}
+
+fn confirm_process_end(pending: &mut Option<u32>, pid: u32) -> bool {
+    if *pending == Some(pid) {
+        *pending = None;
+        true
+    } else {
+        *pending = Some(pid);
+        false
+    }
+}
+
+fn endable_process_pid(row: &AgentSessionRow) -> Option<u32> {
+    match row.state {
+        AgentSessionState::HeldByOtherBuild { pid, .. }
+        | AgentSessionState::NoKnownPane { pid, .. } => Some(pid),
+        AgentSessionState::Running { .. }
+        | AgentSessionState::Pending { .. }
+        | AgentSessionState::Detached { .. }
+        | AgentSessionState::KnownProcess { .. }
+        | AgentSessionState::Past => None,
+    }
+}
+
+fn process_warning(row: &AgentSessionRow) -> Option<String> {
+    match &row.state {
+        AgentSessionState::HeldByOtherBuild { pid, build, .. } => Some(format!(
+            "Warning: this process is held by WarpSpeed build {build}. End process, then Confirm end, terminates only PID {pid}."
+        )),
+        AgentSessionState::NoKnownPane { pid, .. } => Some(format!(
+            "Warning: no terminal pane owns this process. End process, then Confirm end, terminates only PID {pid}."
+        )),
+        AgentSessionState::Running { .. }
+        | AgentSessionState::Pending { .. }
+        | AgentSessionState::KnownProcess { .. }
+        | AgentSessionState::Detached { .. }
+        | AgentSessionState::Past => None,
+    }
+}
+
 fn local_preview_detail(row: &AgentSessionRow, cwd: &Path) -> String {
     let mut details = vec!["Local".to_owned(), row.state.label().to_owned()];
+    if let Some(placement) = placement_detail(row) {
+        details.push(placement);
+    }
     if let Some(last_used) = row.last_used {
         details.push(activity_detail_label(DateTime::<Local>::from(last_used)));
     }
-    details.push(cwd.display().to_string());
+    if !cwd.as_os_str().is_empty() {
+        details.push(cwd.display().to_string());
+    }
     details.join(" · ")
 }
 
@@ -1166,7 +1380,10 @@ fn activity_detail_label(last_active: DateTime<Local>) -> String {
     )
 }
 
-fn preview_action(row: &ViewRow) -> Option<(RowKey, &'static str)> {
+fn preview_action(
+    row: &ViewRow,
+    pending_process_end: Option<u32>,
+) -> Option<(RowKey, &'static str)> {
     let label = match row {
         ViewRow::Pane { action, .. } => match action {
             ViewRowAction::Act(action) => action.label(),
@@ -1174,7 +1391,21 @@ fn preview_action(row: &ViewRow) -> Option<(RowKey, &'static str)> {
             ViewRowAction::None => return None,
         },
         ViewRow::Past { row, target } => action_for(row, Some(*target))?.label(),
-        ViewRow::Detached { row } => action_for(row, None)?.label(),
+        ViewRow::Detached { row } => match row.state {
+            AgentSessionState::HeldByOtherBuild { pid, .. }
+            | AgentSessionState::NoKnownPane { pid, .. } => {
+                if pending_process_end == Some(pid) {
+                    "Confirm end"
+                } else {
+                    "End process…"
+                }
+            }
+            AgentSessionState::Detached { .. } => action_for(row, None)?.label(),
+            AgentSessionState::Running { .. }
+            | AgentSessionState::KnownProcess { .. }
+            | AgentSessionState::Pending { .. }
+            | AgentSessionState::Past => return None,
+        },
         ViewRow::Managed { run } => managed_action_label(&run.state),
         ViewRow::TabHeader { .. }
         | ViewRow::PastToggle { .. }
@@ -1275,10 +1506,11 @@ fn render_row(
     is_selected: bool,
     row_state: MouseStateHandle,
     button_state: MouseStateHandle,
+    pending_process_end: Option<u32>,
     app: &AppContext,
 ) -> Box<dyn Element> {
     if !is_interactive(row) {
-        return render_row_contents(row, is_selected, false, None, app);
+        return render_row_contents(row, is_selected, false, None, pending_process_end, app);
     }
 
     let content_key = key.clone();
@@ -1288,6 +1520,7 @@ fn render_row(
             is_selected,
             state.is_hovered(),
             Some((content_key.clone(), button_state.clone())),
+            pending_process_end,
             app,
         )
     })
@@ -1303,6 +1536,7 @@ fn render_row_contents(
     is_selected: bool,
     is_hovered: bool,
     action_button: Option<(RowKey, MouseStateHandle)>,
+    pending_process_end: Option<u32>,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -1416,8 +1650,8 @@ fn render_row_contents(
             ),
             ViewRow::DetachedHeader { count } => {
                 let title = match count {
-                    0 => "Detached in supervisor".to_owned(),
-                    count => format!("Detached in supervisor ({count})"),
+                    0 => "Other local sessions".to_owned(),
+                    count => format!("Other local sessions ({count})"),
                 };
                 (
                     12.,
@@ -1426,16 +1660,41 @@ fn render_row_contents(
                     None,
                 )
             }
-            ViewRow::Detached { row } => (
-                PANE_INDENT,
-                clipped_text(
-                    truncate_from_end(&session_label(row), ROW_TITLE_MAX_CHARS),
-                    main_color,
+            ViewRow::Detached { row } => {
+                let detail = [
+                    placement_detail(row),
+                    Some(row.cwd.display().to_string()).filter(|cwd| !cwd.is_empty()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+                let button = match row.state {
+                    AgentSessionState::HeldByOtherBuild { pid, .. }
+                    | AgentSessionState::NoKnownPane { pid, .. } => {
+                        if pending_process_end == Some(pid) {
+                            Some("Confirm end")
+                        } else {
+                            Some("End process…")
+                        }
+                    }
+                    AgentSessionState::Detached { .. } => Some("Attach"),
+                    AgentSessionState::Running { .. }
+                    | AgentSessionState::KnownProcess { .. }
+                    | AgentSessionState::Pending { .. }
+                    | AgentSessionState::Past => None,
+                };
+                (
+                    PANE_INDENT,
+                    clipped_text(
+                        truncate_from_end(&session_label(row), ROW_TITLE_MAX_CHARS),
+                        main_color,
+                    )
+                    .finish(),
+                    Some(detail).filter(|detail| !detail.is_empty()),
+                    button,
                 )
-                .finish(),
-                Some(row.cwd.display().to_string()).filter(|cwd| !cwd.is_empty()),
-                Some("Attach"),
-            ),
+            }
             ViewRow::ManagedHeader => (
                 12.,
                 text("AgentCtrl".to_owned(), main_color)

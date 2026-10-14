@@ -7,6 +7,9 @@
 //! endpoint is lent. All of that is exercised in tests against a fake host,
 //! with no processes involved.
 
+use std::collections::HashMap;
+use std::ffi::OsStr;
+
 use anyhow::Result;
 use log::{info, warn};
 use warp_core::SessionId;
@@ -15,6 +18,7 @@ use super::message::{Message, SessionMetadata};
 use super::session_table::SessionTable;
 use super::transport::Endpoint;
 use crate::event_listener::ChannelEventListener;
+use crate::focus_env::TERMINAL_SESSION_UUID_ENV;
 use crate::local_tty::PtyOptions;
 use crate::local_tty::screen::ScreenSnapshot;
 
@@ -66,6 +70,9 @@ pub struct Supervisor<H: SessionHost> {
 
     /// Whether the transport in use can carry an endpoint to a client.
     lends_endpoints: bool,
+
+    /// Process identities learned while spawning, before the first detach creates a table row.
+    spawned_identities: HashMap<SessionId, (u32, String)>,
 }
 
 impl<H: SessionHost> Supervisor<H> {
@@ -78,6 +85,7 @@ impl<H: SessionHost> Supervisor<H> {
             table: SessionTable::new(),
             host,
             lends_endpoints,
+            spawned_identities: HashMap::new(),
         }
     }
 
@@ -100,11 +108,14 @@ impl<H: SessionHost> Supervisor<H> {
         now_unix_seconds: u64,
         event_listener: ChannelEventListener,
     ) {
+        let (shell_pid, session_uuid_hex) = self.process_identity(session_id);
         self.table.detach(
             session_id,
             snapshot,
             metadata,
             now_unix_seconds,
+            shell_pid,
+            session_uuid_hex,
             event_listener,
         );
     }
@@ -117,6 +128,7 @@ impl<H: SessionHost> Supervisor<H> {
     ) {
         for session_id in self.host.take_orphaned_sessions() {
             info!("Terminal session {session_id:?} lost its client without a detach; holding it");
+            let (shell_pid, session_uuid_hex) = self.process_identity(session_id);
             self.table.detach(
                 session_id,
                 ScreenSnapshot {
@@ -129,6 +141,8 @@ impl<H: SessionHost> Supervisor<H> {
                 // carried lives in the client that died with it.
                 SessionMetadata::default(),
                 now_unix_seconds,
+                shell_pid,
+                session_uuid_hex,
                 event_listener.clone(),
             );
         }
@@ -152,7 +166,19 @@ impl<H: SessionHost> Supervisor<H> {
             } => {
                 let result = bincode::deserialize::<PtyOptions>(options)
                     .map_err(anyhow::Error::from)
-                    .and_then(|options| self.host.spawn(*session_id, options, client_pid))
+                    .and_then(|options| {
+                        let session_uuid_hex = options
+                            .env_vars
+                            .get(OsStr::new(TERMINAL_SESSION_UUID_ENV))
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        self.host
+                            .spawn(*session_id, options, client_pid)
+                            .inspect(|endpoint| {
+                                self.spawned_identities
+                                    .insert(*session_id, (endpoint.pid, session_uuid_hex.clone()));
+                            })
+                    })
                     .map_err(|error| error.to_string());
                 match &result {
                     Ok(endpoint) => info!(
@@ -192,11 +218,14 @@ impl<H: SessionHost> Supervisor<H> {
                     error.as_deref().unwrap_or("ok")
                 );
                 if error.is_none() {
+                    let (shell_pid, session_uuid_hex) = self.process_identity(*session_id);
                     self.table.detach(
                         *session_id,
                         snapshot.clone(),
                         metadata.clone(),
                         now_unix_seconds,
+                        shell_pid,
+                        session_uuid_hex,
                         event_listener.clone(),
                     );
                 }
@@ -253,6 +282,7 @@ impl<H: SessionHost> Supervisor<H> {
             }
 
             Message::Kill { session_id } => {
+                self.spawned_identities.remove(session_id);
                 // Whether the shell was alive when the kill arrived separates a client cleaning up
                 // after an exit from a client ending a live shell.
                 let was_running = self.host.is_running(*session_id);
@@ -289,6 +319,13 @@ impl<H: SessionHost> Supervisor<H> {
         }
     }
 
+    fn process_identity(&self, session_id: SessionId) -> (u32, String) {
+        self.table
+            .process_identity(session_id)
+            .or_else(|| self.spawned_identities.get(&session_id).cloned())
+            .unwrap_or_default()
+    }
+
     /// Collects output from every held session and drops any whose process has
     /// ended.
     ///
@@ -317,6 +354,7 @@ impl<H: SessionHost> Supervisor<H> {
         for session_id in &ended {
             info!("Detached terminal session {session_id:?} ended");
             self.table.remove(*session_id);
+            self.spawned_identities.remove(session_id);
         }
 
         // Reaping is folded in here so a caller cannot pump output forever and
@@ -327,6 +365,7 @@ impl<H: SessionHost> Supervisor<H> {
                 "Detached terminal session {session_id:?} expired after {ttl_seconds}s; killing it"
             );
             let _ = self.host.kill(*session_id);
+            self.spawned_identities.remove(session_id);
         }
 
         ended.append(&mut expired);

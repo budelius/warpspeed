@@ -12,8 +12,10 @@ use crate::search::data_source::{Query, QueryResult};
 use crate::search::mixer::DataSourceRunErrorWrapper;
 use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{
-    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows, is_row_within,
+    AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows_with_scanned,
+    is_row_within,
 };
+use crate::terminal::cli_agent_sessions::agent_process_scan::ScannedAgent;
 use crate::workspace::PaneViewLocator;
 use crate::workspace::agent_session_actions::{AgentSessionAction, action_for};
 
@@ -61,6 +63,9 @@ pub(super) fn section_for(
             }
         }
         AgentSessionState::Detached { .. } => AgentSessionSection::Detached,
+        AgentSessionState::KnownProcess { .. }
+        | AgentSessionState::HeldByOtherBuild { .. }
+        | AgentSessionState::NoKnownPane { .. } => AgentSessionSection::RunningElsewhere,
         AgentSessionState::Past => {
             if focused_folder.is_some_and(|folder| is_row_within(row, folder)) {
                 AgentSessionSection::ThisPane
@@ -112,6 +117,7 @@ struct Entry {
 pub struct DataSource {
     panes: Vec<PaneAgentInput>,
     detached: Vec<DetachedInput>,
+    scanned_agents: Vec<ScannedAgent>,
     focused: Option<PaneViewLocator>,
     focused_folder: Option<ResolvedPath>,
     entries: Vec<Entry>,
@@ -126,6 +132,7 @@ impl DataSource {
         Self::default()
     }
 
+    #[cfg(test)]
     pub(crate) fn set_snapshot(
         &mut self,
         panes: Vec<PaneAgentInput>,
@@ -133,12 +140,24 @@ impl DataSource {
         focused: Option<PaneViewLocator>,
         past: &[PastAgentSession],
     ) {
+        self.set_snapshot_with_scan(panes, detached, focused, past, &[]);
+    }
+
+    pub(crate) fn set_snapshot_with_scan(
+        &mut self,
+        panes: Vec<PaneAgentInput>,
+        detached: Vec<DetachedInput>,
+        focused: Option<PaneViewLocator>,
+        past: &[PastAgentSession],
+        scanned_agents: &[ScannedAgent],
+    ) {
         self.focused_folder = focused
             .and_then(|focused| panes.iter().find(|pane| pane.locator == focused))
             .and_then(|pane| pane.cwd.as_deref())
             .map(ResolvedPath::new);
         self.panes = panes;
         self.detached = detached;
+        self.scanned_agents = scanned_agents.to_vec();
         self.focused = focused;
         self.is_loaded = true;
         self.rebuild(past);
@@ -146,8 +165,18 @@ impl DataSource {
 
     /// Rebuilds the rows against newer past sessions, keeping the panes and detached sessions
     /// the snapshot was taken with.
+    #[cfg(test)]
     pub(crate) fn refresh_past(&mut self, past: &[PastAgentSession]) {
+        self.refresh_snapshot(past, &[]);
+    }
+
+    pub(crate) fn refresh_snapshot(
+        &mut self,
+        past: &[PastAgentSession],
+        scanned_agents: &[ScannedAgent],
+    ) {
         if self.is_loaded {
+            self.scanned_agents = scanned_agents.to_vec();
             self.rebuild(past);
         }
     }
@@ -192,14 +221,15 @@ impl DataSource {
     }
 
     fn rebuild(&mut self, past: &[PastAgentSession]) {
-        self.entries = build_rows(&self.panes, &self.detached, past)
-            .into_iter()
-            .map(|row| Entry {
-                action: action_for(&row, self.focused),
-                section: section_for(&row, self.focused, self.focused_folder.as_ref()),
-                row,
-            })
-            .collect();
+        self.entries =
+            build_rows_with_scanned(&self.panes, &self.detached, past, &self.scanned_agents)
+                .into_iter()
+                .map(|row| Entry {
+                    action: action_for(&row, self.focused),
+                    section: section_for(&row, self.focused, self.focused_folder.as_ref()),
+                    row,
+                })
+                .collect();
     }
 
     fn item(entry: &Entry, matched: RowMatch) -> QueryResult<CommandPaletteItemAction> {

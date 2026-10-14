@@ -44,7 +44,7 @@ pub(crate) fn managed_run_title(run: &RunSummary) -> String {
 
 pub(crate) fn managed_run_detail(run: &RunSummary) -> String {
     [
-        Some("AgentCtrl"),
+        Some("Remote AgentCtrl"),
         Some(run.state.as_str()),
         run.node_name.as_deref(),
         run.branch.as_deref(),

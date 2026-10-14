@@ -70,6 +70,7 @@ fn refreshes_requested_during_a_load_trigger_exactly_one_more_load() {
                 cwd: std::path::PathBuf::new(),
                 canonical_cwd: None,
                 title: None,
+                last_prompt: None,
                 modified: std::time::SystemTime::UNIX_EPOCH,
                 preview: Vec::new(),
             })
@@ -113,6 +114,7 @@ fn a_refresh_that_finds_nothing_new_announces_nothing() {
             cwd: std::path::PathBuf::new(),
             canonical_cwd: None,
             title: None,
+            last_prompt: None,
             modified: std::time::SystemTime::UNIX_EPOCH,
             preview: Vec::new(),
         }]

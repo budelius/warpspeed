@@ -52,6 +52,9 @@ pub(crate) fn action_for(
         AgentSessionState::Running { locator } => Some(AgentSessionAction::Focus(*locator)),
         AgentSessionState::Pending { locator } => Some(AgentSessionAction::Start(*locator)),
         AgentSessionState::Detached { session_id } => Some(AgentSessionAction::Attach(*session_id)),
+        AgentSessionState::KnownProcess { .. }
+        | AgentSessionState::HeldByOtherBuild { .. }
+        | AgentSessionState::NoKnownPane { .. } => None,
         AgentSessionState::Past => {
             let agent = row.agent?;
             let session_id = row.session_id.clone().filter(|id| is_safe_session_id(id))?;

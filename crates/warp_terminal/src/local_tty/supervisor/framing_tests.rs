@@ -190,6 +190,8 @@ fn every_message() -> Vec<Message> {
                 metadata: metadata(),
                 detached_for_seconds: 66,
                 attached: false,
+                shell_pid: 42,
+                session_uuid_hex: "a1b2c3".to_owned(),
             }],
         },
         Message::Ping,
@@ -211,14 +213,14 @@ fn every_message() -> Vec<Message> {
 /// came back as `invalid u8 while decoding bool`.
 ///
 /// **If this test fails, the encoding changed. Bump `PROTOCOL_VERSION` in
-/// `message.rs` and update `wire_v6.hex`.** Do not update the golden bytes alone.
+/// `message.rs` and update `wire_v7.hex`.** Do not update the golden bytes alone.
 #[test]
 fn the_wire_encoding_is_what_this_protocol_version_promises() {
     let encoded = bincode::serialize(&every_message()).expect("every message should encode");
 
     assert_eq!(
         hex::encode(&encoded),
-        include_str!("wire_v6.hex").trim(),
+        include_str!("wire_v7.hex").trim(),
         "the supervisor wire encoding changed; see this test's documentation"
     );
 }

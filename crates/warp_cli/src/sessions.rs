@@ -1,12 +1,12 @@
 //! Arguments for the `sessions` subcommand, the terminal-session control
 //! surface.
 //!
-//! Two different processes answer these subcommands, and which one it is
-//! decides what the subcommand can do.
+//! Which process answers a subcommand decides what it can do.
 //!
 //! [`SessionsCommand::List`] and [`SessionsCommand::Kill`] talk to the
 //! *supervisor*: the daemon that owns detached shells and outlives the app.
-//! They work with no Warp window open at all.
+//! [`SessionsCommand::Agents`] reads the agents' process registries directly.
+//! All three work with no Warp window open.
 //!
 //! Everything else talks to a *running Warp instance*, because the work is the
 //! app's to do. Detaching reads the pane's screen and closes it; attaching
@@ -71,6 +71,9 @@ pub enum SessionsCommand {
     /// Prints the channel it listens on even when nothing answers, which is the
     /// first thing worth knowing when a detach has failed.
     Supervisor,
+
+    /// List every registered local agent process and where its terminal is.
+    Agents,
 
     /// List the running Warp instances that accept these commands.
     Instances,

@@ -92,6 +92,8 @@ fn consecutive_messages_are_read_in_order() {
                 metadata: SessionMetadata::default(),
                 detached_for_seconds: 5,
                 attached: false,
+                shell_pid: 42,
+                session_uuid_hex: "a1b2c3".to_owned(),
             }],
         })
         .unwrap();

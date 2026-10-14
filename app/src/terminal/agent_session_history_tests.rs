@@ -36,6 +36,7 @@ fn pi_transcript_supplies_session_identity_directory_and_title() {
     assert_eq!(session.session_id, "actual-id");
     assert_eq!(session.cwd, std::path::Path::new("/work/repo"));
     assert_eq!(session.title.as_deref(), Some("Fix the reboot bug"));
+    assert_eq!(session.last_prompt.as_deref(), Some("Fix the reboot bug"));
     assert_eq!(
         session.preview,
         vec![
@@ -49,6 +50,36 @@ fn pi_transcript_supplies_session_identity_directory_and_title() {
             },
         ]
     );
+}
+
+#[test]
+fn the_latest_user_prompt_names_the_session() {
+    let root = tempfile::tempdir().expect("temporary root should be created");
+    let project = root.path().join("--project--");
+    fs::create_dir(&project).expect("project directory should be created");
+    fs::write(
+        project.join("2026-09-28T09-53-21-590Z_filename-id.jsonl"),
+        concat!(
+            "{\"type\":\"session\",\"id\":\"actual-id\",\"cwd\":\"/work/repo\"}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"First prompt\"}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Fix the second bug\\nwith detail\"}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<task-notification>background task</task-notification>\"}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<local-command-stdout>See ya!</local-command-stdout>\"}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"/clear\"}]}}\n"
+        ),
+    )
+    .expect("transcript should be written");
+
+    let session = describe(
+        pi_candidates(root.path())
+            .into_iter()
+            .next()
+            .expect("Pi transcript should be found"),
+    );
+
+    assert_eq!(session.title.as_deref(), Some("First prompt"));
+    assert_eq!(session.last_prompt.as_deref(), Some("Fix the second bug"));
 }
 
 #[test]
@@ -139,6 +170,7 @@ fn past(
         cwd: PathBuf::from(cwd),
         canonical_cwd: None,
         title: title.map(str::to_owned),
+        last_prompt: None,
         modified: saved_at() - Duration::from_secs(hours_before * 60 * 60),
         preview: Vec::new(),
     }

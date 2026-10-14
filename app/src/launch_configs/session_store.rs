@@ -419,7 +419,7 @@ fn window_summary(
 }
 
 #[cfg(feature = "local_fs")]
-fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
     use std::io::{BufWriter, Write};
 
     let parent = path

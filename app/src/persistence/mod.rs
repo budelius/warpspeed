@@ -349,6 +349,8 @@ pub enum ModelEvent {
     SaveBlock(BlockCompleted),
     DeleteBlocks(Vec<u8>),
     Snapshot(AppState),
+    #[cfg(feature = "local_fs")]
+    RecoverySnapshot(AppState),
     SaveLaunchConfigWindowSessions {
         windows: Vec<crate::app_state::WindowSnapshot>,
         /// Captures block history before a window's persisted panes can be cleaned up.

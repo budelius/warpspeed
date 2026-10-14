@@ -92,6 +92,7 @@ use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::settings_view::{OpenTeamsSettingsModalArgs, SettingsSection, flags};
 use crate::stozn_auth::StoznAuthManager;
 use crate::terminal::available_shells::AvailableShell;
+use crate::terminal::general_settings::GeneralSettings;
 use crate::terminal::keys_settings::KeysSettings;
 use crate::terminal::shell::ShellType;
 use crate::terminal::view::{TerminalAction, cell_size_and_padding};
@@ -1017,12 +1018,26 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
             )
         };
 
-        // Saved windows are reopened by choice, from the session picker. Only a window handed
-        // over by another process is restored without being asked for.
-        if arg.force_restore {
+        if arg.force_restore || *GeneralSettings::as_ref(ctx).restore_session {
             let mut active_index = None;
             let mut normal_window_count = 0;
             for (idx, window) in app_state.windows.iter().enumerate() {
+                #[cfg(feature = "local_fs")]
+                if !(arg.defer_shell_start || cfg!(windows) && window.quake_mode)
+                    && let Some(source) = window
+                        .launch_config_source
+                        .as_ref()
+                        .filter(|source| source.is_session_config())
+                {
+                    match crate::session_configs::claim_session(source) {
+                        Ok(crate::session_configs::SessionClaim::Claimed) => {}
+                        Ok(crate::session_configs::SessionClaim::HeldBy(_)) => continue,
+                        Err(error) => {
+                            report_error!(error.context("Failed to claim recovered session"));
+                            continue;
+                        }
+                    }
+                }
                 // If this window is a quake window, hide it by default.
                 if window.quake_mode {
                     // If this is Windows, skip restoring the quake window. Creating a hidden window

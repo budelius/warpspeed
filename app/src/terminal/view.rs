@@ -17171,6 +17171,8 @@ impl TerminalView {
         menu_source: &BlockListMenuSource,
         ctx: &mut ViewContext<Self>,
     ) -> Vec<MenuItem<TerminalAction>> {
+        // AgentCtrl eligibility takes the terminal model lock itself.
+        let agent_ctrl_actions = self.agent_ctrl_pane_actions(ctx);
         let model = self.model.lock();
 
         let mut items = match (
@@ -17784,13 +17786,13 @@ impl TerminalView {
             // text-selection contexts (`Regular*TextRightClick` /
             // `RichContentTextRightClick`) because those menus are scoped to
             // actions on the selected text.
-            let include_clear = matches!(
+            let include_session_actions = matches!(
                 menu_source,
                 BlockListMenuSource::RegularBlockRightClick { .. }
                     | BlockListMenuSource::RichContentBlockRightClick { .. }
                     | BlockListMenuSource::OutsideBlockRightClick { .. }
             );
-            let clear_menu_item = include_clear
+            let clear_menu_item = include_session_actions
                 .then(|| self.clear_buffer_menu_item(&model, ctx))
                 .flatten();
             if let Some(clear_menu_item) = clear_menu_item {
@@ -17798,6 +17800,17 @@ impl TerminalView {
                     items.push(MenuItem::Separator);
                 }
                 items.push(clear_menu_item);
+            }
+
+            if include_session_actions {
+                let session_items =
+                    self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+                if !session_items.is_empty() {
+                    if !items.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.extend(session_items);
+                }
             }
 
             let current_shell = model.shell_launch_state().available_shell();
@@ -18087,6 +18100,7 @@ impl TerminalView {
         &self,
         ctx: &mut ViewContext<Self>,
     ) -> Vec<MenuItem<TerminalAction>> {
+        let agent_ctrl_actions = self.agent_ctrl_pane_actions(ctx);
         let model = self.model.lock();
         let mut items = Vec::new();
 
@@ -18223,6 +18237,13 @@ impl TerminalView {
             );
         }
         // Section 5: All Pane related
+        if selected_input_text.is_empty() {
+            let session_items = self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+            if !session_items.is_empty() {
+                items.push(MenuItem::Separator);
+                items.extend(session_items);
+            }
+        }
         let current_shell = model.shell_launch_state().available_shell();
         let pane_context_menu_items = self.pane_context_menu_items(current_shell, ctx);
         if !pane_context_menu_items.is_empty() {
@@ -18354,6 +18375,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) -> Vec<MenuItem<TerminalAction>> {
         let mut menu_items = Vec::new();
+        let agent_ctrl_actions = self.agent_ctrl_pane_actions(ctx);
         let model = self.model.lock();
 
         let semantic_selection = SemanticSelection::as_ref(ctx);
@@ -18395,6 +18417,13 @@ impl TerminalView {
                 false,
                 has_session_link,
             ));
+        }
+        let session_items = self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+        if !session_items.is_empty() {
+            if !menu_items.is_empty() {
+                menu_items.push(MenuItem::Separator);
+            }
+            menu_items.extend(session_items);
         }
         let current_shell = model.shell_launch_state().available_shell();
         let mut pane_context_menu_items = self.pane_context_menu_items(current_shell, ctx);
@@ -30086,3 +30115,7 @@ fn agent_view_back_button_label(
 #[cfg(test)]
 #[path = "view_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+#[path = "view/session_menu_tests.rs"]
+mod session_menu_tests;

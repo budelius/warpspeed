@@ -2763,7 +2763,7 @@ fn test_tab_context_menu_share_session_items() {
     let _guard = FeatureFlag::CreatingSharedSessions.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let workspace = mock_workspace(&mut app);
         let shared_pane_id = setup_session_sharing_test(&workspace, &mut app);
 
@@ -4108,7 +4108,7 @@ fn test_vertical_tabs_context_menu_does_not_show_hover_only_tab_bar() {
     let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
 
@@ -4137,7 +4137,7 @@ fn test_standard_tab_context_menu_shows_hover_only_tab_bar() {
     let _full_screen_zen_mode_guard = FeatureFlag::FullScreenZenMode.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
 
@@ -5429,7 +5429,7 @@ fn restart_window_in_new_process_is_available_to_the_command_palette() {
 #[test]
 fn restart_and_change_shell_appear_in_pane_context_menus() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
         let (tab_items, pane_header_items, terminal_view_id) =
@@ -6593,7 +6593,7 @@ fn change_shell_picker_opens_and_renders_for_a_targeted_terminal_view() {
 #[test]
 fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_view() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let _shell_selector = FeatureFlag::ShellSelector.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);
@@ -6633,7 +6633,7 @@ fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_vie
 #[test]
 fn terminal_pane_header_button_maximizes_and_restores_the_pane() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let _header = FeatureFlag::ContextWindowUsageV2.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);
@@ -8131,13 +8131,20 @@ fn initialize_app_for_fleet(app: &mut App) {
 }
 
 fn initialize_app_for_associated_run(app: &mut App) {
+    initialize_app_for_run_list(app, list_associated_run);
+}
+
+fn initialize_app_for_run_list(
+    app: &mut App,
+    list: fn() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot>,
+) {
     use crate::agent_ctrl::FleetPaneManager;
     use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
 
     initialize_app_with_stozn(app);
     app.add_singleton_model(|_| {
         FleetModel::with_backend(FleetBackend {
-            list: list_associated_run,
+            list,
             start: start_nothing,
             stop: stop_nothing,
             pause: pause_nothing,
@@ -8410,6 +8417,175 @@ fn agent_session_resume_runs_in_an_idle_shell() {
                 1
             );
         });
+    });
+}
+
+fn open_remote_session_palette(
+    workspace: &ViewHandle<Workspace>,
+    app: &mut App,
+) -> PaneViewLocator {
+    app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
+    app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
+    workspace.update(app, |workspace, ctx| {
+        let pane_group = workspace.active_tab_pane_group();
+        let target = PaneViewLocator {
+            pane_group_id: pane_group.id(),
+            pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+        };
+        workspace.open_agent_sessions_palette(target, ctx);
+        workspace.palette.update(ctx, |palette, ctx| {
+            palette.insert_query_text("job-associated", ctx)
+        });
+        target
+    })
+}
+
+fn choose_remote_palette_result(workspace: &ViewHandle<Workspace>, app: &mut App) {
+    let palette = workspace.read(app, |workspace, _| workspace.palette.clone());
+    let action = palette.read(app, |palette, ctx| {
+        palette.selected_search_result(ctx).unwrap().accept_result()
+    });
+    assert!(matches!(
+        action,
+        crate::search::command_palette::mixer::CommandPaletteItemAction::AgentSession {
+            action: AgentSessionAction::Managed { .. }
+        }
+    ));
+    palette.update(app, |palette, ctx| {
+        palette.handle_action(
+            &crate::search::command_palette::view::Action::ResultClicked { action },
+            ctx,
+        );
+    });
+}
+
+#[test]
+fn remote_palette_fetches_runs_and_attaches_to_the_originating_idle_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_associated_run(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let target = open_remote_session_palette(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => selected_palette_label(&workspace, &mut app)
+                .is_some_and(|label| label.starts_with("AgentCtrl session:")),
+            "remote run did not reach the palette"
+        );
+        workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group();
+            pane_group
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .unwrap()
+                .update(ctx, |view, _| {
+                    view.set_login_shell_bootstrapped_for_test();
+                });
+            workspace.add_terminal_tab(false, ctx);
+        });
+        choose_remote_palette_result(&workspace, &mut app);
+        workspace.read(&app, |workspace, ctx| {
+            assert!(!workspace.current_workspace_state.is_palette_open);
+            assert!(!workspace.is_agent_sessions_modal_open());
+            let pane_group = workspace
+                .get_pane_group_view_with_id(target.pane_group_id)
+                .unwrap()
+                .as_ref(ctx);
+            assert_eq!(
+                pane_group.managed_session_job_id(target.pane_id),
+                Some("job-associated")
+            );
+            assert_eq!(pane_group.pane_ids().count(), 1);
+            assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 0);
+        });
+    });
+}
+
+fn list_finished_remote_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    let mut snapshot = list_associated_run()?;
+    snapshot.runs[0].state = "completed".to_owned();
+    Ok(snapshot)
+}
+
+#[test]
+fn remote_palette_opens_finished_transcripts_without_starting_a_command() {
+    App::test((), |mut app| async move {
+        initialize_app_for_run_list(&mut app, list_finished_remote_run);
+        let workspace = mock_workspace(&mut app);
+        let target = open_remote_session_palette(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => selected_palette_label(&workspace, &mut app)
+                .is_some_and(|label| label.starts_with("AgentCtrl session:")),
+            "finished run did not reach the palette"
+        );
+        choose_remote_palette_result(&workspace, &mut app);
+        workspace.read(&app, |workspace, ctx| {
+            assert!(workspace.is_agent_sessions_modal_open());
+            assert!(!workspace.current_workspace_state.is_palette_open);
+            let view = workspace
+                .agent_sessions_modal
+                .as_ref(ctx)
+                .body()
+                .as_ref(ctx);
+            assert_eq!(view.selected_managed_job_id(), Some("job-associated"));
+            assert_eq!(workspace.agent_sessions_target, Some(target));
+        });
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_agent_sessions_modal(ctx)
+        });
+        app.read(|ctx| assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 0));
+    });
+}
+
+fn list_paused_remote_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    let mut snapshot = list_associated_run()?;
+    snapshot.runs[0].state = "paused".to_owned();
+    Ok(snapshot)
+}
+
+#[test]
+fn remote_palette_resume_failure_keeps_the_browser_open() {
+    App::test((), |mut app| async move {
+        initialize_app_for_run_list(&mut app, list_paused_remote_run);
+        let workspace = mock_workspace(&mut app);
+        let target = open_remote_session_palette(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => selected_palette_label(&workspace, &mut app)
+                .is_some_and(|label| label.starts_with("AgentCtrl session:")),
+            "paused run did not reach the palette"
+        );
+        choose_remote_palette_result(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => app.read(|ctx| FleetModel::as_ref(ctx).action_error().is_some()),
+            "resume failure was not surfaced"
+        );
+        workspace.read(&app, |workspace, ctx| {
+            assert!(workspace.is_agent_sessions_modal_open());
+            assert_eq!(workspace.agent_sessions_target, Some(target));
+            assert_eq!(
+                workspace
+                    .agent_sessions_modal
+                    .as_ref(ctx)
+                    .body()
+                    .as_ref(ctx)
+                    .selected_managed_job_id(),
+                Some("job-associated")
+            );
+        });
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+    });
+}
+
+#[test]
+fn remote_palette_stops_polling_when_dismissed() {
+    App::test((), |mut app| async move {
+        initialize_app_for_associated_run(&mut app);
+        let workspace = mock_workspace(&mut app);
+        open_remote_session_palette(&workspace, &mut app);
+        app.read(|ctx| assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 1));
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_palette(true, None, ctx)
+        });
+        app.read(|ctx| assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 0));
     });
 }
 

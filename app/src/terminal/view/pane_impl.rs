@@ -52,7 +52,7 @@ use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shared_session::manager::Manager;
 use crate::terminal::shared_session::participant_avatar_view::render_participants_and_role_elements;
 use crate::terminal::shared_session::render_util::shared_session_indicator_color;
-use crate::terminal::{TerminalManager, TerminalView, detached_sessions};
+use crate::terminal::{TerminalManager, TerminalModel, TerminalView, detached_sessions};
 use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
 use crate::ui_components::buttons::icon_button_with_color;
 use crate::ui_components::icon_with_status::render_icon_with_status;
@@ -759,6 +759,56 @@ impl TerminalView {
         AgentCtrlPaneActions::default()
     }
 
+    pub(super) fn session_context_menu_items(
+        &self,
+        model: &TerminalModel,
+        agent_ctrl_actions: AgentCtrlPaneActions,
+        ctx: &AppContext,
+    ) -> Vec<MenuItem<TerminalAction>> {
+        let mut items = vec![];
+        if model.shell_launch_state().available_shell().is_some() {
+            items.extend([
+                MenuItemFields::new("Restart shell")
+                    .with_on_select_action(TerminalAction::RestartShell)
+                    .into_item(),
+                MenuItemFields::new("Change shell")
+                    .with_on_select_action(TerminalAction::ChangeShell)
+                    .into_item(),
+            ]);
+            if self.can_detach_session(ctx) {
+                items.push(
+                    MenuItemFields::new("Detach session")
+                        .with_on_select_action(TerminalAction::DetachSession)
+                        .into_item(),
+                );
+            }
+        }
+        if agent_ctrl_actions.can_move_session {
+            items.push(
+                MenuItemFields::new("Move session to AgentCtrl")
+                    .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
+                    .into_item(),
+            );
+        }
+        if agent_ctrl_actions.can_start_agent {
+            items.push(
+                MenuItemFields::new("Start in Obachan")
+                    .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
+                    .into_item(),
+            );
+        }
+        // Every agent-session action works on local shells and agents.
+        if !model.shared_session_status().is_viewer() && cfg!(feature = "local_tty") {
+            items.push(
+                MenuItemFields::new("Sessions…")
+                    .with_on_select_action(TerminalAction::ShowAgentSessions)
+                    .into_item(),
+            );
+        }
+
+        items
+    }
+
     /// The folder holding this local pane's repository, whose agent sessions "move all" moves:
     /// sibling checkouts of one project live side by side there.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -881,47 +931,12 @@ impl BackingView for TerminalView {
             );
         }
 
-        if model.shell_launch_state().available_shell().is_some() {
+        let session_items = self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+        if !session_items.is_empty() {
             if !items.is_empty() {
                 items.push(MenuItem::Separator);
             }
-            items.extend([
-                MenuItemFields::new("Restart shell")
-                    .with_on_select_action(TerminalAction::RestartShell)
-                    .into_item(),
-                MenuItemFields::new("Change shell")
-                    .with_on_select_action(TerminalAction::ChangeShell)
-                    .into_item(),
-            ]);
-            if self.can_detach_session(ctx) {
-                items.push(
-                    MenuItemFields::new("Detach session")
-                        .with_on_select_action(TerminalAction::DetachSession)
-                        .into_item(),
-                );
-            }
-        }
-        if agent_ctrl_actions.can_move_session {
-            items.push(
-                MenuItemFields::new("Move session to AgentCtrl")
-                    .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
-                    .into_item(),
-            );
-        }
-        if agent_ctrl_actions.can_start_agent {
-            items.push(
-                MenuItemFields::new("Start in Obachan")
-                    .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
-                    .into_item(),
-            );
-        }
-        // Every agent-session action works on local shells and agents.
-        if !shared_session_status.is_viewer() && cfg!(feature = "local_tty") {
-            items.push(
-                MenuItemFields::new("Sessions…")
-                    .with_on_select_action(TerminalAction::ShowAgentSessions)
-                    .into_item(),
-            );
+            items.extend(session_items);
         }
 
         // Split-pane related items.

@@ -1,6 +1,7 @@
 //! The AgentCtrl fleet pane: the managed runs on staging, grouped by repository.
 pub(crate) mod fleet_model;
 pub(crate) mod fleet_view;
+pub(crate) mod session_picker;
 
 use std::collections::HashMap;
 

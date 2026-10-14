@@ -73,6 +73,10 @@ Every new managed session requires a dashboard-validated STOZN task. The dashboa
 
 ## Recovering CLI agent sessions
 
+On Windows, a restored pane held by an older build offers **Attach** to reconnect without restarting
+its shell or agent. The old supervisor must use a compatible protocol and have no window attached.
+**Take over** still ends the old session and resumes here; **Start fresh** leaves it running there.
+
 Both **Pane menu → Sessions…** and **Command Palette → Sessions: search** list local sessions and
 all non-archived AgentCtrl runs available to your staging account, across repositories and nodes.
 Search by repository, agent, branch, node, or job ID (or use `AgentCtrl` to show remote runs).

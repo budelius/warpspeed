@@ -2517,6 +2517,8 @@ pub struct TerminalView {
     #[cfg(feature = "local_tty")]
     withheld_restore: Option<WithheldRestore>,
     #[cfg(feature = "local_tty")]
+    held_attach_error: Option<String>,
+    #[cfg(feature = "local_tty")]
     agent_session_refresh_scheduled: bool,
     /// Whether this view's agent session was found under its shell rather than seen starting,
     /// which makes it this view's to forget once the agent exits.
@@ -4464,6 +4466,8 @@ impl TerminalView {
             shell_pid: None,
             #[cfg(feature = "local_tty")]
             withheld_restore: None,
+            #[cfg(feature = "local_tty")]
+            held_attach_error: None,
             #[cfg(feature = "local_tty")]
             agent_session_refresh_scheduled: false,
             #[cfg(feature = "local_tty")]
@@ -16545,8 +16549,11 @@ impl TerminalView {
     ) {
         self.remove_session_holder_banner();
         let banner_id = self.inline_banners_state.next_banner_id();
-        self.inline_banners_state.session_holder_banner =
-            Some(SessionHolderBannerState::new(banner_id, restore));
+        let mut banner = SessionHolderBannerState::new(banner_id, restore);
+        if let Some(error) = self.held_attach_error.take() {
+            banner.set_attach_error(error);
+        }
+        self.inline_banners_state.session_holder_banner = Some(banner);
         let active_block_index = self.model.lock().block_list().active_block_index();
         self.model
             .lock()
@@ -27137,6 +27144,40 @@ impl TerminalSurface for TerminalView {
         }
     }
 
+    #[cfg(all(feature = "local_tty", windows))]
+    fn can_replace_shell_for_held_attach(&self, ctx: &AppContext) -> bool {
+        let busy = {
+            let model = self.model.lock();
+            let block = model.block_list().active_block();
+            model.is_read_only() || block.is_executing() || block.is_active_and_long_running()
+        };
+        self.is_login_shell_bootstrapped
+            && !busy
+            && !self.has_pending_command_or_awaiting_completion(ctx)
+            && self.input.as_ref(ctx).editor().as_ref(ctx).is_empty(ctx)
+            && CLIAgentSessionsModel::as_ref(ctx)
+                .session(self.view_id)
+                .is_none()
+    }
+
+    #[cfg(all(feature = "local_tty", windows))]
+    fn on_held_attach_started(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.set_attaching();
+            ctx.notify();
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_held_attach_failed(&mut self, error: String, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.set_attach_error(error);
+        } else {
+            self.held_attach_error = Some(error);
+        }
+        ctx.notify();
+    }
+
     #[cfg(feature = "local_tty")]
     fn on_take_over_started(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
@@ -27156,6 +27197,7 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn on_withheld_restore_resolved(&mut self, ctx: &mut ViewContext<Self>) {
         self.withheld_restore = None;
+        self.held_attach_error = None;
         if self.remove_session_holder_banner() {
             ctx.notify();
         }
@@ -27956,6 +27998,13 @@ impl TypedActionView for TerminalView {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::ReattachShellForTerminalView {
                     terminal_view_id: self.view_id,
                 });
+            }
+            SessionHolderBanner(SessionHolderBannerAction::Attach) => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::AttachHeldSessionForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
             }
             SessionHolderBanner(SessionHolderBannerAction::TakeOver) => {
                 ctx.dispatch_typed_action_deferred(

@@ -6028,6 +6028,98 @@ fn take_over_answers(
     })
 }
 
+#[cfg(windows)]
+#[test]
+fn test_held_attach_failure_preserves_the_withheld_session_without_resuming() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        view.update(&mut app, |view, _| {
+            view.model.lock().simulate_block("echo idle", "idle")
+        });
+        withhold_on_pane(&mut app, &manager, &view, held_detached_restore());
+        manager.update(&mut app, |manager, ctx| {
+            assert!(manager.attach_held_session(ctx))
+        });
+        assert_eventually_within!(
+            Duration::from_secs(5) => view.read(&app, |view, _| {
+                view.session_holder_banner_for_test().and_then(|banner| banner.error())
+                    .is_some_and(|error| error.contains("saved supervisor channel"))
+            }),
+            "the attach failure should remain visible"
+        );
+        app.read(|ctx| {
+            assert_eq!(view.as_ref(ctx).pending_command_for_test(ctx), None);
+            assert_eq!(
+                manager.as_ref(ctx).withheld_restore(),
+                Some(held_detached_restore())
+            );
+            assert!(manager.as_ref(ctx).has_deferred_shell());
+        });
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn test_held_attach_cannot_replace_a_pane_with_a_pending_command() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        withhold_on_pane(&mut app, &manager, &view, held_detached_restore());
+        view.update(&mut app, |view, ctx| {
+            view.set_pending_restore_command("echo keep".to_owned(), ctx);
+        });
+        manager.update(&mut app, |manager, ctx| {
+            assert!(manager.attach_held_session(ctx))
+        });
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(
+                view.session_holder_banner_for_test()
+                    .unwrap()
+                    .error()
+                    .is_some_and(|error| error.contains("busy or contains input"))
+            );
+            assert_eq!(
+                view.pending_command_for_test(ctx).as_deref(),
+                Some("echo keep")
+            );
+            assert_eq!(
+                manager.as_ref(ctx).withheld_restore(),
+                Some(held_detached_restore())
+            );
+            assert!(manager.as_ref(ctx).has_deferred_shell());
+        });
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn test_held_attach_cannot_interrupt_a_command_before_it_becomes_long_running() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, view) = restartable_pane(&mut app);
+        withhold_on_pane(&mut app, &manager, &view, held_detached_restore());
+        view.update(&mut app, |view, _| {
+            view.model.lock().simulate_cmd("echo running")
+        });
+        manager.update(&mut app, |manager, ctx| {
+            assert!(manager.attach_held_session(ctx))
+        });
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            assert!(
+                view.session_holder_banner_for_test()
+                    .unwrap()
+                    .error()
+                    .is_some_and(|error| error.contains("busy or contains input"))
+            );
+            assert!(view.model.lock().block_list().active_block().is_executing());
+            assert!(manager.as_ref(ctx).has_deferred_shell());
+        });
+    });
+}
+
 #[test]
 fn test_a_take_over_that_succeeds_runs_the_command_and_clears_the_banner() {
     App::test((), |mut app| async move {

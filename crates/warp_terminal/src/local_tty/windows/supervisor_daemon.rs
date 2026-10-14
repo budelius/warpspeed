@@ -26,7 +26,10 @@ struct Request {
 /// `on_listening` runs once this process owns the supervisor pipe. A supervisor that loses the
 /// race for the pipe exits before it, so it never touches state the winner owns, such as its log.
 pub fn run(on_listening: impl FnOnce()) -> Result<()> {
-    let pipe_name = supervisor_pipe_name();
+    run_at_pipe(supervisor_pipe_name(), on_listening)
+}
+
+pub(super) fn run_at_pipe(pipe_name: String, on_listening: impl FnOnce()) -> Result<()> {
     let (request_tx, request_rx) = mpsc::channel::<Request>();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 

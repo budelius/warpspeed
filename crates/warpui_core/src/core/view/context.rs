@@ -421,10 +421,24 @@ impl<'a, T: Entity> ViewContext<'a, T> {
     /// This is useful to avoid re-entrant view updates (e.g. triggering UI updates
     /// while a view in the responder chain is still mid-update).
     pub fn dispatch_typed_action_deferred<A: Action + 'static>(&mut self, action: A) {
+        self.dispatch_shared_typed_action_deferred_for_view(
+            self.window_id,
+            self.view_id,
+            Arc::new(action),
+        );
+    }
+
+    /// Defers dispatching a shared typed action from the specified view until effects are flushed.
+    pub fn dispatch_shared_typed_action_deferred_for_view(
+        &mut self,
+        window_id: WindowId,
+        view_id: EntityId,
+        action: Arc<dyn Action>,
+    ) {
         self.app.pending_effects.push_back(Effect::TypedAction {
-            window_id: self.window_id,
-            view_id: self.view_id,
-            action: Box::new(action),
+            window_id,
+            view_id,
+            action,
         });
     }
 

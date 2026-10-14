@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use warp::cmd_or_ctrl_shift;
 use warp::features::FeatureFlag;
 use warp::integration_testing::pane_group::assert_focused_pane_index;
 use warp::integration_testing::settings::set_window_custom_size;
@@ -9,16 +10,15 @@ use warp::integration_testing::terminal::{
     validate_block_output, wait_until_bootstrapped_single_pane_for_tab,
 };
 use warp::integration_testing::type_getters::get_launch_config_ui_location;
-use warp::integration_testing::view_getters::workspace_view;
 use warp::integration_testing::window::assert_num_windows_open;
 use warp::integration_testing::workspace::{assert_focused_tab_index, assert_tab_count};
 use warp::integration_testing::{self};
 use warp::search::SyncDataSource;
 use warp::search::command_palette::launch_config;
 use warp::search::data_source::Query;
-use warp::workspace::{NEW_TAB_BUTTON_POSITION_ID, WorkspaceAction};
+use warp::workspace::NEW_TAB_BUTTON_POSITION_ID;
 use warpui_core::integration::{AssertionOutcome, TestStep};
-use warpui_core::{ModelHandle, TypedActionView, async_assert};
+use warpui_core::{ModelHandle, async_assert};
 
 use super::{TEST_ONLY_ASSETS, assert_approx_eq, new_builder};
 use crate::Builder;
@@ -35,11 +35,9 @@ pub fn test_save_current_window_as_launch_config() -> Builder {
         .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
         .with_step(
             new_step_with_default_assertions("Open the save launch configuration modal")
-                .with_action(|app, window_id, _| {
-                    workspace_view(app, window_id).update(app, |workspace, ctx| {
-                        workspace.handle_action(&WorkspaceAction::OpenLaunchConfigSaveModal, ctx);
-                    });
-                }),
+                .with_keystrokes(&[cmd_or_ctrl_shift("p")])
+                .with_typed_characters(&["save or update launch configuration"])
+                .with_keystrokes(&["enter"]),
         )
         .with_step(
             new_step_with_default_assertions("Save the current window")

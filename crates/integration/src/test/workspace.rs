@@ -561,7 +561,7 @@ pub fn test_command_palette_opens_with_actions() -> Builder {
                         let action_count = palette.search_results(ctx).count();
                         async_assert!(
                             palette.active_query_filter(ctx) == Some(QueryFilter::Actions)
-                                && action_count > 10,
+                                && action_count >= 100,
                             "Expected the Actions filter and a populated action list, found filter {:?} and {action_count} results",
                             palette.active_query_filter(ctx)
                         )

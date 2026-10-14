@@ -167,7 +167,7 @@ use super::util::{
 };
 use super::{ActiveSession, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry, util};
 use crate::agent_ctrl::FleetPaneManager;
-use crate::agent_ctrl::fleet_model::FleetModel;
+use crate::agent_ctrl::fleet_model::{FleetModel, FleetModelEvent};
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::agent::CancellationReason;
@@ -15467,6 +15467,14 @@ impl Workspace {
                 self.start_agent_session(*locator, pending, ctx);
             }
             AgentSessionAction::Attach(session_id) => self.attach_agent_session(*session_id, ctx),
+            AgentSessionAction::Managed { job_id, target } => {
+                self.show_agent_sessions(*target, ctx);
+                self.agent_sessions_modal.update(ctx, |modal, ctx| {
+                    modal
+                        .body()
+                        .update(ctx, |view, ctx| view.open_managed(job_id, ctx));
+                });
+            }
             AgentSessionAction::Resume {
                 agent,
                 session_id,
@@ -17793,6 +17801,9 @@ impl Workspace {
             .update(ctx, |source, _| {
                 source.set_snapshot(panes, detached, Some(focused), &past);
             });
+        self.refresh_palette_managed_sessions(ctx);
+        let view_id = self.palette.id();
+        FleetModel::handle(ctx).update(ctx, |model, ctx| model.attach_view(view_id, ctx));
         AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
     }
 
@@ -17805,6 +17816,15 @@ impl Workspace {
                 &AgentSessionHistoryModel::handle(ctx),
                 |me, _, event, ctx| me.handle_agent_session_history_event(event, ctx),
             );
+            ctx.subscribe_to_model(&FleetModel::handle(ctx), |me, _, event, ctx| {
+                if matches!(event, FleetModelEvent::Updated)
+                    && me.agent_sessions_data_source(ctx).as_ref(ctx).is_loaded()
+                {
+                    me.refresh_palette_managed_sessions(ctx);
+                    me.palette
+                        .update(ctx, |palette, ctx| palette.rerun_query(ctx));
+                }
+            });
         }
     }
 
@@ -17910,9 +17930,24 @@ impl Workspace {
         }
     }
 
-    fn clear_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+    fn refresh_palette_managed_sessions(&mut self, ctx: &mut ViewContext<Self>) {
+        let fleet = FleetModel::as_ref(ctx);
+        let runs = fleet.runs().to_vec();
+        let error = fleet.last_error().map(str::to_owned);
+        let loading = fleet.is_refreshing();
         self.agent_sessions_data_source(ctx)
-            .update(ctx, |source, _| source.clear());
+            .update(ctx, |source, _| {
+                source.set_managed_snapshot(runs, error, loading);
+            });
+    }
+
+    fn clear_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        let source = self.agent_sessions_data_source(ctx);
+        if source.as_ref(ctx).is_loaded() {
+            let view_id = self.palette.id();
+            FleetModel::handle(ctx).update(ctx, |model, _| model.detach_view(view_id));
+        }
+        source.update(ctx, |source, _| source.clear());
     }
 
     fn handle_agent_session_history_event(

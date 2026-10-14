@@ -1,5 +1,8 @@
+use managed_agent_sessions::RunSummary;
 use warpui::{AppContext, Entity};
 
+use super::managed_search_item::ManagedSessionSearchItem;
+use crate::agent_ctrl::session_picker::matching_runs;
 use crate::search::SyncDataSource;
 use crate::search::command_palette::agent_sessions::search::{RowMatch, match_row};
 use crate::search::command_palette::agent_sessions::search_item::AgentSessionSearchItem;
@@ -103,9 +106,8 @@ struct Entry {
     section: AgentSessionSection,
 }
 
-/// Agent sessions as they stood when the palette opened. Queries only read this snapshot: taking
-/// one asks the supervisor and resolves the focused folder on disk, too slow to repeat per
-/// keystroke.
+/// Local session snapshots and the latest AgentCtrl runs. Queries never perform filesystem or
+/// network IO.
 #[derive(Default)]
 pub struct DataSource {
     panes: Vec<PaneAgentInput>,
@@ -113,6 +115,9 @@ pub struct DataSource {
     focused: Option<PaneViewLocator>,
     focused_folder: Option<ResolvedPath>,
     entries: Vec<Entry>,
+    managed_runs: Vec<RunSummary>,
+    managed_error: Option<String>,
+    managed_loading: bool,
     is_loaded: bool,
 }
 
@@ -145,6 +150,37 @@ impl DataSource {
         if self.is_loaded {
             self.rebuild(past);
         }
+    }
+
+    pub(crate) fn set_managed_snapshot(
+        &mut self,
+        runs: Vec<RunSummary>,
+        error: Option<String>,
+        loading: bool,
+    ) {
+        self.managed_runs = runs;
+        self.managed_error = error;
+        self.managed_loading = loading;
+    }
+
+    fn managed_results(&self, text: &str) -> Vec<QueryResult<CommandPaletteItemAction>> {
+        let mut results = matching_runs(&self.managed_runs, text)
+            .into_iter()
+            .rev()
+            .map(|(run, score)| {
+                ManagedSessionSearchItem::new(run.clone(), self.focused, score).into()
+            })
+            .collect::<Vec<QueryResult<CommandPaletteItemAction>>>();
+        if let Some(error) = &self.managed_error {
+            results
+                .push(SeparatorSearchItem::new(format!("AgentCtrl unavailable: {error}")).into());
+        } else if self.managed_loading {
+            results.push(SeparatorSearchItem::new("Loading AgentCtrl sessions…".to_owned()).into());
+        }
+        if !results.is_empty() && text.is_empty() {
+            results.push(SeparatorSearchItem::new("AgentCtrl sessions".to_owned()).into());
+        }
+        results
     }
 
     pub(crate) fn clear(&mut self) {
@@ -180,34 +216,37 @@ impl SyncDataSource for DataSource {
         _app: &AppContext,
     ) -> Result<Vec<QueryResult<Self::Action>>, DataSourceRunErrorWrapper> {
         let text = query.text.trim();
+        let mut results = self.managed_results(text);
         if text.is_empty() {
             let sections: Vec<AgentSessionSection> =
                 self.entries.iter().map(|entry| entry.section).collect();
-            return Ok(zero_state_slots(&sections)
-                .into_iter()
-                .map(|slot| match slot {
-                    ZeroStateSlot::Separator(section) => {
-                        SeparatorSearchItem::new(section.title().to_owned()).into()
-                    }
-                    ZeroStateSlot::Row(index) => {
-                        Self::item(&self.entries[index], RowMatch::default())
-                    }
-                })
-                .collect());
+            results.extend(
+                zero_state_slots(&sections)
+                    .into_iter()
+                    .map(|slot| match slot {
+                        ZeroStateSlot::Separator(section) => {
+                            SeparatorSearchItem::new(section.title().to_owned()).into()
+                        }
+                        ZeroStateSlot::Row(index) => {
+                            Self::item(&self.entries[index], RowMatch::default())
+                        }
+                    }),
+            );
+            return Ok(results);
         }
 
         // Reversed so that, once the palette flips the list, equal scores keep display order.
-        Ok(self
-            .entries
-            .iter()
-            .rev()
-            .filter_map(|entry| {
-                match_row(&entry.row, text).map(|matched| Self::item(entry, matched))
-            })
-            .collect())
+        results.extend(self.entries.iter().rev().filter_map(|entry| {
+            match_row(&entry.row, text).map(|matched| Self::item(entry, matched))
+        }));
+        Ok(results)
     }
 }
 
 impl Entity for DataSource {
     type Event = ();
 }
+
+#[cfg(test)]
+#[path = "data_source_tests.rs"]
+mod tests;

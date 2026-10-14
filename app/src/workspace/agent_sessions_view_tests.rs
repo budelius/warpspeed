@@ -358,6 +358,22 @@ fn managed_runs_are_searchable_and_keep_state_specific_actions() {
 }
 
 #[test]
+fn managed_browser_lists_other_projects_and_nodes_without_a_local_pane() {
+    let mut run = managed("job-remote", "paused");
+    run.node_name = Some("distant-node".to_owned());
+    run.repo_url = Some("https://git.example/other-project.git".to_owned());
+
+    assert_eq!(
+        kinds(&managed_view_rows(&[run.clone()], None, "")),
+        ["managed-header", "managed:job-remote"]
+    );
+    assert_eq!(
+        kinds(&managed_view_rows(&[run], None, "distant-node")),
+        ["managed-header", "managed:job-remote"]
+    );
+}
+
+#[test]
 fn managed_session_details_include_last_activity_age_and_date() {
     let mut run = managed("job-running", "running");
     run.last_activity_at = Some("2020-01-15T12:00:00Z".to_owned());

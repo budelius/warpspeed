@@ -28,6 +28,9 @@ use warpui::{
 };
 
 use crate::agent_ctrl::fleet_model::{FleetModel, FleetModelEvent, is_finished_state};
+use crate::agent_ctrl::session_picker::{
+    managed_action_label, managed_agent_label, managed_run_detail, managed_run_title, matching_runs,
+};
 use crate::appearance::Appearance;
 use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys,
@@ -355,61 +358,21 @@ pub(crate) fn supervisor_rows(error: &DetachedListError) -> Vec<ViewRow> {
     }
 }
 
-fn managed_run_search_fields(run: &RunSummary) -> [Option<&str>; 6] {
-    [
-        Some("AgentCtrl"),
-        Some(run.job_id.as_str()),
-        Some(run.state.as_str()),
-        Some(run.agent_name.as_str()),
-        run.repo_url.as_deref(),
-        run.branch.as_deref(),
-    ]
-}
-
 pub(crate) fn managed_view_rows(
     runs: &[RunSummary],
     error: Option<&str>,
     query: &str,
 ) -> Vec<ViewRow> {
-    let query = normalized_query(query);
-    let has_exact_match = runs.iter().any(|run| {
-        managed_run_search_fields(run)
-            .into_iter()
-            .flatten()
-            .any(|text| text_has_exact_words(text, query))
-    });
-    let matches = |run: &RunSummary| {
-        query.is_empty()
-            || managed_run_search_fields(run)
-                .into_iter()
-                .flatten()
-                .any(|text| {
-                    if has_exact_match {
-                        text_has_exact_words(text, query)
-                    } else {
-                        match_indices_case_insensitive(text, query).is_some()
-                    }
-                })
-    };
-    let mut matching = runs
-        .iter()
-        .filter(|run| matches(run))
-        .cloned()
-        .collect::<Vec<_>>();
-    matching.sort_by_key(|run| {
-        if is_finished_state(&run.state) {
-            2
-        } else if run.state == "paused" {
-            1
-        } else {
-            0
-        }
-    });
+    let matching = matching_runs(runs, query);
     if matching.is_empty() && error.is_none() {
         return Vec::new();
     }
     let mut rows = vec![ViewRow::ManagedHeader];
-    rows.extend(matching.into_iter().map(|run| ViewRow::Managed { run }));
+    rows.extend(
+        matching
+            .into_iter()
+            .map(|(run, _)| ViewRow::Managed { run: run.clone() }),
+    );
     if let Some(error) = error {
         rows.push(ViewRow::ManagedError(error.to_owned()));
     }
@@ -829,6 +792,21 @@ impl AgentSessionsView {
         ctx.notify();
     }
 
+    pub(crate) fn open_managed(&mut self, job_id: &str, ctx: &mut ViewContext<Self>) {
+        let Some(index) = self.index_of(&RowKey::Managed(job_id.to_owned())) else {
+            self.fleet_model.update(ctx, |model, ctx| {
+                model.set_action_error(
+                    "This AgentCtrl session is no longer available. Refresh and try again."
+                        .to_owned(),
+                    ctx,
+                )
+            });
+            return;
+        };
+        self.select(index, ctx);
+        self.activate(index, ctx);
+    }
+
     fn activate_selected(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(index) = self.selected_index.or_else(|| self.next_selectable(0)) {
             self.activate(index, ctx);
@@ -1109,50 +1087,6 @@ fn session_label(row: &AgentSessionRow) -> String {
     match row.agent.map(|agent| agent.display_name()) {
         Some(agent) if agent != title => format!("{agent} · {title}"),
         Some(_) | None => title,
-    }
-}
-
-fn managed_agent_label(agent_name: &str) -> &str {
-    if agent_name.contains("claude") {
-        "Claude"
-    } else if agent_name.contains("codex") {
-        "Codex"
-    } else if agent_name.contains("-pi-") || agent_name.ends_with("-pi") {
-        "Pi"
-    } else {
-        agent_name
-    }
-}
-
-fn managed_run_title(run: &RunSummary) -> String {
-    run.repo_url
-        .as_deref()
-        .and_then(|url| {
-            url.trim_end_matches('/')
-                .trim_end_matches(".git")
-                .rsplit(['/', ':'])
-                .next()
-        })
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| run.job_id.chars().take(16).collect())
-}
-
-fn managed_run_detail(run: &RunSummary) -> String {
-    let mut details = vec![managed_agent_label(&run.agent_name), run.state.as_str()];
-    if let Some(branch) = run.branch.as_deref().filter(|branch| !branch.is_empty()) {
-        details.push(branch);
-    }
-    details.join(" · ")
-}
-
-fn managed_action_label(state: &str) -> &'static str {
-    if state == "paused" {
-        "Resume & attach"
-    } else if is_finished_state(state) {
-        "View transcript"
-    } else {
-        "Attach here"
     }
 }
 

@@ -517,7 +517,41 @@ pub fn fetch_run_preview(
 }
 
 fn list_runs_with(profile: &EnvironmentProfile, token: &str) -> Result<Vec<RunSummary>> {
-    parse_items(fetch_runs_page(profile, token)?, "managed-run list")
+    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
+    let mut runs = Vec::new();
+    let mut cursor = None;
+    let mut cursors = HashSet::new();
+    let mut job_ids = HashSet::new();
+    loop {
+        let mut request = client
+            .get(format!("{}/api/agent-control/runs", profile.base_url))
+            .bearer_auth(token)
+            .header("X-Stozn-Client", "warpspeed")
+            .query(&[("limit", "100")]);
+        if let Some(cursor) = cursor.as_deref() {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let page: Value = send(profile, request)?
+            .json()
+            .context("invalid managed-run list response")?;
+        cursor = serde_json::from_value::<Option<String>>(
+            page.get("next_cursor").cloned().unwrap_or(Value::Null),
+        )
+        .context("invalid managed-run list cursor")?
+        .filter(|cursor| !cursor.is_empty());
+        let items: Vec<RunSummary> = parse_items(page, "managed-run list")?;
+        runs.extend(
+            items
+                .into_iter()
+                .filter(|run| job_ids.insert(run.job_id.clone())),
+        );
+        let Some(next) = &cursor else {
+            return Ok(runs);
+        };
+        if !cursors.insert(next.clone()) || cursors.len() >= 1_000 {
+            bail!("managed-run list pagination did not finish");
+        }
+    }
 }
 
 fn fetch_run_preview_with(

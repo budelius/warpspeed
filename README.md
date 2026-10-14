@@ -73,6 +73,12 @@ Every new managed session requires a dashboard-validated STOZN task. The dashboa
 
 ## Recovering CLI agent sessions
 
+Both **Pane menu → Sessions…** and **Command Palette → Sessions: search** list local sessions and
+all non-archived AgentCtrl runs available to your staging account, across repositories and nodes.
+Search by repository, agent, branch, node, or job ID (or use `AgentCtrl` to show remote runs).
+Running sessions attach in the originating pane, paused sessions resume before attaching, and
+finished sessions open their transcript. A busy pane is preserved by opening a split beside it.
+
 A pane that was running a CLI agent records which agent it was, in which shell and directory, and the session ID it reported. Restoring the window -- including on a fresh boot -- puts the resume command back in that pane's input, ready to run: `claude --resume <id>`, `codex resume <id>`, `vibe --resume <id>` and `pi --session <id>`. Other agents are recorded but not resumed, because their CLIs cannot be told to open a session by ID.
 
 The same information is written to `agent-sessions.md` and `agent-sessions.json` in the state directory (`%LOCALAPPDATA%\warp\WarpSpeed\data` on Windows) every time window state is saved, so a session is still recoverable by hand when its pane is not. Warp learns a session ID from the agent's own Warp plugin; an agent running without that plugin is recorded with no ID and cannot be resumed.

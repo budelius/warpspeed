@@ -17,6 +17,10 @@ pub enum AgentSessionAction {
     Focus(PaneViewLocator),
     Start(PaneViewLocator),
     Attach(warp_core::SessionId),
+    Managed {
+        job_id: String,
+        target: Option<PaneViewLocator>,
+    },
     /// `target` is the pane to resume in, or to split beside when it is busy.
     Resume {
         agent: CLIAgent,
@@ -33,6 +37,7 @@ impl AgentSessionAction {
             AgentSessionAction::Focus(_) => "Focus",
             AgentSessionAction::Start(_) => "Start",
             AgentSessionAction::Attach(_) => "Attach",
+            AgentSessionAction::Managed { .. } => "Open",
             AgentSessionAction::Resume { .. } => "Resume",
         }
     }

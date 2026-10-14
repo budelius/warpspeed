@@ -12,14 +12,17 @@ checkpoints are retained until startup has completed and the replacement checkpo
 A normal exit removes the process's recovery checkpoint. Unreadable checkpoints are left intact.
 
 Named sessions also use their existing session ownership locks. Recovery must not clone, steal,
-or terminate a session held by another instance. Surviving supervised terminals are reattached;
-otherwise existing resume metadata is used. A terminated process cannot be resurrected, and
-metadata that was never saved cannot be recovered. Disable Restore session temporarily if a
+or terminate a session held by another instance. Surviving terminals reachable through the current
+supervisor are reattached; otherwise existing resume metadata is used. A terminal held by an older
+build's supervisor remains protected by the existing held-session prompt rather than starting a
+second copy of its agent. A terminated process cannot be resurrected, and metadata that was never
+saved cannot be recovered. Disable Restore session temporarily if a
 particular saved window triggers a repeatable startup crash.
 
 ## Ojiichan
 
-Build WarpSpeed with `--features crash_reporting` (the Windows installer includes it). Reporting
+Build WarpSpeed with `--features crash_reporting` (the Windows installer includes it and explicitly
+stamps the source revision to avoid stale metadata from incremental Cargo builds). Reporting
 uses Ojiichan's **Rustrak/Sentry-compatible ingest DSN**, not a management API token. Configure
 one of these, in priority order:
 

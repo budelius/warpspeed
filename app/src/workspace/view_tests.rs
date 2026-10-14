@@ -8993,6 +8993,8 @@ fn choosing_from_agent_sessions_opens_the_unfiltered_palette_on_the_clicked_pane
                     tab_title: "tab".to_owned(),
                     pane_number: 1,
                     cwd: Some(std::env::temp_dir()),
+                    session_uuid_hex: None,
+                    latest_user_prompt: None,
                     running: None,
                     pending: None,
                 }],
@@ -9092,6 +9094,7 @@ fn past_conversation(
         cwd: PathBuf::from("Z:/somewhere/else"),
         canonical_cwd: None,
         title: Some(title.to_owned()),
+        last_prompt: None,
         modified: std::time::SystemTime::UNIX_EPOCH
             + std::time::Duration::from_secs(1_000_000 - age_secs),
         preview: Vec::new(),

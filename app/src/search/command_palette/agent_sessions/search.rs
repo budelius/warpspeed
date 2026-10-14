@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local};
 use fuzzy_match::match_indices_case_insensitive;
 
 use crate::terminal::agent_sessions_index::AgentSessionRow;
@@ -12,11 +13,31 @@ pub(super) struct RowMatch {
     pub folder_indices: Vec<usize>,
 }
 
-/// The text a row shows as its title: the conversation title, else a short session id, else the
-/// agent's name.
+/// The most useful available human name for a local conversation.
 pub(crate) fn row_title(row: &AgentSessionRow) -> String {
+    if let Some(prompt) = row
+        .last_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.is_empty())
+    {
+        return prompt.to_owned();
+    }
     if let Some(title) = row.title.as_deref().filter(|title| !title.is_empty()) {
         return title.to_owned();
+    }
+    if let Some(folder) = row
+        .cwd
+        .file_name()
+        .filter(|folder| !folder.is_empty())
+        .map(|folder| folder.to_string_lossy())
+    {
+        return match row.last_used {
+            Some(last_used) => format!(
+                "{folder} · {}",
+                DateTime::<Local>::from(last_used).format("%Y-%m-%d %H:%M")
+            ),
+            None => folder.into_owned(),
+        };
     }
     if let Some(session_id) = row.session_id.as_deref().filter(|id| !id.is_empty()) {
         return session_id.chars().take(8).collect();

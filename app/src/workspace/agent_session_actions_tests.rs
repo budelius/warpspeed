@@ -20,10 +20,12 @@ fn row(agent: Option<CLIAgent>, state: AgentSessionState) -> AgentSessionRow {
         agent,
         session_id: Some("abc".into()),
         title: None,
+        last_prompt: None,
         cwd: PathBuf::from("T:/p/x"),
         canonical_cwd: None,
         last_used: None,
         preview: Vec::new(),
+        process_count: 0,
         state,
     }
 }

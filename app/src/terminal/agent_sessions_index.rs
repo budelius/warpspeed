@@ -1,6 +1,6 @@
-//! One row per agent conversation, in the strongest state any source knows it in.
+//! One row per known agent conversation or otherwise unplaced live process.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -11,13 +11,32 @@ use crate::terminal::agent_session_history::{
     AgentSessionPreviewMessage, PastAgentSession, ResolvedPath, is_within_known,
 };
 use crate::terminal::cli_agent::CLIAgent;
+use crate::terminal::cli_agent_sessions::agent_process_scan::{Placement, SavedPane, ScannedAgent};
 use crate::workspace::PaneViewLocator;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AgentSessionState {
-    Running { locator: PaneViewLocator },
-    Pending { locator: PaneViewLocator },
-    Detached { session_id: SessionId },
+    Running {
+        locator: PaneViewLocator,
+    },
+    Pending {
+        locator: PaneViewLocator,
+    },
+    Detached {
+        session_id: SessionId,
+    },
+    KnownProcess {
+        pid: u32,
+    },
+    HeldByOtherBuild {
+        pid: u32,
+        build: String,
+        saved_in: Option<SavedPane>,
+    },
+    NoKnownPane {
+        pid: u32,
+        saved_in: Option<SavedPane>,
+    },
     Past,
 }
 
@@ -28,6 +47,9 @@ impl AgentSessionState {
             AgentSessionState::Running { .. } => "● running",
             AgentSessionState::Pending { .. } => "○ pending",
             AgentSessionState::Detached { .. } => "detached",
+            AgentSessionState::KnownProcess { .. } => "this build",
+            AgentSessionState::HeldByOtherBuild { .. } => "held by another build",
+            AgentSessionState::NoKnownPane { .. } => "no pane",
             AgentSessionState::Past => "past",
         }
     }
@@ -39,11 +61,13 @@ pub(crate) struct AgentSessionRow {
     pub agent: Option<CLIAgent>,
     pub session_id: Option<String>,
     pub title: Option<String>,
+    pub last_prompt: Option<String>,
     pub cwd: PathBuf,
     /// `cwd` as the background scan resolved it, for a past conversation; `None` otherwise.
     pub canonical_cwd: Option<PathBuf>,
     pub last_used: Option<SystemTime>,
     pub preview: Vec<AgentSessionPreviewMessage>,
+    pub process_count: usize,
     pub state: AgentSessionState,
 }
 
@@ -62,6 +86,8 @@ pub(crate) struct PaneAgentInput {
     /// 1-based position among the tab's visible panes, as laid out.
     pub pane_number: usize,
     pub cwd: Option<PathBuf>,
+    pub session_uuid_hex: Option<String>,
+    pub latest_user_prompt: Option<String>,
     /// From `CLIAgentSessionsModel`.
     pub running: Option<CliAgentResumeDescriptor>,
     /// Restored, not yet running.
@@ -73,12 +99,17 @@ pub(crate) struct DetachedInput {
     pub title: String,
     pub cwd: PathBuf,
     pub detached_for_seconds: u64,
+    pub session_uuid_hex: String,
 }
 
 type ConversationKey = (CLIAgent, String);
 
 fn key_of(descriptor: &CliAgentResumeDescriptor) -> Option<ConversationKey> {
     Some((descriptor.agent, descriptor.session_id.clone()?))
+}
+
+fn row_key(row: &AgentSessionRow) -> Option<ConversationKey> {
+    Some((row.agent?, row.session_id.clone()?))
 }
 
 fn live_row(
@@ -99,6 +130,10 @@ fn live_row(
             .title
             .clone()
             .or_else(|| history.and_then(|session| session.title.clone())),
+        last_prompt: pane
+            .latest_user_prompt
+            .clone()
+            .or_else(|| history.and_then(|session| session.last_prompt.clone())),
         cwd,
         canonical_cwd: None,
         last_used: descriptor
@@ -109,6 +144,7 @@ fn live_row(
         preview: history
             .map(|session| session.preview.clone())
             .unwrap_or_default(),
+        process_count: 0,
         state,
     }
 }
@@ -118,34 +154,74 @@ fn past_row(past: &PastAgentSession, state: AgentSessionState) -> AgentSessionRo
         agent: Some(past.agent),
         session_id: Some(past.session_id.clone()),
         title: past.title.clone(),
+        last_prompt: past.last_prompt.clone(),
         cwd: past.cwd.clone(),
         canonical_cwd: past.canonical_cwd.clone(),
         last_used: Some(past.modified),
         preview: past.preview.clone(),
+        process_count: 0,
         state,
     }
 }
 
-/// Whether a past session is plausibly the conversation a detached shell holds. A detached shell
-/// records no agent, so the title and a shared directory are all there is to go on.
-fn is_detached_conversation(past: &PastAgentSession, detached: &DetachedInput) -> bool {
-    !detached.title.is_empty()
-        && !detached.cwd.as_os_str().is_empty()
-        && past.title.as_deref() == Some(detached.title.as_str())
-        && is_within_known(
-            &past.cwd,
-            past.canonical_cwd.as_deref(),
-            &ResolvedPath::new(&detached.cwd),
-        )
+fn scanned_row(scanned: &ScannedAgent, history: Option<&PastAgentSession>) -> AgentSessionRow {
+    let state = match &scanned.placement {
+        Placement::Known => AgentSessionState::KnownProcess { pid: scanned.pid },
+        Placement::HeldByOtherBuild {
+            build, saved_in, ..
+        } => AgentSessionState::HeldByOtherBuild {
+            pid: scanned.pid,
+            build: build.clone(),
+            saved_in: saved_in.clone(),
+        },
+        Placement::NoKnownPane { saved_in } => AgentSessionState::NoKnownPane {
+            pid: scanned.pid,
+            saved_in: saved_in.clone(),
+        },
+    };
+    let mut row = history.map_or_else(
+        || AgentSessionRow {
+            agent: Some(scanned.agent),
+            session_id: Some(scanned.session_id.clone()),
+            title: None,
+            last_prompt: None,
+            cwd: scanned.cwd.clone().unwrap_or_default(),
+            canonical_cwd: None,
+            last_used: None,
+            preview: Vec::new(),
+            process_count: scanned.process_count,
+            state: state.clone(),
+        },
+        |history| past_row(history, state.clone()),
+    );
+    if let Some(cwd) = &scanned.cwd {
+        row.cwd = cwd.clone();
+        row.canonical_cwd = None;
+    }
+    if row.last_used.is_none() && scanned.started_at_unix_seconds > 0 {
+        row.last_used =
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(scanned.started_at_unix_seconds));
+    }
+    row.process_count = scanned.process_count;
+    row
 }
 
-/// Merges every source into one row per conversation, each in its strongest state
-/// (`Running` > `Detached` > `Pending` > `Past`); of several panes restored holding one
-/// conversation, the first lists it. Panes are expected in tab order.
+/// Merges pane, supervisor, and history sources without a machine-wide process scan.
+#[cfg(test)]
 pub(crate) fn build_rows(
     panes: &[PaneAgentInput],
     detached: &[DetachedInput],
     past: &[PastAgentSession],
+) -> Vec<AgentSessionRow> {
+    build_rows_with_scanned(panes, detached, past, &[])
+}
+
+/// Merges pane, supervisor, process, and history sources. Panes are expected in tab order.
+pub(crate) fn build_rows_with_scanned(
+    panes: &[PaneAgentInput],
+    detached: &[DetachedInput],
+    past: &[PastAgentSession],
+    scanned: &[ScannedAgent],
 ) -> Vec<AgentSessionRow> {
     let running_keys: HashSet<ConversationKey> = panes
         .iter()
@@ -157,80 +233,149 @@ pub(crate) fn build_rows(
 
     let mut pasts: Vec<&PastAgentSession> = past.iter().collect();
     pasts.sort_by_key(|session| std::cmp::Reverse(session.modified));
+    let history_for_key = |key: &ConversationKey| {
+        pasts
+            .iter()
+            .copied()
+            .find(|session| session.agent == key.0 && session.session_id == key.1)
+    };
+    let history_for = |descriptor: &CliAgentResumeDescriptor| history_for_key(&key_of(descriptor)?);
 
-    let mut merged_pasts = HashSet::new();
-    let mut detached_rows = Vec::new();
+    let mut rows = Vec::new();
+    let mut live_keys = running_keys.clone();
+    for pane in panes {
+        if let Some(descriptor) = &pane.running {
+            rows.push(live_row(
+                pane,
+                descriptor,
+                history_for(descriptor),
+                AgentSessionState::Running {
+                    locator: pane.locator,
+                },
+            ));
+        } else if let Some(descriptor) = &pane.pending {
+            let key = key_of(descriptor);
+            if key.as_ref().is_some_and(|key| live_keys.contains(key)) {
+                continue;
+            }
+            live_keys.extend(key);
+            rows.push(live_row(
+                pane,
+                descriptor,
+                history_for(descriptor),
+                AgentSessionState::Pending {
+                    locator: pane.locator,
+                },
+            ));
+        }
+    }
+
     let mut detached_keys = HashSet::new();
     for input in detached_order {
-        let conversation = pasts.iter().enumerate().find(|(index, session)| {
-            !merged_pasts.contains(index)
-                && !running_keys.contains(&(session.agent, session.session_id.clone()))
-                && is_detached_conversation(session, input)
-        });
         let state = AgentSessionState::Detached {
             session_id: input.session_id,
         };
-        let row = match conversation {
-            Some((index, session)) => {
-                merged_pasts.insert(index);
-                detached_keys.insert((session.agent, session.session_id.clone()));
-                AgentSessionRow {
-                    title: Some(input.title.clone()),
-                    cwd: input.cwd.clone(),
-                    canonical_cwd: None,
-                    ..past_row(session, state)
-                }
+        let identified = (!input.session_uuid_hex.is_empty())
+            .then(|| {
+                scanned.iter().find(|process| {
+                    process.warp_session_uuid.as_deref() == Some(input.session_uuid_hex.as_str())
+                })
+            })
+            .flatten();
+        let row = match identified {
+            Some(process) => {
+                let key = (process.agent, process.session_id.clone());
+                detached_keys.insert(key.clone());
+                let mut row = history_for_key(&key).map_or_else(
+                    || AgentSessionRow {
+                        agent: Some(process.agent),
+                        session_id: Some(process.session_id.clone()),
+                        title: None,
+                        last_prompt: None,
+                        cwd: PathBuf::new(),
+                        canonical_cwd: None,
+                        last_used: None,
+                        preview: Vec::new(),
+                        process_count: process.process_count,
+                        state: state.clone(),
+                    },
+                    |history| past_row(history, state.clone()),
+                );
+                row.title = row
+                    .title
+                    .or_else(|| Some(input.title.clone()).filter(|title| !title.is_empty()));
+                row.cwd = process
+                    .cwd
+                    .clone()
+                    .filter(|cwd| !cwd.as_os_str().is_empty())
+                    .unwrap_or_else(|| input.cwd.clone());
+                row.canonical_cwd = None;
+                row.process_count = process.process_count;
+                row
             }
             None => AgentSessionRow {
                 agent: None,
                 session_id: None,
                 title: Some(input.title.clone()).filter(|title| !title.is_empty()),
+                last_prompt: None,
                 cwd: input.cwd.clone(),
                 canonical_cwd: None,
                 last_used: None,
                 preview: Vec::new(),
+                process_count: 0,
                 state,
             },
         };
-        detached_rows.push(row);
+        rows.push(row);
     }
 
-    let history_for = |descriptor: &CliAgentResumeDescriptor| {
-        let session_id = descriptor.session_id.as_deref()?;
-        pasts
-            .iter()
-            .copied()
-            .find(|session| session.agent == descriptor.agent && session.session_id == session_id)
-    };
-    let mut rows = Vec::new();
-    let mut live_keys = running_keys.clone();
-    for pane in panes {
-        if let Some(descriptor) = &pane.running {
-            let state = AgentSessionState::Running {
-                locator: pane.locator,
-            };
-            rows.push(live_row(pane, descriptor, history_for(descriptor), state));
-        } else if let Some(descriptor) = &pane.pending {
-            let key = key_of(descriptor);
-            if key
-                .as_ref()
-                .is_some_and(|key| live_keys.contains(key) || detached_keys.contains(key))
-            {
-                continue;
-            }
-            live_keys.extend(key);
-            let state = AgentSessionState::Pending {
-                locator: pane.locator,
-            };
-            rows.push(live_row(pane, descriptor, history_for(descriptor), state));
+    let process_counts = scanned.iter().fold(HashMap::new(), |mut counts, process| {
+        counts.insert(
+            (process.agent, process.session_id.clone()),
+            process.process_count,
+        );
+        counts
+    });
+    for row in &mut rows {
+        if let Some(key) = row_key(row) {
+            row.process_count = process_counts.get(&key).copied().unwrap_or_default();
         }
     }
-    rows.extend(detached_rows);
 
-    for (index, session) in pasts.into_iter().enumerate() {
+    let scanned_keys = scanned
+        .iter()
+        .map(|process| (process.agent, process.session_id.clone()))
+        .collect::<HashSet<_>>();
+    let represented_pids = scanned
+        .iter()
+        .filter(|process| {
+            let Some(uuid) = process.warp_session_uuid.as_deref() else {
+                return false;
+            };
+            let key = (process.agent, process.session_id.clone());
+            panes.iter().any(|pane| {
+                pane.session_uuid_hex.as_deref() == Some(uuid)
+                    && pane.running.as_ref().and_then(key_of) == Some(key.clone())
+            }) || detached
+                .iter()
+                .any(|session| session.session_uuid_hex == uuid)
+        })
+        .map(|process| process.pid)
+        .collect::<HashSet<_>>();
+    for process in scanned {
+        let key = (process.agent, process.session_id.clone());
+        let uniquely_represented_without_uuid = process.process_count == 1
+            && process.warp_session_uuid.is_none()
+            && (running_keys.contains(&key) || detached_keys.contains(&key));
+        if represented_pids.contains(&process.pid) || uniquely_represented_without_uuid {
+            continue;
+        }
+        rows.push(scanned_row(process, history_for_key(&key)));
+    }
+
+    for session in pasts {
         let key = (session.agent, session.session_id.clone());
-        if merged_pasts.contains(&index) || live_keys.contains(&key) || detached_keys.contains(&key)
-        {
+        if live_keys.contains(&key) || detached_keys.contains(&key) || scanned_keys.contains(&key) {
             continue;
         }
         rows.push(past_row(session, AgentSessionState::Past));

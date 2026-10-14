@@ -5,9 +5,9 @@
 //! `warp` upstream. Messages that suggest a command work it out at run time from
 //! [`crate::remote_control::program_name`] rather than guessing.
 //!
-//! The subcommands split by who can answer them. Listing and killing reach the
-//! supervisor directly and work with no window open. Detaching, attaching and
-//! quitting are the app's to do, and go to a running instance over the
+//! The subcommands split by who can answer them. Listing or killing detached shells reaches the
+//! supervisor directly, while listing agents reads their process registries. Both work with no
+//! window open. Detaching, attaching and quitting go to a running instance over the
 //! [`crate::remote_control`] channel.
 //!
 //! Output is a plain table by default and JSON under `--json`. Both are
@@ -28,6 +28,7 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
     match &args.command {
         SessionsCommand::List => list_sessions(json),
         SessionsCommand::Supervisor => supervisor_status(json),
+        SessionsCommand::Agents => list_agents(json),
         SessionsCommand::Instances => list_instances(json),
         SessionsCommand::Panes { instance } => list_panes(instance.pid, json),
         SessionsCommand::Detach { session, instance } => act(
@@ -200,6 +201,131 @@ struct SessionRow {
     title: String,
     detached_for_seconds: u64,
     attached: bool,
+    shell_pid: u32,
+    session_uuid_hex: String,
+}
+
+#[derive(Serialize)]
+struct AgentRow {
+    agent: String,
+    session_id: String,
+    pid: u32,
+    started_at_unix_seconds: u64,
+    last_active_unix_seconds: Option<u64>,
+    state: String,
+    build: Option<String>,
+    saved_session: Option<String>,
+    saved_tab: Option<String>,
+    working_directory: Option<String>,
+    last_prompt: Option<String>,
+    process_count: usize,
+}
+
+fn list_agents(json: bool) -> Result<()> {
+    use crate::terminal::cli_agent_sessions::agent_process_scan::{Placement, scan};
+
+    let history = crate::terminal::agent_session_history::find_all_resumable()
+        .into_iter()
+        .map(|session| {
+            let last_active_unix_seconds = session
+                .modified
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs());
+            (
+                (session.agent, session.session_id),
+                (session.last_prompt, last_active_unix_seconds),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let rows = scan()
+        .into_iter()
+        .map(|process| {
+            let (last_prompt, last_active_unix_seconds) = history
+                .get(&(process.agent, process.session_id.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let (state, build, saved_in) = match process.placement {
+                Placement::Known => ("known".to_owned(), None, None),
+                Placement::HeldByOtherBuild {
+                    build, saved_in, ..
+                } => ("held_by_other_build".to_owned(), Some(build), saved_in),
+                Placement::NoKnownPane { saved_in } => ("no_known_pane".to_owned(), None, saved_in),
+            };
+            AgentRow {
+                agent: process.agent.display_name().to_owned(),
+                session_id: process.session_id,
+                pid: process.pid,
+                started_at_unix_seconds: process.started_at_unix_seconds,
+                last_active_unix_seconds,
+                state,
+                build,
+                saved_session: saved_in.as_ref().map(|saved| saved.session_name.clone()),
+                saved_tab: saved_in.map(|saved| saved.tab_title),
+                working_directory: process.cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+                last_prompt,
+                process_count: process.process_count,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No registered local agent processes are running.");
+        return Ok(());
+    }
+    println!(
+        "{:<12}  {:<8}  {:<24}  {:<12}  NAME",
+        "AGENT", "PID", "STATE", "SESSION"
+    );
+    for row in rows {
+        let name = row
+            .last_prompt
+            .as_deref()
+            .or(row.working_directory.as_deref())
+            .unwrap_or(&row.session_id);
+        let duplicate = if row.process_count > 1 {
+            format!(" ({} processes claim this session)", row.process_count)
+        } else {
+            String::new()
+        };
+        println!(
+            "{:<12}  {:<8}  {:<24}  {:<12}  {}{}",
+            truncate(&row.agent, 12),
+            row.pid,
+            truncate(&row.state, 24),
+            truncate(&row.session_id, 12),
+            name,
+            duplicate,
+        );
+        let saved_in = match (&row.saved_session, &row.saved_tab) {
+            (Some(session), Some(tab)) => Some(format!("saved in {session} / {tab}")),
+            (Some(session), None) => Some(format!("saved in {session}")),
+            (None, Some(tab)) => Some(format!("saved in {tab}")),
+            (None, None) => None,
+        };
+        let details = [
+            row.build.as_deref().map(|build| format!("build {build}")),
+            saved_in,
+            row.working_directory
+                .as_deref()
+                .map(|cwd| format!("cwd {cwd}")),
+            (row.started_at_unix_seconds > 0)
+                .then(|| format!("started {}", row.started_at_unix_seconds)),
+            row.last_active_unix_seconds
+                .map(|last_active| format!("last active {last_active}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if !details.is_empty() {
+            println!("{:<62}{}", "", details.join(" · "));
+        }
+    }
+    Ok(())
 }
 
 fn list_sessions(json: bool) -> Result<()> {
@@ -213,6 +339,8 @@ fn list_sessions(json: bool) -> Result<()> {
             title: session.metadata.title,
             detached_for_seconds: session.detached_for_seconds,
             attached: session.attached,
+            shell_pid: session.shell_pid,
+            session_uuid_hex: session.session_uuid_hex,
         })
         .collect();
 

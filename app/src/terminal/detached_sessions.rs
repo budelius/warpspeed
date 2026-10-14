@@ -30,6 +30,12 @@ pub struct DetachedSession {
     pub title: String,
 
     pub detached_for_seconds: u64,
+
+    /// The shell process the supervisor spawned.
+    pub shell_pid: u32,
+
+    /// The pane UUID supplied to the shell at spawn time.
+    pub session_uuid_hex: String,
 }
 
 /// Why the detached sessions could not be listed.
@@ -97,6 +103,8 @@ pub fn list_checked(ctx: &AppContext) -> Result<Vec<DetachedSession>, DetachedLi
                 cwd: PathBuf::from(&session.metadata.working_directory),
                 title: session.metadata.title,
                 detached_for_seconds: session.detached_for_seconds,
+                shell_pid: session.shell_pid,
+                session_uuid_hex: session.session_uuid_hex,
             })
             .collect())
     }

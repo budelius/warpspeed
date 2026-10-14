@@ -49,6 +49,8 @@ fn listed_session(attached: bool) -> SessionSummary {
         metadata: SessionMetadata::default(),
         detached_for_seconds: 0,
         attached,
+        shell_pid: 0,
+        session_uuid_hex: String::new(),
     }
 }
 

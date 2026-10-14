@@ -12,6 +12,7 @@ fn past(agent: CLIAgent, session_id: &str, cwd: &str) -> PastAgentSession {
         cwd: PathBuf::from(cwd),
         canonical_cwd: None,
         title: None,
+        last_prompt: None,
         modified: SystemTime::UNIX_EPOCH,
         preview: Vec::new(),
     }

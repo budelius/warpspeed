@@ -35,6 +35,8 @@ fn pane_at(index: usize, cwd: &str) -> PaneAgentInput {
         tab_title: format!("tab {index}"),
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
+        session_uuid_hex: None,
+        latest_user_prompt: None,
         running: None,
         pending: None,
     }
@@ -47,6 +49,7 @@ fn past_session_at(agent: CLIAgent, id: &str, cwd: &str, age_secs: u64) -> PastA
         cwd: cwd.into(),
         canonical_cwd: None,
         title: None,
+        last_prompt: None,
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
         preview: Vec::new(),
     }
@@ -62,6 +65,7 @@ fn detached(id: u64, title: &str, cwd: &str, seconds: u64) -> DetachedInput {
         title: title.into(),
         cwd: cwd.into(),
         detached_for_seconds: seconds,
+        session_uuid_hex: String::new(),
     }
 }
 
@@ -89,6 +93,21 @@ fn a_running_conversation_uses_its_history_title_when_live_context_has_none() {
     let rows = build_rows(&[pane], &[], &[past]);
 
     assert_eq!(rows[0].title.as_deref(), Some("fix resume button"));
+}
+
+#[test]
+fn a_live_conversations_latest_prompt_outranks_stale_history() {
+    let pane = PaneAgentInput {
+        latest_user_prompt: Some("Fix the current bug".into()),
+        running: Some(claude("a", "/p")),
+        ..pane_at(0, "/p")
+    };
+    let mut past = past_session(CLIAgent::Claude, "a", "/p");
+    past.last_prompt = Some("Fix the old bug".into());
+
+    let rows = build_rows(&[pane], &[], &[past]);
+
+    assert_eq!(rows[0].last_prompt.as_deref(), Some("Fix the current bug"));
 }
 
 #[test]
@@ -216,10 +235,22 @@ fn detached_sessions_come_after_live_ones_most_recently_detached_first() {
 }
 
 #[test]
-fn a_past_session_merges_into_a_detached_shell_with_the_same_title_and_a_cwd_within_it() {
+fn exact_pane_identity_merges_history_into_its_detached_shell() {
     let mut past = past_session(CLIAgent::Claude, "a", "/work/repo/sub");
     past.title = Some("fix the bug".into());
-    let rows = build_rows(&[], &[detached(1, "fix the bug", "/work/repo", 5)], &[past]);
+    let mut detached = detached(1, "fix the bug", "/work/repo", 5);
+    detached.session_uuid_hex = "pane-uuid".into();
+    let scanned = ScannedAgent {
+        agent: CLIAgent::Claude,
+        session_id: "a".into(),
+        cwd: Some("/work/repo/sub".into()),
+        pid: 42,
+        started_at_unix_seconds: 0,
+        warp_session_uuid: Some("pane-uuid".into()),
+        placement: Placement::Known,
+        process_count: 1,
+    };
+    let rows = build_rows_with_scanned(&[], &[detached], &[past], &[scanned]);
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0].state, AgentSessionState::Detached { .. }));
     assert_eq!(rows[0].agent, Some(CLIAgent::Claude));
@@ -227,11 +258,34 @@ fn a_past_session_merges_into_a_detached_shell_with_the_same_title_and_a_cwd_wit
 }
 
 #[test]
-fn a_past_session_with_another_title_stays_separate_from_a_detached_shell() {
+fn a_known_process_outside_this_windows_rows_is_still_listed() {
+    let scanned = ScannedAgent {
+        agent: CLIAgent::Claude,
+        session_id: "other-window".into(),
+        cwd: Some("/work/repo".into()),
+        pid: 42,
+        started_at_unix_seconds: 0,
+        warp_session_uuid: Some("other-pane".into()),
+        placement: Placement::Known,
+        process_count: 1,
+    };
+
+    let rows = build_rows_with_scanned(&[], &[], &[], &[scanned]);
+
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(
+        rows[0].state,
+        AgentSessionState::KnownProcess { pid: 42 }
+    ));
+}
+
+#[test]
+fn matching_titles_and_folders_do_not_guess_a_detached_shells_agent() {
     let mut past = past_session(CLIAgent::Claude, "a", "/work/repo");
-    past.title = Some("something else".into());
+    past.title = Some("fix the bug".into());
     let rows = build_rows(&[], &[detached(1, "fix the bug", "/work/repo", 5)], &[past]);
     assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].agent, None);
     assert_eq!(rows[1].state, AgentSessionState::Past);
 }
 
@@ -256,6 +310,105 @@ fn a_conversation_restored_into_two_panes_is_listed_once_under_the_first() {
 }
 
 #[test]
+fn an_unplaced_process_is_named_from_its_exact_history() {
+    let mut past = past_session(CLIAgent::Pi, "process-session", "/work/repo");
+    past.last_prompt = Some("Fix the reboot path".into());
+    let scanned = ScannedAgent {
+        agent: CLIAgent::Pi,
+        session_id: "process-session".into(),
+        cwd: Some("/work/repo".into()),
+        pid: 42,
+        started_at_unix_seconds: 0,
+        warp_session_uuid: None,
+        placement: Placement::NoKnownPane { saved_in: None },
+        process_count: 1,
+    };
+
+    let rows = build_rows_with_scanned(&[], &[], &[past], &[scanned]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].last_prompt.as_deref(), Some("Fix the reboot path"));
+    assert_eq!(rows[0].process_count, 1);
+    assert!(matches!(
+        rows[0].state,
+        AgentSessionState::NoKnownPane { pid: 42, .. }
+    ));
+}
+
+#[test]
+fn a_process_start_time_is_the_activity_fallback_without_history() {
+    let scanned = ScannedAgent {
+        agent: CLIAgent::Pi,
+        session_id: "process-session".into(),
+        cwd: Some("/work/repo".into()),
+        pid: 42,
+        started_at_unix_seconds: 123,
+        warp_session_uuid: None,
+        placement: Placement::NoKnownPane { saved_in: None },
+        process_count: 1,
+    };
+
+    let rows = build_rows_with_scanned(&[], &[], &[], &[scanned]);
+
+    assert_eq!(
+        rows[0].last_used,
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(123))
+    );
+}
+
+#[test]
+fn duplicate_live_processes_each_get_a_row_and_a_warning_count() {
+    let process = |pid| ScannedAgent {
+        agent: CLIAgent::Pi,
+        session_id: "duplicate".into(),
+        cwd: Some("/work/repo".into()),
+        pid,
+        started_at_unix_seconds: 0,
+        warp_session_uuid: None,
+        placement: Placement::NoKnownPane { saved_in: None },
+        process_count: 2,
+    };
+
+    let rows = build_rows_with_scanned(&[], &[], &[], &[process(42), process(43)]);
+
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.process_count == 2));
+}
+
+#[test]
+fn pane_uuid_accounts_for_only_its_process_when_a_session_id_is_duplicated() {
+    let pane = PaneAgentInput {
+        session_uuid_hex: Some("pane-one".into()),
+        running: Some(claude("duplicate", "/work/repo")),
+        ..pane_at(0, "/work/repo")
+    };
+    let process = |pid, uuid: &str| ScannedAgent {
+        agent: CLIAgent::Claude,
+        session_id: "duplicate".into(),
+        cwd: Some("/work/repo".into()),
+        pid,
+        started_at_unix_seconds: 0,
+        warp_session_uuid: Some(uuid.into()),
+        placement: Placement::NoKnownPane { saved_in: None },
+        process_count: 2,
+    };
+
+    let rows = build_rows_with_scanned(
+        &[pane],
+        &[],
+        &[],
+        &[process(42, "pane-one"), process(43, "pane-two")],
+    );
+
+    assert_eq!(rows.len(), 2);
+    assert!(matches!(rows[0].state, AgentSessionState::Running { .. }));
+    assert!(matches!(
+        rows[1].state,
+        AgentSessionState::NoKnownPane { pid: 43, .. }
+    ));
+}
+
+#[test]
 fn each_state_has_its_label() {
     let locator = pane_at(0, "/p").locator;
     assert_eq!(AgentSessionState::Running { locator }.label(), "● running");
@@ -266,6 +419,27 @@ fn each_state_has_its_label() {
         }
         .label(),
         "detached"
+    );
+    assert_eq!(
+        AgentSessionState::KnownProcess { pid: 1 }.label(),
+        "this build"
+    );
+    assert_eq!(
+        AgentSessionState::HeldByOtherBuild {
+            pid: 1,
+            build: "old".into(),
+            saved_in: None,
+        }
+        .label(),
+        "held by another build"
+    );
+    assert_eq!(
+        AgentSessionState::NoKnownPane {
+            pid: 1,
+            saved_in: None,
+        }
+        .label(),
+        "no pane"
     );
     assert_eq!(AgentSessionState::Past.label(), "past");
 }

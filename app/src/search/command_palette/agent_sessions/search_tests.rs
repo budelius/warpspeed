@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use warpui::{App, EntityId};
 
-use super::{score_row, text_has_exact_words};
+use super::{row_title, score_row, text_has_exact_words};
 use crate::pane_group::PaneId;
 use crate::search::QueryFilter;
 use crate::search::command_palette::CommandPaletteMixer;
@@ -32,16 +32,26 @@ fn row(title: Option<&str>, cwd: &str, state: AgentSessionState) -> AgentSession
         agent: Some(CLIAgent::Claude),
         session_id: Some("3f2a9c1e-7b44-4d0e-9a51-0c8e2b6d1f77".into()),
         title: title.map(str::to_owned),
+        last_prompt: None,
         cwd: cwd.into(),
         canonical_cwd: None,
         last_used: None,
         preview: Vec::new(),
+        process_count: 0,
         state,
     }
 }
 
 fn past_row(title: &str, cwd: &str) -> AgentSessionRow {
     row(Some(title), cwd, AgentSessionState::Past)
+}
+
+#[test]
+fn the_last_prompt_outranks_a_generated_title() {
+    let mut row = past_row("generated title", "/work/other");
+    row.last_prompt = Some("Fix the reboot path".into());
+
+    assert_eq!(row_title(&row), "Fix the reboot path");
 }
 
 #[test]
@@ -190,6 +200,8 @@ fn pane(index: usize, cwd: &str) -> PaneAgentInput {
         tab_title: format!("tab {index}"),
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
+        session_uuid_hex: None,
+        latest_user_prompt: None,
         running: None,
         pending: None,
     }
@@ -202,6 +214,7 @@ fn past_session(id: &str, title: &str, cwd: &str) -> PastAgentSession {
         cwd: cwd.into(),
         canonical_cwd: None,
         title: Some(title.into()),
+        last_prompt: None,
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
         preview: Vec::new(),
     }
@@ -413,10 +426,16 @@ fn a_pending_row_reads_as_pending_not_running() {
         RowMatch::default(),
     );
 
-    assert_eq!(start.trailing_text(), "○ pending · Start");
-    assert_eq!(focus.trailing_text(), "● running · Focus");
+    assert_eq!(
+        start.trailing_text(),
+        "Local · Claude Code · ○ pending · Start"
+    );
+    assert_eq!(
+        focus.trailing_text(),
+        "Local · Claude Code · ● running · Focus"
+    );
     assert_eq!(
         AgentSessionSearchItem::new(past_row("a", "/x"), None, RowMatch::default()).trailing_text(),
-        ""
+        "Local · Claude Code"
     );
 }

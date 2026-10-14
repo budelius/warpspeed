@@ -58,6 +58,12 @@ pub struct SupervisedSession {
     /// `true` while a client holds this session.
     attached: bool,
 
+    /// The pid of the shell the supervisor spawned for this session.
+    shell_pid: u32,
+
+    /// The pane UUID supplied to the shell at spawn time.
+    session_uuid_hex: String,
+
     /// The detach-point scrollback was collapsed into a resized repaint.
     ///
     /// A restored pane normally suppresses the snapshot because sqlite already
@@ -108,6 +114,8 @@ impl SessionTable {
         snapshot: ScreenSnapshot,
         metadata: SessionMetadata,
         detached_at_unix_seconds: u64,
+        shell_pid: u32,
+        session_uuid_hex: String,
         event_listener: ChannelEventListener,
     ) {
         let screen = HeadlessScreen::from_snapshot(&snapshot, event_listener);
@@ -122,9 +130,18 @@ impl SessionTable {
                 metadata,
                 detached_at_unix_seconds,
                 attached: false,
+                shell_pid,
+                session_uuid_hex,
                 replay_was_truncated: false,
             },
         );
+    }
+
+    /// The process identity recorded for `session_id`.
+    pub fn process_identity(&self, session_id: SessionId) -> Option<(u32, String)> {
+        self.sessions
+            .get(&session_id)
+            .map(|session| (session.shell_pid, session.session_uuid_hex.clone()))
     }
 
     /// Whether `session_id` is held here with no client attached.
@@ -216,6 +233,8 @@ impl SessionTable {
                 detached_for_seconds: now_unix_seconds
                     .saturating_sub(session.detached_at_unix_seconds),
                 attached: session.attached,
+                shell_pid: session.shell_pid,
+                session_uuid_hex: session.session_uuid_hex.clone(),
             })
             .collect();
 

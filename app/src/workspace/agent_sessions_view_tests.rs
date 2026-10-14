@@ -34,6 +34,8 @@ fn pane(tab_index: usize, cwd: &str) -> PaneAgentInput {
         tab_title: format!("tab {tab_index}"),
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
+        session_uuid_hex: None,
+        latest_user_prompt: None,
         running: None,
         pending: None,
     }
@@ -46,6 +48,7 @@ fn past(id: &str, cwd: &str, age_secs: u64) -> PastAgentSession {
         cwd: cwd.into(),
         canonical_cwd: None,
         title: Some(format!("past {id}")),
+        last_prompt: None,
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
         preview: Vec::new(),
     }
@@ -57,6 +60,7 @@ fn detached(id: u64, title: &str) -> DetachedInput {
         title: title.into(),
         cwd: "/elsewhere".into(),
         detached_for_seconds: id,
+        session_uuid_hex: String::new(),
     }
 }
 
@@ -381,8 +385,21 @@ fn managed_session_details_include_last_activity_age_and_date() {
     let (_, detail) = preview_heading(&ViewRow::Managed { run });
     let detail = detail.expect("a managed session has details");
 
+    assert!(detail.contains("Remote AgentCtrl"));
     assert!(detail.contains("last active"));
     assert!(detail.contains("2020-01-15"));
+}
+
+#[test]
+fn ending_a_process_requires_two_activations_and_switching_processes_rearms() {
+    let mut pending = None;
+
+    assert!(!confirm_process_end(&mut pending, 42));
+    assert_eq!(pending, Some(42));
+    assert!(!confirm_process_end(&mut pending, 43));
+    assert_eq!(pending, Some(43));
+    assert!(confirm_process_end(&mut pending, 43));
+    assert_eq!(pending, None);
 }
 
 #[test]
@@ -399,8 +416,54 @@ fn local_session_details_include_last_activity_age_and_date() {
     });
     let detail = detail.expect("a local session has details");
 
+    assert!(detail.contains("Local"));
     assert!(detail.contains("last active"));
     assert!(detail.contains("1970-"));
+}
+
+#[test]
+fn an_external_process_names_its_agent_build_and_saved_pane() {
+    let scanned = ScannedAgent {
+        agent: CLIAgent::Claude,
+        session_id: "session".into(),
+        cwd: Some("/work/repo".into()),
+        pid: 42,
+        started_at_unix_seconds: 123,
+        warp_session_uuid: Some("pane".into()),
+        placement:
+            crate::terminal::cli_agent_sessions::agent_process_scan::Placement::HeldByOtherBuild {
+                build: "997f1e1c".into(),
+                supervisor_pid: 12,
+                saved_in: Some(SavedPane {
+                    session_name: "M3RP".into(),
+                    tab_title: "WA3P".into(),
+                }),
+            },
+        process_count: 1,
+    };
+    let mut history = past("session", "/work/repo", 5);
+    history.last_prompt = Some("Fix the reboot path".into());
+    let rows = build_rows_with_scanned(&[], &[], &[history], &[scanned]);
+    let row = rows.first().expect("the process is indexed").clone();
+
+    let view_row = ViewRow::Detached { row: row.clone() };
+    let (title, detail) = preview_heading(&view_row);
+
+    assert_eq!(endable_process_pid(&row), Some(42));
+    assert_eq!(
+        preview_action(&view_row, None).map(|(_, label)| label),
+        Some("End process…")
+    );
+    assert_eq!(
+        preview_action(&view_row, Some(42)).map(|(_, label)| label),
+        Some("Confirm end")
+    );
+    assert_eq!(title, "Claude Code · Fix the reboot path");
+    let detail = detail.expect("an external process has details");
+    assert!(detail.contains("Local"));
+    assert!(detail.contains("997f1e1c"));
+    assert!(detail.contains("M3RP / WA3P"));
+    assert!(process_warning(&row).is_some_and(|warning| warning.contains("PID 42")));
 }
 
 #[test]

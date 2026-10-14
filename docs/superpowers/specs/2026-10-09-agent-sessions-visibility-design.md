@@ -1,6 +1,6 @@
 # Agent sessions visibility: name every running agent, wherever its terminal went
 
-**Status:** design
+**Status:** implemented
 **Date:** 2026-10-09
 **Branch:** `feat/agent-sessions-visibility`, off `dev`
 **Scope:** The Agent Sessions modal (`workspace:show_agent_sessions`), its command-palette data
@@ -37,9 +37,8 @@ for exactly this, would have shown none of it:
 - Every agent process on this machine appears in the modal once, in a section that says where
   it is: this window, this build's supervisor, another build's supervisor, or no known pane.
 - A session with more than one live process is marked.
-- Agents with no known pane can be ended, or ended and resumed in the focused pane, from the
-  modal.
-- The same facts are available from the CLI for scripts and the TUI.
+- Agents held by another build or with no known pane can be ended by exact PID from the modal.
+- The same facts are available from the CLI for scripts and future TUI use.
 
 ## Non-goals
 
@@ -71,34 +70,20 @@ that spawned it elsewhere keeps `shell_pid = 0` and an empty uuid, and is treate
 the golden bytes regenerated and the doc comment on the constant extended with a v7 line. The
 pipe name already separates builds, so no mixed-version decoding exists.
 
-`DetachedSession` and `DetachedInput` carry the two new fields through to the row builder.
+`DetachedSession` carries both fields for the CLI. `DetachedInput` carries the pane UUID into the
+row builder.
 
 ### 2. Identifying the agent in a detached shell
 
-For each detached session with a non-zero `shell_pid`, the client calls
-`process_registry::discover(shell_pid, session_uuid_hex)`. That function already prefers the uuid
-match (a Pi or Claude entry whose `warpSessionUuid` equals the pane's uuid and whose process
-started no earlier than the shell) and falls back to the descendant walk, so Pi is found through
-the uuid and Claude through either. The result `(CLIAgent, AgentProcessSession)` gives the agent,
-its session id and its cwd.
-
-`agent_sessions_index::build_rows` takes the identification as part of `DetachedInput`:
-
-```rust
-pub(crate) struct DetachedInput {
-    pub session_id: SessionId,
-    pub title: String,
-    pub cwd: PathBuf,
-    pub detached_for_seconds: u64,
-    /// The agent found in the shell, with its own session id and cwd.
-    pub agent: Option<(CLIAgent, String, PathBuf)>,
-}
-```
+The machine-wide process scan in the next section reads the agent, agent session id, cwd, PID and
+`warpSessionUuid` from each valid registry entry. `agent_sessions_index::build_rows_with_scanned`
+joins a detached supervisor summary to a process only when their pane UUIDs are equal. The matched
+process supplies the agent conversation key and cwd.
 
 An identified detached row joins the conversation key space `(agent, session_id)`, so it merges
-with a matching past row and dedupes against a pane row the way running rows already do. The
-title-and-directory guess (`is_detached_conversation`) is removed; it never matched in practice
-and now has an exact replacement.
+with matching history and dedupes against a pane row the way running rows already do. The
+old title-and-directory guess is removed; a detached shell with no exact UUID match remains an
+unidentified shell.
 
 ### 3. Machine-wide agent scan
 
@@ -113,11 +98,13 @@ pub(crate) struct ScannedAgent {
     pub cwd: Option<PathBuf>,
     pub pid: u32,
     pub warp_session_uuid: Option<String>,
+    pub started_at_unix_seconds: u64,
     pub placement: Placement,
+    pub process_count: usize,
 }
 
 pub(crate) enum Placement {
-    /// A pane of this process, or a session of this build's supervisor; the row already exists.
+    /// The process descends from this build's terminal supervisor.
     Known,
     /// Its shell belongs to a supervisor started from another build.
     HeldByOtherBuild { build: String, supervisor_pid: u32, saved_in: Option<SavedPane> },
@@ -133,8 +120,10 @@ pub(crate) struct SavedPane {
 
 Placement is decided in this order, and never from a broken parent chain alone:
 
-1. **Known** when the uuid, or the pid, matches a pane of this window, another window of this
-   process (`CLIAgentSessionsModel` is global), or an identified detached session from step 2.
+1. **Known** when walking the pid's parents reaches this executable's terminal supervisor. Exact
+   pane and detached UUID matches account for the process while rows are merged. A known process
+   not represented in this window remains visible as `KnownProcess` ("this build") rather than
+   disappearing.
 2. **HeldByOtherBuild** when walking the pid's parents reaches a process whose command line
    contains `--terminal-session-supervisor` and whose executable is not this one. The build is
    the `versions\<build>\` path segment of that executable, or the executable's file name when
@@ -168,22 +157,22 @@ Pi lines are `{"type":"message","message":{"role":"user","content":[{"type":"tex
 `<task-notification>`, `<system-reminder>` or tool-result block is skipped. When nothing is found
 in the tail, the existing head-based `title` is used, then the cwd's last component.
 
-`AgentSessionRow` gains `last_prompt: Option<String>`, `last_active: Option<SystemTime>` (the
-transcript's mtime, which the past scan already has as `modified`) and `process_count: usize`.
+`AgentSessionRow` gains `last_prompt: Option<String>`, uses its existing activity timestamp for
+the transcript mtime or process start fallback, and gains `process_count: usize`.
 `AgentSessionState` gains:
 
 ```rust
+KnownProcess { pid: u32 },
 HeldByOtherBuild { pid: u32, build: String, saved_in: Option<SavedPane> },
 NoKnownPane { pid: u32, saved_in: Option<SavedPane> },
 ```
 
-with labels "held by <build>" and "no pane".
+with labels "this build", "held by another build", and "no pane".
 
 ### 5. The modal
 
-`view_rows` adds two sections after "Detached in supervisor (n)": "Held by another WarpSpeed
-build (n)" and "No known pane (n)". Both are empty-aware like the detached header. Every non-pane
-row renders as:
+`view_rows` groups detached, this-build, other-build, and unplaced rows under an empty-aware
+"Other local sessions" section after the window's panes. Every non-pane row renders as:
 
 ```
 ● running   Claude  Fix the CORS preflight for Idempotency-Key            [Attach]
@@ -200,34 +189,33 @@ Buttons by state:
 |---|---|---|
 | Detached, identified | Attach | `AgentSessionAction::Attach`, unchanged |
 | Detached, unidentified | Attach | unchanged; title is "shell" |
-| HeldByOtherBuild | Kill | ends the process; the row becomes a past row |
-| NoKnownPane | Kill, Resume here | Kill as above; Resume here = Kill, then `Resume { target }` in the focused pane |
+| KnownProcess | None | remains visible for diagnosis without offering an unsafe action |
+| HeldByOtherBuild | End process | ends only the selected process; the row becomes a past row |
+| NoKnownPane | End process | ends only the selected process; the row becomes a past row |
 
-Kill is a two-click action: the first click relabels the button "Kill?" through the existing
-`button_states` map; the second click acts; any other click or a refresh resets it.
-`AgentSessionAction` gains `Kill { agent, session_id, pid }` and `KillAndResume { agent,
-session_id, cwd, pid, target }`. Both call a new `process_registry::terminate_pid(agent, pid,
-session_id)`, which is `terminate_agent_for_session` with the pid chosen by the caller, so the
-right one of two processes is ended. The view refreshes its inputs after a kill.
+Ending is a two-click action: the first click relabels the button "Confirm end"; the second calls
+`process_registry::terminate_pid(agent, pid, session_id)`. Selecting another row or refreshing
+resets confirmation. Failures stay visible in the selected row's preview and return the button to
+its unarmed state. The view refreshes history and process placement after an attempt.
 
-The command-palette data source adds the same two sections with the same titles, so searching
-by last prompt finds every agent.
+The command-palette data source places these processes under "Running elsewhere", so searching
+by last prompt finds every registered agent.
 
 ### 6. CLI
 
 `warpspeed sessions list --json` includes `shell_pid` and `session_uuid_hex`.
 
 A new `warpspeed sessions agents [--json]` runs the scan out of process and prints one row per
-agent process: agent, session id, pid, state, build, saved-in, cwd, last prompt, last active. The
-pretty format mirrors the modal's two lines. The TUI's session picker consumes the JSON.
+agent process: agent, session id, pid, state, build, saved-in, cwd, last prompt, process start,
+last active, and duplicate count. The pretty format mirrors the modal's two lines.
 
 ## Error handling
 
 - A registry file that fails to parse, or whose pid belongs to a process that started after the
   entry was written (`entry_can_belong_to`), is skipped.
 - A transcript that cannot be opened yields no `last_prompt`; the row falls back as in section 4.
-- Kill failures surface in the row's detail line ("could not end process 1234: ...") and the
-  button returns to "Kill".
+- End-process failures surface in the selected row's preview and the button returns to
+  "End process".
 - The supervisor being unreachable keeps today's `SupervisorUnreachable` row; the scan still
   runs, so "Held by another build" and "No known pane" fill even then.
 
@@ -235,9 +223,9 @@ pretty format mirrors the modal's two lines. The TUI's session picker consumes t
 
 All tests live in `*_tests.rs` files beside their modules, per repo convention.
 
-- `agent_sessions_index_tests`: identified detached input merges with its past row and dedupes
-  against a pane row; `process_count` reaches every row of a conversation; the two new states sort
-  into their sections in `view_rows`.
+- `agent_sessions_index_tests`: an exact detached UUID merges with history and accounts for its
+  process; a known process outside the current window stays visible; `process_count` reaches every
+  row of a conversation.
 - `agent_process_scan_tests`: placement on a synthetic process table and registry directory:
   under this build's supervisor, under another build's supervisor (build parsed from the path),
   Pi with a dead parent but a uuid in a saved layout, Claude with no parent and no uuid anywhere.
@@ -247,7 +235,7 @@ All tests live in `*_tests.rs` files beside their modules, per repo convention.
 - `framing_tests`: golden bytes for v7; the v6 fixture file is deleted.
 - `session_table_tests`: `shell_pid` and `session_uuid_hex` survive spawn, detach and list.
 - `sessions_cli` snapshot: `sessions agents --json` on a fixture scan.
-- `agent_sessions_view_tests`: the two-click Kill state machine and the detail-line composition.
+- `agent_sessions_view_tests`: the two-click end-process state machine and provenance details.
 
 ## Rollout
 

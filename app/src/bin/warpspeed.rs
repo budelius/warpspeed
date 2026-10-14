@@ -90,6 +90,33 @@ fn application_name() -> String {
     }
 }
 
+#[cfg(feature = "crash_reporting")]
+fn configure_ojiichan() {
+    use warp_core::channel::CrashReportingConfig;
+
+    let dsn = std::env::var("WARPSPEED_OJIICHAN_DSN")
+        .or_else(|_| std::env::var("OJIICHAN_SENTRY_DSN"))
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(warp_core::paths::config_local_dir().join("ojiichan-dsn.txt"))
+                .ok()
+        });
+    let Some(dsn) = dsn else {
+        return;
+    };
+    let dsn = dsn.trim();
+    if dsn.is_empty() {
+        return;
+    }
+    if dsn.parse::<sentry::types::Dsn>().is_err() {
+        eprintln!("WarpSpeed: invalid Ojiichan DSN; crash reporting disabled");
+        return;
+    }
+    ChannelState::set_crash_reporting_config(CrashReportingConfig {
+        sentry_url: dsn.to_owned().into(),
+    });
+}
+
 fn main() -> Result<()> {
     let application_name = application_name();
 
@@ -121,6 +148,8 @@ fn main() -> Result<()> {
     .with_additional_features(features::PREVIEW_FLAGS);
 
     ChannelState::set(state);
+    #[cfg(feature = "crash_reporting")]
+    configure_ojiichan();
 
     warp::run()
 }

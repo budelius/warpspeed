@@ -625,6 +625,15 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                             log::info!("Shutting down SQLite writer thread");
                             return;
                         }
+                        #[cfg(feature = "local_fs")]
+                        ModelEvent::RecoverySnapshot(state) => {
+                            if !paused {
+                                warp_errors::report_if_error!(
+                                    crate::session_recovery::save(&state)
+                                        .context("Failed to save session recovery checkpoint")
+                                );
+                            }
+                        }
                         ModelEvent::SaveLaunchConfigWindowSessions {
                             windows,
                             include_blocks,
@@ -692,6 +701,10 @@ fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> a
         | ModelEvent::Terminate
         | ModelEvent::SaveLaunchConfigWindowSessions { .. } => {
             panic!("Unhandled control-flow event {event:?}");
+        }
+        #[cfg(feature = "local_fs")]
+        ModelEvent::RecoverySnapshot(_) => {
+            unreachable!("Recovery snapshots are handled outside SQLite")
         }
         ModelEvent::SaveBlock(BlockCompleted {
             pane_id,
@@ -968,6 +981,10 @@ fn deduplicate_events(events: Vec<ModelEvent>) -> Vec<ModelEvent> {
     let last_snapshot_index = events
         .iter()
         .rposition(|event| matches!(event, ModelEvent::Snapshot(_)));
+    #[cfg(feature = "local_fs")]
+    let last_recovery_snapshot_index = events
+        .iter()
+        .rposition(|event| matches!(event, ModelEvent::RecoverySnapshot(_)));
     let last_launch_config_sessions_index = events.iter().rposition(|event| {
         matches!(
             event,
@@ -983,6 +1000,8 @@ fn deduplicate_events(events: Vec<ModelEvent>) -> Vec<ModelEvent> {
         .enumerate()
         .filter_map(|(index, event)| match event {
             ModelEvent::Snapshot(_) if Some(index) != last_snapshot_index => None,
+            #[cfg(feature = "local_fs")]
+            ModelEvent::RecoverySnapshot(_) if Some(index) != last_recovery_snapshot_index => None,
             ModelEvent::SaveLaunchConfigWindowSessions {
                 include_blocks: false,
                 ..

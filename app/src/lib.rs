@@ -88,6 +88,8 @@ mod server;
 #[cfg(feature = "local_fs")]
 mod session_configs;
 mod session_management;
+#[cfg(feature = "local_fs")]
+mod session_recovery;
 #[cfg(not(target_family = "wasm"))]
 mod sessions_cli;
 mod shell_indicator;
@@ -2889,6 +2891,12 @@ pub(crate) fn app_callbacks(
             #[cfg(all(feature = "local_tty", windows))]
             terminal::local_tty::shutdown_all_pty_event_loops(ctx);
 
+            #[cfg(feature = "local_fs")]
+            warp_errors::report_if_error!(
+                session_recovery::clean_exit()
+                    .context("Failed to retire session recovery checkpoint")
+            );
+
             // Stop advertising this process to the `sessions` subcommand, before anything
             // that could exit without unwinding.
             #[cfg(not(target_family = "wasm"))]
@@ -3292,20 +3300,34 @@ fn launch(
                 .urls
                 .iter()
                 .any(is_cloud_agent_web_home_launch_url);
-            let force_restore = incoming_window_handoff.is_some();
+            let handoff_restore = incoming_window_handoff.is_some();
+            let recover_interrupted = matches!(launch_mode, LaunchMode::App { .. })
+                && !should_skip_restore
+                && !handoff_restore
+                && launch_mode.args().urls.is_empty()
+                && *GeneralSettings::as_ref(ctx).restore_session;
+            #[cfg(feature = "local_fs")]
+            let recovered_state = if matches!(launch_mode, LaunchMode::App { .. }) {
+                session_recovery::begin(recover_interrupted)
+                    .map_err(|error| {
+                        report_error!(error.context("Failed to initialize session recovery"));
+                    })
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            #[cfg(not(feature = "local_fs"))]
+            let recovered_state: Option<AppState> = None;
+            let force_restore = handoff_restore || recovered_state.is_some();
             #[cfg(not(target_family = "wasm"))]
             let starts_empty = matches!(launch_mode, LaunchMode::App { .. })
-                && !force_restore
+                && !handoff_restore
                 && !remote_control::should_restore_at_startup();
             #[cfg(target_family = "wasm")]
             let starts_empty = false;
-            let interrupted_sessions = if matches!(launch_mode, LaunchMode::App { .. })
-                && !should_skip_restore
-                && !starts_empty
-                && !force_restore
-                && launch_mode.args().urls.is_empty()
+            let interrupted_sessions = if recover_interrupted
                 && FeatureFlag::PersistentLaunchConfigSessions.is_enabled()
-                && *GeneralSettings::as_ref(ctx).restore_session
             {
                 crate::launch_configs::session_store::list_interrupted_summaries()
             } else {
@@ -3313,6 +3335,19 @@ fn launch(
             };
             if let Some(handoff) = incoming_window_handoff.as_ref() {
                 let conversation_ids = handoff.window().conversation_ids_to_restore();
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
+                    history.detach_conversations_for_restore(&conversation_ids)
+                });
+                RestoredAgentConversations::handle(ctx).update(ctx, |conversations, _| {
+                    conversations.release_conversations(&conversation_ids)
+                });
+            }
+            if let Some(state) = recovered_state.as_ref() {
+                let conversation_ids = state
+                    .windows
+                    .iter()
+                    .flat_map(|window| window.conversation_ids_to_restore())
+                    .collect::<Vec<_>>();
                 BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
                     history.detach_conversations_for_restore(&conversation_ids)
                 });
@@ -3332,6 +3367,13 @@ fn launch(
                         running_mcp_servers,
                     })
                 }
+                None if recovered_state.is_some() => recovered_state.map(|mut recovered| {
+                    if let Some(state) = app_state {
+                        recovered.block_lists = state.block_lists;
+                        recovered.running_mcp_servers = state.running_mcp_servers;
+                    }
+                    recovered
+                }),
                 None if should_skip_restore || starts_empty => None,
                 None => app_state,
             };
@@ -3354,7 +3396,7 @@ fn launch(
                 let arg = OpenFromRestoredArg {
                     app_state,
                     force_restore,
-                    defer_shell_start: force_restore,
+                    defer_shell_start: handoff_restore,
                 };
                 ctx.dispatch_global_action("root_view:open_from_restored", &arg);
             }
@@ -3394,6 +3436,17 @@ fn launch(
             // haven't opened any windows, open a new window.
             if ctx.window_ids().count() == 0 {
                 ctx.dispatch_global_action("root_view:open_new", &());
+            }
+
+            #[cfg(feature = "local_fs")]
+            if matches!(launch_mode, LaunchMode::App { .. }) {
+                let state =
+                    (*GeneralSettings::as_ref(ctx).restore_session).then(|| get_app_state(ctx));
+                warp_errors::report_if_error!(
+                    session_recovery::finish_startup(state.as_ref())
+                        .context("Failed to checkpoint restored sessions")
+                );
+                ctx.dispatch_global_action("workspace:save_app", &());
             }
 
             IntervalTimer::handle(ctx).update(ctx, |timer, _| {

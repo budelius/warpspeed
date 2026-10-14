@@ -5,6 +5,7 @@ mod sentry_minidump;
 
 #[cfg(target_os = "linux")]
 mod linux;
+mod ojiichan;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -181,6 +182,9 @@ impl ToSentryTags for CrashRecoveryMetadata {
 /// Initializes the crash reporting subsystem.  Returns whether or not crash
 /// reporting is active.
 pub(crate) fn init(ctx: &mut AppContext) -> bool {
+    if !ChannelState::is_crash_reporting_available() {
+        return false;
+    }
     if !FeatureFlag::CrashReporting.is_enabled() {
         log::info!("Crash reporting FeatureFlag is disabled; not initializing sentry.");
         return false;
@@ -252,6 +256,23 @@ enum RustSentryClientGuard {
     Initialized {
         _guard: ClientInitGuard,
     },
+}
+
+fn is_warpspeed() -> bool {
+    ChannelState::app_id()
+        .application_name()
+        .starts_with("WarpSpeed")
+}
+
+pub(crate) fn report_interrupted_session(revision: &str) {
+    if is_warpspeed() && is_initialized() {
+        sentry::capture_event(sentry::protocol::Event {
+            message: Some("WarpSpeed interrupted session recovered".to_owned()),
+            release: Some(revision.to_owned().into()),
+            level: sentry::Level::Error,
+            ..Default::default()
+        });
+    }
 }
 
 /// Returns the environment used when reporting events to Sentry.
@@ -351,10 +372,26 @@ fn init_sentry(user_id: Option<UserUid>, email: Option<String>, ctx: &mut AppCon
 
         Some(event)
     }));
+    if is_warpspeed() {
+        sentry_options.transport = Some(Arc::new(ojiichan::transport));
+        sentry_options.before_breadcrumb = Some(Arc::new(|_| None));
+        sentry_options.before_send = Some(Arc::new(|event| Some(ojiichan::sanitize(event))));
+        sentry_options.release = Some(env!("WARP_BUILD_REVISION").into());
+        sentry_options.attach_stacktrace = true;
+        sentry_options.auto_session_tracking = false;
+        sentry_options.send_default_pii = false;
+        sentry_options.shutdown_timeout = std::time::Duration::from_secs(2);
+    }
 
     *RUST_SENTRY_CLIENT_GUARD.lock() = RustSentryClientGuard::Initialized {
         _guard: sentry::init(sentry_options),
     };
+
+    // Native minidumps can contain terminal buffers and credentials. Interrupted instances are
+    // reported from their recovery checkpoint on the next launch instead.
+    if is_warpspeed() {
+        return;
+    }
 
     // Initialize the appropriate native Sentry SDK.
     #[cfg(enable_crash_recovery)]
@@ -470,6 +507,9 @@ fn set_optional_user_information(
     email: Option<String>,
     ctx: &mut AppContext,
 ) {
+    if is_warpspeed() {
+        return;
+    }
     let user_id = user_id.map(|uid| uid.as_string()).unwrap_or_else(|| {
         // If the user isn't signed in, set an anonymous ID.  This allows us to
         // compute more accurate crash-free user metrics.

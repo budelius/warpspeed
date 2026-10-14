@@ -136,6 +136,14 @@ pub trait TerminalManager: Any {
     ) {
     }
 
+    /// Attaches the held shell without ending it or running its resume command.
+    #[cfg(windows)]
+    #[must_use]
+    fn attach_held_session(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManager>>) -> bool {
+        let _ = ctx;
+        false
+    }
+
     /// Ends the held session where it is and then runs the withheld command here.
     #[must_use]
     fn take_over_held_session(

@@ -284,6 +284,10 @@ pub enum WorkspaceAction {
     ReattachShellForTerminalView {
         terminal_view_id: EntityId,
     },
+    /// Reconnects to a restored pane's old supervisor without restarting its shell.
+    AttachHeldSessionForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Ends a restored pane's session in the supervisor that still holds it, then resumes here.
     TakeOverHeldSessionForTerminalView {
         terminal_view_id: EntityId,
@@ -1184,6 +1188,7 @@ impl WorkspaceAction {
             | RestartShell
             | RestartShellForTerminalView { .. }
             | ReattachShellForTerminalView { .. }
+            | AttachHeldSessionForTerminalView { .. }
             | TakeOverHeldSessionForTerminalView { .. }
             | StartFreshForTerminalView { .. }
             | ToggleAttachSessionMenu

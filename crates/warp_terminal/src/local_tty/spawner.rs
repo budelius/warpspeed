@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use warp_core::SessionId;
 use warp_core::features::FeatureFlag;
@@ -6,8 +8,8 @@ use warp_errors::report_error;
 use warpui_core::{AppContext, Entity, SingletonEntity};
 #[cfg(unix)]
 use {
-    crate::local_tty::server::TerminalServer, anyhow::bail, std::cmp::Reverse,
-    std::collections::HashMap, std::ffi::OsString, std::process::Child,
+    crate::local_tty::server::TerminalServer, anyhow::bail, std::cmp::Reverse, std::ffi::OsString,
+    std::process::Child,
 };
 
 #[cfg(target_os = "windows")]
@@ -274,6 +276,8 @@ pub struct PtySpawner {
     supervisor: Option<std::sync::Arc<UnixTerminalSupervisorClient>>,
     #[cfg(windows)]
     supervisor: Option<std::sync::Arc<WindowsTerminalSupervisorClient>>,
+    #[cfg(windows)]
+    adopted_supervisors: HashMap<SessionId, std::sync::Arc<WindowsTerminalSupervisorClient>>,
 }
 
 impl PtySpawner {
@@ -309,7 +313,7 @@ impl PtySpawner {
                     .then(WindowsTerminalSupervisorClient::new)
                     .transpose()?
                     .map(std::sync::Arc::new);
-                Ok(Self { supervisor })
+                Ok(Self { supervisor, adopted_supervisors: HashMap::new() })
             } else {
                 unreachable!("Spawning a PTY is not supported on this platform.");
             }
@@ -322,11 +326,39 @@ impl PtySpawner {
             if #[cfg(unix)] {
                 Self { server: None, supervisor: None }
             } else if #[cfg(target_os = "windows")] {
-                Self { supervisor: None }
+                Self { supervisor: None, adopted_supervisors: HashMap::new() }
             } else {
                 unreachable!("Spawning a PTY for tests is not supported on this platform.");
             }
         }
+    }
+
+    /// Routes this session's attach, detach, and shutdown to its original supervisor.
+    #[cfg(windows)]
+    pub fn adopt_supervisor(
+        &mut self,
+        session_id: SessionId,
+        client: std::sync::Arc<WindowsTerminalSupervisorClient>,
+    ) {
+        self.adopted_supervisors.insert(session_id, client);
+    }
+
+    /// The original control channel of an explicitly adopted session.
+    #[cfg(windows)]
+    pub fn adopted_supervisor_channel(&self, session_id: SessionId) -> Option<String> {
+        self.adopted_supervisors
+            .get(&session_id)
+            .map(|client| client.pipe_name())
+    }
+
+    #[cfg(windows)]
+    fn supervisor_for_session(
+        &self,
+        session_id: SessionId,
+    ) -> Option<&std::sync::Arc<WindowsTerminalSupervisorClient>> {
+        self.adopted_supervisors
+            .get(&session_id)
+            .or(self.supervisor.as_ref())
     }
 
     /// Marks selected supervised sessions for transfer without relinquishing this process's
@@ -355,14 +387,14 @@ impl PtySpawner {
             server.prepare_for_app_termination(session_ids)?;
         }
         #[cfg(windows)]
-        if let Some(supervisor) = self.supervisor.as_ref() {
-            for handover in handovers {
-                let session_id = handover.session_id;
-                if let Err(error) =
-                    supervisor.detach(session_id, handover.snapshot, handover.metadata)
-                {
-                    skip_ended_session(session_id, error, |id| supervisor.is_running(id))?;
-                }
+        for handover in handovers {
+            let session_id = handover.session_id;
+            let supervisor = self
+                .supervisor_for_session(session_id)
+                .context("No terminal supervisor is available for this session")?;
+            if let Err(error) = supervisor.detach(session_id, handover.snapshot, handover.metadata)
+            {
+                skip_ended_session(session_id, error, |id| supervisor.is_running(id))?;
             }
         }
         Ok(())
@@ -413,16 +445,15 @@ impl PtySpawner {
         }
 
         #[cfg(windows)]
-        if let Some(supervisor) = self.supervisor.as_ref() {
-            for handover in handovers {
-                let session_id = handover.session_id;
-                if let Err(error) =
+        for handover in handovers {
+            let session_id = handover.session_id;
+            if let Some(supervisor) = self.supervisor_for_session(session_id)
+                && let Err(error) =
                     supervisor.detach(session_id, handover.snapshot, handover.metadata)
-                {
-                    log::error!(
-                        "Failed to detach supervised terminal session {session_id:?}: {error:#}"
-                    );
-                }
+            {
+                log::error!(
+                    "Failed to detach supervised terminal session {session_id:?}: {error:#}"
+                );
             }
         }
     }
@@ -435,7 +466,11 @@ impl PtySpawner {
     /// detach the user cannot undo is worse than no detach at all, so the
     /// feature stays off there until v1 is migrated.
     pub fn supports_detached_sessions(&self) -> bool {
-        #[cfg(any(unix, windows))]
+        #[cfg(windows)]
+        {
+            self.supervisor.is_some() || !self.adopted_supervisors.is_empty()
+        }
+        #[cfg(unix)]
         {
             self.supervisor.is_some()
         }
@@ -458,9 +493,11 @@ impl PtySpawner {
     ) -> Result<()> {
         #[cfg(any(unix, windows))]
         {
-            let supervisor = self
-                .supervisor
-                .as_ref()
+            #[cfg(windows)]
+            let supervisor = self.supervisor_for_session(session_id);
+            #[cfg(unix)]
+            let supervisor = self.supervisor.as_ref();
+            let supervisor = supervisor
                 .context("No terminal supervisor is running to detach this session to")?;
             supervisor.detach(session_id, snapshot, metadata)
         }
@@ -478,10 +515,12 @@ impl PtySpawner {
     pub fn kill_detached_session(&self, session_id: SessionId) -> Result<()> {
         #[cfg(any(unix, windows))]
         {
-            let supervisor = self
-                .supervisor
-                .as_ref()
-                .context("No terminal supervisor is running to end this session")?;
+            #[cfg(windows)]
+            let supervisor = self.supervisor_for_session(session_id);
+            #[cfg(unix)]
+            let supervisor = self.supervisor.as_ref();
+            let supervisor =
+                supervisor.context("No terminal supervisor is running to end this session")?;
             supervisor.kill(session_id)
         }
         #[cfg(not(any(unix, windows)))]
@@ -494,10 +533,30 @@ impl PtySpawner {
     pub fn list_detached_sessions(&self) -> Result<Vec<SessionSummary>> {
         #[cfg(any(unix, windows))]
         {
-            let Some(supervisor) = self.supervisor.as_ref() else {
-                return Ok(Vec::new());
+            let sessions = self
+                .supervisor
+                .as_ref()
+                .map(|supervisor| supervisor.list_sessions())
+                .transpose()?
+                .unwrap_or_default();
+            #[cfg(windows)]
+            let sessions = {
+                let mut sessions = sessions;
+                for (session_id, supervisor) in &self.adopted_supervisors {
+                    // A retired supervisor must not hide sessions in the current build.
+                    let Ok(held) = supervisor.list_sessions() else {
+                        continue;
+                    };
+                    if let Some(session) = held.into_iter().find(|session| {
+                        session.session_id == *session_id
+                            && !sessions.iter().any(|known| known.session_id == *session_id)
+                    }) {
+                        sessions.push(session);
+                    }
+                }
+                sessions
             };
-            supervisor.list_sessions()
+            Ok(sessions)
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -764,9 +823,12 @@ impl PtySpawner {
 
         #[cfg(windows)]
         {
-            let Some(client) = self.supervisor.as_ref() else {
+            let Some(client) = self.supervisor_for_session(session_id) else {
                 return Ok(None);
             };
+            if self.adopted_supervisors.contains_key(&session_id) {
+                client.check_detached(session_id)?;
+            }
             // Windows relays are fresh per attachment. Resize before borrowing
             // one so replay is rendered at this pane's dimensions instead of
             // being discarded as an unsafe old-size snapshot.

@@ -27755,6 +27755,16 @@ impl TypedActionView for Workspace {
                     self.reattach_focused_shell(ctx);
                 }
             }
+            AttachHeldSessionForTerminalView { terminal_view_id } => {
+                #[cfg(windows)]
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx)
+                    && let Some(manager) = self.focused_terminal_manager(ctx)
+                {
+                    let _ = manager.update(ctx, |manager, ctx| manager.attach_held_session(ctx));
+                }
+                #[cfg(not(windows))]
+                let _ = terminal_view_id;
+            }
             TakeOverHeldSessionForTerminalView { terminal_view_id } => {
                 if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
                     self.resolve_withheld_restore(true, ctx);

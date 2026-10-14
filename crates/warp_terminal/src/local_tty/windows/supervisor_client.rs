@@ -13,7 +13,7 @@ use super::pipe_transport::{PipeTransport, supervisor_pipe_name_for};
 use crate::local_tty::PtyOptions;
 use crate::local_tty::screen::ScreenSnapshot;
 use crate::local_tty::supervisor::message::{
-    AttachedSession, Message, SessionMetadata, SessionSummary,
+    AttachedSession, Message, PROTOCOL_VERSION, SessionMetadata, SessionSummary,
 };
 use crate::local_tty::supervisor::transport::{Endpoint, Transport};
 
@@ -23,6 +23,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Client for the per-profile Windows terminal supervisor.
 pub struct WindowsTerminalSupervisorClient {
     executable: PathBuf,
+    existing_pipe: Option<String>,
     // The preservation flag belonging to the currently attached handle for
     // each session. Generations must not share a counter: cleanup of an older
     // pane can lag behind a later attach and must consume only its own detach.
@@ -44,12 +45,48 @@ impl WindowsTerminalSupervisorClient {
     pub fn for_executable(executable: PathBuf) -> Self {
         Self {
             executable,
+            existing_pipe: None,
             current_handles: Mutex::new(HashMap::new()),
         }
     }
 
-    fn pipe_name(&self) -> String {
-        supervisor_pipe_name_for(&warp_core::paths::state_dir(), &self.executable)
+    /// Connects only to an already-running, compatible local supervisor; never starts a daemon.
+    pub fn for_existing_pipe(pipe: String) -> Result<Self> {
+        let prefix = format!(r"\\.\pipe\warp-terminal-supervisor-v{PROTOCOL_VERSION}-");
+        let suffix = pipe.strip_prefix(&prefix).context(
+            "The saved supervisor channel is invalid or uses a different protocol version",
+        )?;
+        if suffix.len() != 16 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("The saved supervisor channel is invalid");
+        }
+        Ok(Self {
+            executable: PathBuf::new(),
+            existing_pipe: Some(pipe),
+            current_handles: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub(crate) fn pipe_name(&self) -> String {
+        self.existing_pipe.clone().unwrap_or_else(|| {
+            supervisor_pipe_name_for(&warp_core::paths::state_dir(), &self.executable)
+        })
+    }
+
+    /// Verifies compatibility and that no other window currently owns this session.
+    pub fn check_detached(&self, session_id: SessionId) -> Result<()> {
+        match self.request(Message::Ping)? {
+            Message::Pong { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
+            _ => bail!("The old supervisor uses an incompatible protocol"),
+        }
+        let sessions = self.list_sessions()?;
+        let session = sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .context("The old supervisor no longer holds this session")?;
+        if session.attached {
+            bail!("Another window is attached to this session; detach it there first");
+        }
+        Ok(())
     }
 
     pub fn spawn(&self, session_id: SessionId, options: &PtyOptions) -> Result<Endpoint> {
@@ -176,6 +213,9 @@ impl WindowsTerminalSupervisorClient {
             match PipeTransport::connect_waiting(&self.pipe_name(), CONTROL_TIMEOUT)? {
                 Some(transport) => transport,
                 None => {
+                    if self.existing_pipe.is_some() {
+                        bail!("The old supervisor is no longer available");
+                    }
                     self.start_supervisor()?;
                     self.connect_after_start()?
                 }
@@ -209,3 +249,7 @@ impl WindowsTerminalSupervisorClient {
 #[cfg(test)]
 #[path = "supervisor_client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "existing_supervisor_tests.rs"]
+mod existing_supervisor_tests;

@@ -823,7 +823,7 @@ impl View {
 
         match result_action.clone() {
             CommandPaletteItemAction::AcceptBinding { binding } => {
-                if let Some(action) = binding.action.as_deref() {
+                if let Some(action) = binding.action.clone() {
                     self.dispatch_typed_action_on_view(action, ctx);
                 };
             }
@@ -947,7 +947,7 @@ impl View {
                 ctx.emit(Event::ViewInWarpDrive { id })
             }
             CommandPaletteItemAction::NewSession { source } => {
-                self.dispatch_typed_action_on_view(source.action().deref(), ctx);
+                self.dispatch_typed_action_on_view(Arc::from(source.action()), ctx);
             }
             CommandPaletteItemAction::OpenFile {
                 path,
@@ -1060,7 +1060,7 @@ impl View {
     /// the [`BindingSource`] model.
     fn dispatch_typed_action_on_view(
         &self,
-        action: &dyn warpui::Action,
+        action: Arc<dyn warpui::Action>,
         ctx: &mut ViewContext<Self>,
     ) {
         send_telemetry_from_ctx!(
@@ -1075,6 +1075,6 @@ impl View {
             BindingSource::None => return,
         };
 
-        ctx.dispatch_typed_action_for_view(window_id, view_id, action);
+        ctx.dispatch_shared_typed_action_deferred_for_view(window_id, view_id, action);
     }
 }

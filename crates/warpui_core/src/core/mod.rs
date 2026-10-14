@@ -13,6 +13,7 @@ use std::hash::Hash;
 use std::mem;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -220,7 +221,7 @@ pub enum Effect {
     TypedAction {
         window_id: WindowId,
         view_id: EntityId,
-        action: Box<dyn Action>,
+        action: Arc<dyn Action>,
     },
     GlobalAction {
         name: &'static str,

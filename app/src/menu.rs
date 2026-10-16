@@ -935,6 +935,11 @@ impl<A: Action + Clone> MenuItemFields<A> {
         self.disabled
     }
 
+    #[cfg(test)]
+    pub(crate) fn tooltip_text(&self) -> Option<&str> {
+        self.tooltip.as_deref()
+    }
+
     pub fn get_a11y_text(&self) -> &str {
         match &self.element {
             MenuItemLabel::Text(label) | MenuItemLabel::MultilineText { label, .. } => label,

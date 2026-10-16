@@ -38,9 +38,10 @@ repository or embedded in the executable. Provision a project with Ojiichan and 
 project-specific ingest DSN here. Existing **Privacy → Crash reporting** opt-out is respected.
 
 Rust panics and actionable `report_error!` events use the existing Sentry integration. Reports
-contain build revision, platform/environment, exception categories and code locations. Event messages,
-exception values, user identity, requests, breadcrumbs, local variables, absolute paths, and other
-arbitrary context are excluded. Native memory dumps are disabled because they can contain terminal
+contain build revision, platform/environment, exception categories and code locations. Panic titles
+include the source filename, line and column from the Rust panic hook, even without release debug
+symbols. Original event messages, panic/error payloads, user identity, requests, breadcrumbs, local
+variables, absolute paths, and other arbitrary context are excluded. Native memory dumps are disabled because they can contain terminal
 content or credentials. Recovery emits a minimal interrupted-session event on the next launch,
 including after a forced exit or power loss; that is not proof of a Rust panic. Delivery is
 best-effort and requires network access. Ordinary warnings are not promoted to remote issues.
@@ -49,6 +50,8 @@ best-effort and requires network access. Ordinary warnings are not promoted to r
 
 - Unit tests: checkpoint locking, recovery beside a live process, concurrent recovery, another
   crash during startup, failed writes, corrupt checkpoints, clean exits, and report sanitization.
+  The panic-hook regression uses a caught synthetic panic and an in-memory transport; it never
+  contacts Ojiichan or terminates a GUI.
 - Windows runtime acceptance: use a disposable `WARPSPEED_PROFILE`; open multiple windows with
   tabs/splits and an agent with a known resume ID, force-terminate only that test GUI, leave a
   second test GUI running, relaunch, and verify every recoverable window returns exactly once.

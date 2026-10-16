@@ -23,6 +23,8 @@ use warpui::{AddSingletonModel, App, ViewHandle};
 use watcher::HomeDirectoryWatcher;
 
 use super::*;
+use crate::agent_ctrl::FleetPaneManager;
+use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
 use crate::ai::AIRequestUsageModel;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent_conversations_model::AgentConversationsModel;
@@ -72,6 +74,7 @@ use crate::settings::PrivacySettings;
 use crate::settings::cloud_preferences_syncer::CloudPreferencesSyncer;
 use crate::settings_view::DisplayCount;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
+use crate::stozn_auth::StoznAuthManager;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
 use crate::tab_configs::tab_config::{TabConfigPaneNode, TabConfigPaneType};
@@ -105,6 +108,7 @@ pub(crate) fn initialize_app(app: &mut App) {
     // Add the necessary singleton models to the App
     app.add_singleton_model(|_ctx| ServerApiProvider::new_for_test());
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+    app.add_singleton_model(|_| StoznAuthManager::new_for_test());
     app.add_singleton_model(AppTelemetryContextProvider::new_context_provider);
     app.add_singleton_model(AuthManager::new_for_test);
     app.add_singleton_model(|_ctx| PtySpawner::new_for_test());
@@ -266,6 +270,7 @@ pub(crate) fn initialize_app(app: &mut App) {
 }
 
 pub(crate) fn mock_workspace(app: &mut App) -> ViewHandle<Workspace> {
+    register_fleet_test_models(app);
     let global_resource_handles = GlobalResourceHandles::mock(app);
     let active_window_id = app.read(|ctx| ctx.windows().active_window());
     let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
@@ -6821,20 +6826,16 @@ fn selecting_a_shell_restarts_the_session_before_closing_the_picker() {
     });
 }
 
-/// `initialize_app` plus the STOZN auth singleton the workspace reads, which `initialize_app`
-/// does not register yet.
 fn initialize_app_with_stozn(app: &mut App) {
     initialize_app(app);
-    if !app.read(|ctx| ctx.has_singleton_model::<crate::stozn_auth::StoznAuthManager>()) {
-        app.add_singleton_model(|_| crate::stozn_auth::StoznAuthManager::new());
-    }
 }
 
 pub(crate) fn initialize_app_for_move_session(app: &mut App) {
-    use crate::agent_ctrl::FleetPaneManager;
-    use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
-
     initialize_app_with_stozn(app);
+    register_fleet_test_models(app);
+}
+
+fn register_fleet_test_models(app: &mut App) {
     if !app.read(|ctx| ctx.has_singleton_model::<FleetModel>()) {
         app.add_singleton_model(|_| {
             FleetModel::with_backend(FleetBackend {

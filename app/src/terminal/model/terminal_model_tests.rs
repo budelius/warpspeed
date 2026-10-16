@@ -1992,6 +1992,89 @@ fn exit_for_restart_allows_the_replacement_shell_to_initialize() {
 }
 
 #[test]
+fn restart_accepts_output_before_the_replacement_shell_initializes() {
+    let mut terminal = TerminalModel::mock(None, None);
+    terminal.simulate_long_running_block("old command", "old output");
+    let old_block_id = terminal.active_block_id().clone();
+    terminal.exit(ExitReason::PtyDisconnected);
+
+    terminal.exit_for_restart();
+    terminal.process_bytes("\r\nreplacement startup\r\n");
+
+    assert_ne!(terminal.active_block_id(), &old_block_id);
+    assert!(!terminal.block_list().active_block().finished());
+    assert!(
+        terminal
+            .block_list()
+            .active_block()
+            .contents_to_string()
+            .contains("replacement startup")
+    );
+    let old_block = terminal
+        .block_list()
+        .blocks()
+        .iter()
+        .find(|block| block.id() == &old_block_id)
+        .unwrap();
+    assert_eq!(old_block.output_to_string(), "old output");
+    assert_eq!(old_block.state(), BlockState::DoneWithExecution);
+    assert!(old_block.finished());
+
+    terminal.exit(ExitReason::PtyDisconnected);
+}
+
+#[test]
+fn repeated_restarts_before_bootstrap_keep_the_replacement_grid_writable() {
+    let mut terminal = TerminalModel::mock_before_bootstrap();
+    terminal.exit_for_restart();
+    terminal.process_bytes("\r\nfirst startup\r\n");
+
+    terminal.exit_for_restart();
+    terminal.process_bytes("\r\nsecond startup\r\n");
+    let replacement_block_id = terminal.active_block_id().clone();
+    let replacement_session_id = SessionId::from(456);
+    terminal.register_session_id(replacement_session_id);
+    terminal.init_shell(InitShellValue {
+        shell: "bash".to_owned(),
+        session_id: replacement_session_id,
+        ..Default::default()
+    });
+
+    assert_eq!(terminal.active_block_id(), &replacement_block_id);
+    assert!(!terminal.block_list().active_block().finished());
+    assert_eq!(terminal.pending_session_id(), Some(replacement_session_id));
+    assert!(
+        terminal
+            .block_list()
+            .active_block()
+            .contents_to_string()
+            .contains("second startup")
+    );
+    terminal.exit(ExitReason::PtyDisconnected);
+}
+
+#[test]
+fn reinitializing_a_shell_preserves_completed_block_status() {
+    let mut terminal = TerminalModel::mock(None, None);
+    terminal.simulate_long_running_block("failed command", "failure output");
+    terminal.block_list_mut().active_block_mut().finish(7);
+    let finished_id = terminal.active_block_id().clone();
+
+    terminal.block_list_mut().reinit_shell();
+
+    let finished_block = terminal
+        .block_list()
+        .blocks()
+        .iter()
+        .find(|block| block.id() == &finished_id)
+        .unwrap();
+    assert_eq!(finished_block.state(), BlockState::DoneWithExecution);
+    assert_eq!(finished_block.exit_code(), ExitCode::from(7));
+    assert_eq!(finished_block.output_to_string(), "failure output");
+    assert!(!terminal.block_list().active_block().finished());
+}
+
+#[test]
 fn test_alt_screen_selection_tracks_scroll() {
     let mut terminal: TerminalModel = TerminalModel::mock(None, None);
     terminal.enter_alt_screen(true);

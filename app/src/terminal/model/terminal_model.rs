@@ -1586,6 +1586,10 @@ impl TerminalModel {
         self.ignore_bootstrapping_messages = false;
         self.pending_session_info = None;
         self.lifecycle_coordinator.reset_unknown();
+
+        // The replacement can emit bytes before InitShell. The exited block's truncated grids
+        // are immutable and cannot receive that output, even though the model is writable again.
+        self.block_list.reinit_shell();
     }
 
     /// Clears the exit latch so a replaced shell's model is writable again.

@@ -373,14 +373,8 @@ fn init_sentry(user_id: Option<UserUid>, email: Option<String>, ctx: &mut AppCon
         Some(event)
     }));
     if is_warpspeed() {
-        sentry_options.transport = Some(Arc::new(ojiichan::transport));
-        sentry_options.before_breadcrumb = Some(Arc::new(|_| None));
-        sentry_options.before_send = Some(Arc::new(|event| Some(ojiichan::sanitize(event))));
+        ojiichan::configure(&mut sentry_options);
         sentry_options.release = Some(env!("WARP_BUILD_REVISION").into());
-        sentry_options.attach_stacktrace = true;
-        sentry_options.auto_session_tracking = false;
-        sentry_options.send_default_pii = false;
-        sentry_options.shutdown_timeout = std::time::Duration::from_secs(2);
     }
 
     *RUST_SENTRY_CLIENT_GUARD.lock() = RustSentryClientGuard::Initialized {

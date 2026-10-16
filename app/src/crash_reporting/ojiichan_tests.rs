@@ -60,6 +60,36 @@ fn reporting_keeps_code_locations_but_drops_sensitive_context() {
     assert_eq!(frame.lineno, Some(42));
 }
 
+#[test]
+fn panic_reports_identify_the_source_without_the_payload() {
+    let filename = r"C:\Users\private\project\ansi_handler.rs";
+    let event = sanitize(Event {
+        exception: vec![Exception {
+            ty: "panic".into(),
+            value: Some("private panic payload".into()),
+            stacktrace: Some(Stacktrace {
+                frames: vec![Frame {
+                    function: Some("rust_panic_location".into()),
+                    filename: Some(filename.into()),
+                    lineno: Some(42),
+                    colno: Some(8),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]
+        .into(),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        event.exception[0].value.as_deref(),
+        Some("ansi_handler.rs:42:8")
+    );
+    assert!(!serde_json::to_string(&event).unwrap().contains("private"));
+}
+
 #[derive(Default)]
 struct RecordedEnvelopes(Mutex<Vec<Envelope>>);
 
@@ -67,6 +97,69 @@ impl Transport for RecordedEnvelopes {
     fn send_envelope(&self, envelope: Envelope) {
         self.0.lock().unwrap().push(envelope);
     }
+}
+
+#[test]
+fn panic_hook_reports_a_source_location_without_uploading_the_payload() {
+    let recorded = Arc::new(RecordedEnvelopes::default());
+    let transport = Arc::new(DiagnosticsTransport(recorded.clone()));
+    let mut options = ClientOptions {
+        dsn: Some("https://public@example.invalid/1".parse().unwrap()),
+        release: Some("test-build".into()),
+        ..Default::default()
+    };
+    configure(&mut options);
+    options.transport = Some(Arc::new(transport));
+    let client = Arc::new(sentry::Client::from(sentry::apply_defaults(options)));
+    let hub = Arc::new(sentry::Hub::new(Some(client), Default::default()));
+
+    let result = sentry::Hub::run(hub, || {
+        std::panic::catch_unwind(|| panic!("private panic payload"))
+    });
+
+    assert!(result.is_err());
+    let recorded = recorded.0.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let event = recorded[0].event().unwrap();
+    assert_eq!(event.level, Level::Fatal);
+    assert_eq!(event.release.as_deref(), Some("test-build"));
+    assert_eq!(event.exception[0].ty, "panic");
+    assert!(
+        event.exception[0]
+            .value
+            .as_deref()
+            .unwrap()
+            .starts_with("ojiichan_tests.rs:")
+    );
+    let frame = event.exception[0]
+        .stacktrace
+        .as_ref()
+        .unwrap()
+        .frames
+        .last()
+        .unwrap();
+    assert_eq!(frame.filename.as_deref(), Some("ojiichan_tests.rs"));
+    assert!(frame.lineno.unwrap() > 0);
+    assert!(frame.colno.unwrap() > 0);
+    let json = serde_json::to_string(event).unwrap();
+    assert!(!json.contains("private panic payload"));
+    assert!(!json.contains("warp-crash-diagnostics"));
+}
+
+#[test]
+fn missing_panic_locations_do_not_fall_back_to_the_payload() {
+    let event = sanitize(Event {
+        exception: vec![Exception {
+            ty: "panic".into(),
+            value: Some("private panic payload".into()),
+            ..Default::default()
+        }]
+        .into(),
+        ..Default::default()
+    });
+
+    assert_eq!(event.exception[0].ty, "panic");
+    assert!(event.exception[0].value.is_none());
 }
 
 #[test]

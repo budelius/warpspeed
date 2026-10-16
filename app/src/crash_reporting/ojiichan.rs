@@ -1,10 +1,59 @@
+use std::panic::PanicHookInfo;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sentry::integrations::backtrace::{
+    AttachStacktraceIntegration, ProcessStacktraceIntegration, current_stacktrace,
+};
+use sentry::integrations::panic::PanicIntegration;
 use sentry::protocol::{EnvelopeItem, Event, Exception, Frame, Stacktrace};
-use sentry::{ClientOptions, Envelope, Transport, TransportFactory};
+use sentry::{ClientOptions, Envelope, Level, Transport, TransportFactory};
 
-pub(super) fn transport(options: &ClientOptions) -> Arc<dyn Transport> {
+const PANIC_LOCATION: &str = "rust_panic_location";
+
+pub(super) fn configure(options: &mut ClientOptions) {
+    // The SDK's default panic integration takes precedence over custom extractors if both exist.
+    options.default_integrations = false;
+    options.integrations = vec![
+        Arc::new(AttachStacktraceIntegration),
+        Arc::new(PanicIntegration::new().add_extractor(|info| Some(panic_event(info)))),
+        Arc::new(ProcessStacktraceIntegration),
+    ];
+    options.transport = Some(Arc::new(transport));
+    options.before_breadcrumb = Some(Arc::new(|_| None));
+    options.before_send = Some(Arc::new(|event| Some(sanitize(event))));
+    options.attach_stacktrace = true;
+    options.auto_session_tracking = false;
+    options.send_default_pii = false;
+    options.shutdown_timeout = Duration::from_secs(2);
+}
+
+fn panic_event(info: &PanicHookInfo<'_>) -> Event<'static> {
+    let mut stacktrace = current_stacktrace().unwrap_or_default();
+    // Release builds may lack debug symbols, but Rust still supplies the panic's source location.
+    if let Some(location) = info.location() {
+        stacktrace.frames.push(Frame {
+            function: Some(PANIC_LOCATION.into()),
+            filename: Some(location.file().into()),
+            lineno: Some(location.line().into()),
+            colno: Some(location.column().into()),
+            in_app: Some(true),
+            ..Default::default()
+        });
+    }
+    Event {
+        level: Level::Fatal,
+        exception: vec![Exception {
+            ty: "panic".into(),
+            stacktrace: Some(stacktrace),
+            ..Default::default()
+        }]
+        .into(),
+        ..Default::default()
+    }
+}
+
+fn transport(options: &ClientOptions) -> Arc<dyn Transport> {
     Arc::new(DiagnosticsTransport(
         sentry::transports::DefaultTransportFactory.create_transport(options),
     ))
@@ -48,19 +97,40 @@ pub(super) fn sanitize(event: Event<'static>) -> Event<'static> {
         exception: event
             .exception
             .into_iter()
-            .map(|exception| Exception {
-                // Error types are inferred from Debug output by the SDK, not always static names.
-                ty: if exception.ty == "panic" {
-                    "panic"
-                } else {
-                    "Error"
-                }
-                .to_owned(),
-                stacktrace: exception.stacktrace.map(sanitize_stacktrace),
-                ..Default::default()
-            })
+            .map(sanitize_exception)
             .collect(),
         stacktrace: event.stacktrace.map(sanitize_stacktrace),
+        ..Default::default()
+    }
+}
+
+fn sanitize_exception(exception: Exception) -> Exception {
+    // Error types are inferred from Debug output by the SDK, not always static names.
+    let ty = if exception.ty == "panic" {
+        "panic"
+    } else {
+        "Error"
+    };
+    let stacktrace = exception.stacktrace.map(sanitize_stacktrace);
+    let value = if ty == "panic" {
+        stacktrace.as_ref().and_then(|stacktrace| {
+            let frame = stacktrace
+                .frames
+                .iter()
+                .rev()
+                .find(|frame| frame.function.as_deref() == Some(PANIC_LOCATION))?;
+            let filename = frame.filename.as_deref()?;
+            let line = frame.lineno?;
+            let column = frame.colno?;
+            Some(format!("{filename}:{line}:{column}"))
+        })
+    } else {
+        None
+    };
+    Exception {
+        ty: ty.into(),
+        value,
+        stacktrace,
         ..Default::default()
     }
 }

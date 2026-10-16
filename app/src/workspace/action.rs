@@ -344,7 +344,7 @@ pub enum WorkspaceAction {
     },
     /// Focuses, starts, attaches or resumes the agent session a picker row stands for.
     AgentSession(AgentSessionAction),
-    /// Opens the window's agent sessions by tab and pane, with `focus`'s pane selected.
+    /// Opens the full-window session library, using `focus` as the resume target.
     ShowAgentSessions {
         focus: Option<PaneViewLocator>,
     },

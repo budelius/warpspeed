@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -8,13 +7,21 @@ use super::*;
 use crate::app_state::CliAgentResumeDescriptor;
 use crate::pane_group::PaneId;
 use crate::terminal::agent_session_history::PastAgentSession;
-use crate::terminal::agent_sessions_index::{DetachedInput, build_rows};
+use crate::terminal::agent_sessions_index::{DetachedInput, build_rows, build_rows_with_scanned};
 use crate::terminal::cli_agent::CLIAgent;
+use crate::terminal::cli_agent_sessions::agent_process_scan::{Placement, SavedPane, ScannedAgent};
 use crate::terminal::detached_sessions::DetachedListError;
 use crate::workspace::PaneViewLocator;
 use crate::workspace::agent_session_actions::AgentSessionAction;
 
-fn claude(id: &str, cwd: &str) -> CliAgentResumeDescriptor {
+fn locator(index: usize) -> PaneViewLocator {
+    PaneViewLocator {
+        pane_group_id: EntityId::from_usize(index + 1),
+        pane_id: PaneId::dummy_pane_id(),
+    }
+}
+
+fn descriptor(id: &str, cwd: &str) -> CliAgentResumeDescriptor {
     CliAgentResumeDescriptor {
         agent: CLIAgent::Claude,
         session_id: Some(id.into()),
@@ -24,14 +31,11 @@ fn claude(id: &str, cwd: &str) -> CliAgentResumeDescriptor {
     }
 }
 
-fn pane(tab_index: usize, cwd: &str) -> PaneAgentInput {
+fn pane(index: usize, cwd: &str) -> PaneAgentInput {
     PaneAgentInput {
-        locator: PaneViewLocator {
-            pane_group_id: EntityId::from_usize(tab_index + 1),
-            pane_id: PaneId::dummy_pane_id(),
-        },
-        tab_index,
-        tab_title: format!("tab {tab_index}"),
+        locator: locator(index),
+        tab_index: index,
+        tab_title: format!("tab {index}"),
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
         session_uuid_hex: None,
@@ -41,7 +45,14 @@ fn pane(tab_index: usize, cwd: &str) -> PaneAgentInput {
     }
 }
 
-fn past(id: &str, cwd: &str, age_secs: u64) -> PastAgentSession {
+fn running_pane(index: usize, id: &str, cwd: &str) -> PaneAgentInput {
+    PaneAgentInput {
+        running: Some(descriptor(id, cwd)),
+        ..pane(index, cwd)
+    }
+}
+
+fn past_at(id: &str, cwd: &str, modified: SystemTime) -> PastAgentSession {
     PastAgentSession {
         agent: CLIAgent::Claude,
         session_id: id.into(),
@@ -49,16 +60,24 @@ fn past(id: &str, cwd: &str, age_secs: u64) -> PastAgentSession {
         canonical_cwd: None,
         title: Some(format!("past {id}")),
         last_prompt: None,
-        modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
+        modified,
         preview: Vec::new(),
     }
 }
 
-fn detached(id: u64, title: &str) -> DetachedInput {
+fn past(id: &str, cwd: &str, age_secs: u64) -> PastAgentSession {
+    past_at(
+        id,
+        cwd,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
+    )
+}
+
+fn detached(id: u64, title: &str, cwd: &str) -> DetachedInput {
     DetachedInput {
         session_id: warp_core::SessionId::from(id),
         title: title.into(),
-        cwd: "/elsewhere".into(),
+        cwd: cwd.into(),
         detached_for_seconds: id,
         session_uuid_hex: String::new(),
     }
@@ -82,19 +101,17 @@ fn managed(job_id: &str, state: &str) -> RunSummary {
 fn kinds(rows: &[ViewRow]) -> Vec<String> {
     rows.iter()
         .map(|row| match row {
-            ViewRow::TabHeader { title, .. } => format!("tab:{title}"),
-            ViewRow::Pane { input, .. } => format!("pane:{}", input.tab_index),
-            ViewRow::PastToggle {
-                count, expanded, ..
-            } => format!("toggle:{count}:{expanded}"),
-            ViewRow::Past { row, .. } => {
-                format!("past:{}", row.session_id.clone().unwrap_or_default())
+            ViewRow::SectionHeader { section, count, .. } => {
+                format!("section:{section:?}:{count}")
             }
-            ViewRow::DetachedHeader { count } => format!("detached-header:{count}"),
-            ViewRow::Detached { row } => {
-                format!("detached:{}", row.title.clone().unwrap_or_default())
-            }
-            ViewRow::ManagedHeader => "managed-header".to_owned(),
+            ViewRow::DateHeader(date) => format!("date:{date}"),
+            ViewRow::Local { row, .. } => format!(
+                "local:{}",
+                row.session_id
+                    .clone()
+                    .or_else(|| row.title.clone())
+                    .unwrap_or_default()
+            ),
             ViewRow::Managed { run } => format!("managed:{}", run.job_id),
             ViewRow::ManagedError(_) => "managed-error".to_owned(),
             ViewRow::SupervisorUnreachable => "unreachable".to_owned(),
@@ -102,244 +119,229 @@ fn kinds(rows: &[ViewRow]) -> Vec<String> {
         .collect()
 }
 
-/// `view_rows` over a snapshot, with folder membership worked out as the view does on open.
 fn layout(
     panes: &[PaneAgentInput],
-    rows: &[AgentSessionRow],
-    expanded_folders: &ExpandedFolders,
+    detached: &[DetachedInput],
+    history: &[PastAgentSession],
+    target: Option<PaneViewLocator>,
+    filter: SessionFilter,
     query: &str,
 ) -> Vec<ViewRow> {
-    view_rows(
-        panes,
-        rows,
-        &past_by_folder(panes, rows),
-        expanded_folders,
-        query,
-    )
-}
-
-fn pane_action(rows: &[ViewRow], tab_index: usize) -> ViewRowAction {
-    rows.iter()
-        .find_map(|row| match row {
-            ViewRow::Pane { input, action, .. } => {
-                (input.tab_index == tab_index).then(|| action.clone())
-            }
-            ViewRow::TabHeader { .. }
-            | ViewRow::PastToggle { .. }
-            | ViewRow::Past { .. }
-            | ViewRow::DetachedHeader { .. }
-            | ViewRow::Detached { .. }
-            | ViewRow::ManagedHeader
-            | ViewRow::Managed { .. }
-            | ViewRow::ManagedError(_)
-            | ViewRow::SupervisorUnreachable => None,
-        })
-        .expect("the pane has a row")
+    let rows = build_rows(panes, detached, history);
+    view_rows(panes, &rows, target, filter, query)
 }
 
 #[test]
-fn panes_are_grouped_under_their_tab_headers_in_tab_order() {
-    let first = pane(0, "/a");
-    let second = PaneAgentInput {
-        tab_title: "tab 0".into(),
-        ..pane(0, "/b")
-    };
-    let third = pane(1, "/c");
-    let panes = vec![first, second, third];
-    let rows = build_rows(&panes, &[], &[]);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
-
-    assert_eq!(
-        kinds(&view),
-        vec!["tab:tab 0", "pane:0", "pane:0", "tab:tab 1", "pane:1"]
-    );
-}
-
-#[test]
-fn each_pane_gets_the_action_its_state_calls_for() {
-    let running = PaneAgentInput {
-        running: Some(claude("r", "/r")),
-        ..pane(0, "/r")
-    };
-    let pending = PaneAgentInput {
-        pending: Some(claude("p", "/p")),
-        ..pane(1, "/p")
-    };
-    let shell = pane(2, "/s");
-    let panes = vec![running.clone(), pending.clone(), shell.clone()];
-    let rows = build_rows(&panes, &[], &[]);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
-
-    assert_eq!(
-        pane_action(&view, 0),
-        ViewRowAction::Act(AgentSessionAction::Focus(running.locator))
-    );
-    assert_eq!(
-        pane_action(&view, 1),
-        ViewRowAction::Act(AgentSessionAction::Start(pending.locator))
-    );
-    assert_eq!(
-        pane_action(&view, 2),
-        ViewRowAction::ChooseSession {
-            target: shell.locator,
-        }
-    );
-}
-
-#[test]
-fn a_pane_without_a_folder_has_no_action() {
-    let shell = PaneAgentInput {
-        cwd: None,
-        ..pane(0, "/unused")
-    };
-    let panes = vec![shell];
-    let rows = build_rows(&panes, &[], &[]);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
-
-    assert_eq!(pane_action(&view, 0), ViewRowAction::None);
-}
-
-#[test]
-fn folders_with_past_sessions_are_expanded_when_the_view_opens() {
-    let panes = vec![
-        same_tab(0, "/proj"),
-        same_tab(0, "/proj"),
-        pane(1, "/proj"),
-        pane(2, "/empty"),
-    ];
-    let history = vec![past("top", "/proj", 1)];
-    let rows = build_rows(&panes, &[], &history);
-    let membership = past_by_folder(&panes, &rows);
-
-    let expanded = folders_with_past(&panes, &membership);
-
-    assert_eq!(
-        expanded,
-        ExpandedFolders::from([(0, PathBuf::from("/proj")), (1, PathBuf::from("/proj")),])
-    );
-}
-
-#[test]
-fn past_rows_appear_only_when_their_folder_is_expanded() {
-    let panes = vec![pane(0, "/proj")];
+fn all_sessions_promotes_the_current_directory_first() {
+    let target = pane(0, "/work/current");
+    let elsewhere = running_pane(1, "running-elsewhere", "/work/elsewhere");
+    let panes = vec![target.clone(), elsewhere];
     let history = vec![
-        past("top", "/proj", 1),
-        past("nested", "/proj/sub", 2),
-        past("other", "/elsewhere", 3),
+        past("current-past", "/work/current/subdir", 1),
+        past("other-past", "/another/project", 2),
     ];
-    let rows = build_rows(&panes, &[], &history);
 
-    let collapsed = layout(&panes, &rows, &ExpandedFolders::new(), "");
-    assert_eq!(
-        kinds(&collapsed),
-        vec!["tab:tab 0", "pane:0", "toggle:2:false"]
+    let rows = layout(
+        &panes,
+        &[detached(7, "detached shell", "/detached")],
+        &history,
+        Some(target.locator),
+        SessionFilter::All,
+        "",
     );
 
-    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj"))]);
-    let open = layout(&panes, &rows, &expanded, "");
+    let kinds = kinds(&rows);
+    assert_eq!(kinds[0], "section:CurrentDirectory:1");
+    assert_eq!(kinds[1], "local:current-past");
+    assert_eq!(kinds[2], "section:RunningAndDetached:2");
+    assert_eq!(kinds[3], "local:running-elsewhere");
+    assert_eq!(kinds[4], "local:detached shell");
+    assert_eq!(kinds[5], "section:Past:1");
+    assert!(kinds[6].starts_with("date:"));
+    assert_eq!(kinds[7], "local:other-past");
+}
+
+#[test]
+fn empty_shells_are_not_session_rows_or_nested_picker_actions() {
+    let target = pane(0, "/work/current");
+
+    let rows = layout(
+        std::slice::from_ref(&target),
+        &[],
+        &[past("elsewhere", "/work/elsewhere", 1)],
+        Some(target.locator),
+        SessionFilter::All,
+        "",
+    );
+
     assert_eq!(
-        kinds(&open),
-        vec![
-            "tab:tab 0",
-            "pane:0",
-            "toggle:2:true",
-            "past:top",
-            "past:nested"
+        kinds(&rows)
+            .into_iter()
+            .filter(|kind| kind.starts_with("local:"))
+            .collect::<Vec<_>>(),
+        ["local:elsewhere"]
+    );
+}
+
+#[test]
+fn every_past_session_is_available_and_resumes_in_the_opening_pane() {
+    let target = pane(0, "/work/current");
+    let rows = layout(
+        std::slice::from_ref(&target),
+        &[],
+        &[past("far-away", "/unrelated/repository", 1)],
+        Some(target.locator),
+        SessionFilter::All,
+        "",
+    );
+    let ViewRow::Local {
+        row,
+        target: actual_target,
+    } = rows
+        .iter()
+        .find(|row| matches!(row, ViewRow::Local { .. }))
+        .expect("the global past session is listed")
+    else {
+        panic!("expected a local session row");
+    };
+
+    assert_eq!(*actual_target, Some(target.locator));
+    assert!(matches!(
+        action_for(row, *actual_target),
+        Some(AgentSessionAction::Resume {
+            target: Some(actual),
+            ..
+        }) if actual == target.locator
+    ));
+}
+
+#[test]
+fn filters_include_all_sessions_of_their_kind() {
+    let target = running_pane(0, "current-running", "/work/current");
+    let elsewhere = running_pane(1, "other-running", "/work/elsewhere");
+    let panes = vec![target.clone(), elsewhere];
+    let history = vec![
+        past("current-past", "/work/current", 1),
+        past("other-past", "/work/elsewhere", 2),
+    ];
+
+    let current = layout(
+        &panes,
+        &[],
+        &history,
+        Some(target.locator),
+        SessionFilter::CurrentDirectory,
+        "",
+    );
+    let running = layout(
+        &panes,
+        &[],
+        &history,
+        Some(target.locator),
+        SessionFilter::RunningAndDetached,
+        "",
+    );
+    let past = layout(
+        &panes,
+        &[],
+        &history,
+        Some(target.locator),
+        SessionFilter::Past,
+        "",
+    );
+
+    assert_eq!(
+        kinds(&current),
+        [
+            "section:CurrentDirectory:2",
+            "local:current-running",
+            "local:current-past"
         ]
+    );
+    assert_eq!(
+        kinds(&running),
+        [
+            "section:RunningAndDetached:2",
+            "local:current-running",
+            "local:other-running"
+        ]
+    );
+    assert_eq!(
+        kinds(&past)
+            .into_iter()
+            .filter(|kind| !kind.starts_with("date:"))
+            .collect::<Vec<_>>(),
+        ["section:Past:2", "local:current-past", "local:other-past"]
+    );
+}
+
+#[test]
+fn past_sessions_are_grouped_under_calendar_dates() {
+    let first_day = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let previous_day = first_day - Duration::from_secs(86_400);
+    let history = vec![
+        past_at("newer", "/a", first_day),
+        past_at("same-day", "/b", first_day - Duration::from_secs(60)),
+        past_at("previous-day", "/c", previous_day),
+    ];
+
+    let rows = layout(&[], &[], &history, None, SessionFilter::Past, "");
+    let date_headers = rows
+        .iter()
+        .filter(|row| matches!(row, ViewRow::DateHeader(_)))
+        .count();
+
+    assert_eq!(date_headers, 2);
+    assert_eq!(
+        kinds(&rows)
+            .into_iter()
+            .filter(|kind| kind.starts_with("local:"))
+            .collect::<Vec<_>>(),
+        ["local:newer", "local:same-day", "local:previous-day"]
+    );
+}
+
+#[test]
+fn search_finds_sessions_outside_the_current_directory() {
+    let target = pane(0, "/work/current");
+    let history = vec![
+        past("needle", "/unrelated/repository", 1),
+        past("haystack", "/work/current", 2),
+    ];
+
+    let rows = layout(
+        std::slice::from_ref(&target),
+        &[],
+        &history,
+        Some(target.locator),
+        SessionFilter::All,
+        "needle",
+    );
+
+    assert_eq!(
+        kinds(&rows)
+            .into_iter()
+            .filter(|kind| kind.starts_with("local:"))
+            .collect::<Vec<_>>(),
+        ["local:needle"]
     );
 }
 
 #[test]
 fn exact_full_word_queries_exclude_partial_matches() {
-    let exact = PaneAgentInput {
-        tab_title: "ME".into(),
-        ..pane(0, "/projects/me")
-    };
-    let partial = PaneAgentInput {
-        tab_title: "memo".into(),
-        ..pane(1, "/projects/memo")
-    };
-    let panes = vec![exact, partial];
-    let rows = build_rows(&panes, &[], &[]);
+    let history = vec![
+        past("exact", "/projects/me", 1),
+        past("partial", "/memo", 2),
+    ];
 
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "me");
-
-    assert_eq!(kinds(&view), vec!["tab:ME", "pane:0"]);
-}
-
-#[test]
-fn fuzzy_queries_still_match_when_there_is_no_exact_word() {
-    let matching = PaneAgentInput {
-        tab_title: "backend".into(),
-        ..pane(0, "/projects/backend")
-    };
-    let panes = vec![matching];
-    let rows = build_rows(&panes, &[], &[]);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "bcknd");
-
-    assert_eq!(kinds(&view), vec!["tab:backend", "pane:0"]);
-}
-
-#[test]
-fn a_query_filters_rows_but_keeps_their_tab_header() {
-    let alpha = PaneAgentInput {
-        running: Some(claude("alpha", "/alpha")),
-        ..pane(0, "/alpha")
-    };
-    let beta = PaneAgentInput {
-        running: Some(claude("beta", "/beta")),
-        tab_title: "tab 0".into(),
-        ..pane(0, "/beta")
-    };
-    let gamma = pane(1, "/gamma");
-    let panes = vec![alpha, beta, gamma];
-    let rows = build_rows(&panes, &[], &[]);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "beta");
-
-    assert_eq!(kinds(&view), vec!["tab:tab 0", "pane:0"]);
-    assert!(matches!(
-        &view[1],
-        ViewRow::Pane { input, .. } if input.cwd.as_deref() == Some(std::path::Path::new("/beta"))
-    ));
-}
-
-#[test]
-fn a_query_shows_matching_past_rows_without_expanding() {
-    let panes = vec![pane(0, "/proj")];
-    let history = vec![past("needle", "/proj", 1), past("hay", "/proj", 2)];
-    let rows = build_rows(&panes, &[], &history);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "needle");
+    let rows = layout(&[], &[], &history, None, SessionFilter::Past, "me");
 
     assert_eq!(
-        kinds(&view),
-        vec!["tab:tab 0", "pane:0", "toggle:1:true", "past:needle"]
-    );
-}
-
-#[test]
-fn the_detached_section_comes_last() {
-    let panes = vec![pane(0, "/a"), pane(1, "/b")];
-    let rows = build_rows(&panes, &[detached(1, "one"), detached(2, "two")], &[]);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "");
-
-    assert_eq!(
-        kinds(&view),
-        vec![
-            "tab:tab 0",
-            "pane:0",
-            "tab:tab 1",
-            "pane:1",
-            "detached-header:2",
-            "detached:one",
-            "detached:two"
-        ]
+        kinds(&rows)
+            .into_iter()
+            .filter(|kind| kind.starts_with("local:"))
+            .collect::<Vec<_>>(),
+        ["local:exact"]
     );
 }
 
@@ -352,29 +354,13 @@ fn managed_runs_are_searchable_and_keep_state_specific_actions() {
 
     let rows = managed_view_rows(&runs, None, "paused");
 
-    assert_eq!(kinds(&rows), ["managed-header", "managed:job-paused"]);
+    assert_eq!(kinds(&rows), ["section:AgentCtrl:1", "managed:job-paused"]);
     let ViewRow::Managed { run } = &rows[1] else {
         panic!("the matching run should be listed");
     };
     assert_eq!(managed_action_label(&run.state), "Resume & attach");
     assert_eq!(managed_action_label("completed"), "View transcript");
     assert_eq!(managed_action_label("running"), "Attach here");
-}
-
-#[test]
-fn managed_browser_lists_other_projects_and_nodes_without_a_local_pane() {
-    let mut run = managed("job-remote", "paused");
-    run.node_name = Some("distant-node".to_owned());
-    run.repo_url = Some("https://git.example/other-project.git".to_owned());
-
-    assert_eq!(
-        kinds(&managed_view_rows(&[run.clone()], None, "")),
-        ["managed-header", "managed:job-remote"]
-    );
-    assert_eq!(
-        kinds(&managed_view_rows(&[run], None, "distant-node")),
-        ["managed-header", "managed:job-remote"]
-    );
 }
 
 #[test]
@@ -391,6 +377,67 @@ fn managed_session_details_include_last_activity_age_and_date() {
 }
 
 #[test]
+fn a_managed_error_stays_visible_without_runs() {
+    let rows = managed_view_rows(&[], Some("sign in required"), "");
+
+    assert_eq!(kinds(&rows), ["section:AgentCtrl:0", "managed-error"]);
+}
+
+#[test]
+fn an_unreachable_supervisor_is_visible_in_the_running_section() {
+    assert_eq!(
+        kinds(&supervisor_rows(&DetachedListError::Unreachable(
+            "refused".into()
+        ))),
+        ["section:RunningAndDetached:0", "unreachable"]
+    );
+    assert!(supervisor_rows(&DetachedListError::Unsupported).is_empty());
+}
+
+#[test]
+fn filter_counts_are_independent_of_the_all_sessions_deduplication() {
+    let target = running_pane(0, "running", "/work/current");
+    let panes = vec![target.clone()];
+    let rows = build_rows(
+        &panes,
+        &[detached(1, "shell", "/work/current")],
+        &[past("past", "/work/current", 1)],
+    );
+    let (_, current_folder) = focused_folder(&panes, Some(target.locator)).unwrap();
+
+    assert_eq!(
+        filter_count(SessionFilter::All, &rows, 2, Some(&current_folder)),
+        5
+    );
+    assert_eq!(
+        filter_count(
+            SessionFilter::CurrentDirectory,
+            &rows,
+            2,
+            Some(&current_folder)
+        ),
+        3
+    );
+    assert_eq!(
+        filter_count(
+            SessionFilter::RunningAndDetached,
+            &rows,
+            2,
+            Some(&current_folder)
+        ),
+        2
+    );
+    assert_eq!(
+        filter_count(SessionFilter::AgentCtrl, &rows, 2, Some(&current_folder)),
+        2
+    );
+    assert_eq!(
+        filter_count(SessionFilter::Past, &rows, 2, Some(&current_folder)),
+        1
+    );
+}
+
+#[test]
 fn ending_a_process_requires_two_activations_and_switching_processes_rearms() {
     let mut pending = None;
 
@@ -403,25 +450,6 @@ fn ending_a_process_requires_two_activations_and_switching_processes_rearms() {
 }
 
 #[test]
-fn local_session_details_include_last_activity_age_and_date() {
-    let rows = build_rows(&[], &[], &[past("old", "/proj", 5)]);
-    let row = rows.first().expect("the past session is indexed").clone();
-
-    let (_, detail) = preview_heading(&ViewRow::Past {
-        row,
-        target: PaneViewLocator {
-            pane_group_id: EntityId::from_usize(1),
-            pane_id: PaneId::dummy_pane_id(),
-        },
-    });
-    let detail = detail.expect("a local session has details");
-
-    assert!(detail.contains("Local"));
-    assert!(detail.contains("last active"));
-    assert!(detail.contains("1970-"));
-}
-
-#[test]
 fn an_external_process_names_its_agent_build_and_saved_pane() {
     let scanned = ScannedAgent {
         agent: CLIAgent::Claude,
@@ -430,23 +458,25 @@ fn an_external_process_names_its_agent_build_and_saved_pane() {
         pid: 42,
         started_at_unix_seconds: 123,
         warp_session_uuid: Some("pane".into()),
-        placement:
-            crate::terminal::cli_agent_sessions::agent_process_scan::Placement::HeldByOtherBuild {
-                build: "997f1e1c".into(),
-                supervisor_pid: 12,
-                saved_in: Some(SavedPane {
-                    session_name: "M3RP".into(),
-                    tab_title: "WA3P".into(),
-                }),
-            },
+        placement: Placement::HeldByOtherBuild {
+            build: "997f1e1c".into(),
+            supervisor_pid: 12,
+            saved_in: Some(SavedPane {
+                session_name: "M3RP".into(),
+                tab_title: "WA3P".into(),
+            }),
+        },
         process_count: 1,
     };
     let mut history = past("session", "/work/repo", 5);
     history.last_prompt = Some("Fix the reboot path".into());
     let rows = build_rows_with_scanned(&[], &[], &[history], &[scanned]);
     let row = rows.first().expect("the process is indexed").clone();
+    let view_row = ViewRow::Local {
+        row: row.clone(),
+        target: None,
+    };
 
-    let view_row = ViewRow::Detached { row: row.clone() };
     let (title, detail) = preview_heading(&view_row);
 
     assert_eq!(endable_process_pid(&row), Some(42));
@@ -460,213 +490,49 @@ fn an_external_process_names_its_agent_build_and_saved_pane() {
     );
     assert_eq!(title, "Claude Code · Fix the reboot path");
     let detail = detail.expect("an external process has details");
-    assert!(detail.contains("Local"));
     assert!(detail.contains("997f1e1c"));
     assert!(detail.contains("M3RP / WA3P"));
     assert!(process_warning(&row).is_some_and(|warning| warning.contains("PID 42")));
 }
 
 #[test]
-fn a_managed_error_stays_visible_without_runs() {
-    let rows = managed_view_rows(&[], Some("sign in required"), "");
-    assert_eq!(kinds(&rows), ["managed-header", "managed-error"]);
+fn local_session_details_include_last_activity_age_and_date() {
+    let rows = build_rows(&[], &[], &[past("old", "/proj", 5)]);
+    let row = rows.first().expect("the past session is indexed").clone();
+
+    let (_, detail) = preview_heading(&ViewRow::Local { row, target: None });
+    let detail = detail.expect("a local session has details");
+
+    assert!(detail.contains("Local"));
+    assert!(detail.contains("last active"));
+    assert!(detail.contains("1970-"));
 }
 
 #[test]
-fn an_unreachable_supervisor_is_one_row_in_the_detached_section() {
-    assert_eq!(
-        kinds(&supervisor_rows(&DetachedListError::Unreachable(
-            "refused".into()
-        ))),
-        vec!["detached-header:0", "unreachable"]
+fn row_keys_stay_stable_when_a_newer_session_is_inserted() {
+    let older = past("older", "/work", 10);
+    let old_rows = layout(
+        &[],
+        &[],
+        std::slice::from_ref(&older),
+        None,
+        SessionFilter::Past,
+        "",
     );
-    assert!(supervisor_rows(&DetachedListError::Unsupported).is_empty());
-}
-
-#[test]
-fn view_rows_takes_folder_membership_from_the_snapshot_not_the_paths() {
-    let panes = vec![pane(0, "/proj")];
-    let history = vec![past("near", "/proj", 1), past("far", "/elsewhere", 2)];
-    let rows = build_rows(&panes, &[], &history);
-    let far = rows
+    let old_key = old_rows
         .iter()
-        .position(|row| row.session_id.as_deref() == Some("far"))
-        .expect("the far session is a row");
-    let membership = PastByFolder::from([(PathBuf::from("/proj"), vec![far])]);
-    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj"))]);
+        .find(|row| matches!(row, ViewRow::Local { .. }))
+        .map(ViewRow::key)
+        .unwrap();
 
-    let view = view_rows(&panes, &rows, &membership, &expanded, "");
-
-    assert_eq!(
-        kinds(&view),
-        vec!["tab:tab 0", "pane:0", "toggle:1:true", "past:far"]
-    );
-}
-
-#[test]
-fn past_by_folder_counts_subfolders_and_skips_other_folders() {
-    let panes = vec![pane(0, "/proj"), pane(1, "/proj"), pane(2, "")];
-    let history = vec![
-        past("top", "/proj", 1),
-        past("nested", "/proj/sub", 2),
-        past("other", "/elsewhere", 3),
-    ];
-    let rows = build_rows(&panes, &[], &history);
-
-    let membership = past_by_folder(&panes, &rows);
-
-    assert_eq!(
-        membership.len(),
-        1,
-        "one entry per distinct, non-empty folder"
-    );
-    let ids: Vec<&str> = membership[&PathBuf::from("/proj")]
-        .iter()
-        .filter_map(|index| rows[*index].session_id.as_deref())
-        .collect();
-    assert_eq!(ids, vec!["top", "nested"]);
-}
-
-fn same_tab(tab_index: usize, cwd: &str) -> PaneAgentInput {
-    PaneAgentInput {
-        tab_title: format!("tab {tab_index}"),
-        ..pane(tab_index, cwd)
-    }
-}
-
-fn past_targets(rows: &[ViewRow]) -> Vec<(String, PaneViewLocator)> {
-    rows.iter()
-        .filter_map(|row| match row {
-            ViewRow::Past { row, target } => Some((row.session_id.clone()?, *target)),
-            ViewRow::TabHeader { .. }
-            | ViewRow::Pane { .. }
-            | ViewRow::PastToggle { .. }
-            | ViewRow::DetachedHeader { .. }
-            | ViewRow::Detached { .. }
-            | ViewRow::ManagedHeader
-            | ViewRow::Managed { .. }
-            | ViewRow::ManagedError(_)
-            | ViewRow::SupervisorUnreachable => None,
-        })
-        .collect()
-}
-
-#[test]
-fn a_folders_past_is_listed_once_per_tab_under_its_last_pane() {
-    let first = same_tab(0, "/proj");
-    let other = same_tab(0, "/other");
-    let last = same_tab(0, "/proj");
-    let panes = vec![first, other, last.clone()];
-    let history = vec![past("top", "/proj", 1), past("nested", "/proj/sub", 2)];
-    let rows = build_rows(&panes, &[], &history);
-
-    let collapsed = layout(&panes, &rows, &ExpandedFolders::new(), "");
-    assert_eq!(
-        kinds(&collapsed),
-        vec!["tab:tab 0", "pane:0", "pane:0", "pane:0", "toggle:2:false"]
+    let new_rows = layout(
+        &[],
+        &[],
+        &[past("newer", "/work", 1), older],
+        None,
+        SessionFilter::Past,
+        "",
     );
 
-    let expanded = ExpandedFolders::from([(0, PathBuf::from("/proj"))]);
-    let open = layout(&panes, &rows, &expanded, "");
-    assert_eq!(
-        kinds(&open),
-        vec![
-            "tab:tab 0",
-            "pane:0",
-            "pane:0",
-            "pane:0",
-            "toggle:2:true",
-            "past:top",
-            "past:nested"
-        ]
-    );
-    assert_eq!(
-        past_targets(&open),
-        vec![
-            ("top".into(), last.locator),
-            ("nested".into(), last.locator)
-        ],
-        "past rows resume in the pane they are listed under"
-    );
-}
-
-#[test]
-fn expanding_a_folder_in_one_tab_leaves_the_same_folder_in_another_collapsed() {
-    let panes = vec![pane(0, "/proj"), pane(1, "/proj")];
-    let history = vec![past("top", "/proj", 1)];
-    let rows = build_rows(&panes, &[], &history);
-
-    let expanded = ExpandedFolders::from([(1, PathBuf::from("/proj"))]);
-    let view = layout(&panes, &rows, &expanded, "");
-
-    assert_eq!(
-        kinds(&view),
-        vec![
-            "tab:tab 0",
-            "pane:0",
-            "toggle:1:false",
-            "tab:tab 1",
-            "pane:1",
-            "toggle:1:true",
-            "past:top"
-        ]
-    );
-}
-
-#[test]
-fn a_query_lists_matching_past_rows_once_per_tab_and_folder() {
-    let panes = vec![same_tab(0, "/proj"), same_tab(0, "/proj"), pane(1, "/proj")];
-    let history = vec![past("needle", "/proj", 1), past("hay", "/proj", 2)];
-    let rows = build_rows(&panes, &[], &history);
-
-    let view = layout(&panes, &rows, &ExpandedFolders::new(), "needle");
-
-    assert_eq!(
-        kinds(&view),
-        vec![
-            "tab:tab 0",
-            "pane:0",
-            "toggle:1:true",
-            "past:needle",
-            "tab:tab 1",
-            "pane:1",
-            "toggle:1:true",
-            "past:needle"
-        ]
-    );
-}
-
-#[test]
-fn every_row_has_its_own_key_and_keeps_it_when_rows_are_added_before_it() {
-    let running = PaneAgentInput {
-        running: Some(claude("r", "/proj")),
-        ..same_tab(0, "/proj")
-    };
-    let panes = vec![running, same_tab(0, "/proj"), pane(1, "/proj")];
-    let history = vec![past("old", "/proj", 5)];
-    let detached_sessions = [detached(1, "one"), detached(2, "two")];
-    let expanded =
-        ExpandedFolders::from([(0, PathBuf::from("/proj")), (1, PathBuf::from("/proj"))]);
-    let rows = build_rows(&panes, &detached_sessions, &history);
-    let before = layout(&panes, &rows, &expanded, "");
-
-    let keys: Vec<RowKey> = before.iter().map(ViewRow::key).collect();
-    let unique: HashSet<&RowKey> = keys.iter().collect();
-    assert_eq!(unique.len(), keys.len(), "no two rows share a key");
-
-    let newer_history = vec![past("new", "/proj", 1), past("old", "/proj", 5)];
-    let rows = build_rows(&panes, &detached_sessions, &newer_history);
-    let after = layout(&panes, &rows, &expanded, "");
-    let old_before = before
-        .iter()
-        .position(|row| matches!(row, ViewRow::Past { row, .. } if row.session_id.as_deref() == Some("old")))
-        .expect("the old session is listed");
-    let old_after = after
-        .iter()
-        .position(|row| row.key() == before[old_before].key())
-        .expect("the old session keeps its key");
-    assert_ne!(old_before, old_after, "the new session moved it down");
-    assert!(
-        matches!(&after[old_after], ViewRow::Past { row, .. } if row.session_id.as_deref() == Some("old"))
-    );
+    assert!(new_rows.iter().any(|row| row.key() == old_key));
 }

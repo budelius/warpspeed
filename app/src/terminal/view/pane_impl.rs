@@ -790,12 +790,17 @@ impl TerminalView {
                     .into_item(),
             );
         }
-        if agent_ctrl_actions.can_start_agent {
-            items.push(
-                MenuItemFields::new("Start in Obachan")
-                    .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
-                    .into_item(),
-            );
+        if !model.shared_session_status().is_viewer()
+            && cfg!(all(feature = "local_fs", feature = "local_tty"))
+        {
+            let mut start_in_obachan = MenuItemFields::new("Start in Obachan")
+                .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
+                .with_disabled(!agent_ctrl_actions.can_start_agent);
+            if !agent_ctrl_actions.can_start_agent {
+                start_in_obachan = start_in_obachan
+                    .with_tooltip("Open a local Git repository in this pane to start in Obachan");
+            }
+            items.push(start_in_obachan.into_item());
         }
         // Every agent-session action works on local shells and agents.
         if !model.shared_session_status().is_viewer() && cfg!(feature = "local_tty") {

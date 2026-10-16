@@ -33,6 +33,7 @@ fn single_pane_background_menu_offers_obachan_and_sessions() {
                 start.on_select_action(),
                 Some(TerminalAction::StartAgentOnAgentCtrl)
             ));
+            assert!(!start.is_disabled());
             let sessions = items
                 .iter()
                 .filter_map(MenuItem::fields)
@@ -107,7 +108,7 @@ fn single_pane_input_menu_offers_obachan_and_sessions() {
 }
 
 #[test]
-fn background_menu_outside_a_repo_keeps_sessions_without_obachan() {
+fn background_menu_outside_a_repo_disables_obachan() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let directory = TempDir::new().unwrap();
@@ -127,10 +128,20 @@ fn background_menu_outside_a_repo_keeps_sessions_without_obachan() {
                 item.fields().and_then(MenuItemFields::on_select_action),
                 Some(TerminalAction::ShowAgentSessions)
             )));
-            assert!(!items.iter().any(|item| matches!(
-                item.fields().and_then(MenuItemFields::on_select_action),
+            let start = items
+                .iter()
+                .filter_map(MenuItem::fields)
+                .find(|fields| fields.label() == "Start in Obachan")
+                .expect("Obachan should remain discoverable outside a repository");
+            assert!(matches!(
+                start.on_select_action(),
                 Some(TerminalAction::StartAgentOnAgentCtrl)
-            )));
+            ));
+            assert!(start.is_disabled());
+            assert_eq!(
+                start.tooltip_text(),
+                Some("Open a local Git repository in this pane to start in Obachan")
+            );
         });
     });
 }

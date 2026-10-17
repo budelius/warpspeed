@@ -1528,6 +1528,7 @@ fn render_row(
     .on_click(move |ctx, _, _| {
         ctx.dispatch_typed_action(AgentSessionsViewAction::Select(key.clone()));
     })
+    .with_defer_events_to_children()
     .finish()
 }
 

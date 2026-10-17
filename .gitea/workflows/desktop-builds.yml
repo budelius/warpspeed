@@ -225,14 +225,15 @@ jobs:
           persist-credentials: false
           github-server-url: http://gitea-http.gitea.svc:3000
 
+      # v4 rejects non-GitHub server URLs before contacting Gitea's compatible artifact service.
       - name: Download macOS artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
         with:
           name: desktop-macos-${{ github.sha }}
           path: release-assets
 
       - name: Download Windows artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
         with:
           name: desktop-windows-${{ github.sha }}
           path: release-assets

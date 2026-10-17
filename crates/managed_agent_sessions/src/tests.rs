@@ -1503,7 +1503,8 @@ fn a_running_run_is_attached_without_a_pause_notice() {
 }
 
 #[test]
-fn only_allowlisted_origins_override_the_managed_session_base_url() {
+fn staging_uses_the_public_api_and_rejects_untrusted_origin_overrides() {
+    assert_eq!(STAGING_BASE_URL, "https://agents-dev.obachan.dev");
     assert_eq!(staging_base_url(None), STAGING_BASE_URL);
     assert_eq!(staging_base_url(Some("")), STAGING_BASE_URL);
     assert_eq!(

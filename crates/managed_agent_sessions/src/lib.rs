@@ -24,12 +24,10 @@ pub use preview_stream::RunPreviewStream;
 mod tui;
 mod zitadel_auth;
 
-const STAGING_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
-/// Debug override of the staging managed-session origin, used to exercise the AgentCtrl public
-/// API before WarpSpeed switches to it. Only these origins are accepted because every request
-/// carries the user's access token.
+const STAGING_BASE_URL: &str = "https://agents-dev.obachan.dev";
+/// Keep existing acceptance scripts working without allowing credentials to reach another origin.
 const BASE_URL_OVERRIDE_ENV: &str = "STOZN_BASE_URL";
-const BASE_URL_OVERRIDES: &[&str] = &["https://agents-dev.obachan.dev"];
+const BASE_URL_OVERRIDES: &[&str] = &[STAGING_BASE_URL];
 const STAGING_FLEET_ID: &str = "stoz3n-agent-ctrl-staging";
 const SUPPORTED_PROTOCOL: u32 = 1;
 const BOOKMARK_FORMAT: u32 = 1;

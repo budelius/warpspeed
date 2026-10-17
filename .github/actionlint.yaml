@@ -1,5 +1,7 @@
 self-hosted-runner:
   labels:
+    - macos-arm64-ext
     - ubuntu-release
+    - windows-amd64
 
 config-variables: null

@@ -1,0 +1,242 @@
+name: Desktop rolling builds
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-rolling-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "3"
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C debuginfo=0 --cfg=web_sys_unstable_apis"
+  WARP_SKIP_SUDO_PROMPT: "1"
+
+jobs:
+  macos:
+    name: Build macOS arm64 app
+    runs-on: macos-arm64-ext
+    timeout-minutes: 180
+
+    steps:
+      - name: Prepare host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in "$HOME/.cargo/bin" /opt/homebrew/bin /usr/local/bin; do
+            echo "$dir" >> "$GITHUB_PATH"
+          done
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v git-lfs || brew install git-lfs
+          git lfs install --skip-repo
+          for tool in cargo rustup cargo-bundle xcodebuild; do
+            printf '%s: %s\n' "$tool" "$(command -v "$tool" || echo missing)"
+          done
+
+      - name: Check free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          free_gib=$(( $(df -k "$PWD" | awk 'NR==2 {print $4}') / 1024 / 1024 ))
+          echo "Free: ${free_gib} GiB"
+          if (( free_gib < 15 )); then
+            echo "::error::Only ${free_gib} GiB free on the runner; a WarpSpeed build needs 15 GiB."
+            exit 1
+          fi
+
+      - name: Check out source and LFS assets
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: Install release tools
+        shell: bash
+        run: ./script/install_cargo_release_deps
+
+      - name: Build app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          workspace=$PWD
+          watchdog_log=$(mktemp)
+          (
+            while sleep 15; do
+              if (( $(df -k "$workspace" | awk 'NR==2 {print $4}') < 3 * 1024 * 1024 )); then
+                echo "::error::Under 3 GiB free on the runner; stopping the build."
+                pkill -TERM -f "$workspace/" || true
+                exit
+              fi
+            done
+          ) </dev/null >"$watchdog_log" 2>&1 &
+          watchdog=$!
+          trap 'kill $watchdog 2>/dev/null || true; cat "$watchdog_log"' EXIT
+          ./script/bundle --channel oss --debug --nouniversal --selfsign --no-dmg
+          codesign --verify --deep --strict target/debug/bundle/osx/WarpOss.app
+
+      - name: Package app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          printf '%s\n' "$GITHUB_SHA" > ci-artifacts/WarpOss-macos-arm64.source-commit.txt
+          ditto -c -k --sequesterRsrc --keepParent \
+            target/debug/bundle/osx/WarpOss.app ci-artifacts/WarpOss-macos-arm64.zip
+          shasum -a 256 ci-artifacts/WarpOss-macos-arm64.zip \
+            > ci-artifacts/WarpOss-macos-arm64.zip.sha256
+
+      - name: Stage macOS artifact
+        uses: actions/upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: desktop-macos-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: error
+          retention-days: 2
+
+  windows:
+    name: Build Windows x64 installer
+    runs-on: windows-amd64
+    timeout-minutes: 240
+
+    steps:
+      - name: Prepare host tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolDirectories = @(
+              (Join-Path $HOME '.cargo\bin'),
+              (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6'),
+              'C:\Program Files\Git\cmd',
+              'C:\Program Files\nodejs'
+          )
+          $protoc = Get-Command protoc -ErrorAction Stop
+          $toolDirectories += Split-Path -Parent $protoc.Source
+          $llvmCandidates = @(
+              (Join-Path $env:ProgramFiles 'LLVM\bin\libclang.dll'),
+              (Join-Path ${env:ProgramFiles(x86)} 'LLVM\bin\libclang.dll')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+          $winGetPackages = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+          if (Test-Path -LiteralPath $winGetPackages -PathType Container) {
+              $llvmCandidates += Get-ChildItem $winGetPackages -Filter libclang.dll -File -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object FullName -Like '*LLVM.LLVM*\bin\libclang.dll' |
+                  Select-Object -ExpandProperty FullName
+          }
+          $llvm = Get-Item ($llvmCandidates | Select-Object -First 1) -ErrorAction Stop
+          $toolDirectories += $llvm.DirectoryName
+          $toolDirectories = @($toolDirectories | Select-Object -Unique)
+          foreach ($directory in $toolDirectories) {
+              if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+                  throw "Required tool directory does not exist: $directory"
+              }
+              $directory >> $env:GITHUB_PATH
+          }
+          $env:PATH = "$($toolDirectories -join ';');$env:PATH"
+          "LIBCLANG_PATH=$($llvm.DirectoryName)" >> $env:GITHUB_ENV
+          git lfs install --skip-repo
+          foreach ($tool in @('cargo', 'rustup', 'cmake', 'protoc', 'ISCC', 'node')) {
+              $command = Get-Command $tool -ErrorAction Stop
+              Write-Output "$tool`: $($command.Source)"
+          }
+
+      - name: Check free disk space
+        shell: powershell
+        run: |
+          $freeGiB = [math]::Floor((Get-PSDrive -Name $PWD.Drive.Name).Free / 1GB)
+          Write-Output "Free: $freeGiB GiB"
+          if ($freeGiB -lt 50) {
+              throw "Only $freeGiB GiB free on the Windows runner; a WarpSpeed build needs 50 GiB."
+          }
+
+      - name: Check out source and LFS assets
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: Install release tools
+        shell: bash
+        run: ./script/install_cargo_release_deps --no-build-deps
+
+      - name: Build installer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $branch = $env:GITHUB_REF_NAME -replace '[^A-Za-z0-9._-]', '-'
+          $release = "$branch-$($env:GITHUB_SHA.Substring(0, 8))"
+          & .\script\windows\bundle.ps1 -CHANNEL oss -ARCH x64 -RELEASE_TAG $release
+          if ($LASTEXITCODE -ne 0) {
+              throw "Windows bundle failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package installer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactDirectory = Join-Path $PWD 'ci-artifacts'
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+          $installer = Join-Path $PWD 'script\windows\Output\WarpOssSetup.exe'
+          $destination = Join-Path $artifactDirectory 'WarpOss-windows-x64-setup.exe'
+          Copy-Item -LiteralPath $installer -Destination $destination
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+              "$destination.sha256",
+              "$hash  $([IO.Path]::GetFileName($destination))`n",
+              [Text.Encoding]::ASCII
+          )
+          [IO.File]::WriteAllText(
+              (Join-Path $artifactDirectory 'WarpOss-windows-x64.source-commit.txt'),
+              "$env:GITHUB_SHA`n",
+              [Text.Encoding]::ASCII
+          )
+
+      - name: Stage Windows artifact
+        uses: actions/upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: desktop-windows-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: error
+          retention-days: 2
+
+  publish:
+    name: Publish latest branch downloads
+    needs: [macos, windows]
+    if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out release publisher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          lfs: false
+          persist-credentials: false
+          github-server-url: http://gitea-http.gitea.svc:3000
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: desktop-macos-${{ github.sha }}
+          path: release-assets
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: desktop-windows-${{ github.sha }}
+          path: release-assets
+
+      - name: Publish rolling Gitea release
+        shell: bash
+        run: python3 script/ci/publish_gitea_rolling_release.py release-assets

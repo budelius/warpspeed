@@ -543,27 +543,23 @@ impl Hoverable {
         //
         // Note: we intentionally compare the `hovered` property
         // and not the `is_mouse_over_element` property.
-        let was_hovered = self.state().is_hovered;
+        let mut state = self.state();
+        let was_hovered = state.is_hovered;
         if was_hovered == is_hovered {
             return false;
         }
-        self.state().is_hovered = is_hovered;
 
         // We should only handle this event if not both the previous and current instance of the state change
         // is triggered by a synthetic mouse event. This is to prevent infinite loops when a child element
         // conditional on the state of the hoverable might in return trigger the state change of the hoverable.
         //
         // TODO: we should re-consider this approach. It can lead to missed `on_hover` dispatches.
-        let was_synthetic = mem::replace(
-            &mut self.state().last_event_is_synthetic_hover,
-            is_synthetic,
-        );
+        let was_synthetic = mem::replace(&mut state.last_event_is_synthetic_hover, is_synthetic);
         if was_synthetic && is_synthetic {
-            log::warn!(
-                "Not handling MouseMoved event in Hoverable due to back-to-back synthetic events."
-            );
             return false;
         }
+        state.is_hovered = is_hovered;
+        drop(state);
 
         // Skip synthetic hover-out events if configured to do so.
         if !is_hovered && is_synthetic && self.skip_synthetic_hover_out {

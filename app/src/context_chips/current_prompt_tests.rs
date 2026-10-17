@@ -45,6 +45,7 @@ use crate::terminal::model::block::BlockMetadata;
 use crate::terminal::model::session::{
     CommandExecutor, ExecuteCommandOptions, SessionId, SessionInfo, Sessions,
 };
+use crate::terminal::model_events::{AnsiHandlerEvent, ModelEvent, ModelEventDispatcher};
 use crate::terminal::session_settings::{
     AgentToolbarChipSelection, CLIAgentToolbarChipSelection, SessionSettings, ToolbarChipSelection,
 };
@@ -342,6 +343,109 @@ fn test_environment_updates_only_refresh_matching_session() {
                 ChipUpdateStatus::Cached
             );
         });
+    });
+}
+
+#[test]
+fn test_live_environment_refresh_ignores_in_band_precmd() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(456);
+        app.add_singleton_model(|_| {
+            Prompt::mock_with(
+                [ContextChipKind::KubernetesContext],
+                false,
+                WarpPromptSeparator::None,
+            )
+        });
+        app.add_singleton_model(SessionSettings::new_with_defaults);
+        app.add_singleton_model(|_| History::new(vec![]));
+        app.add_singleton_model(|_ctx| {
+            settings::PublicPreferences::new(
+                Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+            )
+        });
+        app.add_singleton_model(|_| {
+            settings::PrivatePreferences::new(
+                Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+            )
+        });
+        app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+        app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+        app.add_singleton_model(AppTelemetryContextProvider::new_context_provider);
+        app.add_singleton_model(AuthManager::new_for_test);
+        app.add_singleton_model(|_| crate::settings::manager::SettingsManager::default());
+        crate::settings::InputSettings::register(&mut app);
+        app.update(crate::settings::AISettings::register_and_subscribe_to_events);
+        app.add_singleton_model(crate::workspaces::user_workspaces::UserWorkspaces::default_mock);
+        #[cfg(windows)]
+        app.add_singleton_model(SystemInfo::new);
+
+        let executor = Arc::new(RecordingCommandExecutor::default());
+        let sessions = app.add_model(|ctx| {
+            let mut sessions = Sessions::new_for_test().with_command_executor(executor.clone());
+            sessions.initialize_bootstrapped_session(
+                SessionInfo::new_for_test().with_id(session_id),
+                "test command".to_string(),
+                vec![],
+                None,
+                ctx,
+            );
+            sessions
+        });
+        let session = app
+            .read(|ctx| sessions.as_ref(ctx).get(session_id))
+            .expect("session should exist");
+        session.set_external_commands(["kubectl"]);
+
+        let (_model_event_tx, model_event_rx) = async_channel::unbounded();
+        let sessions_for_events = sessions.clone();
+        let model_events = app.add_model(move |ctx| {
+            ModelEventDispatcher::new(model_event_rx, sessions_for_events, ctx)
+        });
+        let sessions_for_prompt = sessions.clone();
+        let current_prompt = app.add_model(move |ctx| CurrentPrompt::new(sessions_for_prompt, ctx));
+        current_prompt
+            .update(&mut app, |current_prompt, ctx| {
+                current_prompt.latest_context = Some(PromptContext {
+                    active_block_metadata: BlockMetadata::new(
+                        Some(session_id),
+                        Some("/tmp/project".to_string()),
+                    ),
+                    environment: Environment::default(),
+                });
+                current_prompt.update_states_with_new_context(ctx);
+                current_prompt.await_generators(ctx)
+            })
+            .await;
+        executor.clear();
+
+        current_prompt.update(&mut app, |current_prompt, ctx| {
+            current_prompt.handle_model_event(
+                model_events.clone(),
+                &ModelEvent::Handler(AnsiHandlerEvent::Precmd {
+                    environment_updated: false,
+                }),
+                ctx,
+            );
+        });
+        assert!(executor.commands.lock().is_empty());
+
+        current_prompt
+            .update(&mut app, |current_prompt, ctx| {
+                current_prompt.handle_model_event(
+                    model_events,
+                    &ModelEvent::Handler(AnsiHandlerEvent::Precmd {
+                        environment_updated: true,
+                    }),
+                    ctx,
+                );
+                current_prompt.await_generators(ctx)
+            })
+            .await;
+        assert_eq!(
+            executor.commands.lock().as_slice(),
+            ["kubectl config current-context"]
+        );
     });
 }
 

@@ -37,7 +37,7 @@ use crate::terminal::event::BlockType;
 use crate::terminal::model::block::{Block, BlockMetadata};
 use crate::terminal::model::session::{ExecuteCommandOptions, Session, Sessions, SessionsEvent};
 use crate::terminal::model::terminal_model::TerminalModel;
-use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
+use crate::terminal::model_events::{AnsiHandlerEvent, ModelEvent, ModelEventDispatcher};
 use crate::terminal::session_settings::{
     SessionSettings, SessionSettingsChangedEvent, ToolbarChipSelection,
 };
@@ -230,20 +230,20 @@ impl CurrentPrompt {
             &SessionSettings::handle(ctx),
             Self::handle_session_settings_changed,
         );
-        ctx.subscribe_to_model(&sessions, |me, _, event, ctx| {
-            if let SessionsEvent::EnvironmentVariablesUpdated { session_id } = event
-                && me
-                    .latest_context
-                    .as_ref()
-                    .and_then(|context| context.active_block_metadata.session_id())
-                    == Some(*session_id)
-            {
-                me.update_states_with_new_context(ctx);
-            }
-        });
-
         if let Some((model_events, _)) = &live_session {
             ctx.subscribe_to_model(model_events, Self::handle_model_event);
+        } else {
+            ctx.subscribe_to_model(&sessions, |me, _, event, ctx| {
+                if let SessionsEvent::EnvironmentVariablesUpdated { session_id } = event
+                    && me
+                        .latest_context
+                        .as_ref()
+                        .and_then(|context| context.active_block_metadata.session_id())
+                        == Some(*session_id)
+                {
+                    me.update_states_with_new_context(ctx);
+                }
+            });
         }
 
         // we cannot simply capture the strong references in subscriptions, or we risk having a reference cycle.
@@ -1369,6 +1369,15 @@ impl CurrentPrompt {
         event: &ModelEvent,
         ctx: &mut ModelContext<Self>,
     ) {
+        if matches!(
+            event,
+            ModelEvent::Handler(AnsiHandlerEvent::Precmd {
+                environment_updated: true
+            })
+        ) {
+            self.update_states_with_new_context(ctx);
+        }
+
         if let ModelEvent::AfterBlockCompleted(after_block_completed) = event
             && let BlockType::User(user_block_completed) = &after_block_completed.block_type
             && let Some(terminal_model) = &self

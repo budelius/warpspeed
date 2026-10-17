@@ -664,6 +664,33 @@ fn test_hoverable_element_hover_handling_with_hover_in_out_delay() {
     });
 }
 
+#[test]
+fn consecutive_synthetic_hover_flips_leave_hover_state_unchanged() {
+    App::test((), |mut app| async move {
+        let (window_id, _) = app.add_window(WindowStyle::NotStealFocus, |_| View::default());
+        let mut presenter = Presenter::new(window_id);
+        let hover_state = MouseStateHandle::default();
+        hover_state.lock().unwrap().last_event_is_synthetic_hover = true;
+        let assertion_state = hover_state.clone();
+        let mut hoverable = Hoverable::new(hover_state, |_| {
+            Text::new_inline("hover target", FamilyId(0), 10.).finish()
+        });
+
+        app.update(move |ctx| {
+            let mut event_ctx = presenter.mock_event_context(ctx.font_cache());
+            assert!(!hoverable.handle_mouse_moved_without_delay(
+                true,
+                vec2f(1., 1.),
+                true,
+                &mut event_ctx,
+                ctx,
+            ));
+        });
+
+        assert!(!assertion_state.lock().unwrap().is_hovered());
+    })
+}
+
 // Why would Elements that haven't been painted need to receive any mouse events?
 // Shouldn't paint happen BEFORE any user interaction? Yes, but remember that Elements are
 // disposable, and may get discarded and created anew between invalidations. Most of the time,

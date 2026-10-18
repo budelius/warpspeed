@@ -772,8 +772,7 @@ fn write_checkpoint_atomically_before_replace(
         bail!("New checkpoint did not validate as version {SESSION_FORMAT_VERSION}");
     }
     before_replace()?;
-    temp.persist(path)
-        .map_err(|error| error.error)
+    persist_temp_file(temp, path)
         .with_context(|| format!("Failed to replace stored session at {path:?}"))?;
     sync_parent_directory(path)?;
     Ok(())

@@ -50,7 +50,20 @@ Run on 2026-10-18 against a copied 142,723,686-byte STOZN V1 checkpoint with the
 - child processes during parse/migration/reread: 0;
 - warnings in captured benchmark output: 0.
 
-The source checkpoint was opened read-only and copied to a temporary directory. The test retained and checksum-validated the temporary `.v1.bak`; it did not modify the user profile. The release-build rollout matrix must repeat peak-memory sampling before the active profile is migrated.
+The source checkpoint was opened read-only and copied to a temporary directory. The test retained and checksum-validated the temporary `.v1.bak`; it did not modify the user profile.
+
+The release-mode test was repeated after integrating the latest `dev` branch:
+
+- bounded V1 parse: 658 ms;
+- validated migration, including rollback copy: 424 ms;
+- total first migration path: 1,082 ms;
+- V2 size: 14,886,364 bytes;
+- V2 reread: 85 ms;
+- retained decoded output: 11,079,008 bytes;
+- sampled peak working set: 21,917,696 bytes;
+- sampled peak private memory: 11,104,256 bytes;
+- child processes during parse/migration/reread: 0;
+- warnings in captured benchmark output: 0.
 
 ## 3. Restoration side-effect validation
 

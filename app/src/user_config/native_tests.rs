@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{
     Overwrite, SaveLaunchConfigError, load_launch_configs, overwrite_launch_config_window_in_dir,
-    write_launch_config_file,
+    write_launch_config_file, write_launch_configs,
 };
 use crate::launch_configs::launch_config::{
     LaunchConfig, LaunchConfigWindowSource, WindowTemplate,
@@ -30,6 +30,18 @@ fn read_configs(path: &std::path::Path) -> Vec<LaunchConfig> {
         .map(LaunchConfig::deserialize)
         .collect::<Result<Vec<_>, _>>()
         .expect("launch config documents should parse")
+}
+
+#[test]
+fn new_launch_publish_does_not_replace_a_file_created_by_another_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("existing.yaml");
+    fs::write(&path, "name: Original\nwindows: []\n").unwrap();
+    assert!(write_launch_configs(&path, &[config("Replacement", "/new")], Overwrite::No).is_err());
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "name: Original\nwindows: []\n"
+    );
 }
 
 #[test]

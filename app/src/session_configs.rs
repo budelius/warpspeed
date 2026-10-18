@@ -16,6 +16,9 @@ use crate::launch_configs::launch_config::{
 };
 use crate::tab_configs::TabConfig;
 
+#[cfg(feature = "local_fs")]
+pub(crate) mod save;
+
 const SESSION_CONFIG_VERSION: u32 = 1;
 
 static PRESERVE_OWNERS_FOR_RESTART: AtomicBool = AtomicBool::new(false);

@@ -396,6 +396,92 @@ fn launch_config_source_is_preserved_in_window_snapshots() {
     });
 }
 
+#[test]
+fn save_picker_preselects_the_current_session_configuration() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let source = LaunchConfigWindowSource {
+            path: "session_configurations/IWAKAN.toml".into(),
+            document_index: 7,
+            window_index: 0,
+            config_name: "IWAKAN".into(),
+        };
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.launch_config_source = Some(source.clone());
+            workspace.open_launch_config_save_modal(ctx);
+        });
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(
+                workspace
+                    .launch_config_save_modal
+                    .view
+                    .as_ref(ctx)
+                    .selected_target(),
+                Some(&source)
+            );
+            assert_eq!(workspace.launch_config_source(), Some(&source));
+        });
+    });
+}
+
+#[test]
+fn save_picker_preselects_the_exact_launch_configuration_window() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let source = LaunchConfigWindowSource {
+            path: "launch_configurations/workspaces.yaml".into(),
+            document_index: 2,
+            window_index: 3,
+            config_name: "IWAKAN".into(),
+        };
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.launch_config_source = Some(source.clone());
+            workspace.open_launch_config_save_modal(ctx);
+        });
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(
+                workspace
+                    .launch_config_save_modal
+                    .view
+                    .as_ref(ctx)
+                    .selected_target(),
+                Some(&source)
+            );
+        });
+    });
+}
+
+#[test]
+fn save_picker_does_not_acquire_ownership_of_an_updated_configuration() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let mut config =
+            crate::launch_configs::launch_config::make_mock_single_window_launch_config();
+        config.source = Some(crate::launch_configs::launch_config::LaunchConfigSource {
+            path: "session_configurations/other.toml".into(),
+            document_index: 3,
+        });
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_launch_config_save_modal_event(
+                &LaunchConfigModalEvent::SuccessfullySavedConfig {
+                    launch_config: config.clone(),
+                    created: false,
+                },
+                ctx,
+            );
+            assert_eq!(workspace.launch_config_source(), None);
+            assert!(
+                WarpConfig::as_ref(ctx)
+                    .launch_and_session_configs()
+                    .any(|loaded| loaded == &config)
+            );
+        });
+    });
+}
+
 fn transferred_tab_workspace(
     app: &mut App,
     vertical_tabs_panel_open: bool,

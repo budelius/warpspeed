@@ -290,22 +290,6 @@ impl super::WarpConfig {
             Overwrite::No,
         )
     }
-
-    /// Saves a launch configuration over the file of that name, replacing what is there.  Any
-    /// other configurations that file holds are preserved.  A missing file is created, so that
-    /// renaming between a failed save and the overwrite still does the obvious thing.
-    #[cfg(feature = "local_fs")]
-    pub fn overwrite_launch_config(
-        file_name: String,
-        launch_config: LaunchConfig,
-    ) -> std::result::Result<SavedLaunchConfig, SaveLaunchConfigError> {
-        write_launch_config_file(
-            &crate::user_config::launch_configs_dir(),
-            file_name,
-            launch_config,
-            Overwrite::Yes,
-        )
-    }
 }
 
 /// Where a launch configuration ended up on disk.
@@ -369,7 +353,16 @@ fn write_launch_config_file(
         (vec![launch_config], 0)
     };
 
-    write_launch_configs(&path, &configs)?;
+    write_launch_configs(&path, &configs, overwrite).map_err(|error| {
+        if error
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::AlreadyExists)
+        {
+            SaveLaunchConfigError::FileAlreadyExists(file_name.clone())
+        } else {
+            SaveLaunchConfigError::Other(error)
+        }
+    })?;
     Ok(SavedLaunchConfig {
         file_name,
         document_index,
@@ -421,7 +414,7 @@ fn merge_into_existing_launch_configs(
 /// Writes `configs` to `path` through a temporary file, so an interrupted write can't leave a
 /// half-written launch configuration behind.
 #[cfg(feature = "local_fs")]
-fn write_launch_configs(path: &Path, configs: &[LaunchConfig]) -> Result<()> {
+fn write_launch_configs(path: &Path, configs: &[LaunchConfig], overwrite: Overwrite) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("Launch configuration path has no parent"))?;
@@ -437,7 +430,11 @@ fn write_launch_configs(path: &Path, configs: &[LaunchConfig]) -> Result<()> {
         writer.flush()?;
     }
     temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|error| error.error)?;
+    match overwrite {
+        Overwrite::Yes => temp.persist(path),
+        Overwrite::No => temp.persist_noclobber(path),
+    }
+    .map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -472,7 +469,7 @@ fn overwrite_launch_config_window_in_dir(
         .ok_or_else(|| anyhow!("Launch configuration window no longer exists"))?;
     *target = window;
 
-    write_launch_configs(&source_path, &configs)?;
+    write_launch_configs(&source_path, &configs, Overwrite::Yes)?;
 
     let mut updated = configs
         .into_iter()

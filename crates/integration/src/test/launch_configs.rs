@@ -28,7 +28,10 @@ pub fn test_save_current_window_as_launch_config() -> Builder {
     const FILE_NAME: &str = "saved-window.yaml";
 
     new_builder()
-        .with_setup(|_utils| {
+        .with_setup(|utils| {
+            integration_testing::launch_configs::use_test_config_directory(
+                utils.test_dir().join("authored-configs"),
+            );
             std::fs::create_dir_all(integration_testing::launch_configs::launch_configs_dir())
                 .expect("Should be able to create launch configs dir");
         })

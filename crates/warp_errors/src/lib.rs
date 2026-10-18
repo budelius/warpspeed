@@ -36,6 +36,28 @@ pub use self::anyhow::AnyhowErrorExt;
 /// The `target` that is set by log entries from this crate.
 pub const LOG_TARGET: &str = "errors::report_error";
 
+/// Marks the synthetic stack frame added at each `report_error!` call site.
+pub const REPORT_ERROR_LOCATION: &str = "rust_report_error_location";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReportLocation {
+    pub file: &'static str,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl ReportLocation {
+    #[track_caller]
+    pub fn caller() -> Self {
+        let caller = std::panic::Location::caller();
+        Self {
+            file: caller.file(),
+            line: caller.line(),
+            column: caller.column(),
+        }
+    }
+}
+
 /// Controls how often a [`report_error!`] invocation logs errors.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ReportErrorLogMode {
@@ -59,7 +81,7 @@ macro_rules! report_error {
         use $crate::{AnyhowErrorExt as _, ErrorExt as _, LOG_TARGET};
         let err = $err;
         let log_level = if err.is_actionable() {
-            err.report_error();
+            err.report_error($crate::ReportLocation::caller());
             log::Level::Error
         } else {
             log::Level::Warn
@@ -93,7 +115,8 @@ macro_rules! report_error {
         $crate::report_error!(@fields __fields $($fields)*);
         let __suffix = $crate::format_context_suffix(&__fields);
         if err.is_actionable() {
-            $crate::with_error_context(&__fields, || err.report_error());
+            let __location = $crate::ReportLocation::caller();
+            $crate::with_error_context(&__fields, || err.report_error(__location));
             log::log!(target: LOG_TARGET, log::Level::Error, "{:#}{}", err, __suffix);
         } else {
             log::log!(target: LOG_TARGET, log::Level::Warn, "{:#}{}", err, __suffix);
@@ -266,10 +289,50 @@ pub trait ErrorExt: RegisteredError + std::error::Error {
     /// Returns whether or not an error is something that is actionable by our engineering team.
     fn is_actionable(&self) -> bool;
 
-    fn report_error(&self) {
-        #[cfg(feature = "crash_reporting")]
-        sentry::capture_error(self);
+    fn report_error(&self, location: ReportLocation) {
+        with_report_location(location, || {
+            #[cfg(feature = "crash_reporting")]
+            sentry::capture_error(self);
+        });
     }
+}
+
+#[cfg(feature = "crash_reporting")]
+fn with_report_location(location: ReportLocation, report: impl FnOnce()) {
+    sentry::with_scope(
+        |scope| {
+            scope.add_event_processor(move |mut event| {
+                let frame = sentry::protocol::Frame {
+                    function: Some(REPORT_ERROR_LOCATION.into()),
+                    filename: Some(location.file.into()),
+                    lineno: Some(location.line.into()),
+                    colno: Some(location.column.into()),
+                    in_app: Some(true),
+                    ..Default::default()
+                };
+                if let Some(exception) = event.exception.last_mut() {
+                    exception
+                        .stacktrace
+                        .get_or_insert_with(Default::default)
+                        .frames
+                        .push(frame);
+                } else {
+                    event
+                        .stacktrace
+                        .get_or_insert_with(Default::default)
+                        .frames
+                        .push(frame);
+                }
+                Some(event)
+            });
+        },
+        report,
+    );
+}
+
+#[cfg(not(feature = "crash_reporting"))]
+fn with_report_location(_location: ReportLocation, report: impl FnOnce()) {
+    report();
 }
 
 #[cfg(test)]

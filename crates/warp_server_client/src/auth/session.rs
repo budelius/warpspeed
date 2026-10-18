@@ -2,12 +2,14 @@ use std::fmt;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use firebase::FetchAccessTokenResponse;
 use instant::Duration;
 use oauth2::TokenResponse as _;
+use thiserror::Error;
 use url::Url;
 use warp_core::channel::ChannelState;
+use warp_errors::{ErrorExt, register_error};
 use warp_server_auth::auth_state::AuthState;
 use warp_server_auth::credentials::{
     AuthToken, Credentials, FirebaseToken, LoginToken, RefreshToken,
@@ -18,6 +20,22 @@ use warpui_core::r#async::{BoxFuture, Timer};
 use super::UserAuthenticationError;
 
 const FETCH_ACCESS_TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Error)]
+pub enum AuthSessionError {
+    #[error("authenticated requests are unavailable when login is skipped")]
+    LoginSkipped,
+    #[error("authenticated request requires credentials")]
+    MissingCredentials,
+}
+
+impl ErrorExt for AuthSessionError {
+    fn is_actionable(&self) -> bool {
+        false
+    }
+}
+
+register_error!(AuthSessionError);
 
 /// Authentication and authenticated-transport conditions observed by shared client code.
 #[derive(Clone)]
@@ -96,11 +114,11 @@ impl AuthSession {
 
     pub async fn get_or_refresh_access_token(&self) -> Result<AuthToken> {
         if cfg!(feature = "skip_login") {
-            bail!("skip_login enabled; failing all authenticated requests");
+            return Err(AuthSessionError::LoginSkipped.into());
         }
 
         let Some(credentials) = self.auth_state.credentials() else {
-            bail!("missing authentication credentials");
+            return Err(AuthSessionError::MissingCredentials.into());
         };
 
         match credentials {

@@ -762,6 +762,61 @@ fn apply_scroll_multiplier(event: &mut Event, app: &AppContext) {
     }
 }
 
+#[cfg(all(feature = "local_tty", any(unix, windows)))]
+fn terminal_supervisor_listening() {
+    if let Err(error) = warp_logging::init(warp_logging::LogConfig {
+        frontend: warp_logging::LogFrontend::TerminalSupervisor,
+        log_destination: Some(warp_logging::LogDestination::File),
+        ..Default::default()
+    }) {
+        eprintln!("Failed to initialize terminal supervisor logging: {error:#}");
+    }
+    log::info!("Terminal supervisor {} is listening", std::process::id());
+
+    #[cfg(feature = "crash_reporting")]
+    crash_reporting::init_terminal_supervisor_crash_reporting();
+}
+
+#[cfg(all(feature = "local_tty", any(unix, windows)))]
+fn finish_terminal_supervisor(
+    result: Result<warp_terminal::local_tty::supervisor::SupervisorExit>,
+) -> Result<()> {
+    use warp_terminal::local_tty::supervisor::{SupervisorExit, SupervisorExitReason};
+
+    match &result {
+        Ok(SupervisorExit {
+            reason: SupervisorExitReason::Idle,
+            ..
+        }) => {}
+        Ok(SupervisorExit {
+            reason: SupervisorExitReason::ControlChannelClosed,
+            had_live_sessions,
+        }) => {
+            log::error!(
+                "Terminal supervisor control channel closed (live sessions: {had_live_sessions})"
+            );
+            #[cfg(feature = "crash_reporting")]
+            crash_reporting::report_terminal_supervisor_exit(
+                crash_reporting::TerminalSupervisorExit::ControlChannelClosed {
+                    had_live_sessions: *had_live_sessions,
+                },
+            );
+        }
+        Err(error) => {
+            log::error!("Terminal supervisor failed: {error:#}");
+            #[cfg(feature = "crash_reporting")]
+            crash_reporting::report_terminal_supervisor_exit(
+                crash_reporting::TerminalSupervisorExit::Error,
+            );
+        }
+    }
+
+    #[cfg(feature = "crash_reporting")]
+    crash_reporting::uninit_terminal_supervisor_crash_reporting();
+
+    result.map(|_| ())
+}
+
 /// Runs the shared Warp executable as the app or as one of its command-line modes.
 ///
 /// The bundled Warp Control wrapper injects `--warpctrl`, which is dispatched
@@ -776,20 +831,17 @@ pub fn run() -> Result<()> {
     features::init_feature_flags();
     #[cfg(all(feature = "local_tty", windows))]
     if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
-        return warp_terminal::local_tty::windows::supervisor_daemon::run(|| {
-            if let Err(error) = warp_logging::init(warp_logging::LogConfig {
-                frontend: warp_logging::LogFrontend::TerminalSupervisor,
-                log_destination: Some(warp_logging::LogDestination::File),
-                ..Default::default()
-            }) {
-                eprintln!("Failed to initialize terminal supervisor logging: {error:#}");
-            }
-            log::info!("Terminal supervisor {} is listening", std::process::id());
-        });
+        let result = warp_terminal::local_tty::windows::supervisor_daemon::run_with_exit(
+            terminal_supervisor_listening,
+        );
+        return finish_terminal_supervisor(result);
     }
     #[cfg(all(feature = "local_tty", unix))]
     if std::env::args_os().any(|arg| arg == "--terminal-session-supervisor") {
-        return warp_terminal::local_tty::unix_supervisor::supervisor_daemon::run();
+        let result = warp_terminal::local_tty::unix_supervisor::supervisor_daemon::run_with_exit(
+            terminal_supervisor_listening,
+        );
+        return finish_terminal_supervisor(result);
     }
     if let Some(args) = warp_cli::local_control::ControlArgs::from_control_mode_env() {
         #[cfg(windows)]

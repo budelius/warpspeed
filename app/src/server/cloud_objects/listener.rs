@@ -10,6 +10,8 @@ use warpui::r#async::Timer;
 use warpui::{Entity, ModelContext, ModelHandle, RequestState, SingletonEntity};
 
 use super::update_manager::UpdateManager;
+use crate::auth::AuthStateProvider;
+use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::server::retry_strategies::LISTENER_RETRY_STRATEGY;
@@ -55,10 +57,8 @@ pub enum ListenerEvent {}
 /// or edit access was taken for a workflow, etc.)
 pub struct Listener {
     cloud_objects_client: Arc<dyn ObjectClient>,
-    /// Since we only want to start websocket connections if we know the user is
-    /// on a team or has access to cloud objects, we keep track of whether
-    /// or not we should be subscribing for updates. Once we start websockets, we don't stop
-    /// so that the user gets a snappier experience once they start using Warp Drive.
+    /// Tracks whether team membership or cached cloud objects require updates. This intent
+    /// survives logout so a later login can resume the subscription without rebuilding the model.
     should_subscribe_to_updates: bool,
     /// Abort handle for the (retried) future that resolves when the subscription is done.
     current_subscription_abort_handle: Option<AbortHandle>,
@@ -112,6 +112,7 @@ impl Listener {
             Self::handle_user_workspaces_event,
         );
         ctx.subscribe_to_model(&CloudModel::handle(ctx), Self::handle_cloud_model_event);
+        ctx.subscribe_to_model(&AuthManager::handle(ctx), Self::handle_auth_event);
 
         // We need to do a one-time check of cloud objects when starting
         // because the Cloud Model was initialized before this model and we could have populated
@@ -187,9 +188,7 @@ impl Listener {
                 // refreshes here. The paired `CpuWillSleep` event already handled both;
                 // this handler just restarts the websocket so that `on_subscription_ready`
                 // can decide whether to refresh based on the sleep-time gap.
-                if self.should_subscribe_to_updates {
-                    self.get_warp_drive_updates(ctx);
-                }
+                self.start_subscription_if_authorized(ctx);
             }
             SystemStatsEvent::CpuWillSleep => {
                 if let Some(abort_handle) = self.current_subscription_abort_handle.take() {
@@ -215,9 +214,7 @@ impl Listener {
                         abort_handle.abort();
                     }
 
-                    if self.should_subscribe_to_updates {
-                        self.get_warp_drive_updates(ctx);
-                    }
+                    self.start_subscription_if_authorized(ctx);
                 }
 
                 // When losing connection, abort the current subscription to avoid a lingering future that doesn't resolve.
@@ -232,11 +229,36 @@ impl Listener {
         }
     }
 
+    fn handle_auth_event(
+        &mut self,
+        _: ModelHandle<AuthManager>,
+        event: &AuthManagerEvent,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if matches!(event, AuthManagerEvent::AuthComplete) {
+            self.start_subscription_if_authorized(ctx);
+        }
+    }
+
     fn start_listener(&mut self, ctx: &mut ModelContext<Self>) {
-        if !self.should_subscribe_to_updates {
-            self.should_subscribe_to_updates = true;
+        self.should_subscribe_to_updates = true;
+        self.start_subscription_if_authorized(ctx);
+    }
+
+    fn start_subscription_if_authorized(&mut self, ctx: &mut ModelContext<Self>) {
+        if self.current_subscription_abort_handle.is_none()
+            && self.should_subscribe_to_updates
+            && AuthStateProvider::as_ref(ctx).get().is_logged_in()
+        {
             self.get_warp_drive_updates(ctx);
         }
+    }
+
+    pub fn stop_subscription(&mut self) {
+        if let Some(abort_handle) = self.current_subscription_abort_handle.take() {
+            abort_handle.abort();
+        }
+        self.cancel_pending_refresh();
     }
 
     /// Cancels any pending delayed refresh that was scheduled after a reconnection.
@@ -361,13 +383,15 @@ impl Listener {
                         ctx.spawn(async move {
                             Timer::after(time_to_wait).await
                         }, |me, _, ctx| {
-                            me.get_warp_drive_updates(ctx);
+                            me.current_subscription_abort_handle = None;
+                            me.start_subscription_if_authorized(ctx);
                         });
                     }
                     RequestState::RequestFailedRetryPending(e) => {
                         log::warn!("CloudObjects::Listener: websocket connection failed to connect or finished with an error; trying again: {e:#}");
                     }
                     RequestState::RequestFailed(e) => {
+                        me.current_subscription_abort_handle = None;
                         report_error!(e.context("CloudObjects::Listener websocket connection failed"));
                     }
                 }
@@ -388,3 +412,7 @@ impl Entity for Listener {
 }
 
 impl SingletonEntity for Listener {}
+
+#[cfg(test)]
+#[path = "listener_tests.rs"]
+mod tests;

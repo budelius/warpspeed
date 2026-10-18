@@ -18,6 +18,7 @@ use super::transport::UnixSocketTransport;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty::supervisor::serve::{DEFAULT_SESSION_TTL_SECONDS, Supervisor};
 use crate::local_tty::supervisor::transport::Transport;
+use crate::local_tty::supervisor::{SupervisorExit, SupervisorExitReason};
 
 /// How long one request/response exchange may take before the peer is abandoned.
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
@@ -33,6 +34,10 @@ const IDLE_SHUTDOWN_DELAY: Duration = Duration::from_secs(60);
 
 /// Runs the Unix terminal supervisor until it has been idle with no sessions.
 pub fn run() -> Result<()> {
+    run_with_exit(|| {}).map(|_| ())
+}
+
+pub fn run_with_exit(on_listening: impl FnOnce()) -> Result<SupervisorExit> {
     let path = socket_path();
     let directory = path
         .parent()
@@ -44,6 +49,7 @@ pub fn run() -> Result<()> {
         .set_nonblocking(true)
         .context("Failed to make the terminal supervisor listener non-blocking")?;
     let _socket_guard = SocketGuard(path);
+    on_listening();
 
     let events = ChannelEventListener::new_headless();
     let mut supervisor = Supervisor::new(UnixSessionHost::default(), true);
@@ -72,7 +78,10 @@ pub fn run() -> Result<()> {
             idle_since = None;
         } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_SHUTDOWN_DELAY {
             log::info!("Terminal supervisor exiting: nothing left to supervise");
-            return Ok(());
+            return Ok(SupervisorExit {
+                reason: SupervisorExitReason::Idle,
+                had_live_sessions: false,
+            });
         }
     }
 }

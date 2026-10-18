@@ -52,6 +52,11 @@ Do not resolve the mixed Error issue wholesale or treat recovery events as proof
 
 Files: `app/src/server/cloud_objects/listener.rs`, `crates/warp_server_client/src/auth/session.rs`.
 
+Status: implemented on `investigate/crash-followups`. Subscription intent survives logout, but the
+websocket and pending refresh work stop until `AuthStateProvider` reports a logged-in user. Missing
+credentials and skipped login are typed non-actionable errors. Focused lifecycle and auth-session
+tests pass.
+
 - Require usable credentials before starting or retrying a subscription; cached cloud objects alone
   must not start it while logged out. Preserve the desire to subscribe until login becomes possible.
 - Observe authentication changes. Login starts at most one subscription; logout cancels the active
@@ -65,6 +70,10 @@ Files: `app/src/server/cloud_objects/listener.rs`, `crates/warp_server_client/sr
 ### P1 — Make non-panic reports actionable without weakening privacy
 
 Files: `crates/warp_errors/`, `app/src/crash_reporting/ojiichan.rs`.
+
+Status: implemented on `investigate/crash-followups`. `report_error!` adds a synthetic call-site
+frame; Ojiichan retains only the component, basename, line and column. SDK-path tests confirm that
+payloads, private paths, attachments and debug-derived error types remain absent.
 
 - Preserve a static report call-site location and an allowlisted component/error category. The panic
   hook location improvement in this changeset covers panics, not arbitrary `report_error!` failures.
@@ -80,6 +89,17 @@ Files: `crates/warp_errors/`, `app/src/crash_reporting/ojiichan.rs`.
 
 Files: `app/src/lib.rs`, `crates/warp_terminal/src/local_tty/{supervisor,windows,unix_supervisor}`,
 `crates/warp_terminal/src/local_tty/event_loop.rs`.
+
+Status: implemented on `investigate/crash-followups` for in-process unexpected exits and Rust
+panics. After exclusively claiming its local channel, each supervisor initializes Rust-only reporting
+when a persisted opt-in marker exists. The marker is synchronized with the privacy setting and is
+checked again before every headless event, so missing or removed state fails closed. Ojiichan retains
+only fixed process/exit enums and bounded live-session state; revision remains the sanitized Sentry
+release. Idle shutdowns are not reported. Control-channel loss, returned daemon errors and Rust
+panics are reportable, without native minidumps, terminal bytes, session IDs, paths, code locations
+or error payloads. Windows and Unix supervisor tests, crash-reporting tests and Unix idle-shutdown
+runtime acceptance pass. Abrupt external process termination remains inherently unreportable from
+inside that process; explicit shutdown intent and connection-generation correlation remain open.
 
 - Supervisor startup currently bypasses GUI crash-reporting initialization. Its available logs show
   startup and client-requested kills, but no panic. Absence of remote reports is not evidence that

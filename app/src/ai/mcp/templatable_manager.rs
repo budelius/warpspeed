@@ -381,3 +381,7 @@ impl Entity for TemplatableMCPServerManager {
 }
 
 impl SingletonEntity for TemplatableMCPServerManager {}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "templatable_manager_tests.rs"]
+mod tests;

@@ -64,9 +64,14 @@ async fn loopback_callback_accepts_matching_state() {
         .await
         .expect("matching callback should succeed");
     match result {
-        CallbackResult::Success { code, csrf_token } => {
+        CallbackResult::Success {
+            code,
+            csrf_token,
+            issuer,
+        } => {
             assert_eq!(code, "test-code");
             assert_eq!(csrf_token, "test-state");
+            assert_eq!(issuer, None);
         }
         CallbackResult::Error { error } => panic!("unexpected callback error: {error:?}"),
     }
@@ -76,6 +81,28 @@ async fn loopback_callback_accepts_matching_state() {
             .expect("callback task should join")
             .contains("200 OK")
     );
+}
+
+#[tokio::test]
+async fn loopback_callback_preserves_decoded_issuer() {
+    let receiver = loopback::LoopbackOAuthReceiver::bind().await.unwrap();
+    let redirect_uri = receiver.redirect_uri().to_string();
+    let callback = tokio::spawn(async move {
+        send_loopback_callback(
+            &redirect_uri,
+            "code=test-code&state=test-state&iss=https%3A%2F%2Fmcp.example.test",
+        )
+        .await
+    });
+
+    let result = receiver.receive("test-state").await.unwrap();
+    match result {
+        CallbackResult::Success { issuer, .. } => {
+            assert_eq!(issuer.as_deref(), Some("https://mcp.example.test"));
+        }
+        CallbackResult::Error { error } => panic!("unexpected callback error: {error:?}"),
+    }
+    assert!(callback.await.unwrap().contains("200 OK"));
 }
 
 #[tokio::test]
@@ -111,6 +138,9 @@ async fn protected_resource_metadata(
     State(state): State<FakeOAuthState>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        // RFC 9728 requires `resource`, and rmcp rejects metadata whose identifier does not
+        // match the URL being authenticated.
+        "resource": format!("{}/mcp", state.origin),
         "authorization_servers": [state.origin],
         "scopes_supported": ["mcp"]
     }))
@@ -121,6 +151,7 @@ async fn authorization_server_metadata(
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "issuer": state.origin,
+        "authorization_response_iss_parameter_supported": true,
         "authorization_endpoint": format!("{}/authorize", state.origin),
         "token_endpoint": format!("{}/token", state.origin),
         "registration_endpoint": format!("{}/register", state.origin),
@@ -221,8 +252,13 @@ async fn loopback_oauth_completes_dcr_and_code_exchange() {
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("authorization URL missing redirect_uri"))?;
                 assert!(redirect_uri.starts_with("http://127.0.0.1:"));
+                let mut callback_url = Url::parse(&redirect_uri)?;
+                callback_url
+                    .query_pairs_mut()
+                    .append_pair("code", "test-code")
+                    .append_pair("state", &state)
+                    .append_pair("iss", &auth_url.origin().ascii_serialization());
                 tokio::spawn(async move {
-                    let callback_url = format!("{redirect_uri}?code=test-code&state={state}");
                     reqwest::get(callback_url)
                         .await
                         .expect("loopback callback should complete");

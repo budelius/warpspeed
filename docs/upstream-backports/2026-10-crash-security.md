@@ -63,5 +63,24 @@ The smart-selection regression uses the fork's existing byte-offset selection AP
 - Native-platform verification for the TLS/native crypto and winit changes. Windows checks do not
   establish Linux X11 runtime behavior or macOS compatibility.
 
-Results and unavailable verification environments should be reported with the change; this document
-does not claim that every check has run or passed.
+## Local verification (Windows x86-64, October 18, 2026)
+
+- Frozen GraphQL tooling install, exact patched-version checks, and schema validation passed.
+- Focused nextest run: **1,506 passed**, 7,400 outside the selected scope. This is not the full
+  workspace test suite.
+- Formatting, inline-test-module validation, and `git diff --check` passed.
+- All three Clippy configurations from `script/presubmit` passed with `-D warnings`, `--locked`,
+  and `--offline`.
+- The first two test runs each failed the existing detached-CMD spawn fixture. It passed outside
+  nextest. The fixture now disables CMD AutoRun and explicitly exits with status 0; the complete
+  selected suite passed after that change. Supervisor production code is unchanged.
+- Workspace Clippy initially lacked generated completions-v2 JavaScript. Running `yarn install
+  --immutable` and `yarn build` in `crates/command-signatures-v2/js` generated it successfully.
+  The Rust build script still warns about its unavailable native Yarn invocation, but the generated
+  JavaScript was freshly built from this checkout, not reused from another revision.
+- Cross-platform verification is **incomplete**: `oz-dev` is not installed on this host. Linux/macOS
+  native builds and Linux X11 runtime behavior remain unverified.
+
+Local evidence is in `target/safety-tests.log`, `target/safety-final-lints.log`, and
+`target/safety-runner-discovery.log`. Earlier failed runs are retained separately. No installed-GUI
+acceptance test, complete presubmit run, or deployment was performed.

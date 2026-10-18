@@ -21,7 +21,15 @@ fn unused_pipe_name() -> String {
 }
 
 fn peer(responses: Vec<Message>) -> (WindowsTerminalSupervisorClient, JoinHandle<Vec<Message>>) {
-    let pipe = unused_pipe_name();
+    peer_with_version(responses, PROTOCOL_VERSION)
+}
+
+fn peer_with_version(
+    responses: Vec<Message>,
+    version: u32,
+) -> (WindowsTerminalSupervisorClient, JoinHandle<Vec<Message>>) {
+    let pipe =
+        unused_pipe_name().replace(&format!("-v{PROTOCOL_VERSION}-"), &format!("-v{version}-"));
     let name = pipe.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let peer = std::thread::spawn(move || {
@@ -30,6 +38,7 @@ fn peer(responses: Vec<Message>) -> (WindowsTerminalSupervisorClient, JoinHandle
         let mut requests = Vec::new();
         for response in responses {
             let mut transport = listener.accept().unwrap();
+            transport.use_protocol_for_test(version);
             requests.push(transport.receive_timeout(Duration::from_secs(5)).unwrap());
             transport.send(&response).unwrap();
             let _ = transport.receive_timeout(Duration::from_secs(5));
@@ -52,6 +61,103 @@ fn listed_session(attached: bool) -> SessionSummary {
         shell_pid: 0,
         session_uuid_hex: String::new(),
     }
+}
+
+#[test]
+fn v6_supervisor_can_be_checked_without_ending_or_restarting_the_session() {
+    let (client, peer) = peer_with_version(
+        vec![
+            Message::Pong {
+                protocol_version: 6,
+            },
+            Message::ListSessionsResponse {
+                sessions: vec![listed_session(false)],
+            },
+        ],
+        6,
+    );
+    client.check_detached(SessionId::from(7)).unwrap();
+    assert!(matches!(
+        peer.join().unwrap().as_slice(),
+        [Message::Ping, Message::ListSessions]
+    ));
+}
+
+#[test]
+fn v6_attach_and_detach_preserve_the_original_screen_and_bootstrap() {
+    let snapshot = ScreenSnapshot {
+        columns: 80,
+        rows: 24,
+        repaint: b"Claude\r\n> ask".to_vec(),
+    };
+    let metadata = SessionMetadata {
+        title: "ME WEB".to_owned(),
+        bootstrap: Some(crate::local_tty::supervisor::message::SessionBootstrap {
+            hook_session_id: 42,
+            shell: "bash".to_owned(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (client, peer) = peer_with_version(
+        vec![
+            Message::ResizeResponse { error: None },
+            Message::AttachResponse {
+                result: Ok(AttachedSession {
+                    snapshot: snapshot.clone(),
+                    metadata: metadata.clone(),
+                    buffered_output: vec![],
+                    sequence: 7,
+                    output_was_dropped: false,
+                    endpoint: Some(Endpoint { pid: 42, raw: 123 }),
+                }),
+            },
+            Message::DetachResponse { error: None },
+        ],
+        6,
+    );
+    client.resize(SessionId::from(7), 80, 24).unwrap();
+    let attached = client.attach(SessionId::from(7)).unwrap();
+    assert_eq!(attached.snapshot, snapshot);
+    assert_eq!(attached.metadata, metadata);
+    assert_eq!(attached.endpoint.unwrap().pid, 42);
+    client
+        .detach(SessionId::from(7), attached.snapshot, attached.metadata)
+        .unwrap();
+    assert!(matches!(
+        peer.join().unwrap().as_slice(),
+        [
+            Message::Resize { .. },
+            Message::Attach { .. },
+            Message::Detach { .. }
+        ]
+    ));
+}
+
+#[test]
+fn v6_supervisor_does_not_steal_a_session_attached_in_another_window() {
+    let (client, peer) = peer_with_version(
+        vec![
+            Message::Pong {
+                protocol_version: 6,
+            },
+            Message::ListSessionsResponse {
+                sessions: vec![listed_session(true)],
+            },
+        ],
+        6,
+    );
+    assert!(
+        client
+            .check_detached(SessionId::from(7))
+            .unwrap_err()
+            .to_string()
+            .contains("Another window")
+    );
+    assert!(matches!(
+        peer.join().unwrap().as_slice(),
+        [Message::Ping, Message::ListSessions]
+    ));
 }
 
 #[test]

@@ -133,6 +133,11 @@ impl SessionHolderBannerState {
             };
         }
         let command = &self.restore.command;
+        let restart = if command.is_empty() {
+            "leaves a fresh shell here".to_owned()
+        } else {
+            format!("runs `{command}` here")
+        };
         match self.restore.verdict {
             HeldVerdict::Detached => {
                 let attach = if self.offers_attach() {
@@ -141,8 +146,8 @@ impl SessionHolderBannerState {
                     ""
                 };
                 format!(
-                    "The agent and its shell are still alive in that build's session supervisor. \
-                     {attach}Take over ends them there and runs `{command}` here. Start fresh leaves \
+                    "The shell and its running processes are still alive in that build's supervisor. \
+                     {attach}Take over ends them there and {restart}. Start fresh leaves \
                      this shell as it is."
                 )
             }
@@ -152,7 +157,7 @@ impl SessionHolderBannerState {
                 .to_owned(),
             HeldVerdict::HeldByUnknown => format!(
                 "The agent is still running in another Warp. Take over ends the agent there and \
-                 runs `{command}` here. Start fresh leaves this shell as it is."
+                 {restart}. Start fresh leaves this shell as it is."
             ),
         }
     }
@@ -224,6 +229,26 @@ pub fn render_session_holder_banner(
                 appearance.ui_font_size(),
             )]),
             buttons,
+            ..Default::default()
+        },
+    )
+}
+
+#[cfg(feature = "local_tty")]
+pub fn render_connected_supervisor_banner(
+    holder: &crate::app_state::SessionHolder,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    render_inline_block_list_banner(
+        InlineBannerStyle::LowPriority,
+        appearance,
+        InlineBannerContent {
+            title: format!("Connected to supervisor from build {}", holder.version),
+            content: Some(vec![Text::new(
+                "The original shell is still running. Use “Restart under current supervisor…” in the session menu to replace it.",
+                appearance.ui_font_family(),
+                appearance.ui_font_size(),
+            )]),
             ..Default::default()
         },
     )

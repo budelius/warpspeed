@@ -15,6 +15,7 @@ pub struct RestartShellConfirmationModal {
     cancel_mouse_state: MouseStateHandle,
     confirm_mouse_state: MouseStateHandle,
     running_command: Option<String>,
+    supervisor_restart: bool,
 }
 
 impl RestartShellConfirmationModal {
@@ -23,6 +24,7 @@ impl RestartShellConfirmationModal {
             cancel_mouse_state: Default::default(),
             confirm_mouse_state: Default::default(),
             running_command: None,
+            supervisor_restart: false,
         }
     }
 
@@ -30,6 +32,11 @@ impl RestartShellConfirmationModal {
     /// being restarted.
     pub fn set_running_command(&mut self, running_command: String) {
         self.running_command = Some(running_command);
+        self.supervisor_restart = false;
+    }
+
+    pub fn set_supervisor_restart(&mut self) {
+        self.supervisor_restart = true;
     }
 }
 
@@ -46,14 +53,23 @@ impl View for RestartShellConfirmationModal {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
 
-        let description = match self.running_command.as_deref() {
-            Some(command) if !command.trim().is_empty() => format!(
+        let description = match (self.supervisor_restart, self.running_command.as_deref()) {
+            (true, _) => {
+                "This will end the original shell and its running processes, then start a \
+                          replacement under this build’s supervisor. Resumable agents will be \
+                          reopened when possible; other process state will be lost. This is not a \
+                          live migration. Continue?"
+                    .to_owned()
+            }
+            (false, Some(command)) if !command.trim().is_empty() => format!(
                 "\"{}\" is still running in this pane. Restarting the shell will end it. Continue?",
                 command.trim()
             ),
-            _ => "A command is still running in this pane. Restarting the shell will end it. \
+            (false, _) => {
+                "A command is still running in this pane. Restarting the shell will end it. \
                   Continue?"
-                .to_string(),
+                    .to_string()
+            }
         };
 
         let description_text = Text::new(description, appearance.ui_font_family(), 14.)

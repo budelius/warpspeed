@@ -783,6 +783,19 @@ impl TerminalView {
                 );
             }
         }
+        #[cfg(feature = "local_tty")]
+        if let Some(holder) = &self.connected_supervisor {
+            items.push(
+                MenuItemFields::new(format!("Supervisor: build {}", holder.version))
+                    .with_disabled(true)
+                    .into_item(),
+            );
+            items.push(
+                MenuItemFields::new("Restart under current supervisor…")
+                    .with_on_select_action(TerminalAction::RestartInCurrentSupervisor)
+                    .into_item(),
+            );
+        }
         if agent_ctrl_actions.can_move_session {
             items.push(
                 MenuItemFields::new("Move session to AgentCtrl")

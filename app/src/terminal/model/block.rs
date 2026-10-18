@@ -1673,6 +1673,12 @@ impl Block {
         self.start_ts = Some(ts);
     }
 
+    /// Restores a running command's replayed screen without the new-command render delay.
+    pub(super) fn restore_attached_output(&mut self, grid: GridHandler) {
+        self.output_grid.grid_handler = grid;
+        self.render_delay_complete.store(true, Ordering::Relaxed);
+    }
+
     pub fn ready_to_render(&self) -> bool {
         self.finished()
             || self.bootstrap_stage == BootstrapStage::ScriptExecution

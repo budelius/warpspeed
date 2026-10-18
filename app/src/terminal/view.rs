@@ -100,7 +100,9 @@ use inline_banner::{
 };
 pub use inline_banner::{NotificationsDiscoveryBannerAction, NotificationsErrorBannerAction};
 #[cfg(feature = "local_tty")]
-use inline_banner::{SessionHolderBannerState, render_session_holder_banner};
+use inline_banner::{
+    SessionHolderBannerState, render_connected_supervisor_banner, render_session_holder_banner,
+};
 use instant::Instant;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -290,6 +292,7 @@ use crate::ai::predict::prompt_suggestions::{
 };
 use crate::ai_assistant::{ASK_AI_ASSISTANT_TEXT, AskAIType};
 use crate::antivirus::AntivirusInfo;
+use crate::app_state::SessionHolder;
 use crate::appearance::{Appearance, AppearanceEvent};
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::auth_state::AuthState;
@@ -1029,6 +1032,7 @@ pub enum InlineBannerType {
     ShellProcessTerminated,
     ShellDetached,
     SessionHolder,
+    ConnectedSupervisor,
     OpenInWarp,
     VimMode,
     CodebaseIndexSpeedbump,
@@ -1057,6 +1061,7 @@ impl InlineBannerType {
             | Self::ShellProcessTerminated
             | Self::ShellDetached
             | Self::SessionHolder
+            | Self::ConnectedSupervisor
             | Self::OpenInWarp
             | Self::VimMode => false,
         }
@@ -1115,6 +1120,8 @@ struct InlineBannersState {
 
     #[cfg(feature = "local_tty")]
     session_holder_banner: Option<SessionHolderBannerState>,
+    #[cfg(feature = "local_tty")]
+    connected_supervisor_banner: Option<InlineBannerId>,
 }
 
 impl InlineBannersState {
@@ -2516,6 +2523,8 @@ pub struct TerminalView {
     /// kept until the shell bootstraps and its banner can be shown.
     #[cfg(feature = "local_tty")]
     withheld_restore: Option<WithheldRestore>,
+    #[cfg(feature = "local_tty")]
+    connected_supervisor: Option<SessionHolder>,
     #[cfg(feature = "local_tty")]
     held_attach_error: Option<String>,
     #[cfg(feature = "local_tty")]
@@ -4466,6 +4475,8 @@ impl TerminalView {
             shell_pid: None,
             #[cfg(feature = "local_tty")]
             withheld_restore: None,
+            #[cfg(feature = "local_tty")]
+            connected_supervisor: None,
             #[cfg(feature = "local_tty")]
             held_attach_error: None,
             #[cfg(feature = "local_tty")]
@@ -12055,6 +12066,9 @@ impl TerminalView {
                     return;
                 }
 
+                #[cfg(feature = "local_tty")]
+                self.on_supervisor_changed(None, ctx);
+
                 if matches!(reason, ExitReason::PtyDetached) {
                     // The shell is still running in the supervisor, so nothing it was doing has
                     // failed and the pane must stay open to reattach it: no failed conversation,
@@ -13945,6 +13959,9 @@ impl TerminalView {
         if let Some(restore) = self.withheld_restore.take() {
             self.insert_session_holder_banner(restore, ctx);
         }
+
+        #[cfg(feature = "local_tty")]
+        self.update_connected_supervisor_banner(ctx);
 
         if self.should_display_vim_banner(&session, ctx) {
             self.insert_vim_mode_banner(ctx);
@@ -16575,6 +16592,35 @@ impl TerminalView {
             .block_list_mut()
             .remove_inline_banner(banner.id);
         true
+    }
+
+    pub(crate) fn connected_supervisor(&self) -> Option<&SessionHolder> {
+        #[cfg(feature = "local_tty")]
+        {
+            self.connected_supervisor.as_ref()
+        }
+        #[cfg(not(feature = "local_tty"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn update_connected_supervisor_banner(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(id) = self.inline_banners_state.connected_supervisor_banner.take() {
+            self.model.lock().block_list_mut().remove_inline_banner(id);
+        }
+        if self.connected_supervisor.is_some() && self.is_login_shell_bootstrapped {
+            let id = self.inline_banners_state.next_banner_id();
+            let mut model = self.model.lock();
+            let index = model.block_list().active_block_index();
+            model.block_list_mut().insert_inline_banner_after_block(
+                index,
+                InlineBannerItem::new(id, InlineBannerType::ConnectedSupervisor),
+            );
+            self.inline_banners_state.connected_supervisor_banner = Some(id);
+        }
+        ctx.notify();
     }
 
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
@@ -24760,6 +24806,13 @@ impl TerminalView {
         if let Some(state) = &self.inline_banners_state.session_holder_banner {
             inline_banners.insert(state.id, render_session_holder_banner(state, appearance));
         }
+        #[cfg(feature = "local_tty")]
+        if let (Some(id), Some(holder)) = (
+            self.inline_banners_state.connected_supervisor_banner,
+            &self.connected_supervisor,
+        ) {
+            inline_banners.insert(id, render_connected_supervisor_banner(holder, appearance));
+        }
 
         if (FeatureFlag::CreatingSharedSessions.is_enabled()
             && ContextFlag::CreateSharedSession.is_enabled())
@@ -27203,6 +27256,21 @@ impl TerminalSurface for TerminalView {
         }
     }
 
+    #[cfg(feature = "local_tty")]
+    fn on_supervisor_changed(
+        &mut self,
+        holder: Option<SessionHolder>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.connected_supervisor = holder.filter(|holder| {
+            holder.channel != crate::terminal::local_tty::session_holder::current_channel()
+        });
+        self.update_connected_supervisor_banner(ctx);
+        self.pane_configuration.update(ctx, |config, ctx| {
+            config.refresh_pane_header_overflow_menu_items(ctx);
+        });
+    }
+
     fn on_active_shell_launch_data_updated(
         &mut self,
         shell_launch_data: Option<ShellLaunchData>,
@@ -27226,6 +27294,7 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn on_session_restart_started(&mut self, ctx: &mut ViewContext<Self>) {
         self.begin_restart();
+        self.on_supervisor_changed(None, ctx);
 
         // A restarted shell must not retain either banner representation from the process it
         // replaced. Remove each banner from both its view state and block-list entry; clearing
@@ -27656,6 +27725,7 @@ impl TypedActionView for TerminalView {
             | AltMouseAction(_)
             | ToggleMaximizePane
             | RestartShell
+            | RestartInCurrentSupervisor
             | ReattachShell
             | SessionHolderBanner(_)
             | ChangeShell
@@ -27993,6 +28063,13 @@ impl TypedActionView for TerminalView {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::RestartShellForTerminalView {
                     terminal_view_id: self.view_id,
                 });
+            }
+            RestartInCurrentSupervisor => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
             }
             ReattachShell => {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::ReattachShellForTerminalView {

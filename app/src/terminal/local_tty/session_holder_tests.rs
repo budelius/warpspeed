@@ -111,6 +111,18 @@ fn a_detached_session_the_holder_lists_is_held_detached() {
     holder.join().unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn v6_sessions_are_not_mistaken_for_missing_sessions() {
+    let (sender, receiver) = mpsc::channel();
+    let holder = fake_holder(receiver, 6, vec![summary(42, false)], None, 0);
+    assert_eq!(
+        verdict_over(opener(sender), SessionId::from(42)),
+        HolderVerdict::HeldDetached
+    );
+    holder.join().unwrap();
+}
+
 #[test]
 fn an_attached_session_is_held_attached() {
     let (sender, receiver) = mpsc::channel();

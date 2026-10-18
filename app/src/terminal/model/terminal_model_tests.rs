@@ -10,6 +10,7 @@ use warp_terminal::local_tty::screen::HeadlessScreen;
 use warp_terminal::model::ansi::ClearMode;
 use warpui::r#async::executor::Background;
 use warpui::text::{SelectionType, str_to_byte_vec};
+use warpui::units::IntoLines;
 
 use super::*;
 use crate::ai::agent::conversation::AIConversationId;
@@ -2528,6 +2529,99 @@ fn a_pane_adopting_a_shell_mid_command_sends_input_to_the_command() {
         ),
         "an adopted shell must accept input"
     );
+}
+
+#[test]
+fn attached_running_command_is_visible_before_any_live_output() {
+    let mut original = TerminalModel::mock(None, None);
+    original.simulate_long_running_block("claude", "Claude\r\nready\r\n> ask");
+    let snapshot = original.screen_snapshot();
+    let bootstrap = original.captured_bootstrap().unwrap().clone();
+
+    let mut adopting = TerminalModel::mock_before_bootstrap();
+    adopting.prepare_attached_state(bootstrap, false, Some("/workspace".to_owned()));
+    adopting.process_bytes(snapshot.repaint.as_slice());
+    adopting.restore_attached_state();
+
+    let restored = HeadlessScreen::from_snapshot(
+        &adopting.screen_snapshot(),
+        ChannelEventListener::new_for_test(),
+    );
+    assert!(restored.visible_text().contains("Claude"));
+    assert!(restored.visible_text().contains("> ask"));
+    let blocks = adopting.block_list();
+    let active = blocks.active_block();
+    assert!(active.is_executing());
+    assert!(active.output_to_string().contains("Claude"));
+    assert!(active.output_grid_displayed_height() >= 3.0.into_lines());
+    assert_eq!(
+        blocks.block_heights().items().last().unwrap().height(),
+        active.height(blocks.transcript_scope()).into(),
+        "the first frame must use the restored executing block's height"
+    );
+}
+
+#[test]
+fn attached_alternate_screen_preserves_the_replayed_frame_and_modes() {
+    let original = TerminalModel::mock(None, None);
+    let bootstrap = original.captured_bootstrap().unwrap().clone();
+    let mut adopting = TerminalModel::mock_before_bootstrap();
+    adopting.prepare_attached_state(bootstrap, false, None);
+    adopting.process_bytes("\x1b[?1049h\x1b[HClaude\r\n> ask\x1b[?2004h");
+    let cursor = adopting.alt_screen().grid_handler().cursor_point();
+
+    adopting.restore_attached_state();
+
+    assert!(adopting.is_alt_screen_active());
+    assert!(adopting.block_list().active_block().is_executing());
+    assert!(adopting.is_term_mode_set(TermMode::BRACKETED_PASTE));
+    assert_eq!(adopting.alt_screen().grid_handler().cursor_point(), cursor);
+    let restored = HeadlessScreen::from_snapshot(
+        &adopting.screen_snapshot(),
+        ChannelEventListener::new_for_test(),
+    );
+    assert!(restored.visible_text().contains("Claude"));
+    assert!(restored.visible_text().contains("> ask"));
+}
+
+#[test]
+fn attached_resized_primary_screen_accepts_output_at_the_replayed_cursor() {
+    let mut original = TerminalModel::mock(None, None);
+    original.simulate_long_running_block("claude", "Claude\r\n> ");
+    let bootstrap = original.captured_bootstrap().unwrap().clone();
+    let mut detached = HeadlessScreen::from_snapshot(
+        &original.screen_snapshot(),
+        ChannelEventListener::new_for_test(),
+    );
+    detached.resize(12, 6);
+    let snapshot = detached.snapshot();
+
+    let mut adopting = TerminalModel::mock_before_bootstrap();
+    adopting.resize(SizeUpdate::from_cell_dimensions(
+        *adopting.block_list().size(),
+        6,
+        12,
+    ));
+    adopting.prepare_attached_state(bootstrap, false, None);
+    adopting.process_bytes(snapshot.repaint.as_slice());
+    adopting.process_bytes("\x1b[?2004h");
+    adopting.restore_attached_state();
+
+    assert!(
+        adopting
+            .block_list()
+            .active_block()
+            .output_to_string()
+            .contains("Claude")
+    );
+    assert!(adopting.is_term_mode_set(TermMode::BRACKETED_PASTE));
+
+    adopting.process_bytes("ready");
+    let restored = HeadlessScreen::from_snapshot(
+        &adopting.screen_snapshot(),
+        ChannelEventListener::new_for_test(),
+    );
+    assert!(restored.visible_text().contains("> ready"));
 }
 
 /// The announcement has to survive the supervisor, which is the only thing that

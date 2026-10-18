@@ -24,9 +24,10 @@ use crate::pane_group::pane::DetachType;
 use crate::settings::{BlockVisibilitySettings, DebugSettings, InputModeSettings};
 use crate::terminal::CLIAgent;
 
-/// What a restored pane was going to run before the guard found its session held elsewhere.
+/// A restored session that could not be attached because it is still held elsewhere.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WithheldRestore {
+    /// The agent resume command, or empty for a plain shell.
     pub command: String,
     /// `None` when no supervisor is known to hold the session and only the agent's own registry
     /// shows it still running.

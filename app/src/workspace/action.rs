@@ -280,6 +280,10 @@ pub enum WorkspaceAction {
     RestartShellForTerminalView {
         terminal_view_id: EntityId,
     },
+    /// Replaces the connected shell under this build's supervisor, after confirmation.
+    RestartInCurrentSupervisorForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Attaches a pane again, in place, to the supervised shell it lost the connection to.
     ReattachShellForTerminalView {
         terminal_view_id: EntityId,
@@ -1187,6 +1191,7 @@ impl WorkspaceAction {
             // do not change persisted state.
             | RestartShell
             | RestartShellForTerminalView { .. }
+            | RestartInCurrentSupervisorForTerminalView { .. }
             | ReattachShellForTerminalView { .. }
             | AttachHeldSessionForTerminalView { .. }
             | TakeOverHeldSessionForTerminalView { .. }

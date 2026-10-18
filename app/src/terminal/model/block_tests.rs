@@ -42,6 +42,21 @@ impl float_cmp::ApproxEq for BlockSection {
 }
 
 #[test]
+fn attached_output_is_visible_without_waiting_for_the_render_delay() {
+    let mut block = TestBlockBuilder::new().build();
+    block.apply_preexec(ansi::PreexecValue::default());
+    block.render_delay_complete.store(false, Ordering::Relaxed);
+    let replay = mock_blockgrid("Claude\r\n> ask");
+    assert!(!block.ready_to_render());
+
+    block.restore_attached_output(replay.grid_handler);
+
+    assert!(block.ready_to_render());
+    assert!(block.output_to_string().contains("Claude"));
+    assert!(block.output_grid_displayed_height() >= 2.0.into_lines());
+}
+
+#[test]
 pub fn test_find() {
     let mut block = TestBlockBuilder::new().build();
 

@@ -33,6 +33,15 @@ fn attach_requires_a_known_detached_supervisor_session() {
     assert!(!SessionHolderBannerState::new(0, restore(HeldVerdict::HeldByUnknown)).offers_attach());
 }
 
+#[test]
+fn plain_shell_recovery_does_not_promise_to_execute_an_empty_command() {
+    let mut held = restore(HeldVerdict::Detached);
+    held.command.clear();
+    let banner = SessionHolderBannerState::new(0, held);
+    assert!(banner.body().contains("leaves a fresh shell here"));
+    assert!(!banner.body().contains("``"));
+}
+
 #[cfg(windows)]
 #[test]
 fn attach_progress_never_says_the_old_session_is_being_ended() {

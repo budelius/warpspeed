@@ -13,9 +13,9 @@
 //   * the AppId varies with elevation and with WARPSPEED_PROFILE, so an elevated instance uses a
 //     separate database from a normal one instead of contending for the same SQLite files.
 //
-// Multiple instances run concurrently because `SingleInstanceManager` is gated behind the
-// `release_bundle` cargo feature, which this build does not enable. Instances sharing one AppId
-// still share one database; use WARPSPEED_PROFILE to separate them.
+// GUI ownership is scoped to the AppId even without `release_bundle`: a second launch forwards
+// to the primary process before profile state is opened. Use WARPSPEED_PROFILE to run intentionally
+// isolated GUI profiles side by side.
 //
 // This is the fork's entry point: `cargo run -p warp --bin warpspeed`. It is the only binary
 // in the tree that both builds without warpdotdev SSH access and runs with dogfood flags on,
@@ -75,19 +75,44 @@ fn is_elevated() -> bool {
 ///   with a normal one. Sharing would mean two processes on one SQLite file, and files written
 ///   by the elevated process that the normal one may not be able to rewrite.
 /// * otherwise -> `WarpSpeed`.
-fn application_name() -> String {
-    match std::env::var("WARPSPEED_PROFILE") {
-        Ok(profile) if !profile.trim().is_empty() => {
-            let profile: String = profile
-                .trim()
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .collect();
-            format!("WarpSpeed-{profile}")
-        }
-        _ if is_elevated() => "WarpSpeedAdmin".to_owned(),
-        _ => "WarpSpeed".to_owned(),
+fn application_name_for(profile: Option<&str>, elevated: bool) -> String {
+    let profile = profile.map(str::trim).unwrap_or_default();
+    let sanitized = profile
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
+        })
+        .collect::<String>();
+    let profile = if sanitized.len() == profile.len() {
+        sanitized
+    } else {
+        let hash = profile
+            .as_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+        let sanitized = if sanitized.is_empty() {
+            "profile"
+        } else {
+            &sanitized
+        };
+        format!("{sanitized}-{hash:016x}")
+    };
+    if !profile.is_empty() {
+        format!("WarpSpeed-{profile}")
+    } else if elevated {
+        "WarpSpeedAdmin".to_owned()
+    } else {
+        "WarpSpeed".to_owned()
     }
+}
+
+fn application_name() -> String {
+    application_name_for(
+        std::env::var("WARPSPEED_PROFILE").ok().as_deref(),
+        is_elevated(),
+    )
 }
 
 #[cfg(feature = "crash_reporting")]
@@ -152,4 +177,36 @@ fn main() -> Result<()> {
     configure_ojiichan();
 
     warp::run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::application_name_for;
+
+    #[test]
+    fn explicit_profiles_are_sanitized_and_isolated() {
+        let sanitized = application_name_for(Some(" project/a "), false);
+        assert!(sanitized.starts_with("WarpSpeed-projecta-"));
+        assert_ne!(sanitized, application_name_for(Some("projecta"), false));
+        assert_eq!(
+            application_name_for(Some("project-b"), false),
+            "WarpSpeed-project-b"
+        );
+        assert_ne!(
+            application_name_for(Some("project-a"), false),
+            application_name_for(Some("project-b"), false)
+        );
+    }
+
+    #[test]
+    fn nonempty_profiles_never_collapse_to_the_default_profile() {
+        let punctuation = application_name_for(Some("///"), false);
+        let unicode = application_name_for(Some("💥"), false);
+        assert!(punctuation.starts_with("WarpSpeed-profile-"));
+        assert!(unicode.starts_with("WarpSpeed-profile-"));
+        assert_ne!(punctuation, unicode);
+        assert_ne!(punctuation, "WarpSpeed");
+        assert_eq!(application_name_for(Some("  "), true), "WarpSpeedAdmin");
+        assert_eq!(application_name_for(None, false), "WarpSpeed");
+    }
 }

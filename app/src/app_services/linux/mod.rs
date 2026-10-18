@@ -1,13 +1,24 @@
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use futures_util::FutureExt as _;
 use itertools::Itertools as _;
 use warp_errors::report_if_error;
 use warpui::r#async::executor::BackgroundTask;
+use warpui::platform::TerminationMode;
 use warpui::{AppContext, SingletonEntity};
 use zbus::{interface, proxy, zvariant};
 
+pub(crate) use super::enforces_profile_ownership;
+use super::profile_ownership_scope;
 use crate::channel::ChannelState;
+
+const FORWARD_ATTEMPTS: usize = 100;
+const FORWARD_RETRY_DELAY: Duration = Duration::from_millis(100);
+const PROFILE_OWNER_LOCK_FILE: &str = "warpspeed-gui-owner.lock";
+static PROFILE_OWNER_LOCK: OnceLock<File> = OnceLock::new();
 
 /// Initializes application services.
 pub fn init(ctx: &mut AppContext) {
@@ -25,14 +36,56 @@ pub fn teardown(ctx: &mut AppContext) {
 /// application.
 ///
 /// Returns Ok if an existing instance exists and was reachable.
-#[cfg(feature = "release_bundle")]
+fn single_instance_enabled() -> bool {
+    cfg!(feature = "release_bundle") || enforces_profile_ownership()
+}
+
 pub fn pass_startup_args_to_existing_instance(
     args: &warp_cli::AppArgs,
 ) -> Result<(), StartupArgsForwardingError> {
-    if args.finish_update {
+    if !single_instance_enabled() {
+        return Err(StartupArgsForwardingError::NoExistingInstance);
+    }
+    if args.finish_update && !enforces_profile_ownership() {
         return Err(StartupArgsForwardingError::IgnoredAfterAutoUpdate);
     }
 
+    log::info!(
+        "Forwarding launch to Warp profile owner profile={} source_version={}",
+        ChannelState::app_id().application_name(),
+        crate::build_info::version_identity()
+    );
+    let first_result = forward_startup_args_once(args);
+    if !matches!(
+        first_result,
+        Err(StartupArgsForwardingError::NoExistingInstance)
+    ) || !enforces_profile_ownership()
+    {
+        return first_result;
+    }
+    if try_claim_profile_ownership()? {
+        return Err(StartupArgsForwardingError::NoExistingInstance);
+    }
+
+    for attempt in 0..FORWARD_ATTEMPTS {
+        match forward_startup_args_once(args) {
+            Ok(()) => return Ok(()),
+            Err(StartupArgsForwardingError::NoExistingInstance) => {}
+            Err(error) => return Err(error),
+        }
+        if attempt + 1 < FORWARD_ATTEMPTS {
+            std::thread::sleep(FORWARD_RETRY_DELAY);
+        }
+    }
+
+    if try_claim_profile_ownership()? {
+        Err(StartupArgsForwardingError::NoExistingInstance)
+    } else {
+        Err(StartupArgsForwardingError::ProfileOwnerUnavailable)
+    }
+}
+
+fn forward_startup_args_once(args: &warp_cli::AppArgs) -> Result<(), StartupArgsForwardingError> {
     warpui::r#async::block_on(async {
         let conn = zbus::Connection::session().await?;
         let proxy = ExistingApplicationProxy::builder(&conn)
@@ -40,17 +93,18 @@ pub fn pass_startup_args_to_existing_instance(
             .path(DBusServiceHost::application_service_path())?
             .build()
             .await?;
-        let mut open_new_url;
-        let mut url_refs = args.urls.iter().map(AsRef::as_ref).collect_vec();
+        let mut urls = args.urls.clone();
         // If there are no URLs on the command line, send one to open a new
         // window using the same current working directory as this process.
-        if url_refs.is_empty() {
-            open_new_url = format!("{}://action/new_window", ChannelState::url_scheme());
+        if urls.is_empty() {
+            let mut open_new_url = format!("{}://action/new_window", ChannelState::url_scheme());
             if let Ok(current_dir) = std::env::current_dir() {
                 open_new_url.push_str(&format!("?path={}", current_dir.display()));
             }
-            url_refs.push(&open_new_url);
+            urls.push(url::Url::parse(&open_new_url)?);
         }
+        super::add_forwarded_source_version(&mut urls);
+        let url_refs = urls.iter().map(AsRef::as_ref).collect_vec();
         proxy.open(&url_refs, HashMap::new()).await?;
 
         // Make sure we close the connection and clean up resources, to avoid
@@ -62,8 +116,24 @@ pub fn pass_startup_args_to_existing_instance(
     })
 }
 
+fn try_claim_profile_ownership() -> Result<bool, std::io::Error> {
+    if PROFILE_OWNER_LOCK.get().is_some() {
+        return Ok(true);
+    }
+    let state_dir = warp_core::paths::state_dir();
+    std::fs::create_dir_all(&state_dir)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(state_dir.join(PROFILE_OWNER_LOCK_FILE))?;
+    if !fs4::fs_std::FileExt::try_lock_exclusive(&lock)? {
+        return Ok(false);
+    }
+    Ok(PROFILE_OWNER_LOCK.set(lock).is_ok())
+}
+
 #[derive(Debug, thiserror::Error)]
-#[cfg(feature = "release_bundle")]
 pub enum StartupArgsForwardingError {
     /// There's no instance of Warp already running.
     #[error("no existing instance found to forward args to")]
@@ -72,12 +142,20 @@ pub enum StartupArgsForwardingError {
     /// arguments to the old (terminating) instance.
     #[error("should not forward args after an auto-update")]
     IgnoredAfterAutoUpdate,
+    /// The synthetic new-window URL could not be constructed.
+    #[error("failed to construct startup URL")]
+    InvalidUrl(#[from] url::ParseError),
+    /// Profile ownership exists but its D-Bus service did not become reachable.
+    #[error("the WarpSpeed profile owner is not accepting forwarded launches")]
+    ProfileOwnerUnavailable,
+    /// Profile ownership could not be checked.
+    #[error("failed to claim WarpSpeed profile ownership")]
+    ProfileOwnership(#[from] std::io::Error),
     /// An unknown D-Bus error occurred.
     #[error("unknown dbus error")]
     Unknown(zbus::Error),
 }
 
-#[cfg(feature = "release_bundle")]
 impl From<zbus::fdo::Error> for StartupArgsForwardingError {
     fn from(value: zbus::fdo::Error) -> Self {
         // While ServiceUnknown usually means that D-Bus doesn't know how to
@@ -92,7 +170,6 @@ impl From<zbus::fdo::Error> for StartupArgsForwardingError {
     }
 }
 
-#[cfg(feature = "release_bundle")]
 impl From<zbus::Error> for StartupArgsForwardingError {
     fn from(value: zbus::Error) -> Self {
         match value {
@@ -104,6 +181,7 @@ impl From<zbus::Error> for StartupArgsForwardingError {
 
 enum ApplicationServiceEvent {
     Open { uris: Vec<String> },
+    InitializationFailed { message: String },
 }
 
 /// A structure providing an implementation of the org.freedesktop.Application
@@ -186,6 +264,7 @@ impl DBusServiceHost {
         let (tx, rx) = async_channel::unbounded();
 
         // Spawn a background task for the D-Bus server.
+        let failure_tx = tx.clone();
         let server_task = ctx.background_executor().spawn(
             async {
                 let conn = zbus::connection::Builder::session()?
@@ -201,11 +280,17 @@ impl DBusServiceHost {
                     conn.executor().tick().await;
                 }
             }
-            .map(|result: anyhow::Result<()>| {
+            .map(move |result: anyhow::Result<()>| {
                 if let Err(err) = result {
                     log::error!(
                         "Failed to initialize org.freedesktop.Application D-Bus service: {err:#}"
                     );
+                    if enforces_profile_ownership() {
+                        let _ =
+                            failure_tx.try_send(ApplicationServiceEvent::InitializationFailed {
+                                message: format!("{err:#}"),
+                            });
+                    }
                 }
             }),
         );
@@ -214,13 +299,35 @@ impl DBusServiceHost {
         ctx.spawn_stream_local(rx, |_, event, ctx| {
             match event {
                 ApplicationServiceEvent::Open { uris } => {
-                    for uri in uris {
-                        match url::Url::parse(&uri) {
-                            Ok(uri) => crate::uri::handle_incoming_uri(&uri, ctx),
-                            Err(err) => log::warn!("Failed to parse URI when handling org.freedesktop.Application/open: {err:#}"),
-                        }
+                    log::info!(
+                        "Received forwarded launch profile={} primary_version={} url_count={}",
+                        ChannelState::app_id().application_name(),
+                        crate::build_info::version_identity(),
+                        uris.len()
+                    );
+                    let urls = uris
+                        .into_iter()
+                        .filter_map(|uri| match url::Url::parse(&uri) {
+                            Ok(uri) => Some(uri),
+                            Err(err) => {
+                                log::warn!("Failed to parse URI when handling org.freedesktop.Application/open: {err:#}");
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    for uri in &urls {
+                        crate::uri::handle_incoming_uri(uri, ctx);
                     }
-                },
+                    crate::app_services::surface_forwarded_version_mismatch(&urls, ctx);
+                }
+                ApplicationServiceEvent::InitializationFailed { message } => {
+                    ctx.terminate_app(
+                        TerminationMode::ForceTerminate,
+                        Some(Err(anyhow::anyhow!(
+                            "Failed to claim WarpSpeed profile ownership: {message}"
+                        ))),
+                    );
+                }
             }
         }, |_, _| {});
 
@@ -245,7 +352,10 @@ impl DBusServiceHost {
     /// Returns the path under which the org.freedesktop.Application interface
     /// will be hosted.
     fn application_service_path() -> String {
-        format!("/{}", Self::well_known_name().split('.').join("/"))
+        application_service_path_for(
+            &Self::well_known_name(),
+            enforces_profile_ownership().then(profile_ownership_scope),
+        )
     }
 }
 
@@ -254,3 +364,14 @@ impl warpui::Entity for DBusServiceHost {
 }
 
 impl SingletonEntity for DBusServiceHost {}
+
+fn application_service_path_for(well_known_name: &str, ownership_scope: Option<String>) -> String {
+    ownership_scope.map_or_else(
+        || format!("/{}", well_known_name.split('.').join("/")),
+        |scope| format!("/dev/warp/{scope}"),
+    )
+}
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

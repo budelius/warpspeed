@@ -474,6 +474,17 @@ enum AuthInitialization {
 }
 
 impl LaunchMode {
+    pub(crate) fn participates_in_gui_profile_ownership(&self) -> bool {
+        match self {
+            LaunchMode::App { .. } => true,
+            LaunchMode::CommandLine { .. }
+            | LaunchMode::Test { .. }
+            | LaunchMode::RemoteServerProxy
+            | LaunchMode::RemoteServerDaemon { .. }
+            | LaunchMode::Tui { .. } => false,
+        }
+    }
+
     fn args(&self) -> Cow<'_, warp_cli::AppArgs> {
         match self {
             LaunchMode::App { args, .. } => Cow::Borrowed(args),
@@ -1059,6 +1070,16 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     #[cfg(target_family = "wasm")]
     let incoming_window_handoff = None;
 
+    #[cfg(not(target_family = "wasm"))]
+    if app_services::enforces_profile_ownership()
+        && let Some(handoff) = incoming_window_handoff.as_ref()
+    {
+        handoff.reject()?;
+        return Err(anyhow!(
+            "WarpSpeed window-process handoffs cannot bypass profile ownership"
+        ));
+    }
+
     let mut timer = IntervalTimer::new();
 
     // ── Early initialization (pre-AppBuilder) ──────────────────────
@@ -1157,21 +1178,13 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     // Collect errors that occur in run_internal() before the Sentry client is initialized,
     // so they can be replayed to Sentry once it's ready.
     #[cfg_attr(
-        not(all(
-            feature = "release_bundle",
-            any(windows, any(target_os = "linux", target_os = "freebsd"))
-        )),
+        not(any(windows, target_os = "linux", target_os = "freebsd")),
         expect(unused_mut)
     )]
     let mut pre_sentry_errors: Vec<anyhow::Error> = Vec::new();
 
-    #[cfg(all(
-        feature = "release_bundle",
-        any(target_os = "linux", target_os = "freebsd")
-    ))]
-    if let LaunchMode::App { .. } = launch_mode
-        && incoming_window_handoff.is_none()
-    {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if launch_mode.participates_in_gui_profile_ownership() && incoming_window_handoff.is_none() {
         match app_services::linux::pass_startup_args_to_existing_instance(
             launch_mode.args().as_ref(),
         ) {
@@ -1188,15 +1201,16 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
             Err(err) => {
                 let err = anyhow::Error::from(err).context("Failed to forward startup args");
                 report_error!(&err);
+                if app_services::linux::enforces_profile_ownership() {
+                    return Err(err);
+                }
                 pre_sentry_errors.push(err);
             }
         }
     }
 
-    #[cfg(all(feature = "release_bundle", windows))]
-    if let LaunchMode::App { .. } = launch_mode
-        && incoming_window_handoff.is_none()
-    {
+    #[cfg(windows)]
+    if launch_mode.participates_in_gui_profile_ownership() && incoming_window_handoff.is_none() {
         match app_services::windows::pass_startup_args_to_existing_instance(
             launch_mode.args().as_ref(),
         ) {
@@ -1213,6 +1227,9 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
             Err(err) => {
                 let err = anyhow::Error::from(err).context("Failed to forward startup args");
                 report_error!(&err);
+                if app_services::windows::enforces_profile_ownership() {
+                    return Err(err);
+                }
                 pre_sentry_errors.push(err);
             }
         }

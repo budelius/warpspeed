@@ -145,6 +145,7 @@ fn git_shell_runtime_policy() -> ChipRuntimePolicy {
             ChipFingerprintInput::InvalidatingCommandCount,
         ],
     )
+    .with_suppress_on_failure()
     .with_invalidate_on_commands(["git"])
 }
 

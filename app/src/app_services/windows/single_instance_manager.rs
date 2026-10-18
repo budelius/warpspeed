@@ -4,6 +4,7 @@ use ipc::ServerBuilder;
 use parking_lot::Mutex;
 use warp_core::channel::ChannelState;
 use warp_errors::report_error;
+use warpui::platform::TerminationMode;
 use warpui::{Entity, ModelContext, SingletonEntity};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
@@ -44,8 +45,24 @@ impl Drop for MutexHandle {
 static SOLE_INSTANCE_MUTEX: LazyLock<Mutex<Result<Option<MutexHandle>, Error>>> =
     LazyLock::new(|| Mutex::new(try_create_mutex()));
 
+fn uri_named_pipe_name_for_scope(scope: &str) -> String {
+    format!("Warp{scope}_URI_CHANNEL")
+}
+
 pub(super) fn uri_named_pipe_name() -> String {
-    format!("Warp{:?}_URI_CHANNEL", ChannelState::channel())
+    uri_named_pipe_name_for_scope(&single_instance_scope())
+}
+
+fn single_instance_scope() -> String {
+    if super::enforces_profile_ownership() {
+        crate::app_services::profile_ownership_scope()
+    } else {
+        format!("{:?}", ChannelState::channel())
+    }
+}
+
+fn single_instance_mutex_name_for_scope(scope: &str) -> String {
+    format!("Local\\Warp{scope}_SingleInstance")
 }
 
 fn try_create_mutex() -> Result<Option<MutexHandle>, Error> {
@@ -54,10 +71,9 @@ fn try_create_mutex() -> Result<Option<MutexHandle>, Error> {
     // > "client processes can use the "Local\" prefix to explicitly create an object in their
     //   session namespace"
     //
-    // NOTE: This lock name must stay in sync with `AppMutexName` in
-    // `script/windows/windows-installer.iss`, which the installer uses to detect whether Warp is
-    // running.
-    let name = format!("Local\\Warp{:?}_SingleInstance", ChannelState::channel())
+    // The installer uses the channel-scoped name for bundled Warp builds. WarpSpeed uses its
+    // AppId-derived scope so separate WARPSPEED_PROFILE values remain isolated.
+    let name = single_instance_mutex_name_for_scope(&single_instance_scope())
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<u16>>();
@@ -110,21 +126,30 @@ impl SingleInstanceManager {
                 ctx.spawn_stream_local(
                     rx,
                     |_single_instance_manager, event, ctx| {
-                        for uri in event {
-                            crate::uri::handle_incoming_uri(&uri, ctx);
+                        log::info!(
+                            "Received forwarded launch profile={} primary_version={} url_count={}",
+                            ChannelState::app_id().application_name(),
+                            crate::build_info::version_identity(),
+                            event.len()
+                        );
+                        for uri in &event {
+                            crate::uri::handle_incoming_uri(uri, ctx);
                         }
+                        crate::app_services::surface_forwarded_version_mismatch(&event, ctx);
                     },
                     |_, _| {},
                 );
                 server
             }
             Err(err) => {
-                report_error!(
-                    anyhow::Error::new(err).context("Failed to initialize UriService Server")
-                );
-                // If we failed to create a server, we can't receive URI requests so we drop the
-                // lock.
-                *SOLE_INSTANCE_MUTEX.lock() = Ok(None);
+                let err = anyhow::Error::new(err).context("Failed to initialize UriService Server");
+                report_error!(&err);
+                if super::enforces_profile_ownership() {
+                    ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                } else {
+                    // Bundled Warp historically fails open when its URI service cannot start.
+                    *SOLE_INSTANCE_MUTEX.lock() = Ok(None);
+                }
                 return Self { _server: None };
             }
         };
@@ -152,3 +177,7 @@ impl Entity for SingleInstanceManager {
 }
 
 impl SingletonEntity for SingleInstanceManager {}
+
+#[cfg(test)]
+#[path = "single_instance_manager_tests.rs"]
+mod tests;

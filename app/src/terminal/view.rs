@@ -325,6 +325,7 @@ use crate::code_review::git_repo_model::{GitRepoModels, GitRepoStatusModel, GitS
 use crate::code_review::github_repo_model::GitHubRepoModel;
 use crate::code_review::telemetry_event::CodeReviewPaneEntrypoint;
 use crate::context_chips::ContextChipKind;
+use crate::context_chips::current_prompt::GitRepositoryContext;
 use crate::context_chips::prompt::{Prompt, PromptSelection};
 use crate::context_chips::prompt_type::PromptType;
 use crate::drive::CloudObjectTypeAndId;
@@ -3071,6 +3072,10 @@ enum BlockMetadataUpdateSource {
     Osc7,
 }
 
+fn should_refresh_prompt_after_block_completion(block_type: &BlockType) -> bool {
+    !matches!(block_type, BlockType::InBandCommand | BlockType::Restored)
+}
+
 impl TerminalView {
     /// Returns the path to the current repository, if any.
     pub fn current_repo_path(&self) -> Option<&LocalOrRemotePath> {
@@ -5220,10 +5225,39 @@ impl TerminalView {
         ctx.unsubscribe_to_model(&handle);
     }
 
+    fn set_prompt_git_repository_context(
+        &mut self,
+        repository_context: GitRepositoryContext,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.current_prompt.update(ctx, |prompt_type, ctx| {
+            if let PromptType::Dynamic { prompt } = prompt_type {
+                prompt.update(ctx, |current_prompt, ctx| {
+                    current_prompt.set_git_repository_context(repository_context, ctx);
+                });
+            }
+        });
+    }
+
+    fn set_prompt_git_repository_context_without_refresh(
+        &mut self,
+        repository_context: GitRepositoryContext,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.current_prompt.update(ctx, |prompt_type, ctx| {
+            if let PromptType::Dynamic { prompt } = prompt_type {
+                prompt.update(ctx, |current_prompt, _| {
+                    current_prompt.set_git_repository_context_without_refresh(repository_context);
+                });
+            }
+        });
+    }
+
     /// Fully clear the per-repo git status handle, including the input's repo
     /// path. Use this when navigating out of a git repository.
     fn clear_git_repo_status(&mut self, ctx: &mut ViewContext<Self>) {
         self.clear_git_repo_status_subscription(ctx);
+        self.set_prompt_git_repository_context(GitRepositoryContext::NotRepository, ctx);
         self.input.update(ctx, |input, ctx| {
             input.update_repo_path(None, ctx);
         });
@@ -11787,6 +11821,15 @@ impl TerminalView {
                     });
                     if let Some(session_type) = session_type {
                         let is_local = matches!(session_type, RepoDetectionSessionType::Local);
+                        let working_directory_changed = prev_block_metadata
+                            .current_working_directory()
+                            != block_metadata.current_working_directory();
+                        if is_local && working_directory_changed {
+                            self.set_prompt_git_repository_context_without_refresh(
+                                GitRepositoryContext::Unknown,
+                                ctx,
+                            );
+                        }
 
                         // For local sessions, convert the shell-native CWD
                         // (e.g. "/c/Users/..." for Git Bash/MSYS2) to a
@@ -11874,6 +11917,10 @@ impl TerminalView {
                                         me.clear_git_repo_status_subscription(ctx);
                                         me.update_git_status_subscription(ctx);
                                     }
+                                    me.set_prompt_git_repository_context(
+                                        GitRepositoryContext::Attached,
+                                        ctx,
+                                    );
                                 }
                                 Some(LocalOrRemotePath::Local(repo_path)) => {
                                     #[cfg(feature = "local_fs")]
@@ -11938,6 +11985,10 @@ impl TerminalView {
                                         me.start_lsp_server_in_active_pwd(ctx);
 
                                         me.update_repo_banner_state(repo_path.clone(), ctx);
+                                        me.set_prompt_git_repository_context(
+                                            GitRepositoryContext::Attached,
+                                            ctx,
+                                        );
                                     }
                                     #[cfg(not(feature = "local_fs"))]
                                     let _ = repo_path;
@@ -12680,7 +12731,7 @@ impl TerminalView {
                 // that the shell has been bootstrapped. Since we're in the BlockCompleted
                 // event, that also implies we would have received the first precmd
                 // so we know that the active block has valid metadata.
-                if !matches!(block_type, BlockType::InBandCommand)
+                if should_refresh_prompt_after_block_completion(block_type)
                     && self
                         .model
                         .lock()

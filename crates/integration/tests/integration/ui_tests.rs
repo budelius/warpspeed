@@ -222,6 +222,7 @@ integration_tests! {
     test_osc8_no_regression_on_url_autodetect,
 
     test_command_palette_opens_with_actions,
+    test_title_bar_search_finds_terminal_sessions,
     test_cycle_active_tab_color_with_keybinding,
     test_active_session_follows_focus,
     test_tab_context_menu_copies_metadata,

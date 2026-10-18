@@ -8,11 +8,11 @@ mod imp;
 use std::path::Path;
 use std::path::PathBuf;
 
+#[cfg(feature = "local_fs")]
+pub use imp::SaveLaunchConfigError;
 pub(crate) use imp::load_tab_configs;
 #[cfg(feature = "local_fs")]
 pub use imp::load_workflows;
-#[cfg(feature = "local_fs")]
-pub use imp::{SaveLaunchConfigError, SavedLaunchConfig};
 pub use imp::{load_launch_configs, load_theme_configs};
 use lazy_static::lazy_static;
 use warp_core::ui::theme::WarpTheme;
@@ -153,17 +153,30 @@ impl WarpConfig {
         launch_config: &LaunchConfig,
         ctx: &mut ModelContext<Self>,
     ) {
+        let is_session = launch_config
+            .window_source(0)
+            .is_some_and(|source| source.is_session_config());
+        let (configs, event) = if is_session {
+            (
+                &mut self.session_configs,
+                WarpConfigUpdateEvent::SessionConfigs,
+            )
+        } else {
+            (
+                &mut self.launch_configs,
+                WarpConfigUpdateEvent::LaunchConfigs,
+            )
+        };
         if let Some(source) = launch_config.source.as_ref()
-            && let Some(existing) = self
-                .launch_configs
+            && let Some(existing) = configs
                 .iter_mut()
                 .find(|existing| existing.source.as_ref() == Some(source))
         {
             *existing = launch_config.clone();
-            ctx.emit(WarpConfigUpdateEvent::LaunchConfigs);
-        } else if !self.launch_configs.contains(launch_config) {
-            self.launch_configs.push(launch_config.to_owned());
-            ctx.emit(WarpConfigUpdateEvent::LaunchConfigs);
+            ctx.emit(event);
+        } else if !configs.contains(launch_config) {
+            configs.push(launch_config.to_owned());
+            ctx.emit(event);
         }
     }
 
@@ -217,7 +230,15 @@ fn authored_config_base_dir_for_app_id(app_id: warp_core::AppId) -> PathBuf {
     ))
 }
 
+#[cfg(feature = "integration_tests")]
+pub(crate) static AUTHORED_CONFIG_TEST_DIR: parking_lot::Mutex<Option<PathBuf>> =
+    parking_lot::Mutex::new(None);
+
 pub(crate) fn authored_config_base_dir() -> PathBuf {
+    #[cfg(feature = "integration_tests")]
+    if let Some(root) = AUTHORED_CONFIG_TEST_DIR.lock().clone() {
+        return root;
+    }
     authored_config_base_dir_for_app_id(warp_core::channel::ChannelState::app_id())
 }
 

@@ -101,6 +101,7 @@ integration_tests! {
     #[cfg(target_os="macos")]
     test_preview_config_dir_migration,
     test_save_current_window_as_launch_config,
+    test_save_configuration_target_picker,
     #[ignore = "Flakes in CI"]
     test_add_launch_config_to_warp_config,
     #[ignore = "Flakes in CI"]

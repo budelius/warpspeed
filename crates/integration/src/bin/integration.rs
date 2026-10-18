@@ -249,6 +249,7 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_preview_config_dir_migration);
     register_test!(test_launch_warp_with_theme_in_warp_config);
     register_test!(test_save_current_window_as_launch_config);
+    register_test!(test_save_configuration_target_picker);
     register_test!(test_add_launch_config_to_warp_config);
     register_test!(test_add_workflows_to_warp_config);
     register_test!(test_loading_project_workflows);

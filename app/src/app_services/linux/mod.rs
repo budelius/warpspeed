@@ -51,8 +51,7 @@ pub fn pass_startup_args_to_existing_instance(
     }
 
     log::info!(
-        "Forwarding launch to Warp profile owner profile={} source_version={}",
-        ChannelState::app_id().application_name(),
+        "Forwarding launch to Warp profile owner source_version={}",
         crate::build_info::version_identity()
     );
     let first_result = forward_startup_args_once(args);
@@ -300,8 +299,7 @@ impl DBusServiceHost {
             match event {
                 ApplicationServiceEvent::Open { uris } => {
                     log::info!(
-                        "Received forwarded launch profile={} primary_version={} url_count={}",
-                        ChannelState::app_id().application_name(),
+                        "Received forwarded launch primary_version={} url_count={}",
                         crate::build_info::version_identity(),
                         uris.len()
                     );

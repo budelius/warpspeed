@@ -67,8 +67,7 @@ pub fn pass_startup_args_to_existing_instance(
 
     super::add_forwarded_source_version(&mut urls);
     log::info!(
-        "Forwarding launch to Warp profile owner profile={} source_version={}",
-        ChannelState::app_id().application_name(),
+        "Forwarding launch to Warp profile owner source_version={}",
         crate::build_info::version_identity()
     );
     warpui::r#async::block_on(async {

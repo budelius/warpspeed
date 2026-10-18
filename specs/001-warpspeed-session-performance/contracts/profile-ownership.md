@@ -6,7 +6,7 @@ Ownership applies only to GUI application launches. CLI subcommands, crash helpe
 
 ## Identity
 
-The ownership key is derived from the effective AppId/profile and user session. It is independent of executable path and application version. Explicit profiles and elevation-derived profiles therefore remain isolated. Sanitization hashes every non-empty profile whose identity changes, including names made entirely of unsupported characters, so they cannot collapse into the default profile.
+The ownership key is derived from the effective AppId/profile and user session. It is independent of executable path and application version. Explicit profiles and elevation-derived profiles therefore remain isolated. Every non-empty explicit profile includes a hash of its exact value after sanitization, including names made entirely of unsupported characters, so sanitization and case-folding cannot collapse distinct profiles into the same identity or the default profile.
 
 ## Launch behavior
 

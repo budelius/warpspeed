@@ -127,8 +127,7 @@ impl SingleInstanceManager {
                     rx,
                     |_single_instance_manager, event, ctx| {
                         log::info!(
-                            "Received forwarded launch profile={} primary_version={} url_count={}",
-                            ChannelState::app_id().application_name(),
+                            "Received forwarded launch primary_version={} url_count={}",
                             crate::build_info::version_identity(),
                             event.len()
                         );

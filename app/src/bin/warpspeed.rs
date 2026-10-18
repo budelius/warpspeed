@@ -23,8 +23,11 @@
 #![cfg_attr(feature = "release_bundle", windows_subsystem = "windows")]
 
 use anyhow::Result;
+use sha2::{Digest as _, Sha256};
 use warp_core::channel::{Channel, ChannelConfig, ChannelState, OzConfig, WarpServerConfig};
 use warp_core::{AppId, features};
+
+const MAX_PROFILE_NAME_CHARS: usize = 48;
 
 /// Whether this process is running with an elevated token.
 ///
@@ -70,34 +73,32 @@ fn is_elevated() -> bool {
 
 /// Picks the application name, which is what separates data directories.
 ///
-/// * `WARPSPEED_PROFILE=foo` -> `WarpSpeed-foo`, for running isolated instances side by side.
+/// * `WARPSPEED_PROFILE=foo` -> `WarpSpeed-foo-<stable hash>`, for running isolated instances side
+///   by side without collisions after sanitization or filesystem case folding.
 /// * elevated, no profile set -> `WarpSpeedAdmin`, so an admin instance never shares a database
 ///   with a normal one. Sharing would mean two processes on one SQLite file, and files written
 ///   by the elevated process that the normal one may not be able to rewrite.
 /// * otherwise -> `WarpSpeed`.
 fn application_name_for(profile: Option<&str>, elevated: bool) -> String {
-    let profile = profile.map(str::trim).unwrap_or_default();
+    let profile = profile.unwrap_or_default();
     let sanitized = profile
         .chars()
         .filter(|character| {
             character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
         })
+        .take(MAX_PROFILE_NAME_CHARS)
         .collect::<String>();
-    let profile = if sanitized.len() == profile.len() {
-        sanitized
+    let profile = if profile.is_empty() {
+        String::new()
     } else {
-        let hash = profile
-            .as_bytes()
-            .iter()
-            .fold(0xcbf29ce484222325u64, |hash, byte| {
-                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-            });
+        let digest = Sha256::digest(profile.as_bytes());
+        let hash = hex::encode(&digest[..16]);
         let sanitized = if sanitized.is_empty() {
             "profile"
         } else {
             &sanitized
         };
-        format!("{sanitized}-{hash:016x}")
+        format!("{sanitized}-{hash}")
     };
     if !profile.is_empty() {
         format!("WarpSpeed-{profile}")
@@ -188,10 +189,9 @@ mod tests {
         let sanitized = application_name_for(Some(" project/a "), false);
         assert!(sanitized.starts_with("WarpSpeed-projecta-"));
         assert_ne!(sanitized, application_name_for(Some("projecta"), false));
-        assert_eq!(
-            application_name_for(Some("project-b"), false),
-            "WarpSpeed-project-b"
-        );
+        let project_b = application_name_for(Some("project-b"), false);
+        assert!(project_b.starts_with("WarpSpeed-project-b-"));
+        assert_eq!(project_b, application_name_for(Some("project-b"), false));
         assert_ne!(
             application_name_for(Some("project-a"), false),
             application_name_for(Some("project-b"), false)
@@ -202,11 +202,25 @@ mod tests {
     fn nonempty_profiles_never_collapse_to_the_default_profile() {
         let punctuation = application_name_for(Some("///"), false);
         let unicode = application_name_for(Some("💥"), false);
+        let whitespace = application_name_for(Some("  "), true);
         assert!(punctuation.starts_with("WarpSpeed-profile-"));
         assert!(unicode.starts_with("WarpSpeed-profile-"));
+        assert!(whitespace.starts_with("WarpSpeed-profile-"));
         assert_ne!(punctuation, unicode);
+        assert_ne!(punctuation, whitespace);
         assert_ne!(punctuation, "WarpSpeed");
-        assert_eq!(application_name_for(Some("  "), true), "WarpSpeedAdmin");
+        assert_ne!(whitespace, "WarpSpeedAdmin");
+        assert_ne!(
+            application_name_for(Some("profile"), false).to_ascii_lowercase(),
+            application_name_for(Some("PROFILE"), false).to_ascii_lowercase()
+        );
+        let long_a = format!("{}a", "x".repeat(1_000));
+        let long_b = format!("{}b", "x".repeat(1_000));
+        assert_ne!(
+            application_name_for(Some(&long_a), false),
+            application_name_for(Some(&long_b), false)
+        );
+        assert!(application_name_for(Some(&long_a), false).len() < 100);
         assert_eq!(application_name_for(None, false), "WarpSpeed");
     }
 }

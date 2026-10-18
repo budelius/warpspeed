@@ -103,7 +103,7 @@ On each affected platform:
 6. Start `WARPSPEED_PROFILE=session-performance-test-2` and confirm it owns an independent primary.
 7. Confirm CLI commands and terminal supervisors do not acquire GUI ownership.
 8. Invoke the window-process restart action and confirm WarpSpeed requests a profile-owner restart instead of starting a replacement GUI writer.
-9. Confirm non-empty profile names containing only unsupported characters remain isolated from the default profile and from each other.
+9. Confirm whitespace-only, unsupported-character-only, and case-only-different profile names remain isolated from the default profile and from each other.
 
 Expected: one primary per profile, no concurrent old/new writers, and live supervisor-managed terminals remain attachable after the GUI restart.
 

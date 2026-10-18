@@ -90,16 +90,16 @@ payloads, private paths, attachments and debug-derived error types remain absent
 Files: `app/src/lib.rs`, `crates/warp_terminal/src/local_tty/{supervisor,windows,unix_supervisor}`,
 `crates/warp_terminal/src/local_tty/event_loop.rs`.
 
-Status: partially implemented on `investigate/crash-followups`. After exclusively claiming its local
-channel, each supervisor initializes Rust-only reporting when a persisted opt-in marker exists. The
-marker is synchronized with the privacy setting and is checked again before every headless event, so
-missing or removed state fails closed. Ojiichan retains only fixed process/exit enums and bounded
-live-session state; revision remains the sanitized Sentry release. Idle shutdowns are not reported.
-Control-channel loss, returned daemon errors and Rust panics are reportable, without native
-minidumps, terminal bytes, session IDs, paths, code locations or error payloads. Windows
-supervisor tests and crash-reporting tests pass; Unix runtime acceptance is still required. Abrupt
-external process termination, explicit shutdown intent and connection-generation correlation remain
-open.
+Status: implemented on `investigate/crash-followups` for in-process unexpected exits and Rust
+panics. After exclusively claiming its local channel, each supervisor initializes Rust-only reporting
+when a persisted opt-in marker exists. The marker is synchronized with the privacy setting and is
+checked again before every headless event, so missing or removed state fails closed. Ojiichan retains
+only fixed process/exit enums and bounded live-session state; revision remains the sanitized Sentry
+release. Idle shutdowns are not reported. Control-channel loss, returned daemon errors and Rust
+panics are reportable, without native minidumps, terminal bytes, session IDs, paths, code locations
+or error payloads. Windows and Unix supervisor tests, crash-reporting tests and Unix idle-shutdown
+runtime acceptance pass. Abrupt external process termination remains inherently unreportable from
+inside that process; explicit shutdown intent and connection-generation correlation remain open.
 
 - Supervisor startup currently bypasses GUI crash-reporting initialization. Its available logs show
   startup and client-requested kills, but no panic. Absence of remote reports is not evidence that

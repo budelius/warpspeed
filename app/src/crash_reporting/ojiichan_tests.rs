@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use sentry::protocol::{Attachment, Breadcrumb, User};
 use serde_json::json;
+use warp_errors::{REPORT_ERROR_LOCATION, report_error};
 
 use super::*;
 
@@ -97,6 +98,81 @@ impl Transport for RecordedEnvelopes {
     fn send_envelope(&self, envelope: Envelope) {
         self.0.lock().unwrap().push(envelope);
     }
+}
+
+#[test]
+fn non_panic_reports_identify_the_call_site_without_the_payload() {
+    let event = sanitize(Event {
+        exception: vec![Exception {
+            ty: "private error type".into(),
+            value: Some("private error payload".into()),
+            stacktrace: Some(Stacktrace {
+                frames: vec![Frame {
+                    function: Some(REPORT_ERROR_LOCATION.into()),
+                    filename: Some(r"C:\Users\private\project\listener.rs".into()),
+                    lineno: Some(42),
+                    colno: Some(8),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]
+        .into(),
+        ..Default::default()
+    });
+
+    assert_eq!(event.exception[0].ty, "Error");
+    assert_eq!(
+        event.exception[0].value.as_deref(),
+        Some("cloud-objects:listener.rs:42:8")
+    );
+    assert!(!serde_json::to_string(&event).unwrap().contains("private"));
+}
+
+#[test]
+fn report_error_macro_preserves_a_sanitized_call_site() {
+    let recorded = Arc::new(RecordedEnvelopes::default());
+    let transport = Arc::new(DiagnosticsTransport(recorded.clone()));
+    let mut options = ClientOptions {
+        dsn: Some("https://public@example.invalid/1".parse().unwrap()),
+        release: Some("test-build".into()),
+        environment: Some("test".into()),
+        ..Default::default()
+    };
+    configure(&mut options);
+    options.transport = Some(Arc::new(transport));
+    let client = Arc::new(sentry::Client::from(sentry::apply_defaults(options)));
+    let hub = Arc::new(sentry::Hub::new(Some(client), Default::default()));
+
+    let report_line = line!() + 2;
+    sentry::Hub::run(hub, || {
+        report_error!("synthetic crash-reporting test diagnostic");
+    });
+
+    let recorded = recorded.0.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let event = recorded[0].event().unwrap();
+    assert_eq!(event.environment.as_deref(), Some("test"));
+    assert_eq!(event.exception[0].ty, "Error");
+    assert!(
+        event.exception[0]
+            .value
+            .as_deref()
+            .unwrap()
+            .starts_with(&format!("application:ojiichan_tests.rs:{report_line}:"))
+    );
+    let frame = event.exception[0]
+        .stacktrace
+        .as_ref()
+        .unwrap()
+        .frames
+        .iter()
+        .find(|frame| frame.function.as_deref() == Some(REPORT_ERROR_LOCATION))
+        .unwrap();
+    assert_eq!(frame.filename.as_deref(), Some("ojiichan_tests.rs"));
+    let json = serde_json::to_string(event).unwrap();
+    assert!(!json.contains("synthetic crash-reporting test diagnostic"));
 }
 
 #[test]

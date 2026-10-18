@@ -8,6 +8,7 @@ use sentry::integrations::backtrace::{
 use sentry::integrations::panic::PanicIntegration;
 use sentry::protocol::{EnvelopeItem, Event, Exception, Frame, Stacktrace};
 use sentry::{ClientOptions, Envelope, Level, Transport, TransportFactory};
+use warp_errors::REPORT_ERROR_LOCATION;
 
 const PANIC_LOCATION: &str = "rust_panic_location";
 
@@ -106,32 +107,49 @@ pub(super) fn sanitize(event: Event<'static>) -> Event<'static> {
 
 fn sanitize_exception(exception: Exception) -> Exception {
     // Error types are inferred from Debug output by the SDK, not always static names.
-    let ty = if exception.ty == "panic" {
-        "panic"
-    } else {
-        "Error"
-    };
+    let is_panic = exception.ty == "panic";
     let stacktrace = exception.stacktrace.map(sanitize_stacktrace);
-    let value = if ty == "panic" {
-        stacktrace.as_ref().and_then(|stacktrace| {
-            let frame = stacktrace
-                .frames
-                .iter()
-                .rev()
-                .find(|frame| frame.function.as_deref() == Some(PANIC_LOCATION))?;
-            let filename = frame.filename.as_deref()?;
-            let line = frame.lineno?;
-            let column = frame.colno?;
+    let value = stacktrace.as_ref().and_then(|stacktrace| {
+        let marker = if is_panic {
+            PANIC_LOCATION
+        } else {
+            REPORT_ERROR_LOCATION
+        };
+        let frame = stacktrace
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.function.as_deref() == Some(marker))?;
+        let filename = frame.filename.as_deref()?;
+        let line = frame.lineno?;
+        let column = frame.colno?;
+        if is_panic {
             Some(format!("{filename}:{line}:{column}"))
-        })
-    } else {
-        None
-    };
+        } else {
+            Some(format!(
+                "{}:{filename}:{line}:{column}",
+                report_component(filename)
+            ))
+        }
+    });
     Exception {
-        ty: ty.into(),
+        ty: if is_panic { "panic" } else { "Error" }.into(),
         value,
         stacktrace,
         ..Default::default()
+    }
+}
+
+fn report_component(filename: &str) -> &'static str {
+    match filename {
+        "auth_manager.rs" | "auth_state.rs" | "session.rs" => "authentication",
+        "listener.rs" | "update_manager.rs" => "cloud-objects",
+        "terminal_model.rs" | "ansi_handler.rs" | "grid_handler.rs" | "event_loop.rs" => "terminal",
+        "workspace.rs" | "view.rs" | "root_view.rs" => "workspace",
+        "driver.rs" | "agent.rs" => "agent",
+        "ojiichan.rs" | "crash_reporting.rs" => "crash-reporting",
+        "sqlite.rs" | "session_store.rs" => "persistence",
+        _ => "application",
     }
 }
 

@@ -78,6 +78,8 @@ use crate::stozn_auth::StoznAuthManager;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
 use crate::tab_configs::tab_config::{TabConfigPaneNode, TabConfigPaneType};
+#[cfg(feature = "local_tty")]
+use crate::terminal::TerminalSurface;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
@@ -5500,6 +5502,46 @@ fn restart_and_change_shell_appear_in_pane_context_menus() {
 /// The restart confirmation exists to protect work in progress. A freshly
 /// created pane has nothing running in it, so `RestartShell` must restart
 /// immediately without prompting.
+#[cfg(feature = "local_tty")]
+#[test]
+fn supervisor_restart_requires_confirmation_even_for_an_idle_shell_and_can_be_cancelled() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let session = manager.as_ref(ctx).persistent_session_id();
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(
+                    Some(crate::app_state::SessionHolder {
+                        channel: "older-supervisor".to_owned(),
+                        version: "older-build".to_owned(),
+                        pid: 42,
+                    }),
+                    ctx,
+                );
+            });
+            workspace.handle_action(
+                &WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
+                    terminal_view_id: view.id(),
+                },
+                ctx,
+            );
+            assert!(workspace.restart_shell_confirmation_modal.is_open());
+            assert!(workspace.pending_shell_restart.is_some());
+            assert_eq!(manager.as_ref(ctx).persistent_session_id(), session);
+            workspace.handle_restart_shell_confirmation_modal_body_event(
+                &RestartShellConfirmationEvent::Cancel,
+                ctx,
+            );
+            assert!(!workspace.restart_shell_confirmation_modal.is_open());
+            assert!(workspace.pending_shell_restart.is_none());
+            assert_eq!(manager.as_ref(ctx).persistent_session_id(), session);
+        });
+    });
+}
+
 #[test]
 fn restart_shell_does_not_prompt() {
     App::test((), |mut app| async move {

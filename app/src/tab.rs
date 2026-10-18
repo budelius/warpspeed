@@ -637,6 +637,23 @@ impl TabData {
                 })
                 .into_item(),
         ];
+        #[cfg(feature = "local_tty")]
+        if let Some(holder) = terminal_view.as_ref(ctx).connected_supervisor() {
+            items.push(
+                MenuItemFields::new(format!("Supervisor: build {}", holder.version))
+                    .with_disabled(true)
+                    .into_item(),
+            );
+            items.push(
+                MenuItemFields::new("Restart under current supervisor…")
+                    .with_on_select_action(
+                        WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
+                            terminal_view_id,
+                        },
+                    )
+                    .into_item(),
+            );
+        }
         if can_detach {
             items.push(
                 MenuItemFields::new("Detach session")

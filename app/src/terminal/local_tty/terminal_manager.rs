@@ -1102,7 +1102,9 @@ impl<S> TerminalManager<S> {
                         if let Some(restore) = terminal_manager.withheld_restore.take() {
                             terminal_manager.view.update(ctx, |view, ctx| {
                                 view.on_withheld_restore_resolved(ctx);
-                                view.set_pending_restore_command(restore.command, ctx);
+                                if !restore.command.is_empty() {
+                                    view.set_pending_restore_command(restore.command, ctx);
+                                }
                             });
                         }
                         return;
@@ -1684,8 +1686,31 @@ fn on_shell_determined<S: TerminalSurface>(
     // Consumed by this attach: a later restart of the same pane replaces the
     // session rather than taking one over, and must not repaint.
     let include_snapshot = std::mem::take(&mut manager.repaint_screen_on_attach);
+    let held = manager.held_elsewhere();
+    #[cfg(windows)]
+    let include_snapshot = if let Some((Some(holder), HeldVerdict::Detached)) = &held
+        && let Some(session_id) = manager.persistent_session_id
+    {
+        use warp_terminal::local_tty::windows::supervisor_client::WindowsTerminalSupervisorClient;
+        if let Ok(client) =
+            WindowsTerminalSupervisorClient::for_existing_pipe(holder.channel.clone())
+        {
+            PtySpawner::handle(ctx).update(ctx, |spawner, _| {
+                spawner.adopt_supervisor(session_id, Arc::new(client));
+            });
+        }
+        true
+    } else {
+        include_snapshot
+    };
     let mut attach_error = None;
-    let attached = manager.persistent_session_id.and_then(|session_id| {
+    let attachable_session_id = manager.persistent_session_id.filter(|_| {
+        !matches!(
+            held,
+            Some((_, HeldVerdict::Attached | HeldVerdict::HeldByUnknown))
+        )
+    });
+    let attached = attachable_session_id.and_then(|session_id| {
         let size = manager.model().lock().block_list().size().to_owned();
         match Pty::attach(session_id, &size, include_snapshot, ctx) {
             Ok(attached) => attached,
@@ -1789,33 +1814,25 @@ fn on_shell_determined<S: TerminalSurface>(
                 ctx,
             );
         });
-    } else if let Some(command) = manager.cli_agent_resume_command.take() {
-        let held = manager
-            .held_elsewhere()
-            .map(|(holder, verdict)| WithheldRestore {
-                command: command.clone(),
-                holder,
-                session_id: manager.persistent_session_id,
-                agent: manager.held_agent.clone(),
-                verdict,
-            });
-        match held {
-            Some(restore) => {
-                log::info!(
-                    "Withholding the resume command: session {:?} is still held ({:?}) by {:?}",
-                    restore.session_id.map(|session_id| session_id.as_u64()),
-                    restore.verdict,
-                    restore.holder
-                );
-                manager.withheld_restore = Some(restore.clone());
-                manager
-                    .view
-                    .update(ctx, |view, ctx| view.withhold_restore_command(restore, ctx));
+    } else if let Some((holder, verdict)) = held {
+        let restore = WithheldRestore {
+            command: manager.cli_agent_resume_command.take().unwrap_or_default(),
+            holder,
+            session_id: manager.persistent_session_id,
+            agent: manager.held_agent.clone(),
+            verdict,
+        };
+        manager.withheld_restore = Some(restore.clone());
+        manager.view.update(ctx, |view, ctx| {
+            view.withhold_restore_command(restore, ctx);
+            if let Some(error) = attach_error {
+                view.on_held_attach_failed(error, ctx);
             }
-            None => manager.view.update(ctx, |view, ctx| {
-                view.set_pending_restore_command(command, ctx);
-            }),
-        }
+        });
+    } else if let Some(command) = manager.cli_agent_resume_command.take() {
+        manager.view.update(ctx, |view, ctx| {
+            view.set_pending_restore_command(command, ctx);
+        });
     }
 
     let active_session_id = pty.persistent_session_id().unwrap_or(generated_session_id);
@@ -1873,6 +1890,7 @@ fn on_shell_determined<S: TerminalSurface>(
     }
 
     manager.view.update(ctx, |surface, ctx| {
+        surface.on_supervisor_changed(manager.session_holder.clone(), ctx);
         surface.on_shell_pid_determined(pid, ctx);
         surface.on_shell_determined(ctx);
         surface.on_active_shell_launch_data_updated(Some(shell_launch_data), ctx);

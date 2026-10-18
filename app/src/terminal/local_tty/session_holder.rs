@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use instant::Instant;
 use warp_core::SessionId;
-use warp_terminal::local_tty::supervisor::message::{Message, PROTOCOL_VERSION};
+use warp_terminal::local_tty::supervisor::message::Message;
+#[cfg(not(windows))]
+use warp_terminal::local_tty::supervisor::message::PROTOCOL_VERSION;
 use warp_terminal::local_tty::supervisor::transport::Transport;
 
 use crate::app_state::SessionHolder;
@@ -106,7 +108,12 @@ pub(crate) fn verdict_over<T: Transport>(
     let Some(Message::Pong { protocol_version }) = ask(&mut open, Message::Ping, deadline) else {
         return HolderVerdict::Unknown;
     };
-    if protocol_version != PROTOCOL_VERSION {
+    #[cfg(windows)]
+    let compatible =
+        warp_terminal::local_tty::supervisor::compatibility::supports_protocol(protocol_version);
+    #[cfg(not(windows))]
+    let compatible = protocol_version == PROTOCOL_VERSION;
+    if !compatible {
         return HolderVerdict::Unknown;
     }
     let Some(Message::ListSessionsResponse { sessions }) =

@@ -125,6 +125,16 @@ where
     #[cfg(feature = "local_tty")]
     fn on_withheld_restore_resolved(&mut self, _ctx: &mut ViewContext<Self>) {}
 
+    /// Identifies the supervisor that owns the connected shell.
+    #[cfg(feature = "local_tty")]
+    fn on_supervisor_changed(
+        &mut self,
+        holder: Option<crate::app_state::SessionHolder>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let _ = (holder, ctx);
+    }
+
     /// Called when the active shell launch data is updated (e.g. shell indicator metadata).
     fn on_active_shell_launch_data_updated(
         &mut self,

@@ -9,7 +9,9 @@ mod ojiichan;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::io::ErrorKind;
 use std::ops::DerefMut;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use lazy_static::lazy_static;
@@ -31,6 +33,13 @@ use crate::auth::{AuthStateProvider, UserUid};
 use crate::channel::ChannelState;
 use crate::features::FeatureFlag;
 use crate::settings::{PrivacySettings, PrivacySettingsChangedEvent};
+
+pub(super) const HEADLESS_PROCESS_TAG: &str = "warp.headless_process";
+pub(super) const HEADLESS_EXIT_REASON_TAG: &str = "warp.headless_exit_reason";
+pub(super) const HEADLESS_HAD_LIVE_SESSIONS_TAG: &str = "warp.headless_had_live_sessions";
+
+const HEADLESS_CRASH_REPORTING_MARKER: &str = "headless-crash-reporting-enabled";
+const TERMINAL_SESSION_SUPERVISOR: &str = "terminal_session_supervisor";
 
 lazy_static! {
     /// The RAII guard returned by the call to initialize the Rust Sentry client must be kept in
@@ -119,6 +128,49 @@ fn is_crash_reporting_enabled(ctx: &mut AppContext) -> bool {
         .as_ref(ctx)
         .is_crash_reporting_enabled
 }
+
+fn headless_crash_reporting_marker() -> Option<PathBuf> {
+    let state_dir = warp_core::paths::state_dir();
+    (!state_dir.as_os_str().is_empty()).then(|| state_dir.join(HEADLESS_CRASH_REPORTING_MARKER))
+}
+
+fn sync_headless_crash_reporting_marker(enabled: bool) {
+    if !is_warpspeed() {
+        return;
+    }
+    let Some(marker) = headless_crash_reporting_marker() else {
+        return;
+    };
+    let result = if enabled {
+        marker
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| std::fs::write(marker, []))
+    } else {
+        std::fs::remove_file(marker).or_else(|error| {
+            if error.kind() == ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+    };
+    if let Err(error) = result {
+        log::warn!("Failed to update headless crash reporting preference: {error}");
+    }
+}
+
+fn is_headless_crash_reporting_enabled() -> bool {
+    headless_crash_reporting_marker().is_some_and(|marker| marker.is_file())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalSupervisorExit {
+    ControlChannelClosed { had_live_sessions: bool },
+    Error,
+}
+
 #[derive(Default)]
 struct CrashRecoveryMetadata {
     /// Whether the Sentry event was previously _unhandled_.
@@ -183,9 +235,11 @@ impl ToSentryTags for CrashRecoveryMetadata {
 /// reporting is active.
 pub(crate) fn init(ctx: &mut AppContext) -> bool {
     if !ChannelState::is_crash_reporting_available() {
+        sync_headless_crash_reporting_marker(false);
         return false;
     }
     if !FeatureFlag::CrashReporting.is_enabled() {
+        sync_headless_crash_reporting_marker(false);
         log::info!("Crash reporting FeatureFlag is disabled; not initializing sentry.");
         return false;
     }
@@ -208,6 +262,7 @@ pub(crate) fn init(ctx: &mut AppContext) -> bool {
     });
 
     let is_crash_reporting_enabled = is_crash_reporting_enabled(ctx);
+    sync_headless_crash_reporting_marker(is_crash_reporting_enabled);
 
     if is_crash_reporting_enabled {
         AuthStateProvider::handle(ctx).update(ctx, |auth_state_provider, ctx| {
@@ -227,6 +282,7 @@ pub(crate) fn init(ctx: &mut AppContext) -> bool {
     ctx.subscribe_to_model(&privacy_settings, |_, event, ctx| {
         if let &PrivacySettingsChangedEvent::UpdateIsCrashReportingEnabled { new_value, .. } = event
         {
+            sync_headless_crash_reporting_marker(new_value);
             if new_value {
                 AuthStateProvider::handle(ctx).update(ctx, |auth_state_provider, ctx| {
                     init_sentry(
@@ -309,49 +365,35 @@ fn get_environment() -> Cow<'static, str> {
     }
 }
 
-/// Initializes Rust and Cocoa Sentry, which hooks into the panic handler for the rust app and
-/// uncaught exception handler of the mac runtime, respectively.
-///
-/// This must be called from the main thread to capture panics/crashes across the entire
-/// application.
-fn init_sentry(user_id: Option<UserUid>, email: Option<String>, ctx: &mut AppContext) {
-    let key = release_version();
-
-    let environment = Some(get_environment());
-
-    log::info!("Initializing crash reporting {environment:?} with tag {key:?}...");
-
-    fn before_breadcrumb(crumb: sentry::Breadcrumb) -> Option<sentry::Breadcrumb> {
-        #[cfg(linux_or_windows)]
-        sentry_minidump::forward_breadcrumb(crumb.clone());
-        #[cfg(all(target_os = "macos", feature = "cocoa_sentry"))]
-        mac::forward_breadcrumb(&crumb);
-
-        Some(crumb)
-    }
-
-    /// We scrub text we send to Sentry so that we don't leak user input into
-    /// crash reports.
-    fn scrub_message(message: &mut String) {
-        for (regex, replacement) in ERROR_MESSAGES_TO_SCRUB.iter() {
-            if regex.is_match(message) {
-                *message = format!("(REDACTED) {replacement}");
-                return;
-            }
+fn scrub_message(message: &mut String) {
+    for (regex, replacement) in ERROR_MESSAGES_TO_SCRUB.iter() {
+        if regex.is_match(message) {
+            *message = format!("(REDACTED) {replacement}");
+            return;
         }
     }
+}
 
+fn configured_sentry_client_options(require_headless_marker: bool) -> sentry::ClientOptions {
     let mut sentry_options = sentry_client_options();
-    sentry_options.before_breadcrumb = Some(Arc::new(Box::new(before_breadcrumb)));
     sentry_options.before_send = Some(Arc::new(move |mut event| {
+        if require_headless_marker {
+            if !is_headless_crash_reporting_enabled() {
+                return None;
+            }
+            event.tags.insert(
+                HEADLESS_PROCESS_TAG.to_owned(),
+                TERMINAL_SESSION_SUPERVISOR.to_owned(),
+            );
+        }
+
         let mut crash_recovery_metadata = CrashRecoveryMetadata::new();
 
         for exception in event.exception.iter_mut() {
             exception.value.as_mut().map(scrub_message);
 
-            // If the crash recovery process is running, mark any exception as "handled".
-            // The crash recovery process will attempt to the handle that crash, if
-            // we crash when handling we'll report that as an unhandled event to sentry.
+            // Native crash recovery will handle this exception. Marking it handled prevents a
+            // duplicate unhandled event while retaining the Rust diagnostic.
             if crash_recovery_metadata.is_crash_recovery_process_running
                 && let Some(mechanism) = exception.mechanism.as_mut()
             {
@@ -376,6 +418,76 @@ fn init_sentry(user_id: Option<UserUid>, email: Option<String>, ctx: &mut AppCon
         ojiichan::configure(&mut sentry_options);
         sentry_options.release = Some(env!("WARP_BUILD_REVISION").into());
     }
+    sentry_options
+}
+
+pub(crate) fn init_terminal_supervisor_crash_reporting() -> bool {
+    if !is_warpspeed()
+        || !ChannelState::is_crash_reporting_available()
+        || !FeatureFlag::CrashReporting.is_enabled()
+        || !is_headless_crash_reporting_enabled()
+    {
+        return false;
+    }
+
+    let mut sentry_options = configured_sentry_client_options(true);
+    sentry_options.auto_session_tracking = false;
+    sentry_options.attach_stacktrace = false;
+    *RUST_SENTRY_CLIENT_GUARD.lock() = RustSentryClientGuard::Initialized {
+        _guard: sentry::init(sentry_options),
+    };
+    true
+}
+
+pub(crate) fn report_terminal_supervisor_exit(exit: TerminalSupervisorExit) {
+    if !is_initialized() {
+        return;
+    }
+
+    let (reason, had_live_sessions) = match exit {
+        TerminalSupervisorExit::ControlChannelClosed { had_live_sessions } => (
+            "control_channel_closed",
+            if had_live_sessions { "yes" } else { "no" },
+        ),
+        TerminalSupervisorExit::Error => ("error", "unknown"),
+    };
+    sentry::with_scope(
+        |scope| {
+            scope.set_tag(HEADLESS_EXIT_REASON_TAG, reason);
+            scope.set_tag(HEADLESS_HAD_LIVE_SESSIONS_TAG, had_live_sessions);
+        },
+        || {
+            sentry::capture_message(
+                "Terminal session supervisor exited unexpectedly",
+                sentry::Level::Error,
+            );
+        },
+    );
+}
+
+/// Initializes Rust and Cocoa Sentry, which hooks into the panic handler for the rust app and
+/// uncaught exception handler of the mac runtime, respectively.
+///
+/// This must be called from the main thread to capture panics/crashes across the entire
+/// application.
+fn init_sentry(user_id: Option<UserUid>, email: Option<String>, ctx: &mut AppContext) {
+    let key = release_version();
+
+    let environment = Some(get_environment());
+
+    log::info!("Initializing crash reporting {environment:?} with tag {key:?}...");
+
+    fn before_breadcrumb(crumb: sentry::Breadcrumb) -> Option<sentry::Breadcrumb> {
+        #[cfg(linux_or_windows)]
+        sentry_minidump::forward_breadcrumb(crumb.clone());
+        #[cfg(all(target_os = "macos", feature = "cocoa_sentry"))]
+        mac::forward_breadcrumb(&crumb);
+
+        Some(crumb)
+    }
+
+    let mut sentry_options = configured_sentry_client_options(false);
+    sentry_options.before_breadcrumb = Some(Arc::new(Box::new(before_breadcrumb)));
 
     *RUST_SENTRY_CLIENT_GUARD.lock() = RustSentryClientGuard::Initialized {
         _guard: sentry::init(sentry_options),
@@ -447,6 +559,11 @@ pub(crate) fn is_initialized() -> bool {
         &*RUST_SENTRY_CLIENT_GUARD.lock(),
         RustSentryClientGuard::Initialized { .. }
     )
+}
+
+pub(crate) fn uninit_terminal_supervisor_crash_reporting() {
+    let client_guard = std::mem::take(RUST_SENTRY_CLIENT_GUARD.lock().deref_mut());
+    std::mem::drop(client_guard);
 }
 
 /// Uninitializes sentry, effectively ending reporting on crashes and errors.

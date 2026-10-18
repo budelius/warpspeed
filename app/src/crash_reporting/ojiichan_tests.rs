@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sentry::protocol::{Attachment, Breadcrumb, User};
 use serde_json::json;
@@ -272,6 +273,76 @@ fn debug_derived_exception_names_are_not_uploaded() {
         ..Default::default()
     });
     assert_eq!(event.exception[0].ty, "Error");
+}
+
+#[test]
+fn ojiichan_preserves_only_bounded_supervisor_metadata() {
+    let event = sanitize(Event {
+        message: Some("Terminal session supervisor exited unexpectedly".into()),
+        environment: Some("private-environment".into()),
+        platform: "private-platform".into(),
+        tags: [
+            (
+                HEADLESS_PROCESS_TAG.into(),
+                "terminal_session_supervisor".into(),
+            ),
+            (
+                HEADLESS_EXIT_REASON_TAG.into(),
+                "control_channel_closed".into(),
+            ),
+            (HEADLESS_HAD_LIVE_SESSIONS_TAG.into(), "yes".into()),
+            ("cwd".into(), "/home/private/project".into()),
+        ]
+        .into(),
+        exception: vec![Exception {
+            ty: "panic".into(),
+            value: Some("private panic".into()),
+            ..Default::default()
+        }]
+        .into(),
+        stacktrace: Some(Stacktrace {
+            frames: vec![Frame {
+                filename: Some("private.rs".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        event.message.as_deref(),
+        Some("Terminal session supervisor exited unexpectedly")
+    );
+    assert_eq!(event.tags.len(), 3);
+    assert!(event.environment.is_none());
+    assert!(event.platform.is_empty());
+    assert!(event.exception.is_empty());
+    assert!(event.stacktrace.is_none());
+    assert!(!serde_json::to_string(&event).unwrap().contains("private"));
+
+    let invalid = sanitize(Event {
+        tags: [(HEADLESS_PROCESS_TAG.into(), "private-process-name".into())].into(),
+        ..Default::default()
+    });
+    assert!(invalid.tags.is_empty());
+}
+
+#[test]
+fn ojiichan_composes_with_existing_event_filters() {
+    let called = Arc::new(AtomicBool::new(false));
+    let called_by_filter = called.clone();
+    let mut options = ClientOptions {
+        before_send: Some(Arc::new(move |_| {
+            called_by_filter.store(true, Ordering::Release);
+            None
+        })),
+        ..Default::default()
+    };
+
+    configure(&mut options);
+    assert!(options.before_send.unwrap()(Event::default()).is_none());
+    assert!(called.load(Ordering::Acquire));
 }
 
 #[test]

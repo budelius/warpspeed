@@ -10,6 +10,8 @@ use sentry::protocol::{EnvelopeItem, Event, Exception, Frame, Stacktrace};
 use sentry::{ClientOptions, Envelope, Level, Transport, TransportFactory};
 use warp_errors::REPORT_ERROR_LOCATION;
 
+use super::{HEADLESS_EXIT_REASON_TAG, HEADLESS_HAD_LIVE_SESSIONS_TAG, HEADLESS_PROCESS_TAG};
+
 const PANIC_LOCATION: &str = "rust_panic_location";
 
 pub(super) fn configure(options: &mut ClientOptions) {
@@ -22,7 +24,14 @@ pub(super) fn configure(options: &mut ClientOptions) {
     ];
     options.transport = Some(Arc::new(transport));
     options.before_breadcrumb = Some(Arc::new(|_| None));
-    options.before_send = Some(Arc::new(|event| Some(sanitize(event))));
+    let before_send = options.before_send.take();
+    options.before_send = Some(Arc::new(move |event| {
+        let event = match &before_send {
+            Some(process) => process(event)?,
+            None => event,
+        };
+        Some(sanitize(event))
+    }));
     options.attach_stacktrace = true;
     options.auto_session_tracking = false;
     options.send_default_pii = false;
@@ -81,27 +90,66 @@ impl Transport for DiagnosticsTransport {
 
 /// Export only code locations and build metadata, never captured terminal or request data.
 pub(super) fn sanitize(event: Event<'static>) -> Event<'static> {
+    let is_terminal_supervisor = event
+        .tags
+        .get(HEADLESS_PROCESS_TAG)
+        .is_some_and(|value| value == "terminal_session_supervisor");
+    let message = match event.message.as_deref() {
+        Some("WarpSpeed interrupted session recovered") => {
+            "WarpSpeed interrupted session recovered"
+        }
+        Some("Terminal session supervisor exited unexpectedly") => {
+            "Terminal session supervisor exited unexpectedly"
+        }
+        Some(_) | None => "WarpSpeed error; diagnostic details retained locally",
+    };
+    let tags = event
+        .tags
+        .iter()
+        .filter(|(key, value)| safe_headless_tag(key, value))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     Event {
         event_id: event.event_id,
         timestamp: event.timestamp,
         level: event.level,
         release: event.release,
-        environment: event.environment,
-        platform: event.platform,
-        message: Some(
-            if event.message.as_deref() == Some("WarpSpeed interrupted session recovered") {
-                "WarpSpeed interrupted session recovered".to_owned()
-            } else {
-                "WarpSpeed error; diagnostic details retained locally".to_owned()
-            },
-        ),
-        exception: event
-            .exception
-            .into_iter()
-            .map(sanitize_exception)
-            .collect(),
-        stacktrace: event.stacktrace.map(sanitize_stacktrace),
+        environment: if is_terminal_supervisor {
+            None
+        } else {
+            event.environment
+        },
+        platform: if is_terminal_supervisor {
+            Default::default()
+        } else {
+            event.platform
+        },
+        message: Some(message.to_owned()),
+        tags,
+        exception: if is_terminal_supervisor {
+            Default::default()
+        } else {
+            event
+                .exception
+                .into_iter()
+                .map(sanitize_exception)
+                .collect()
+        },
+        stacktrace: if is_terminal_supervisor {
+            None
+        } else {
+            event.stacktrace.map(sanitize_stacktrace)
+        },
         ..Default::default()
+    }
+}
+
+fn safe_headless_tag(key: &str, value: &str) -> bool {
+    match key {
+        HEADLESS_PROCESS_TAG => value == "terminal_session_supervisor",
+        HEADLESS_EXIT_REASON_TAG => matches!(value, "control_channel_closed" | "error"),
+        HEADLESS_HAD_LIVE_SESSIONS_TAG => matches!(value, "yes" | "no" | "unknown"),
+        _ => false,
     }
 }
 

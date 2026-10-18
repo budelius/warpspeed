@@ -10,6 +10,7 @@ use crate::event_listener::ChannelEventListener;
 use crate::local_tty::supervisor::message::Message;
 use crate::local_tty::supervisor::serve::{DEFAULT_SESSION_TTL_SECONDS, Supervisor};
 use crate::local_tty::supervisor::transport::Transport;
+use crate::local_tty::supervisor::{SupervisorExit, SupervisorExitReason};
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 const PUMP_INTERVAL: Duration = Duration::from_millis(20);
@@ -26,10 +27,17 @@ struct Request {
 /// `on_listening` runs once this process owns the supervisor pipe. A supervisor that loses the
 /// race for the pipe exits before it, so it never touches state the winner owns, such as its log.
 pub fn run(on_listening: impl FnOnce()) -> Result<()> {
+    run_with_exit(on_listening).map(|_| ())
+}
+
+pub fn run_with_exit(on_listening: impl FnOnce()) -> Result<SupervisorExit> {
     run_at_pipe(supervisor_pipe_name(), on_listening)
 }
 
-pub(super) fn run_at_pipe(pipe_name: String, on_listening: impl FnOnce()) -> Result<()> {
+pub(super) fn run_at_pipe(
+    pipe_name: String,
+    on_listening: impl FnOnce(),
+) -> Result<SupervisorExit> {
     let (request_tx, request_rx) = mpsc::channel::<Request>();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 
@@ -103,7 +111,12 @@ pub(super) fn run_at_pipe(pipe_name: String, on_listening: impl FnOnce()) -> Res
                 idle_since = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Ok(SupervisorExit {
+                    reason: SupervisorExitReason::ControlChannelClosed,
+                    had_live_sessions: supervisor.has_host_sessions(),
+                });
+            }
         }
 
         let now = unix_seconds();
@@ -112,7 +125,10 @@ pub(super) fn run_at_pipe(pipe_name: String, on_listening: impl FnOnce()) -> Res
         if supervisor.has_host_sessions() {
             idle_since = None;
         } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_SHUTDOWN_DELAY {
-            return Ok(());
+            return Ok(SupervisorExit {
+                reason: SupervisorExitReason::Idle,
+                had_live_sessions: false,
+            });
         }
     }
 }

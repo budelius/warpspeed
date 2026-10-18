@@ -5969,6 +5969,109 @@ fn test_a_withheld_restore_is_saved_as_the_held_session() {
     });
 }
 
+#[cfg(windows)]
+#[test]
+fn restoring_a_plain_shell_held_by_another_window_does_not_forget_the_original_session() {
+    use warp_terminal::local_tty::supervisor::message::{
+        Message, PROTOCOL_VERSION, SessionMetadata, SessionSummary,
+    };
+    use warp_terminal::local_tty::supervisor::transport::Transport;
+    use warp_terminal::local_tty::windows::pipe_transport::PipeListener;
+
+    let channel = format!(
+        r"\\.\pipe\warp-terminal-supervisor-v{PROTOCOL_VERSION}-{:016x}",
+        std::process::id()
+    );
+    let server_channel = channel.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let mut listener = PipeListener::bind(server_channel).unwrap();
+        ready_tx.send(()).unwrap();
+        let mut ping = listener.accept().unwrap();
+        assert_eq!(
+            ping.receive_timeout(Duration::from_secs(5)).unwrap(),
+            Message::Ping
+        );
+        ping.send(&Message::Pong {
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .unwrap();
+        let _ = ping.receive_timeout(Duration::from_secs(5));
+        let mut list = listener.accept().unwrap();
+        assert_eq!(
+            list.receive_timeout(Duration::from_secs(5)).unwrap(),
+            Message::ListSessions
+        );
+        list.send(&Message::ListSessionsResponse {
+            sessions: vec![SessionSummary {
+                session_id: warp_core::SessionId::from(4242),
+                metadata: SessionMetadata::default(),
+                detached_for_seconds: 0,
+                attached: true,
+                shell_pid: 42,
+                session_uuid_hex: String::new(),
+            }],
+        })
+        .unwrap();
+        let _ = list.receive_timeout(Duration::from_secs(5));
+    });
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_panes, manager, view) = restartable_pane(&mut app);
+        let holder = SessionHolder {
+            channel,
+            version: "older-build".to_owned(),
+            pid: 42,
+        };
+        manager.update(&mut app, |manager, ctx| {
+            manager.restore_persistent_session(warp_core::SessionId::from(4242), ctx);
+            manager.restore_session_holder(Some(holder.clone()), None);
+            manager.ensure_shell_started(ctx);
+        });
+        assert_eventually_within!(
+            Duration::from_secs(10) => manager.read(&app, |manager, _| manager.withheld_restore().is_some()),
+            "a plain shell needs the same recovery guard as an agent"
+        );
+        manager.read(&app, |manager, _| {
+            let restore = manager.withheld_restore().unwrap();
+            assert_eq!(restore.session_id, Some(warp_core::SessionId::from(4242)));
+            assert_eq!(restore.holder, Some(holder));
+            assert_eq!(restore.verdict, HeldVerdict::Attached);
+            assert_eq!(restore.command, "");
+        });
+        view.read(&app, |view, ctx| {
+            assert_eq!(view.pending_command_for_test(ctx), None)
+        });
+    });
+    peer.join().unwrap();
+}
+
+#[test]
+fn plain_shell_withheld_restore_retains_its_supervisor_without_a_resume_command() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (pane_group, manager, view) = restartable_pane(&mut app);
+        let mut restore = held_detached_restore();
+        restore.command.clear();
+        restore.agent = None;
+        withhold_on_pane(&mut app, &manager, &view, restore.clone());
+        let saved = pane_group.update(&mut app, |panes, ctx| panes.snapshot(ctx));
+        let PaneNodeSnapshot::Leaf(leaf) = saved else {
+            panic!("expected a leaf");
+        };
+        let LeafContents::Terminal(terminal) = leaf.contents else {
+            panic!("expected a terminal");
+        };
+        assert_eq!(terminal.persistent_session_id, restore.session_id);
+        assert_eq!(terminal.session_holder, restore.holder);
+        assert!(terminal.cli_agent_resume_descriptor.is_none());
+        view.read(&app, |view, ctx| {
+            assert_eq!(view.pending_command_for_test(ctx), None)
+        });
+    });
+}
+
 fn local_tty_manager(
     manager: &mut Box<dyn crate::terminal::TerminalManager>,
 ) -> &mut LocalTtyTerminalManager<TerminalView> {

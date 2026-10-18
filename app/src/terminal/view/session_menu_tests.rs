@@ -5,6 +5,47 @@ use super::*;
 use crate::pane_group::BackingView;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
 
+#[cfg(feature = "local_tty")]
+#[test]
+fn older_supervisor_connection_is_visible_and_restart_clears_its_status() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, ctx| {
+            view.is_login_shell_bootstrapped = true;
+            view.on_supervisor_changed(
+                Some(SessionHolder {
+                    channel: "older-supervisor".to_owned(),
+                    version: "old-build".to_owned(),
+                    pid: 42,
+                }),
+                ctx,
+            );
+            assert!(
+                view.inline_banners_state
+                    .connected_supervisor_banner
+                    .is_some()
+            );
+            let items = view.pane_header_overflow_menu_items(ctx);
+            assert!(items.iter().any(|item| item.fields().is_some_and(|fields| {
+                fields.label() == "Supervisor: build old-build" && fields.is_disabled()
+            })));
+            assert!(items.iter().any(|item| matches!(
+                item.fields().and_then(MenuItemFields::on_select_action),
+                Some(TerminalAction::RestartInCurrentSupervisor)
+            )));
+            view.on_session_restart_started(ctx);
+            assert!(view.connected_supervisor.is_none());
+            assert!(
+                view.inline_banners_state
+                    .connected_supervisor_banner
+                    .is_none()
+            );
+            assert_eq!(view.model.lock().block_list().inline_banner_count(), 0);
+        });
+    });
+}
+
 #[test]
 fn single_pane_background_menu_offers_obachan_and_sessions() {
     App::test((), |mut app| async move {

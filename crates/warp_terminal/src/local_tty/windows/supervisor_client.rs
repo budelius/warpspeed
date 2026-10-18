@@ -9,7 +9,7 @@ use instant::Instant;
 use warp_core::SessionId;
 
 use super::daemon_spawn::spawn_detached_supervisor;
-use super::pipe_transport::{PipeTransport, supervisor_pipe_name_for};
+use super::pipe_transport::{PipeTransport, existing_pipe_protocol, supervisor_pipe_name_for};
 use crate::local_tty::PtyOptions;
 use crate::local_tty::screen::ScreenSnapshot;
 use crate::local_tty::supervisor::message::{
@@ -52,13 +52,7 @@ impl WindowsTerminalSupervisorClient {
 
     /// Connects only to an already-running, compatible local supervisor; never starts a daemon.
     pub fn for_existing_pipe(pipe: String) -> Result<Self> {
-        let prefix = format!(r"\\.\pipe\warp-terminal-supervisor-v{PROTOCOL_VERSION}-");
-        let suffix = pipe.strip_prefix(&prefix).context(
-            "The saved supervisor channel is invalid or uses a different protocol version",
-        )?;
-        if suffix.len() != 16 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("The saved supervisor channel is invalid");
-        }
+        existing_pipe_protocol(&pipe)?;
         Ok(Self {
             executable: PathBuf::new(),
             existing_pipe: Some(pipe),
@@ -75,7 +69,14 @@ impl WindowsTerminalSupervisorClient {
     /// Verifies compatibility and that no other window currently owns this session.
     pub fn check_detached(&self, session_id: SessionId) -> Result<()> {
         match self.request(Message::Ping)? {
-            Message::Pong { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
+            Message::Pong { protocol_version }
+                if protocol_version
+                    == self
+                        .existing_pipe
+                        .as_deref()
+                        .map(existing_pipe_protocol)
+                        .transpose()?
+                        .unwrap_or(PROTOCOL_VERSION) => {}
             _ => bail!("The old supervisor uses an incompatible protocol"),
         }
         let sessions = self.list_sessions()?;

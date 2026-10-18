@@ -202,6 +202,7 @@ pub enum TerminalAction {
     Close,
     ToggleMaximizePane,
     RestartShell,
+    RestartInCurrentSupervisor,
     /// Attaches this pane again to the shell it lost the connection to.
     ReattachShell,
     /// Resolves a restore command withheld because another build still holds the session.
@@ -575,6 +576,7 @@ impl fmt::Debug for TerminalAction {
             SplitUp(_) => f.write_str("SplitUp"),
             ToggleMaximizePane => f.write_str("ToggleMaximizeActivePane"),
             RestartShell => f.write_str("RestartShell"),
+            RestartInCurrentSupervisor => f.write_str("RestartInCurrentSupervisor"),
             ReattachShell => f.write_str("ReattachShell"),
             SessionHolderBanner(action) => write!(f, "SessionHolderBanner({action:?})"),
             ChangeShell => f.write_str("ChangeShell"),

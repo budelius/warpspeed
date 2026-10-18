@@ -10,8 +10,8 @@ use super::transport::Endpoint;
 use crate::local_tty::screen::ScreenSnapshot;
 use crate::shell::ShellLaunchData;
 
-/// The protocol version, carried in the socket and pipe name so a client never
-/// speaks one version of this protocol to a supervisor speaking another.
+/// The protocol version, carried in the socket and pipe name so clients can select the matching
+/// wire encoding. Older versions require an explicit adapter in [`super::compatibility`].
 ///
 /// ## Bump this whenever anything below changes shape
 ///

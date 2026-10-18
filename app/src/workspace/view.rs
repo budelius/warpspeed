@@ -13549,6 +13549,7 @@ impl Workspace {
     fn start_shell_restart(
         &mut self,
         target: Option<ShellLaunchData>,
+        restart_in_current_supervisor: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(manager) = self.focused_terminal_manager(ctx) else {
@@ -13571,6 +13572,15 @@ impl Workspace {
             return;
         }
 
+        if restart_in_current_supervisor && view.as_ref(ctx).connected_supervisor().is_none() {
+            self.toast_stack.update(ctx, |stack, ctx| {
+                stack.add_ephemeral_toast(DismissibleToast::error(
+                    "This pane is no longer connected to another supervisor. Reattach it before restarting.".to_owned(),
+                ), ctx);
+            });
+            return;
+        }
+
         let is_busy = manager
             .as_ref(ctx)
             .model()
@@ -13590,7 +13600,7 @@ impl Workspace {
             })
             .map(PathBuf::from);
 
-        if is_busy {
+        if is_busy || restart_in_current_supervisor {
             let running_command = manager
                 .as_ref(ctx)
                 .model()
@@ -13605,6 +13615,16 @@ impl Workspace {
                 cwd,
             });
             self.show_restart_shell_confirmation_modal(running_command, ctx);
+            if restart_in_current_supervisor {
+                self.restart_shell_confirmation_modal
+                    .view
+                    .update(ctx, |modal, ctx| {
+                        modal.body().update(ctx, |body, ctx| {
+                            body.set_supervisor_restart();
+                            ctx.notify();
+                        });
+                    });
+            }
         } else {
             Self::restart_shell_and_resume_agent(manager, view, target, cwd, ctx);
         }
@@ -27827,10 +27847,15 @@ impl TypedActionView for Workspace {
             AddTabWithShell { shell, source } => {
                 self.add_tab_with_shell(shell.clone(), *source, ctx)
             }
-            RestartShell => self.start_shell_restart(None, ctx),
+            RestartShell => self.start_shell_restart(None, false, ctx),
             RestartShellForTerminalView { terminal_view_id } => {
                 if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
-                    self.start_shell_restart(None, ctx);
+                    self.start_shell_restart(None, false, ctx);
+                }
+            }
+            RestartInCurrentSupervisorForTerminalView { terminal_view_id } => {
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
+                    self.start_shell_restart(None, true, ctx);
                 }
             }
             ReattachShellForTerminalView { terminal_view_id } => {
@@ -27865,7 +27890,7 @@ impl TypedActionView for Workspace {
                     self.toggle_change_shell_menu(ctx);
                 }
             }
-            ChangeShell { shell } => self.start_shell_restart(Some(shell.clone()), ctx),
+            ChangeShell { shell } => self.start_shell_restart(Some(shell.clone()), false, ctx),
             DetachSession => self.detach_focused_session(ctx),
             DetachSessionForTerminalView { terminal_view_id } => {
                 self.detach_session_for_terminal_view(*terminal_view_id, ctx)

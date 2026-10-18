@@ -4,6 +4,7 @@
 //! Unix domain socket. Message shapes, framing, and the transport seam are not
 //! Unix-specific, so they live here where the Windows backend can share them.
 
+pub mod compatibility;
 pub mod framing;
 pub mod loopback;
 pub mod message;

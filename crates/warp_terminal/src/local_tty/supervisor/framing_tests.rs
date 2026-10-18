@@ -202,6 +202,34 @@ fn every_message() -> Vec<Message> {
     ]
 }
 
+#[test]
+fn v6_compatibility_matches_the_original_builds_wire_fixture() {
+    let messages = every_message();
+    let mut encoded = (messages.len() as u64).to_le_bytes().to_vec();
+    for message in messages {
+        let message = match message {
+            Message::Pong { .. } => Message::Pong {
+                protocol_version: 6,
+            },
+            Message::ListSessionsResponse { sessions } => Message::ListSessionsResponse {
+                sessions: sessions
+                    .into_iter()
+                    .map(|session| SessionSummary {
+                        shell_pid: 0,
+                        session_uuid_hex: String::new(),
+                        ..session
+                    })
+                    .collect(),
+            },
+            message => message,
+        };
+        let payload = compatibility::encode(&message, 6).unwrap();
+        assert_eq!(compatibility::decode(&payload, 6).unwrap(), message);
+        encoded.extend(payload);
+    }
+    assert_eq!(hex::encode(encoded), include_str!("wire_v6.hex").trim());
+}
+
 /// The encoding is pinned, because the version in the channel name is the only
 /// thing keeping two builds' supervisors apart.
 ///

@@ -133,6 +133,10 @@ inside that process; explicit shutdown intent and connection-generation correlat
 
 ### P2 — Bootstrap ordering, log volume, and external shell exceptions
 
+- Status: root-caused on `fix/bootstrap-hook-recovery`. The failed Git Bash session received all 24
+  key-value updates and the end marker for its `Bootstrapped` hook, but not the start marker. The
+  Windows attachment relay discarded an overlapped read if it completed between the timeout and
+  cancellation. The fix preserves those bytes and covers the cancellation race directly.
 - One October 16 13:04:42 UTC `next_stage` error and bootstrap timeouts need replay/order tests for
   restored sessions. Unknown-session and duplicate-hook warnings are not proven shell crashes.
 - Three prompt generators repeatedly fail to prepare execution context, flooding logs. Gate work on

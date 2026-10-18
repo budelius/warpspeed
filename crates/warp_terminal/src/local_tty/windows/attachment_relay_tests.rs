@@ -78,6 +78,33 @@ fn repeated_mio_clients_can_type_and_receive_output_through_relay() {
 }
 
 #[test]
+fn a_read_that_completes_as_its_timeout_is_cancelled_is_not_dropped() {
+    let pipe = pipes::create_async_anonymous_pipe().unwrap();
+    let read_event = Event::new().unwrap();
+    let write_event = Event::new().unwrap();
+    let mut buffer = [0u8; 32];
+    let mut overlapped = OVERLAPPED {
+        hEvent: read_event.0,
+        ..Default::default()
+    };
+
+    let error = unsafe { ReadFile(pipe.server, Some(&mut buffer), None, Some(&mut overlapped)) }
+        .expect_err("the empty pipe read should remain pending");
+    assert_eq!(error.code(), ERROR_IO_PENDING.to_hresult());
+    write_all(pipe.client, write_event.0, b"completed during timeout").unwrap();
+    assert_eq!(
+        unsafe { WaitForSingleObject(read_event.0, 500) },
+        WAIT_OBJECT_0
+    );
+
+    let read = finish_timed_out_read(pipe.server, &overlapped).unwrap();
+    assert_eq!(&buffer[..read], b"completed during timeout");
+
+    let _ = unsafe { CloseHandle(pipe.server) };
+    let _ = unsafe { CloseHandle(pipe.client) };
+}
+
+#[test]
 fn relay_moves_output_and_input_in_both_directions() {
     let pty = pipes::create_async_anonymous_pipe().unwrap();
     let (relay, client) = AttachmentRelay::start(pty.server).unwrap();

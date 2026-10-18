@@ -11293,8 +11293,11 @@ impl Workspace {
                 self.launch_config_save_modal.close();
                 ctx.notify();
             }
-            LaunchConfigModalEvent::SuccessfullySavedConfig(launch_config) => {
-                if self.launch_config_source.is_none() {
+            LaunchConfigModalEvent::SuccessfullySavedConfig {
+                launch_config,
+                created,
+            } => {
+                if *created && self.launch_config_source.is_none() {
                     self.launch_config_source = launch_config.window_source(0);
                 }
                 ctx.update_model(&WarpConfig::handle(ctx), move |warp_config, ctx| {
@@ -12431,10 +12434,7 @@ impl Workspace {
         self.current_workspace_state
             .is_launch_config_save_modal_open = true;
 
-        let launch_config_source = self
-            .launch_config_source
-            .clone()
-            .filter(|source| !source.is_session_config());
+        let launch_config_source = self.launch_config_source.clone();
         self.launch_config_save_modal.view.update(ctx, |view, ctx| {
             view.request_snapshot(ctx.window_id(), launch_config_source, ctx);
             view.reset_editor(ctx);

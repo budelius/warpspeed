@@ -10,7 +10,7 @@ use warp_core::ui::theme::Fill;
 use warpui::accessibility::{AccessibilityContent, WarpA11yRole};
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
-    Element, Empty, Flex, FormattedTextElement, MouseStateHandle, OffsetPositioning, ParentAnchor,
+    Element, Flex, FormattedTextElement, MouseStateHandle, OffsetPositioning, ParentAnchor,
     ParentElement, ParentOffsetBounds, Radius, SavePosition, Shrinkable, Stack, Text,
 };
 use warpui::keymap::FixedBinding;
@@ -34,14 +34,13 @@ use crate::launch_configs::launch_config::{LaunchConfig, LaunchConfigWindowSourc
 use crate::launch_configs::launch_config::{LaunchConfigSource, WindowTemplate};
 use crate::send_telemetry_from_ctx;
 use crate::server::telemetry::TelemetryEvent;
-use crate::user_config::launch_configs_dir;
 #[cfg(feature = "local_fs")]
-use crate::user_config::{
-    SaveLaunchConfigError, SavedLaunchConfig, WarpConfig, util::file_name_to_human_readable_name,
-};
+use crate::user_config::{SaveLaunchConfigError, util::file_name_to_human_readable_name};
+use crate::user_config::{WarpConfig, launch_configs_dir};
 use crate::util::bindings::keybinding_name_to_display_string;
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::FileTarget;
+use crate::view_components::{DropdownItem, FilterableDropdown, FilterableDropdownEvent};
 use crate::workspace::WorkspaceRegistry;
 
 const MODAL_WIDTH: f32 = 660.;
@@ -50,9 +49,7 @@ const BUTTON_SIZE: f32 = 24.;
 const DOC_LINK_WIDTH: f32 = 120.;
 const SAVE_CONFIG_BUTTON_LABEL: &str = "Save Configuration";
 const UPDATE_CONFIG_BUTTON_LABEL: &str = "Update Configuration";
-const OVERWRITE_CONFIG_BUTTON_LABEL: &str = "Overwrite Existing";
-const OPEN_FILE_BUTTON_LABEL: &str = "Open YAML File";
-const BUTTON_GAP: f32 = 12.;
+const OPEN_FILE_BUTTON_LABEL: &str = "Open Configuration File";
 
 pub fn init(app: &mut AppContext) {
     use warpui::keymap::macros::*;
@@ -87,13 +84,13 @@ struct SaveModalMouseStates {
     close_button_state: MouseStateHandle,
     documentation_link_state: MouseStateHandle,
     save_button_state: MouseStateHandle,
-    overwrite_button_state: MouseStateHandle,
     open_file_button_state: MouseStateHandle,
 }
 
 /// Saves the current window as a new or existing launch configuration.
 pub struct LaunchConfigSaveModal {
     editor: ViewHandle<EditorView>,
+    target_picker: ViewHandle<FilterableDropdown<ActionRequest>>,
     mouse_states: SaveModalMouseStates,
     current_window_snapshot: Option<WindowSnapshot>,
     snapshot_request: ModelHandle<SnapshotRequest>,
@@ -130,21 +127,19 @@ pub enum ActionRequest {
 pub enum LaunchConfigSaveAction {
     Close,
     Save,
-    /// Save over the launch configuration file the typed name already refers to.
-    Overwrite,
+    SelectTarget(Option<LaunchConfigWindowSource>),
     OpenFile,
 }
 
 impl LaunchConfigSaveAction {
     /// What pressing enter does in the given state.  A name clash is recoverable, so enter
-    /// retries the save under whatever name is in the editor now; replacing an existing
-    /// configuration is destructive and takes a deliberate click instead.
+    /// retries the new name. Updating an existing configuration requires selecting its target.
     pub fn from_state(save_state: &SaveState) -> Self {
         match save_state {
             SaveState::Success => Self::OpenFile,
             SaveState::NotSaved => Self::Save,
             SaveState::Failure(FailureType::FileAlreadyExists) => Self::Save,
-            SaveState::Failure(FailureType::Other) => Self::Close,
+            SaveState::Failure(FailureType::Other) => Self::Save,
         }
     }
 }
@@ -159,7 +154,10 @@ pub enum LaunchConfigModalEvent {
     /// is a delay in our watcher). But because we actually have the LaunchConfig in our hands
     /// already, we may as well save it "manually" to the WarpConfig, while waiting for the update
     /// from the file system. This event passes a saved config to the handler to let us do that.
-    SuccessfullySavedConfig(LaunchConfig),
+    SuccessfullySavedConfig {
+        launch_config: LaunchConfig,
+        created: bool,
+    },
     #[cfg(feature = "local_fs")]
     OpenFileWithTarget {
         path: std::path::PathBuf,
@@ -193,8 +191,32 @@ impl LaunchConfigSaveModal {
             LaunchConfigSaveModal::on_snapshot_requested,
         );
 
+        let target_picker = ctx.add_typed_action_view(|ctx| {
+            let mut picker = FilterableDropdown::new(ctx);
+            picker.set_top_bar_max_width(MODAL_WIDTH - 2. * SIDE_PADDING);
+            picker.set_menu_width(MODAL_WIDTH - 2. * SIDE_PADDING, ctx);
+            picker
+        });
+
+        ctx.subscribe_to_view(&target_picker, |me, _, event, ctx| {
+            if matches!(event, FilterableDropdownEvent::Close)
+                && *me.snapshot_request.as_ref(ctx) != SnapshotRequest::None
+            {
+                let source = me.launch_config_source.clone();
+                me.target_picker.update(ctx, |picker, ctx| {
+                    picker.clear_filter(ctx);
+                    picker.set_selected_by_action(
+                        ActionRequest::Action(LaunchConfigSaveAction::SelectTarget(source)),
+                        ctx,
+                    );
+                });
+                ctx.focus_self();
+            }
+        });
+
         LaunchConfigSaveModal {
             editor,
+            target_picker,
             mouse_states: Default::default(),
             current_window_snapshot: None,
             snapshot_request,
@@ -216,11 +238,53 @@ impl LaunchConfigSaveModal {
         ctx: &mut ViewContext<Self>,
     ) {
         self.current_window_snapshot = None;
+        self.save_state = SaveState::NotSaved;
+        self.file_path = None;
+        let mut targets = WarpConfig::as_ref(ctx)
+            .launch_and_session_configs()
+            .flat_map(|config| {
+                (0..config.windows.len()).filter_map(move |index| config.window_source(index))
+            })
+            .collect::<Vec<_>>();
+        if let Some(source) = &launch_config_source
+            && !targets.contains(source)
+        {
+            targets.push(source.clone());
+        }
+        targets.sort_by_key(target_label);
+        let mut items = vec![DropdownItem::new(
+            "Save as new launch configuration (YAML)".to_owned(),
+            ActionRequest::Action(LaunchConfigSaveAction::SelectTarget(None)),
+        )];
+        items.extend(targets.into_iter().map(|source| {
+            let label = target_label(&source);
+            DropdownItem::new(
+                label.clone(),
+                ActionRequest::Action(LaunchConfigSaveAction::SelectTarget(Some(source))),
+            )
+            .with_tooltip(label)
+        }));
+        self.target_picker.update(ctx, |picker, ctx| {
+            picker.close(ctx);
+            picker.clear_filter(ctx);
+            picker.set_items(items, ctx);
+            picker.set_selected_by_action(
+                ActionRequest::Action(LaunchConfigSaveAction::SelectTarget(
+                    launch_config_source.clone(),
+                )),
+                ctx,
+            );
+        });
         self.launch_config_source = launch_config_source;
         self.snapshot_request.update(ctx, |request, ctx| {
             *request = SnapshotRequest::Window(window_id);
             ctx.notify();
         });
+    }
+
+    #[cfg(any(test, feature = "integration_tests"))]
+    pub fn selected_target(&self) -> Option<&LaunchConfigWindowSource> {
+        self.launch_config_source.as_ref()
     }
 
     fn on_snapshot_requested(
@@ -271,31 +335,30 @@ impl LaunchConfigSaveModal {
         }
     }
 
-    /// Writes the current window out as a launch configuration.  `overwrite` replaces the file
-    /// the typed name refers to instead of refusing to touch it, and only ever comes from the
-    /// user clicking the overwrite button after a name clash.
+    /// Writes the current window to the selected configuration target.
     #[cfg(feature = "local_fs")]
-    fn try_save_launch_config(&mut self, overwrite: bool, ctx: &mut ViewContext<Self>) {
+    fn try_save_launch_config(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(window_snapshot) = self.current_window_snapshot.as_ref() else {
             self.failed_save(FailureType::Other, ctx);
             return;
         };
 
+        let created = self.launch_config_source.is_none();
         let result = if let Some(source) = self.launch_config_source.as_ref() {
-            let window_template = WindowTemplate::from(window_snapshot.clone());
-            WarpConfig::overwrite_launch_config_window(source, window_template)
-                .map(|launch_config| (source.path.clone(), launch_config))
+            let result = if source.is_session_config() {
+                crate::session_configs::save::overwrite_window(source, window_snapshot)
+            } else {
+                let window_template = WindowTemplate::from(window_snapshot.clone());
+                WarpConfig::overwrite_launch_config_window(source, window_template)
+            };
+            result.map(|launch_config| (source.path.clone(), launch_config))
         } else {
             let file_name_candidate = self.editor.as_ref(ctx).buffer_text(ctx);
             let launch_config_name = file_name_to_human_readable_name(&file_name_candidate);
             let mut launch_config =
                 LaunchConfig::from_window_snapshot(launch_config_name, window_snapshot);
-            let saved: std::result::Result<SavedLaunchConfig, SaveLaunchConfigError> = if overwrite
-            {
-                WarpConfig::overwrite_launch_config(file_name_candidate, launch_config.clone())
-            } else {
-                WarpConfig::save_new_launch_config(file_name_candidate, launch_config.clone())
-            };
+            let saved =
+                WarpConfig::save_new_launch_config(file_name_candidate, launch_config.clone());
             saved.map_err(anyhow::Error::from).map(|saved| {
                 let path = launch_configs_dir().join(saved.file_name);
                 let source = LaunchConfigSource {
@@ -310,9 +373,10 @@ impl LaunchConfigSaveModal {
         match result {
             Ok((path, launch_config)) => {
                 self.saved_successfully(path, ctx);
-                ctx.emit(LaunchConfigModalEvent::SuccessfullySavedConfig(
+                ctx.emit(LaunchConfigModalEvent::SuccessfullySavedConfig {
                     launch_config,
-                ));
+                    created,
+                });
             }
             Err(error) => {
                 safe_warn!(
@@ -344,7 +408,11 @@ impl LaunchConfigSaveModal {
     pub fn close(&mut self, ctx: &mut ViewContext<Self>) {
         self.reset_editor(ctx); // clears editor and resets placeholder
         self.current_window_snapshot = None;
+        self.snapshot_request
+            .update(ctx, |request, _| *request = SnapshotRequest::None);
         self.launch_config_source = None;
+        self.target_picker
+            .update(ctx, |picker, ctx| picker.close(ctx));
         self.file_path = None;
         self.save_state = SaveState::NotSaved;
         ctx.notify();
@@ -399,27 +467,6 @@ impl LaunchConfigSaveModal {
         .finish()
     }
 
-    /// Offered only after a name clash, so it always replaces something the user can see named
-    /// in the message above it.  Warn styling because it is the destructive way out.
-    fn render_overwrite_button(&self, appearance: &Appearance, disabled: bool) -> Box<dyn Element> {
-        Container::new(
-            self.save_modal_button(
-                appearance,
-                ButtonVariant::Warn,
-                OVERWRITE_CONFIG_BUTTON_LABEL.to_owned(),
-                self.mouse_states.overwrite_button_state.clone(),
-                disabled,
-            )
-            .build()
-            .on_click(move |ctx, _, _| {
-                ctx.dispatch_typed_action(ActionRequest::Action(LaunchConfigSaveAction::Overwrite));
-            })
-            .finish(),
-        )
-        .with_padding_left(BUTTON_GAP)
-        .finish()
-    }
-
     fn render_open_file_button(&self, appearance: &Appearance) -> Box<dyn Element> {
         self.save_modal_button(
             appearance,
@@ -455,24 +502,13 @@ impl LaunchConfigSaveModal {
                 Self::add_button_padding(Container::new(self.render_open_file_button(appearance)))
                     .finish()
             }
-            SaveState::NotSaved => Self::add_button_padding(Container::new(
-                self.render_save_config_button(appearance, save_config_disabled),
-            ))
-            .finish(),
-            // The editor is still up in this state, so keep saving reachable for a new name and
-            // put replacing the existing configuration next to it.
-            SaveState::Failure(FailureType::FileAlreadyExists) => {
+            SaveState::NotSaved
+            | SaveState::Failure(FailureType::FileAlreadyExists | FailureType::Other) => {
                 Self::add_button_padding(Container::new(
-                    Flex::row()
-                        .with_child(
-                            self.render_save_config_button(appearance, save_config_disabled),
-                        )
-                        .with_child(self.render_overwrite_button(appearance, save_config_disabled))
-                        .finish(),
+                    self.render_save_config_button(appearance, save_config_disabled),
                 ))
                 .finish()
             }
-            SaveState::Failure(FailureType::Other) => Empty::new().finish(),
         }
     }
 
@@ -635,6 +671,22 @@ impl LaunchConfigSaveModal {
         .with_uniform_padding(SIDE_PADDING)
         .finish();
 
+        let header = if self.save_state == SaveState::Success {
+            header
+        } else {
+            header.with_child(
+                Container::new(
+                    SavePosition::new(
+                        ChildView::new(&self.target_picker).finish(),
+                        "save_modal:target",
+                    )
+                    .finish(),
+                )
+                .with_uniform_padding(SIDE_PADDING)
+                .finish(),
+            )
+        };
+
         let info = match &self.save_state {
             SaveState::Success => header
                 .with_child(
@@ -652,26 +704,32 @@ impl LaunchConfigSaveModal {
                     .finish(),
                 )
                 .with_child(link_to_docs),
-            // A name clash is recoverable, so keep the editor up: the name can be changed and
-            // saved again, or the existing configuration replaced outright.
+            // Never replace a whole multi-window file through a new-name collision.
             SaveState::Failure(FailureType::FileAlreadyExists) => header
                 .with_child(
                     self.render_text_block(
                         appearance,
-                        "A launch configuration with this name already exists. Choose a different name, or overwrite the existing one.".to_string(),
+                        "A launch configuration with this name already exists. Select an existing target above to update one window, or choose a different name.".to_string(),
                     )
                     .with_padding_bottom(24.)
                     .finish(),
                 )
                 .with_child(self.render_editor(app)),
-            SaveState::Failure(FailureType::Other) => header.with_child(
-                self.render_text_block(
-                    appearance,
-                    "An issue was encountered while saving.".to_string(),
-                )
-                .with_padding_bottom(24.)
-                .finish(),
-            ),
+            SaveState::Failure(FailureType::Other) => {
+                let error = header.with_child(
+                    self.render_text_block(
+                        appearance,
+                        "Could not save this configuration. The target may have changed or may not be writable. Select a target above and retry.".to_string(),
+                    )
+                    .with_padding_bottom(24.)
+                    .finish(),
+                );
+                if self.launch_config_source.is_none() {
+                    error.with_child(self.render_editor(app))
+                } else {
+                    error
+                }
+            }
             SaveState::NotSaved => {
                 if let Some(source) = &self.launch_config_source {
                     header
@@ -679,8 +737,10 @@ impl LaunchConfigSaveModal {
                             self.render_formatted_text_line(
                                 appearance,
                                 vec![FormattedTextFragment::plain_text(format!(
-                                    "This replaces only the window opened from {}. Other Warp windows and launch configurations are not included. Shell and agent recovery state continues saving automatically.",
-                                    source.config_name
+                                    "Update window {} of {} with this window's layout and working directories. Other configuration windows and shared tab templates are preserved. Startup commands, parameters and shell overrides are not copied. Live sessions and their ownership are unchanged; recovery follows your session settings.\n\nTarget: {}",
+                                    source.window_index.saturating_add(1),
+                                    source.config_name,
+                                    home_relative_path(&source.path)
                                 ))],
                             )
                             .with_padding_bottom(24.)
@@ -688,7 +748,7 @@ impl LaunchConfigSaveModal {
                         )
                         .with_child(link_to_docs)
                 } else {
-                    let mut text = "This saves the current window's tabs and panes so you can easily open it again. Shell and agent recovery state will save automatically".to_string();
+                    let mut text = "This saves the current window's tabs and panes as a new launch configuration. Open saved configurations".to_string();
                     if self.open_modal_keybinding_str.is_empty() {
                         text.push('.');
                     } else {
@@ -721,7 +781,9 @@ impl LaunchConfigSaveModal {
             Container::new(
                 info.with_child(self.render_button_row(
                     appearance,
-                    self.launch_config_source.is_none() && self.editor.as_ref(app).is_empty(app),
+                    self.current_window_snapshot.is_none()
+                        || (self.launch_config_source.is_none()
+                            && self.editor.as_ref(app).is_empty(app)),
                 ))
                 .finish(),
             )
@@ -779,8 +841,8 @@ impl View for LaunchConfigSaveModal {
     fn accessibility_contents(&self, _ctx: &AppContext) -> Option<AccessibilityContent> {
         Some(AccessibilityContent::new(
             "Save Config Modal",
-            "Save the current window as a new launch configuration or update the launch
-            configuration that opened it. Use enter to save and escape to close the modal.",
+            "Choose a session or launch configuration to update, or save a new launch configuration.
+            Use enter to save and escape to close the modal.",
             WarpA11yRole::PopoverRole,
         ))
     }
@@ -799,18 +861,18 @@ impl TypedActionView for LaunchConfigSaveModal {
             ActionRequest::Enter => LaunchConfigSaveAction::from_state(&self.save_state),
         };
         match action {
+            LaunchConfigSaveAction::SelectTarget(source) => {
+                // The picker is still dispatching this action; do not re-enter its view here.
+                self.launch_config_source = source;
+                self.save_state = SaveState::NotSaved;
+                self.file_path = None;
+                ctx.notify();
+            }
             LaunchConfigSaveAction::Close => self.close(ctx),
             LaunchConfigSaveAction::Save => {
                 #[cfg(feature = "local_fs")]
                 if self.launch_config_source.is_some() || !self.editor.as_ref(ctx).is_empty(ctx) {
-                    self.try_save_launch_config(false, ctx);
-                }
-            }
-            LaunchConfigSaveAction::Overwrite =>
-            {
-                #[cfg(feature = "local_fs")]
-                if !self.editor.as_ref(ctx).is_empty(ctx) {
-                    self.try_save_launch_config(true, ctx);
+                    self.try_save_launch_config(ctx);
                 }
             }
             LaunchConfigSaveAction::OpenFile => {
@@ -819,6 +881,23 @@ impl TypedActionView for LaunchConfigSaveModal {
                 self.close(ctx);
             }
         }
+    }
+}
+
+fn target_label(source: &LaunchConfigWindowSource) -> String {
+    let path = home_relative_path(&source.path);
+    if source.is_session_config() {
+        format!(
+            "Session: {} (generation {}) — {path}",
+            source.config_name, source.document_index,
+        )
+    } else {
+        format!(
+            "Launch: {} (document {}, window {}) — {path}",
+            source.config_name,
+            source.document_index.saturating_add(1),
+            source.window_index.saturating_add(1),
+        )
     }
 }
 

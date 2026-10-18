@@ -1186,13 +1186,11 @@ pub struct Workspace {
     /// them, opened by `ToggleAttachSessionMenu`; selecting an entry dispatches
     /// `AttachDetachedSession`.
     attach_session_menu_modal: ModalViewState<Modal<Menu<WorkspaceAction>>>,
-    /// The window's agent sessions by tab and pane, opened by `ShowAgentSessions`. Shown while
+    /// The full-window session library opened by `ShowAgentSessions`. Shown while
     /// `current_workspace_state.is_agent_sessions_modal_open`, so closing all modals closes it.
     agent_sessions_modal: ViewHandle<Modal<AgentSessionsView>>,
     /// The pane that opened the sessions browser, used when attaching an AgentCtrl run.
     agent_sessions_target: Option<PaneViewLocator>,
-    /// The pane where a conversation chosen from the sessions palette should resume.
-    agent_sessions_palette_target: Option<PaneViewLocator>,
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
@@ -2308,7 +2306,7 @@ impl Workspace {
         let modal = ctx.add_typed_action_view(|ctx| {
             Modal::new(None, body, ctx)
                 .close_modal_button_disabled()
-                .with_dismiss_on_click()
+                .with_background_opacity(0)
                 .with_modal_style(UiComponentStyles {
                     width: Some(f32::INFINITY),
                     height: Some(f32::INFINITY),
@@ -3819,7 +3817,6 @@ impl Workspace {
             attach_session_menu_modal,
             agent_sessions_modal,
             agent_sessions_target: None,
-            agent_sessions_palette_target: None,
             pending_shell_restart: None,
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_moves: HashMap::new(),
@@ -17778,20 +17775,6 @@ impl Workspace {
         ctx.notify();
     }
 
-    fn open_agent_sessions_palette(
-        &mut self,
-        target: PaneViewLocator,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.agent_sessions_palette_target = Some(target);
-        self.open_palette_action(
-            PaletteMode::AgentSessions,
-            PaletteSource::AgentSessionsWindow,
-            None,
-            ctx,
-        );
-    }
-
     fn agent_sessions_data_source(&self, app: &AppContext) -> ModelHandle<AgentSessionsDataSource> {
         self.palette
             .as_ref(app)
@@ -17804,19 +17787,16 @@ impl Workspace {
     /// Snapshots this window's agent sessions for the palette and refreshes past sessions in the
     /// background. Asks the supervisor, so it runs once per opening rather than per query.
     fn load_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
-        let palette_target = self.agent_sessions_palette_target.take();
         if self.is_shared_session_viewer_focused(ctx) {
             return;
         }
         self.subscribe_to_agent_session_history(ctx);
 
-        let focused = palette_target.unwrap_or_else(|| {
-            let pane_group = self.active_tab_pane_group();
-            PaneViewLocator {
-                pane_group_id: pane_group.id(),
-                pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
-            }
-        });
+        let pane_group = self.active_tab_pane_group();
+        let focused = PaneViewLocator {
+            pane_group_id: pane_group.id(),
+            pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+        };
         let (panes, detached) = self.agent_session_inputs(ctx);
         // The palette has no place for an unreachable supervisor; it lists what it can.
         let detached = detached.unwrap_or_default();
@@ -17860,7 +17840,7 @@ impl Workspace {
         }
     }
 
-    /// Opens the window's agent sessions with `focus`'s pane selected, the focused pane when
+    /// Opens the session library with `focus` as its resume target, or the focused pane when
     /// `None`. Asks the supervisor once, here, not per render.
     fn show_agent_sessions(&mut self, focus: Option<PaneViewLocator>, ctx: &mut ViewContext<Self>) {
         if self.is_shared_session_viewer_focused(ctx) {
@@ -17960,10 +17940,6 @@ impl Workspace {
             AgentSessionsViewEvent::Act(action) => {
                 self.close_agent_sessions_modal(ctx);
                 self.perform_agent_session_action(action, ctx);
-            }
-            AgentSessionsViewEvent::ChooseSession { target } => {
-                self.hide_agent_sessions_modal(ctx);
-                self.open_agent_sessions_palette(*target, ctx);
             }
             AgentSessionsViewEvent::EndProcess {
                 agent,

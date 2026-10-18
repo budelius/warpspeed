@@ -17689,7 +17689,7 @@ impl Workspace {
         });
     }
 
-    fn open_command_palette(&mut self, ctx: &mut ViewContext<Self>) {
+    fn open_command_palette(&mut self, filter_to_actions: bool, ctx: &mut ViewContext<Self>) {
         self.tips_completed.update(ctx, |tips_completed, ctx| {
             mark_feature_used_and_write_to_user_defaults(
                 Tip::Action(TipAction::CommandPalette),
@@ -17701,7 +17701,9 @@ impl Workspace {
 
         self.palette.update(ctx, |view, ctx| {
             view.reset(ctx);
-            view.set_active_query_filter(QueryFilter::Actions, ctx);
+            if filter_to_actions {
+                view.set_active_query_filter(QueryFilter::Actions, ctx);
+            }
         });
     }
 
@@ -18303,7 +18305,9 @@ impl Workspace {
             self.current_workspace_state.is_palette_open = true;
         }
         match mode {
-            PaletteMode::Command => self.open_command_palette(ctx),
+            PaletteMode::Command => {
+                self.open_command_palette(!matches!(source, PaletteSource::TitleBarSearchBar), ctx)
+            }
             PaletteMode::Navigation => match source {
                 PaletteSource::CtrlTab {
                     shift_pressed_initially,
@@ -22233,7 +22237,7 @@ impl Workspace {
             // Assumption: at most one of the states will be active.
             // If none are, then we focus the terminal view instead.
             if self.current_workspace_state.is_palette_open {
-                self.open_command_palette(ctx);
+                self.open_command_palette(true, ctx);
             } else if self.current_workspace_state.is_theme_chooser_open {
                 self.focus_theme_chooser(ctx);
             } else if self.current_workspace_state.is_resource_center_open {
@@ -24559,7 +24563,7 @@ impl Workspace {
         let theme = appearance.theme();
         let text_color = theme.sub_text_color(theme.background());
 
-        Hoverable::new(
+        let search_bar = Hoverable::new(
             self.mouse_states.title_bar_search_bar.clone(),
             |mouse_state| {
                 let row = Flex::row()
@@ -24615,7 +24619,8 @@ impl Workspace {
                 query: None,
             });
         })
-        .finish()
+        .finish();
+        SavePosition::new(search_bar, "title_bar_search_bar").finish()
     }
 
     fn render_tab_bar_contents(
@@ -33628,3 +33633,7 @@ fn running_agent_session_ids() -> HashSet<String> {
 fn running_agent_session_ids() -> HashSet<String> {
     HashSet::new()
 }
+
+#[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+#[path = "palette_search_tests.rs"]
+mod palette_search_tests;

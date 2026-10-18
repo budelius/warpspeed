@@ -323,7 +323,7 @@ impl View {
         }
     }
 
-    #[cfg(feature = "integration_tests")]
+    #[cfg(any(test, feature = "integration_tests"))]
     /// Returns the current search results within the command palette. Used within integration tests
     /// to verify the command palette returns the correct results when launch configurations or the
     /// current session changes.

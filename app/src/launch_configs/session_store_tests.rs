@@ -8,6 +8,8 @@ use chrono::{Local, TimeZone as _};
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::vec2f;
 
+#[cfg(windows)]
+use super::write_json_atomically;
 use super::{
     NoCheckpointsToClone, clone_checkpoints_in_dir, group_summaries, load_from_dir, read_catalog,
     save_to_dir, save_windows_to_dir,
@@ -102,6 +104,47 @@ fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
         launch_config_source: Some(source),
         tab_groups: vec![],
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn atomic_write_retries_a_temporarily_blocked_windows_replacement() {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let path = dir.path().join("stored-sessions.json");
+    std::fs::write(&path, r#"["old"]"#).expect("the original catalog should be written");
+    let locked_file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .open(&path)
+        .expect("the original catalog should be opened without delete sharing");
+    let (release_tx, release_rx) = mpsc::channel();
+    let releaser = thread::spawn(move || {
+        release_rx
+            .recv()
+            .expect("the replacement attempt should start");
+        thread::sleep(Duration::from_millis(50));
+        drop(locked_file);
+    });
+
+    release_tx
+        .send(())
+        .expect("the replacement attempt should be signaled");
+    let result = write_json_atomically(&path, &vec!["new"]);
+    releaser
+        .join()
+        .expect("the temporary catalog lock should be released");
+    result.expect("the catalog should be replaced after its reader releases it");
+
+    let stored = std::fs::read_to_string(path).expect("the replacement catalog should be readable");
+    assert_eq!(stored, r#"["new"]"#);
 }
 
 #[test]

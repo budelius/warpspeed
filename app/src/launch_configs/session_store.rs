@@ -418,6 +418,47 @@ fn window_summary(
     })
 }
 
+#[cfg(all(feature = "local_fs", windows))]
+fn persist_temp_file(mut temp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    use std::thread;
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+    };
+
+    // Windows replacement fails while any short-lived reader denies delete sharing.
+    let mut retry_delays = [10, 20, 40, 80, 160].into_iter();
+    loop {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let tempfile::PersistError { error, file } = error;
+                let retryable = matches!(
+                    error.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_ACCESS_DENIED.0 as i32
+                            || code == ERROR_SHARING_VIOLATION.0 as i32
+                            || code == ERROR_LOCK_VIOLATION.0 as i32
+                );
+                if !retryable {
+                    return Err(error);
+                }
+                let Some(delay_ms) = retry_delays.next() else {
+                    return Err(error);
+                };
+                temp = file;
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "local_fs", not(windows)))]
+fn persist_temp_file(temp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    temp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
 #[cfg(feature = "local_fs")]
 pub(crate) fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
     use std::io::{BufWriter, Write};
@@ -435,8 +476,7 @@ pub(crate) fn write_json_atomically(path: &Path, value: &impl Serialize) -> Resu
         writer.flush()?;
     }
     temp.as_file().sync_all()?;
-    temp.persist(path)
-        .map_err(|error| error.error)
+    persist_temp_file(temp, path)
         .with_context(|| format!("Failed to replace stored session at {path:?}"))?;
     Ok(())
 }

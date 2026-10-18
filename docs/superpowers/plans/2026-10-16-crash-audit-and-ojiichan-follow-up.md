@@ -124,10 +124,11 @@ inside that process; explicit shutdown intent and connection-generation correlat
   Reproduce GUI loss with a surviving supervisor, build changes, expiration and system restart.
   Verify exact ownership and protocol selection before changing fallback behavior. Coordinate with
   the separate `fix/attach-first-frame` work rather than duplicating or overwriting it.
-- One October 15 08:31:18 UTC saved-session replacement failed with Windows access denied. Reproduce
-  concurrent writers/readers and transient sharing violations against disposable files. Preserve the
-  old durable checkpoint on every failure. Consider bounded retries only for proven transient
-  failures; do not mask ACL failures or delete the destination before replacement.
+- One October 15 08:31:18 UTC saved-session replacement failed with Windows access denied. A
+  disposable-file regression reproduced error 5 by holding the existing catalog open without delete
+  sharing. Atomic replacement now retries only access-denied, sharing-violation, and lock-violation
+  errors with bounded backoff totaling at most 310 ms. The destination remains untouched until a
+  rename succeeds, and permanent failures still return an error after the retry budget.
 - Acceptance: no duplicated agents, no lost old checkpoint on failed writes, and no false success
   when the new checkpoint was not persisted.
 

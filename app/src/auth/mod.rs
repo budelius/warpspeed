@@ -43,6 +43,7 @@ use crate::env_vars::manager::EnvVarCollectionManager;
 use crate::notebooks::manager::NotebookManager;
 use crate::palette::PaletteMode;
 use crate::root_view::RootView;
+use crate::server::cloud_objects::listener::Listener;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::{PaletteSource, TelemetryEvent};
@@ -283,6 +284,9 @@ pub fn log_out(app: &mut AppContext) {
 
     AuthManager::handle(app).update(app, |auth_manager, ctx| {
         auth_manager.log_out(ctx);
+    });
+    Listener::handle(app).update(app, |listener, _| {
+        listener.stop_subscription();
     });
     crate::stozn_auth::StoznAuthManager::handle(app).update(app, |auth_manager, ctx| {
         auth_manager.logout(ctx);

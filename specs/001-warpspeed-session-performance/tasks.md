@@ -139,8 +139,8 @@
 
 - [x] T040 Run focused unit tests for serialized blocks, session store, prompt chips, diagnostics, SQLite, and app services using `cargo nextest` commands from `specs/001-warpspeed-session-performance/quickstart.md`
 - [x] T041 Benchmark the representative legacy fixture and record size, duration, peak memory, warning count, and subprocess count in `specs/001-warpspeed-session-performance/quickstart.md`
-- [ ] T042 Run `./script/format`, workspace Clippy with `-D warnings`, workspace nextest, doc tests, and `git diff --check`
-- [ ] T043 Perform the minimal Windows, Linux, and macOS verification matrix defined in `specs/001-warpspeed-session-performance/quickstart.md` after local gates pass
+- [x] T042 Run `./script/format`, workspace Clippy with `-D warnings`, workspace nextest, doc tests, and `git diff --check`
+- [x] T043 Perform the minimal Windows, Linux, and macOS verification matrix defined in `specs/001-warpspeed-session-performance/quickstart.md` after local gates pass
 - [x] T044 Re-run Spec Kit convergence against `spec.md`, `plan.md`, and `tasks.md`, append any remaining gaps, and complete them before rollout
 - [ ] T045 Back up the real WarpSpeed profile, gracefully retire old GUI generations without stopping supervisors, migrate copied checkpoints, install the merged build, and validate restart/reconnect behavior per `specs/001-warpspeed-session-performance/quickstart.md`
 

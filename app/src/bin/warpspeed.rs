@@ -222,5 +222,6 @@ mod tests {
         );
         assert!(application_name_for(Some(&long_a), false).len() < 100);
         assert_eq!(application_name_for(None, false), "WarpSpeed");
+        assert_eq!(application_name_for(None, true), "WarpSpeedAdmin");
     }
 }

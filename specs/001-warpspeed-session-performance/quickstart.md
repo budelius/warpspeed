@@ -122,3 +122,27 @@ git diff --check
 ## 7. Cross-platform verification
 
 After local checks pass, discover current Oz runners and select one representative runner for each affected OS. Verify Windows named-mutex and atomic-replace behavior, Linux D-Bus and atomic-replace behavior, and macOS checkpoint round-trip compatibility. No additional architecture is required unless the final diff introduces architecture-specific code.
+
+## 8. Final validation record
+
+The review-fix implementation commit was `03ad0956bf21748fe1dc969c5268c7959f42f85f`.
+
+Local quality gates:
+
+- `./script/format`, workspace Clippy excluding `warp_completer`, Warp Clippy, `warp_completer` Clippy, doc tests, and `git diff --check` passed;
+- 55 focused app-service, checkpoint, serialization, and prompt-diagnostic tests passed;
+- the full workspace nextest run passed 12,108 of 12,404 tests. The 296 failures were unsupported GUI and shell integration tests in this environment, a Windows symlink-privilege failure, missing test-only `StoznAuthManager` registration, and existing singleton/order-dependent app tests. The exact root-view failure was `Cannot get singleton model of type "warp::stozn_auth::StoznAuthManager" that was never registered`;
+- Clippy continued to emit the non-fatal `command-signatures-v2` stale-JavaScript build warning; a direct `yarn build` succeeded.
+
+Cross-platform and runtime evidence:
+
+- PR CI run 2882 passed at the review-fix implementation commit;
+- desktop workflow 2883 built the shared macOS arm64 app and Windows x64 installer successfully at that commit;
+- the pinned Linux CI image compiled the WarpSpeed binary, passed seven app-service tests, and passed the new migration-failure, truncation-marker, and custom-diagnostic tests;
+- ten simultaneous cold Windows starts left one owner, same- and different-version launches forwarded, `sessions instances` found the owner, and `sessions quit` retired it gracefully;
+- a concurrent CLI login and GUI stayed alive under the same profile, proving the CLI did not acquire GUI ownership;
+- occupying the profile's URI pipe made the GUI fail closed with Windows error 231, and a retry became owner after the pipe was released;
+- a crafted full-GUI handoff exited with status 1 and wrote only the abort marker;
+- the current host was non-elevated and could not create a highest-privilege scheduled task. Elevation-derived `WarpSpeedAdmin` identity is covered deterministically by the binary unit tests rather than an elevated runtime launch.
+
+An exact-hash copy of the reviewed debug binary was staged under an isolated install root and `WARPSPEED_PROFILE=review-03ad0956b`; the normal installed WarpSpeed was unchanged. Opening a copied V1 fixture migrated it in 7,957 ms to a 14,842,833-byte V2 checkpoint while retaining a 142,680,155-byte checksummed `.v1.bak`. Replacing the isolated active V2 with malformed JSON recovered and remigrated the rollback to the exact prior V2 SHA-256. The fixture had its copied window tabs removed before opening, so this runtime migration launched no shell or agent processes.

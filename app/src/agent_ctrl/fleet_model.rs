@@ -108,6 +108,8 @@ pub struct FleetRow {
     pub node_name: Option<String>,
     /// Whether the dashboard reports that the run can be paused now.
     pub pause_allowed: bool,
+    /// Whether the dashboard can resume or restart this run.
+    pub resume_allowed: bool,
     pub branch: Option<String>,
     /// The branch's page on the repository's web UI, for hosts whose layout is known.
     pub branch_url: Option<String>,
@@ -129,7 +131,7 @@ impl FleetRow {
     }
 
     pub fn can_resume(&self) -> bool {
-        self.is_paused()
+        self.is_paused() || (self.state == "interrupted" && self.resume_allowed)
     }
 
     fn display_rank(&self) -> u8 {
@@ -644,6 +646,7 @@ fn fleet_row(run: &RunSummary, repo_url: Option<&str>) -> FleetRow {
         agent: run.agent_name.clone(),
         node_name: run.node_name.clone(),
         pause_allowed: run.pause_allowed.unwrap_or(false),
+        resume_allowed: run.resume_allowed.unwrap_or(false),
         branch: run.branch.clone(),
         branch_url: repo_url
             .zip(run.branch.as_deref())

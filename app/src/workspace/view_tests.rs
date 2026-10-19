@@ -8236,6 +8236,7 @@ fn list_associated_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::Fleet
             node_name: None,
             paused_at: None,
             pause_allowed: Some(true),
+            resume_allowed: None,
         }],
         repos: Vec::new(),
     })
@@ -9123,7 +9124,8 @@ fn activating_a_past_session_opens_it_directly_without_the_palette() {
         sessions_view.update(&mut app, |view, ctx| {
             view.set_inputs(
                 vec![crate::terminal::agent_sessions_index::PaneAgentInput {
-                    locator: target,
+                    locator: Some(target),
+                    remote_instance_pid: None,
                     tab_index: 0,
                     tab_title: "tab".to_owned(),
                     pane_number: 1,
@@ -9154,6 +9156,7 @@ fn activating_a_past_session_opens_it_directly_without_the_palette() {
                         session_id: Some(session_id),
                         pane: None,
                         detached_session: None,
+                        remote_instance_pid: None,
                         process_pid: None,
                     },
                 ),
@@ -9195,7 +9198,10 @@ fn agent_session_inputs_lists_a_tabs_visible_panes_as_laid_out() {
 
         let (panes, _) = workspace.read(&app, |workspace, ctx| workspace.agent_session_inputs(ctx));
 
-        let listed: Vec<PaneId> = panes.iter().map(|pane| pane.locator.pane_id).collect();
+        let listed: Vec<PaneId> = panes
+            .iter()
+            .filter_map(|pane| pane.locator.map(|locator| locator.pane_id))
+            .collect();
         assert_eq!(listed, expected, "left to right, the hidden pane left out");
         assert!(!listed.contains(&hidden));
         let numbers: Vec<usize> = panes.iter().map(|pane| pane.pane_number).collect();

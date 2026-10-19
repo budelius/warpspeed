@@ -57,10 +57,18 @@ pub(crate) fn managed_run_detail(run: &RunSummary) -> String {
     .join(" · ")
 }
 
-pub(crate) fn managed_action_label(state: &str) -> &'static str {
-    if state == "paused" {
+pub(crate) fn managed_can_resume(run: &RunSummary) -> bool {
+    run.state == "paused" || (run.state == "interrupted" && run.resume_allowed == Some(true))
+}
+
+pub(crate) fn managed_can_take_over(run: &RunSummary) -> bool {
+    matches!(run.state.as_str(), "active" | "running" | "waiting")
+}
+
+pub(crate) fn managed_action_label(run: &RunSummary) -> &'static str {
+    if managed_can_resume(run) {
         "Resume & attach"
-    } else if is_finished_state(state) {
+    } else if is_finished_state(&run.state) {
         "View transcript"
     } else {
         "Attach here"

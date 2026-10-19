@@ -15,6 +15,8 @@ const MAX_HEAD_LINES: usize = 200;
 const MAX_HEAD_BYTES: usize = 256 * 1024;
 const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
 const MAX_LAST_PROMPT_BYTES: u64 = 64 * 1024;
+const MAX_FOLDER_SCAN_BYTES: u64 = 64 * 1024;
+const MAX_FOLDER_SCAN_LINES: usize = 32;
 const MAX_PREVIEW_MESSAGES: usize = 8;
 const MAX_PREVIEW_MESSAGE_CHARS: usize = 1_200;
 const TITLE_MAX_CHARS: usize = 80;
@@ -164,10 +166,9 @@ pub(crate) fn is_safe_session_id(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
-fn claude_candidates(root: &Path) -> Vec<Candidate> {
-    directories(root)
+fn claude_candidates_in(project: &Path) -> Vec<Candidate> {
+    files(project)
         .into_iter()
-        .flat_map(|project| files(&project))
         .filter_map(|(path, modified)| {
             let session_id = path.file_stem()?.to_str()?.to_owned();
             is_safe_session_id(&session_id).then_some(Candidate {
@@ -180,10 +181,16 @@ fn claude_candidates(root: &Path) -> Vec<Candidate> {
         .collect()
 }
 
-pub(super) fn pi_candidates(root: &Path) -> Vec<Candidate> {
+fn claude_candidates(root: &Path) -> Vec<Candidate> {
     directories(root)
         .into_iter()
-        .flat_map(|project| files(&project))
+        .flat_map(|project| claude_candidates_in(&project))
+        .collect()
+}
+
+fn pi_candidates_in(project: &Path) -> Vec<Candidate> {
+    files(project)
+        .into_iter()
         .filter_map(|(path, modified)| {
             let (_, session_id) = path.file_stem()?.to_str()?.rsplit_once('_')?;
             let session_id = session_id.to_owned();
@@ -194,6 +201,13 @@ pub(super) fn pi_candidates(root: &Path) -> Vec<Candidate> {
                 modified,
             })
         })
+        .collect()
+}
+
+pub(super) fn pi_candidates(root: &Path) -> Vec<Candidate> {
+    directories(root)
+        .into_iter()
+        .flat_map(|project| pi_candidates_in(&project))
         .collect()
 }
 
@@ -823,6 +837,118 @@ fn scan(agent: CLIAgent, not_before: Option<SystemTime>) -> Vec<PastAgentSession
     sessions
 }
 
+fn candidate_cwd(candidate: &Candidate) -> Option<PathBuf> {
+    let file = File::open(&candidate.path).ok()?;
+    let mut reader = BufReader::new(file.take(MAX_FOLDER_SCAN_BYTES));
+    let mut line = String::new();
+    for _ in 0..MAX_FOLDER_SCAN_LINES {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            break;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let cwd = match candidate.agent {
+            CLIAgent::Claude | CLIAgent::Pi => entry["cwd"].as_str().map(PathBuf::from),
+            CLIAgent::Codex => {
+                crate::ai::agent_sdk::driver::harness::codex_transcript::parse_session_meta(Some(
+                    &entry,
+                ))
+                .map(|metadata| metadata.cwd)
+            }
+            CLIAgent::Gemini
+            | CLIAgent::Amp
+            | CLIAgent::Droid
+            | CLIAgent::OpenCode
+            | CLIAgent::Copilot
+            | CLIAgent::OhMyPi
+            | CLIAgent::Auggie
+            | CLIAgent::CursorCli
+            | CLIAgent::Goose
+            | CLIAgent::Hermes
+            | CLIAgent::Vibe
+            | CLIAgent::Antigravity
+            | CLIAgent::Kimi
+            | CLIAgent::DeepSeekHarness
+            | CLIAgent::WarpTui
+            | CLIAgent::Unknown => None,
+        };
+        if cwd.as_ref().is_some_and(|cwd| !cwd.as_os_str().is_empty()) {
+            return cwd;
+        }
+    }
+    None
+}
+
+fn sessions_in_folder(candidates: Vec<Candidate>, folder: &Path) -> Vec<PastAgentSession> {
+    let folder = ResolvedPath::new(folder);
+    let mut sessions = candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate_cwd(candidate).is_some_and(|cwd| is_within_known(&cwd, None, &folder))
+        })
+        .map(describe)
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
+    resolve_folders(&mut sessions);
+    sessions
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn sessions_for_agent_in_folder(agent: CLIAgent, folder: &Path) -> Vec<PastAgentSession> {
+    match agent {
+        CLIAgent::Claude => {
+            crate::ai::agent_sdk::driver::harness::claude_transcript::claude_config_dir()
+                .ok()
+                .map(|root| sessions_in_folder(claude_candidates(&root.join("projects")), folder))
+                .unwrap_or_default()
+        }
+        CLIAgent::Pi => {
+            let candidates = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
+                .map(PathBuf::from)
+                .map(|root| pi_candidates_in(&root))
+                .or_else(|| {
+                    dirs::home_dir()
+                        .map(|home| pi_candidates(&home.join(".pi").join("agent").join("sessions")))
+                })
+                .unwrap_or_default();
+            sessions_in_folder(candidates, folder)
+        }
+        CLIAgent::Codex => sessions_in_folder(candidates(agent), folder),
+        CLIAgent::Kimi | CLIAgent::DeepSeekHarness => {
+            let folder = ResolvedPath::new(folder);
+            let mut sessions = directory_sessions(agent)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|session| is_within_known(&session.cwd, None, &folder))
+                .collect::<Vec<_>>();
+            sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
+            resolve_folders(&mut sessions);
+            sessions
+        }
+        CLIAgent::Gemini
+        | CLIAgent::Amp
+        | CLIAgent::Droid
+        | CLIAgent::OpenCode
+        | CLIAgent::Copilot
+        | CLIAgent::OhMyPi
+        | CLIAgent::Auggie
+        | CLIAgent::CursorCli
+        | CLIAgent::Goose
+        | CLIAgent::Hermes
+        | CLIAgent::Vibe
+        | CLIAgent::Antigravity
+        | CLIAgent::WarpTui
+        | CLIAgent::Unknown => Vec::new(),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn sessions_for_agent_in_folder(_: CLIAgent, _: &Path) -> Vec<PastAgentSession> {
+    Vec::new()
+}
+
 /// Resolves each session's folder on disk, which the scan does so the UI thread never has to.
 pub(super) fn resolve_folders(sessions: &mut [PastAgentSession]) {
     for session in sessions {
@@ -849,6 +975,16 @@ pub(crate) fn find_all_resumable() -> Vec<PastAgentSession> {
     let mut sessions = RESUMABLE_AGENTS
         .into_iter()
         .flat_map(find_all)
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
+    sessions
+}
+
+/// Every recorded resumable session in `folder`, without the global recent-session limit.
+pub(crate) fn find_all_resumable_in(folder: &Path) -> Vec<PastAgentSession> {
+    let mut sessions = RESUMABLE_AGENTS
+        .into_iter()
+        .flat_map(|agent| sessions_for_agent_in_folder(agent, folder))
         .collect::<Vec<_>>();
     sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
     sessions

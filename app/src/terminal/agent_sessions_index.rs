@@ -19,11 +19,15 @@ pub(crate) enum AgentSessionState {
     Running {
         locator: PaneViewLocator,
     },
+    RunningInOtherInstance {
+        instance_pid: u32,
+    },
     Pending {
         locator: PaneViewLocator,
     },
     Detached {
         session_id: SessionId,
+        instance_pid: Option<u32>,
     },
     KnownProcess {
         pid: u32,
@@ -45,8 +49,15 @@ impl AgentSessionState {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             AgentSessionState::Running { .. } => "● running",
+            AgentSessionState::RunningInOtherInstance { .. } => "● another Warp instance",
             AgentSessionState::Pending { .. } => "○ pending",
-            AgentSessionState::Detached { .. } => "detached",
+            AgentSessionState::Detached {
+                instance_pid: Some(_),
+                ..
+            } => "detached from another Warp instance",
+            AgentSessionState::Detached {
+                instance_pid: None, ..
+            } => "detached",
             AgentSessionState::KnownProcess { .. } => "this build",
             AgentSessionState::HeldByOtherBuild { .. } => "held by another build",
             AgentSessionState::NoKnownPane { .. } => "no pane",
@@ -80,7 +91,8 @@ pub(crate) fn is_row_within(row: &AgentSessionRow, folder: &ResolvedPath) -> boo
 /// One terminal pane of the window, in tab order, as the window view groups it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PaneAgentInput {
-    pub locator: PaneViewLocator,
+    pub locator: Option<PaneViewLocator>,
+    pub remote_instance_pid: Option<u32>,
     pub tab_index: usize,
     pub tab_title: String,
     /// 1-based position among the tab's visible panes, as laid out.
@@ -94,8 +106,10 @@ pub(crate) struct PaneAgentInput {
     pub pending: Option<CliAgentResumeDescriptor>,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct DetachedInput {
     pub session_id: SessionId,
+    pub remote_instance_pid: Option<u32>,
     pub title: String,
     pub cwd: PathBuf,
     pub detached_for_seconds: u64,
@@ -227,6 +241,11 @@ pub(crate) fn build_rows_with_scanned(
         .iter()
         .filter_map(|pane| pane.running.as_ref().and_then(key_of))
         .collect();
+    let local_running_keys: HashSet<ConversationKey> = panes
+        .iter()
+        .filter(|pane| pane.remote_instance_pid.is_none())
+        .filter_map(|pane| pane.running.as_ref().and_then(key_of))
+        .collect();
 
     let mut detached_order: Vec<&DetachedInput> = detached.iter().collect();
     detached_order.sort_by_key(|input| input.detached_for_seconds);
@@ -243,29 +262,37 @@ pub(crate) fn build_rows_with_scanned(
 
     let mut rows = Vec::new();
     let mut live_keys = running_keys.clone();
+    let mut represented_remote_keys = HashSet::new();
     for pane in panes {
         if let Some(descriptor) = &pane.running {
-            rows.push(live_row(
-                pane,
-                descriptor,
-                history_for(descriptor),
-                AgentSessionState::Running {
-                    locator: pane.locator,
-                },
-            ));
+            if pane.remote_instance_pid.is_some()
+                && let Some(key) = key_of(descriptor)
+                && (local_running_keys.contains(&key) || !represented_remote_keys.insert(key))
+            {
+                continue;
+            }
+            let state = match (pane.remote_instance_pid, pane.locator) {
+                (Some(instance_pid), _) => {
+                    AgentSessionState::RunningInOtherInstance { instance_pid }
+                }
+                (None, Some(locator)) => AgentSessionState::Running { locator },
+                (None, None) => continue,
+            };
+            rows.push(live_row(pane, descriptor, history_for(descriptor), state));
         } else if let Some(descriptor) = &pane.pending {
             let key = key_of(descriptor);
             if key.as_ref().is_some_and(|key| live_keys.contains(key)) {
                 continue;
             }
             live_keys.extend(key);
+            let Some(locator) = pane.locator else {
+                continue;
+            };
             rows.push(live_row(
                 pane,
                 descriptor,
                 history_for(descriptor),
-                AgentSessionState::Pending {
-                    locator: pane.locator,
-                },
+                AgentSessionState::Pending { locator },
             ));
         }
     }
@@ -274,6 +301,7 @@ pub(crate) fn build_rows_with_scanned(
     for input in detached_order {
         let state = AgentSessionState::Detached {
             session_id: input.session_id,
+            instance_pid: input.remote_instance_pid,
         };
         let identified = (!input.session_uuid_hex.is_empty())
             .then(|| {
@@ -364,10 +392,15 @@ pub(crate) fn build_rows_with_scanned(
         .collect::<HashSet<_>>();
     for process in scanned {
         let key = (process.agent, process.session_id.clone());
-        let uniquely_represented_without_uuid = process.process_count == 1
-            && process.warp_session_uuid.is_none()
-            && (running_keys.contains(&key) || detached_keys.contains(&key));
-        if represented_pids.contains(&process.pid) || uniquely_represented_without_uuid {
+        let represented_by_remote_pane = panes.iter().any(|pane| {
+            pane.remote_instance_pid.is_some()
+                && pane.running.as_ref().and_then(key_of) == Some(key.clone())
+        });
+        let uniquely_represented = process.process_count == 1
+            && (represented_by_remote_pane
+                || (process.warp_session_uuid.is_none()
+                    && (running_keys.contains(&key) || detached_keys.contains(&key))));
+        if represented_pids.contains(&process.pid) || uniquely_represented {
             continue;
         }
         rows.push(scanned_row(process, history_for_key(&key)));

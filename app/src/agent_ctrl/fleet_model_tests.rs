@@ -17,6 +17,7 @@ fn run(job_id: &str, state: &str, repo_url: Option<&str>) -> RunSummary {
         node_name: Some("agent-ctrl-node-0".to_owned()),
         paused_at: None,
         pause_allowed: Some(true),
+        resume_allowed: None,
     }
 }
 
@@ -89,6 +90,19 @@ fn finished_runs_follow_the_live_ones() {
         job_ids(&groups[0]),
         ["job-live", "job-waiting", "job-done", "job-failed"]
     );
+}
+
+#[test]
+fn an_interrupted_run_is_resumable_only_when_agent_ctrl_preserved_its_session() {
+    let mut recoverable = run("job-recoverable", "interrupted", Some(WARP));
+    recoverable.resume_allowed = Some(true);
+    let groups = group_runs(
+        &[recoverable, run("job-lost", "interrupted", Some(WARP))],
+        &[repository("warp", WARP)],
+    );
+
+    assert!(groups[0].rows[0].can_resume());
+    assert!(!groups[0].rows[1].can_resume());
 }
 
 #[test]

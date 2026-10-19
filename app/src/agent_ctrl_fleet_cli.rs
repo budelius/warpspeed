@@ -20,7 +20,9 @@ use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, Manage
 use crate::agent_ctrl::fleet_model::branch_web_url;
 use crate::remote_control::address;
 use crate::remote_control::client::{self, Instance};
-use crate::remote_control::protocol::{PROTOCOL_VERSION, PaneSummary, Request, Response};
+use crate::remote_control::protocol::{
+    DetachedSessionSummary, PROTOCOL_VERSION, PaneSummary, Request, Response,
+};
 use crate::terminal::agent_session_handoff::repo_url_for;
 use crate::terminal::{CLIAgent, agent_session_history};
 
@@ -189,7 +191,7 @@ pub(crate) fn move_all_request(args: &ManagedSessionsArgs) -> Option<MoveAllRequ
 }
 
 /// The agent whose first command prefix is `label`, as [`PaneSummary::agent`] names it.
-fn agent_from_label(label: &str) -> Option<CLIAgent> {
+pub(crate) fn agent_from_label(label: &str) -> Option<CLIAgent> {
     enum_iterator::all::<CLIAgent>().find(|agent| agent.command_prefixes().first() == Some(&label))
 }
 
@@ -403,6 +405,33 @@ fn discover() -> (Vec<(Instance, Vec<PaneSummary>)>, Vec<SkippedInstance>) {
         }
     }
     (answered, skipped)
+}
+
+/// The live panes and unattached supervisor sessions belonging to other compatible Warp
+/// instances in this profile.
+pub(crate) struct DiscoveredAgentSessions {
+    pub panes: Vec<(u32, PaneSummary)>,
+    pub detached: Vec<(u32, DetachedSessionSummary)>,
+}
+
+pub(crate) fn discover_agent_sessions() -> DiscoveredAgentSessions {
+    let own_pid = std::process::id();
+    let (instances, _) = discover();
+    let mut panes = Vec::new();
+    let mut detached = Vec::new();
+    for (instance, instance_panes) in instances {
+        if instance.pid() == own_pid {
+            continue;
+        }
+        let pid = instance.pid();
+        panes.extend(instance_panes.into_iter().map(|pane| (pid, pane)));
+        if let Ok(Response::DetachedSessions { sessions }) =
+            instance.call(Request::ListDetachedSessions)
+        {
+            detached.extend(sessions.into_iter().map(|session| (pid, session)));
+        }
+    }
+    DiscoveredAgentSessions { panes, detached }
 }
 
 /// Where each agent's past sessions ran, read once per agent.

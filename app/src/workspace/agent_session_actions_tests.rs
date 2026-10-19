@@ -134,7 +134,13 @@ fn each_state_maps_to_its_action() {
     );
 
     let session_id = warp_core::SessionId::from(7);
-    let detached = row(None, AgentSessionState::Detached { session_id });
+    let detached = row(
+        None,
+        AgentSessionState::Detached {
+            session_id,
+            instance_pid: None,
+        },
+    );
     assert_eq!(
         action_for(&detached, Some(target)),
         Some(AgentSessionAction::Attach(session_id))
@@ -150,6 +156,24 @@ fn each_state_maps_to_its_action() {
             target: Some(target),
         })
     );
+}
+
+#[test]
+fn sessions_owned_by_another_warp_instance_have_no_local_action() {
+    let running = row(
+        Some(CLIAgent::Claude),
+        AgentSessionState::RunningInOtherInstance { instance_pid: 42 },
+    );
+    let detached = row(
+        Some(CLIAgent::Claude),
+        AgentSessionState::Detached {
+            session_id: warp_core::SessionId::from(7),
+            instance_pid: Some(42),
+        },
+    );
+
+    assert_eq!(action_for(&running, None), None);
+    assert_eq!(action_for(&detached, None), None);
 }
 
 #[test]
@@ -181,6 +205,42 @@ fn a_past_row_with_an_unsafe_session_id_has_no_action() {
         ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
     };
     assert!(action_for(&uuid_row, None).is_some());
+}
+
+#[test]
+fn past_supported_sessions_can_start_on_agent_ctrl() {
+    let claude = row(Some(CLIAgent::Claude), AgentSessionState::Past);
+    let source = agent_ctrl_handoff_source(&claude).expect("Claude can move");
+    assert_eq!(source.agent, CLIAgent::Claude);
+    assert_eq!(source.session_id, "abc");
+    assert_eq!(source.cwd, Path::new("T:/p/x"));
+
+    assert!(agent_ctrl_handoff_source(&row(Some(CLIAgent::Pi), AgentSessionState::Past)).is_some());
+    assert!(
+        agent_ctrl_handoff_source(&row(Some(CLIAgent::Gemini), AgentSessionState::Past)).is_none()
+    );
+    assert!(
+        agent_ctrl_handoff_source(&row(
+            Some(CLIAgent::Claude),
+            AgentSessionState::KnownProcess { pid: 42 }
+        ))
+        .is_none()
+    );
+}
+
+#[test]
+fn a_session_without_a_safe_id_or_folder_cannot_start_on_agent_ctrl() {
+    let unsafe_id = AgentSessionRow {
+        session_id: Some("../session".into()),
+        ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
+    };
+    let no_folder = AgentSessionRow {
+        cwd: PathBuf::new(),
+        ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
+    };
+
+    assert!(agent_ctrl_handoff_source(&unsafe_id).is_none());
+    assert!(agent_ctrl_handoff_source(&no_folder).is_none());
 }
 
 #[test]

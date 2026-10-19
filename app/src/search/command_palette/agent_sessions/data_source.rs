@@ -63,7 +63,8 @@ pub(super) fn section_for(
             }
         }
         AgentSessionState::Detached { .. } => AgentSessionSection::Detached,
-        AgentSessionState::KnownProcess { .. }
+        AgentSessionState::RunningInOtherInstance { .. }
+        | AgentSessionState::KnownProcess { .. }
         | AgentSessionState::HeldByOtherBuild { .. }
         | AgentSessionState::NoKnownPane { .. } => AgentSessionSection::RunningElsewhere,
         AgentSessionState::Past => {
@@ -152,7 +153,7 @@ impl DataSource {
         scanned_agents: &[ScannedAgent],
     ) {
         self.focused_folder = focused
-            .and_then(|focused| panes.iter().find(|pane| pane.locator == focused))
+            .and_then(|focused| panes.iter().find(|pane| pane.locator == Some(focused)))
             .and_then(|pane| pane.cwd.as_deref())
             .map(ResolvedPath::new);
         self.panes = panes;

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use warpui::AppContext;
 
-use super::protocol::{PaneSummary, Request, Response, StoredSessionInfo};
+use super::protocol::{DetachedSessionSummary, PaneSummary, Request, Response, StoredSessionInfo};
 
 /// Carries out one request.
 pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
@@ -19,6 +19,7 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
             version: super::build_identity(),
         },
         Request::ListPanes => list_panes(ctx),
+        Request::ListDetachedSessions => list_detached_sessions(ctx),
         Request::DetachSession { session_id } => detach(session_id.into(), ctx),
         Request::AttachSession { session_id } => attach(session_id.into(), ctx),
         Request::ListStoredSessions => list_stored_sessions(),
@@ -121,6 +122,27 @@ fn list_panes(ctx: &mut AppContext) -> Response {
 fn list_panes(_ctx: &mut AppContext) -> Response {
     Response::Failed {
         error: "This build has no local terminals".to_owned(),
+    }
+}
+
+fn list_detached_sessions(ctx: &mut AppContext) -> Response {
+    match crate::terminal::detached_sessions::list_checked(ctx) {
+        Ok(sessions) => Response::DetachedSessions {
+            sessions: sessions
+                .into_iter()
+                .map(|session| DetachedSessionSummary {
+                    session_id: session.session_id.as_u64(),
+                    title: session.title,
+                    working_directory: session.cwd.to_string_lossy().into_owned(),
+                    detached_for_seconds: session.detached_for_seconds,
+                    shell_pid: session.shell_pid,
+                    session_uuid_hex: session.session_uuid_hex,
+                })
+                .collect(),
+        },
+        Err(error) => Response::Failed {
+            error: format!("{error:?}"),
+        },
     }
 }
 

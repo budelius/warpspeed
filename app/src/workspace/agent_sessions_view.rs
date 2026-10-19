@@ -28,7 +28,8 @@ use warpui::{
 
 use crate::agent_ctrl::fleet_model::{FleetModel, FleetModelEvent, is_finished_state};
 use crate::agent_ctrl::session_picker::{
-    managed_action_label, managed_agent_label, managed_run_detail, managed_run_title, matching_runs,
+    managed_action_label, managed_agent_label, managed_can_resume, managed_can_take_over,
+    managed_run_detail, managed_run_title, matching_runs,
 };
 use crate::appearance::Appearance;
 use crate::editor::{
@@ -38,6 +39,7 @@ use crate::editor::{
 use crate::search::command_palette::agent_sessions::{
     normalized_query, row_has_exact_words, row_title, score_row,
 };
+use crate::terminal::agent_session_handoff::HandoffSource;
 use crate::terminal::agent_session_history::{PastAgentSession, ResolvedPath};
 use crate::terminal::agent_sessions_index::{
     AgentSessionRow, AgentSessionState, DetachedInput, PaneAgentInput, build_rows_with_scanned,
@@ -50,7 +52,9 @@ use crate::util::time_format::format_approx_duration_from_now;
 use crate::util::truncation::truncate_from_end;
 use crate::view_components::action_button::{ActionButtonTheme, SecondaryTheme};
 use crate::workspace::PaneViewLocator;
-use crate::workspace::agent_session_actions::{AgentSessionAction, action_for};
+use crate::workspace::agent_session_actions::{
+    AgentSessionAction, action_for, agent_ctrl_handoff_source,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum SessionFilter {
@@ -122,6 +126,7 @@ pub(crate) enum RowKey {
         session_id: Option<String>,
         pane: Option<PaneViewLocator>,
         detached_session: Option<warp_core::SessionId>,
+        remote_instance_pid: Option<u32>,
         process_pid: Option<u32>,
     },
     Managed(String),
@@ -140,16 +145,34 @@ impl ViewRow {
                 pane: match row.state {
                     AgentSessionState::Running { locator }
                     | AgentSessionState::Pending { locator } => Some(locator),
-                    AgentSessionState::Detached { .. }
+                    AgentSessionState::RunningInOtherInstance { .. }
+                    | AgentSessionState::Detached { .. }
                     | AgentSessionState::KnownProcess { .. }
                     | AgentSessionState::HeldByOtherBuild { .. }
                     | AgentSessionState::NoKnownPane { .. }
                     | AgentSessionState::Past => None,
                 },
                 detached_session: match row.state {
-                    AgentSessionState::Detached { session_id } => Some(session_id),
+                    AgentSessionState::Detached { session_id, .. } => Some(session_id),
+                    AgentSessionState::Running { .. }
+                    | AgentSessionState::RunningInOtherInstance { .. }
+                    | AgentSessionState::Pending { .. }
+                    | AgentSessionState::KnownProcess { .. }
+                    | AgentSessionState::HeldByOtherBuild { .. }
+                    | AgentSessionState::NoKnownPane { .. }
+                    | AgentSessionState::Past => None,
+                },
+                remote_instance_pid: match row.state {
+                    AgentSessionState::RunningInOtherInstance { instance_pid }
+                    | AgentSessionState::Detached {
+                        instance_pid: Some(instance_pid),
+                        ..
+                    } => Some(instance_pid),
                     AgentSessionState::Running { .. }
                     | AgentSessionState::Pending { .. }
+                    | AgentSessionState::Detached {
+                        instance_pid: None, ..
+                    }
                     | AgentSessionState::KnownProcess { .. }
                     | AgentSessionState::HeldByOtherBuild { .. }
                     | AgentSessionState::NoKnownPane { .. }
@@ -160,6 +183,7 @@ impl ViewRow {
                     | AgentSessionState::HeldByOtherBuild { pid, .. }
                     | AgentSessionState::NoKnownPane { pid, .. } => Some(pid),
                     AgentSessionState::Running { .. }
+                    | AgentSessionState::RunningInOtherInstance { .. }
                     | AgentSessionState::Pending { .. }
                     | AgentSessionState::Detached { .. }
                     | AgentSessionState::Past => None,
@@ -178,7 +202,7 @@ fn focused_folder(
 ) -> Option<(PathBuf, ResolvedPath)> {
     let path = panes
         .iter()
-        .find(|pane| Some(pane.locator) == target)?
+        .find(|pane| pane.remote_instance_pid.is_none() && pane.locator == target)?
         .cwd
         .as_ref()
         .filter(|path| !path.as_os_str().is_empty())?
@@ -400,6 +424,8 @@ pub enum AgentSessionsViewEvent {
         session_id: String,
     },
     OpenManaged(String),
+    TakeOverManaged(String),
+    StartOnAgentCtrl(HandoffSource),
     Close,
 }
 
@@ -410,6 +436,8 @@ pub enum AgentSessionsViewAction {
     Enter,
     Select(RowKey),
     Activate(RowKey),
+    StartOnAgentCtrl(RowKey),
+    TakeOverManaged(RowKey),
     SetFilter(SessionFilter),
     Close,
 }
@@ -453,6 +481,8 @@ pub struct AgentSessionsView {
     /// Made when a row first appears and kept across renders and rebuilds.
     row_states: HashMap<RowKey, MouseStateHandle>,
     button_states: HashMap<RowKey, MouseStateHandle>,
+    agent_ctrl_button_states: HashMap<RowKey, MouseStateHandle>,
+    takeover_button_states: HashMap<RowKey, MouseStateHandle>,
     filter_states: HashMap<SessionFilter, MouseStateHandle>,
     close_state: MouseStateHandle,
     selected_index: Option<usize>,
@@ -521,6 +551,8 @@ impl AgentSessionsView {
             view_rows: Arc::new(Vec::new()),
             row_states: HashMap::new(),
             button_states: HashMap::new(),
+            agent_ctrl_button_states: HashMap::new(),
+            takeover_button_states: HashMap::new(),
             filter_states,
             close_state: MouseStateHandle::default(),
             selected_index: None,
@@ -610,6 +642,28 @@ impl AgentSessionsView {
         }
         self.request_selected_preview(false, ctx);
         ctx.notify();
+    }
+
+    /// Rebuilds the rows after another Warp instance reports its live sessions, preserving the
+    /// current query, filter, and selection.
+    pub(crate) fn refresh_inputs(
+        &mut self,
+        panes: Vec<PaneAgentInput>,
+        detached: Result<Vec<DetachedInput>, DetachedListError>,
+        past: &[PastAgentSession],
+        scanned_agents: &[ScannedAgent],
+        history_loaded: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.panes = panes;
+        (self.detached, self.supervisor_error) = match detached {
+            Ok(detached) => (detached, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        self.scanned_agents = scanned_agents.to_vec();
+        self.history_loaded = history_loaded;
+        self.set_rows(past);
+        self.rebuild_view_rows(ctx);
     }
 
     /// Rebuilds the rows with newly scanned past sessions, keeping the rest of the snapshot.
@@ -728,7 +782,11 @@ impl AgentSessionsView {
         for row in &rows {
             let key = row.key();
             self.row_states.entry(key.clone()).or_default();
-            self.button_states.entry(key).or_default();
+            self.button_states.entry(key.clone()).or_default();
+            self.agent_ctrl_button_states
+                .entry(key.clone())
+                .or_default();
+            self.takeover_button_states.entry(key).or_default();
         }
         self.view_rows = Arc::new(rows);
         let preferred_index = self
@@ -935,15 +993,22 @@ impl AgentSessionsView {
                 }
                 AgentSessionState::Running { .. }
                 | AgentSessionState::Pending { .. }
-                | AgentSessionState::Detached { .. }
+                | AgentSessionState::Detached {
+                    instance_pid: None, ..
+                }
                 | AgentSessionState::Past => {
                     if let Some(action) = action_for(&row, target) {
                         ctx.emit(AgentSessionsViewEvent::Act(action));
                     }
                 }
-                AgentSessionState::KnownProcess { .. } => {}
+                AgentSessionState::RunningInOtherInstance { .. }
+                | AgentSessionState::Detached {
+                    instance_pid: Some(_),
+                    ..
+                }
+                | AgentSessionState::KnownProcess { .. } => {}
             },
-            ViewRow::Managed { run } if run.state == "paused" => {
+            ViewRow::Managed { run } if managed_can_resume(&run) => {
                 let requester = ctx.view_id();
                 self.pending_managed_open = Some(run.job_id.clone());
                 self.fleet_model.update(ctx, |model, ctx| {
@@ -960,6 +1025,25 @@ impl AgentSessionsView {
             | ViewRow::DateHeader(_)
             | ViewRow::ManagedError(_)
             | ViewRow::SupervisorUnreachable => {}
+        }
+    }
+
+    fn start_on_agent_ctrl(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let Some(ViewRow::Local { row, .. }) = self.view_rows.get(index) else {
+            return;
+        };
+        let Some(source) = agent_ctrl_handoff_source(row) else {
+            return;
+        };
+        ctx.emit(AgentSessionsViewEvent::StartOnAgentCtrl(source));
+    }
+
+    fn take_over_managed(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let Some(ViewRow::Managed { run, .. }) = self.view_rows.get(index) else {
+            return;
+        };
+        if managed_can_take_over(run) {
+            ctx.emit(AgentSessionsViewEvent::TakeOverManaged(run.job_id.clone()));
         }
     }
 
@@ -1070,8 +1154,8 @@ impl AgentSessionsView {
                 .finish(),
             );
         }
-        if let Some(action) = self.render_preview_action(row, app) {
-            content.add_child(action);
+        if let Some(actions) = self.render_preview_actions(row, app) {
+            content.add_child(actions);
         }
         if let ViewRow::Local { row, .. } = row {
             if row.process_count > 1 {
@@ -1163,19 +1247,64 @@ impl AgentSessionsView {
         .finish()
     }
 
-    fn render_preview_action(&self, row: &ViewRow, app: &AppContext) -> Option<Box<dyn Element>> {
-        let (key, label) = preview_action(row, self.pending_process_end)?;
-        let state = self.button_states.get(&key)?.clone();
-        Some(
-            Hoverable::new(state, move |state| {
-                render_button(label, state.is_hovered(), app)
-            })
-            .with_cursor(Cursor::PointingHand)
-            .on_click(move |ctx, _, _| {
-                ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(key.clone()));
-            })
-            .finish(),
-        )
+    fn render_preview_actions(&self, row: &ViewRow, app: &AppContext) -> Option<Box<dyn Element>> {
+        let key = row.key();
+        let mut actions = Flex::row().with_spacing(8.);
+        let mut has_action = false;
+        if let Some((_, label)) = preview_action(row, self.pending_process_end)
+            && let Some(state) = self.button_states.get(&key).cloned()
+        {
+            has_action = true;
+            let action_key = key.clone();
+            actions.add_child(
+                Hoverable::new(state, move |state| {
+                    render_button(label, state.is_hovered(), app)
+                })
+                .with_cursor(Cursor::PointingHand)
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AgentSessionsViewAction::Activate(
+                        action_key.clone(),
+                    ));
+                })
+                .finish(),
+            );
+        }
+        if matches!(row, ViewRow::Local { row, .. } if agent_ctrl_handoff_source(row).is_some())
+            && let Some(state) = self.agent_ctrl_button_states.get(&key).cloned()
+        {
+            has_action = true;
+            let action_key = key.clone();
+            actions.add_child(
+                Hoverable::new(state, move |state| {
+                    render_button("Start on AgentCtrl", state.is_hovered(), app)
+                })
+                .with_cursor(Cursor::PointingHand)
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AgentSessionsViewAction::StartOnAgentCtrl(
+                        action_key.clone(),
+                    ));
+                })
+                .finish(),
+            );
+        }
+        if matches!(row, ViewRow::Managed { run, .. } if managed_can_take_over(run))
+            && let Some(state) = self.takeover_button_states.get(&key).cloned()
+        {
+            has_action = true;
+            actions.add_child(
+                Hoverable::new(state, move |state| {
+                    render_button("Take over & attach", state.is_hovered(), app)
+                })
+                .with_cursor(Cursor::PointingHand)
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AgentSessionsViewAction::TakeOverManaged(
+                        key.clone(),
+                    ));
+                })
+                .finish(),
+            );
+        }
+        has_action.then(|| actions.finish())
     }
 }
 
@@ -1220,6 +1349,9 @@ fn saved_pane_label(saved: &SavedPane) -> String {
 
 fn placement_detail(row: &AgentSessionRow) -> Option<String> {
     match &row.state {
+        AgentSessionState::RunningInOtherInstance { instance_pid } => {
+            Some(format!("open in WarpSpeed process {instance_pid}"))
+        }
         AgentSessionState::KnownProcess { pid } => {
             Some(format!("running under this WarpSpeed build · PID {pid}"))
         }
@@ -1267,6 +1399,7 @@ fn endable_process_pid(row: &AgentSessionRow) -> Option<u32> {
         AgentSessionState::HeldByOtherBuild { pid, .. }
         | AgentSessionState::NoKnownPane { pid, .. } => Some(pid),
         AgentSessionState::Running { .. }
+        | AgentSessionState::RunningInOtherInstance { .. }
         | AgentSessionState::Pending { .. }
         | AgentSessionState::Detached { .. }
         | AgentSessionState::KnownProcess { .. }
@@ -1283,6 +1416,7 @@ fn process_warning(row: &AgentSessionRow) -> Option<String> {
             "Warning: no terminal pane owns this process. End process, then Confirm end, terminates only PID {pid}."
         )),
         AgentSessionState::Running { .. }
+        | AgentSessionState::RunningInOtherInstance { .. }
         | AgentSessionState::Pending { .. }
         | AgentSessionState::KnownProcess { .. }
         | AgentSessionState::Detached { .. }
@@ -1341,11 +1475,18 @@ fn preview_action(
             }
             AgentSessionState::Running { .. }
             | AgentSessionState::Pending { .. }
-            | AgentSessionState::Detached { .. }
+            | AgentSessionState::Detached {
+                instance_pid: None, ..
+            }
             | AgentSessionState::Past => action_for(row, *target)?.label(),
-            AgentSessionState::KnownProcess { .. } => return None,
+            AgentSessionState::RunningInOtherInstance { .. }
+            | AgentSessionState::Detached {
+                instance_pid: Some(_),
+                ..
+            }
+            | AgentSessionState::KnownProcess { .. } => return None,
         },
-        ViewRow::Managed { run } => managed_action_label(&run.state),
+        ViewRow::Managed { run } => managed_action_label(run),
         ViewRow::SectionHeader { .. }
         | ViewRow::DateHeader(_)
         | ViewRow::ManagedError(_)
@@ -1552,7 +1693,7 @@ fn render_row_contents(
                 ROW_INDENT,
                 clipped_text(managed_run_title(run), main_color).finish(),
                 Some(managed_run_detail(run)),
-                Some(managed_action_label(&run.state)),
+                Some(managed_action_label(run)),
             ),
             ViewRow::ManagedError(error) => (
                 ROW_INDENT,
@@ -1826,6 +1967,16 @@ impl TypedActionView for AgentSessionsView {
             AgentSessionsViewAction::Activate(key) => {
                 if let Some(index) = self.index_of(key) {
                     self.activate(index, ctx);
+                }
+            }
+            AgentSessionsViewAction::StartOnAgentCtrl(key) => {
+                if let Some(index) = self.index_of(key) {
+                    self.start_on_agent_ctrl(index, ctx);
+                }
+            }
+            AgentSessionsViewAction::TakeOverManaged(key) => {
+                if let Some(index) = self.index_of(key) {
+                    self.take_over_managed(index, ctx);
                 }
             }
             AgentSessionsViewAction::SetFilter(filter) => self.set_filter(*filter, ctx),

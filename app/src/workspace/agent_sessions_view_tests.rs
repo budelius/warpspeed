@@ -38,7 +38,8 @@ fn descriptor(id: &str, cwd: &str) -> CliAgentResumeDescriptor {
 
 fn pane(index: usize, cwd: &str) -> PaneAgentInput {
     PaneAgentInput {
-        locator: locator(index),
+        locator: Some(locator(index)),
+        remote_instance_pid: None,
         tab_index: index,
         tab_title: format!("tab {index}"),
         pane_number: 1,
@@ -81,6 +82,7 @@ fn past(id: &str, cwd: &str, age_secs: u64) -> PastAgentSession {
 fn detached(id: u64, title: &str, cwd: &str) -> DetachedInput {
     DetachedInput {
         session_id: warp_core::SessionId::from(id),
+        remote_instance_pid: None,
         title: title.into(),
         cwd: cwd.into(),
         detached_for_seconds: id,
@@ -100,6 +102,7 @@ fn managed(job_id: &str, state: &str) -> RunSummary {
         node_name: None,
         paused_at: None,
         pause_allowed: Some(true),
+        resume_allowed: None,
     }
 }
 
@@ -150,7 +153,7 @@ fn all_sessions_promotes_the_current_directory_first() {
         &panes,
         &[detached(7, "detached shell", "/detached")],
         &history,
-        Some(target.locator),
+        target.locator,
         SessionFilter::All,
         "",
     );
@@ -174,7 +177,7 @@ fn empty_shells_are_not_session_rows_or_nested_picker_actions() {
         std::slice::from_ref(&target),
         &[],
         &[past("elsewhere", "/work/elsewhere", 1)],
-        Some(target.locator),
+        target.locator,
         SessionFilter::All,
         "",
     );
@@ -195,7 +198,7 @@ fn every_past_session_is_available_and_resumes_in_the_opening_pane() {
         std::slice::from_ref(&target),
         &[],
         &[past("far-away", "/unrelated/repository", 1)],
-        Some(target.locator),
+        target.locator,
         SessionFilter::All,
         "",
     );
@@ -210,13 +213,13 @@ fn every_past_session_is_available_and_resumes_in_the_opening_pane() {
         panic!("expected a local session row");
     };
 
-    assert_eq!(*actual_target, Some(target.locator));
+    assert_eq!(*actual_target, target.locator);
     assert!(matches!(
         action_for(row, *actual_target),
         Some(AgentSessionAction::Resume {
             target: Some(actual),
             ..
-        }) if actual == target.locator
+        }) if Some(actual) == target.locator
     ));
 }
 
@@ -234,7 +237,7 @@ fn filters_include_all_sessions_of_their_kind() {
         &panes,
         &[],
         &history,
-        Some(target.locator),
+        target.locator,
         SessionFilter::CurrentDirectory,
         "",
     );
@@ -242,7 +245,7 @@ fn filters_include_all_sessions_of_their_kind() {
         &panes,
         &[],
         &history,
-        Some(target.locator),
+        target.locator,
         SessionFilter::RunningAndDetached,
         "",
     );
@@ -250,7 +253,7 @@ fn filters_include_all_sessions_of_their_kind() {
         &panes,
         &[],
         &history,
-        Some(target.locator),
+        target.locator,
         SessionFilter::Past,
         "",
     );
@@ -318,7 +321,7 @@ fn search_finds_sessions_outside_the_current_directory() {
         std::slice::from_ref(&target),
         &[],
         &history,
-        Some(target.locator),
+        target.locator,
         SessionFilter::All,
         "needle",
     );
@@ -363,9 +366,15 @@ fn managed_runs_are_searchable_and_keep_state_specific_actions() {
     let ViewRow::Managed { run } = &rows[1] else {
         panic!("the matching run should be listed");
     };
-    assert_eq!(managed_action_label(&run.state), "Resume & attach");
-    assert_eq!(managed_action_label("completed"), "View transcript");
-    assert_eq!(managed_action_label("running"), "Attach here");
+    assert_eq!(managed_action_label(run), "Resume & attach");
+    assert_eq!(
+        managed_action_label(&managed("job-done", "completed")),
+        "View transcript"
+    );
+    assert_eq!(
+        managed_action_label(&managed("job-running", "running")),
+        "Attach here"
+    );
 }
 
 #[test]
@@ -408,7 +417,7 @@ fn filter_counts_are_independent_of_the_all_sessions_deduplication() {
         &[detached(1, "shell", "/work/current")],
         &[past("past", "/work/current", 1)],
     );
-    let (_, current_folder) = focused_folder(&panes, Some(target.locator)).unwrap();
+    let (_, current_folder) = focused_folder(&panes, target.locator).unwrap();
 
     assert_eq!(
         filter_count(SessionFilter::All, &rows, 2, Some(&current_folder)),

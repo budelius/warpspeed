@@ -61,7 +61,7 @@ impl SearchItem for ManagedSessionSearchItem {
                     format!(
                         "{} · {}",
                         managed_run_title(&self.run),
-                        managed_action_label(&self.run.state)
+                        managed_action_label(&self.run)
                     ),
                     appearance.ui_font_family(),
                     appearance.monospace_font_size(),
@@ -113,7 +113,7 @@ impl SearchItem for ManagedSessionSearchItem {
     fn accessibility_help_message(&self) -> Option<String> {
         Some(format!(
             "Press enter to {}.",
-            managed_action_label(&self.run.state).to_lowercase()
+            managed_action_label(&self.run).to_lowercase()
         ))
     }
 }

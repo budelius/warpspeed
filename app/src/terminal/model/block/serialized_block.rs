@@ -305,6 +305,12 @@ impl<'de> Deserialize<'de> for SerializedBlock {
 const TRUNCATED_OUTPUT_PREFIX: &[u8] = b"\x1b[0m[older output truncated]\r\n";
 const UNAVAILABLE_OUTPUT: &[u8] = b"\x1b[0m[stored output unavailable]\r\n\x18\x1b[0m";
 const TERMINAL_STYLE_RESET: &[u8] = b"\x18\x1b[0m";
+pub(crate) const MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES: usize =
+    TRUNCATED_OUTPUT_PREFIX.len() + TERMINAL_STYLE_RESET.len();
+
+fn visible_truncated_output() -> Vec<u8> {
+    [TRUNCATED_OUTPUT_PREFIX, TERMINAL_STYLE_RESET].concat()
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BoundedStylizedBytes {
@@ -331,13 +337,20 @@ fn bound_retained_stylized_output(
         };
     }
 
-    if max_bytes <= TRUNCATED_OUTPUT_PREFIX.len() + TERMINAL_STYLE_RESET.len() {
+    if max_bytes < MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES {
         return BoundedStylizedBytes {
             bytes: if max_bytes >= TERMINAL_STYLE_RESET.len() {
                 TERMINAL_STYLE_RESET.to_vec()
             } else {
                 Vec::new()
             },
+            original_len,
+            truncated: true,
+        };
+    }
+    if max_bytes == MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES {
+        return BoundedStylizedBytes {
+            bytes: visible_truncated_output(),
             original_len,
             truncated: true,
         };
@@ -682,7 +695,19 @@ impl SerializedBlock {
         let was_truncated = self.stylized_output_truncated
             || self.stylized_output.starts_with(TRUNCATED_OUTPUT_PREFIX)
             || self.stylized_output == UNAVAILABLE_OUTPUT;
-        let bounded = bound_stylized_output(std::mem::take(&mut self.stylized_output), max_bytes);
+        let mut bounded =
+            bound_stylized_output(std::mem::take(&mut self.stylized_output), max_bytes);
+        if was_truncated
+            && max_bytes >= MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES
+            && !bounded.bytes.starts_with(TRUNCATED_OUTPUT_PREFIX)
+            && bounded.bytes != UNAVAILABLE_OUTPUT
+        {
+            bounded = bound_retained_stylized_output(
+                bounded.bytes,
+                max_bytes.saturating_add(1),
+                max_bytes,
+            );
+        }
         let original_len = self
             .stylized_output_original_bytes
             .unwrap_or(bounded.original_len)

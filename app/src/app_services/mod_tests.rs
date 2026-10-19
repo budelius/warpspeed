@@ -54,6 +54,17 @@ fn only_gui_launches_participate_in_profile_ownership() {
 }
 
 #[test]
+fn non_gui_warpspeed_launches_do_not_initialize_gui_app_services() {
+    let warpspeed = AppId::new("dev", "warp", "WarpSpeed-test");
+    let warp = AppId::new("dev", "warp", "Warp");
+
+    assert!(should_initialize_for_app_id(&warpspeed, true));
+    assert!(!should_initialize_for_app_id(&warpspeed, false));
+    assert!(should_initialize_for_app_id(&warp, true));
+    assert!(should_initialize_for_app_id(&warp, false));
+}
+
+#[test]
 fn forwarded_launch_metadata_is_read_from_any_url() {
     let urls = [
         url::Url::parse("warpspeed://action/new_window").unwrap(),

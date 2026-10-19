@@ -108,15 +108,28 @@ fn surface_forwarded_version_mismatch(urls: &[Url], ctx: &mut AppContext) {
     }
 }
 
-pub fn init(_ctx: &mut AppContext) {
+fn should_initialize_for_app_id(
+    app_id: &warp_core::AppId,
+    participates_in_gui_profile_ownership: bool,
+) -> bool {
+    !is_warpspeed_app_id(app_id) || participates_in_gui_profile_ownership
+}
+
+pub fn init(participates_in_gui_profile_ownership: bool, ctx: &mut AppContext) {
+    if !should_initialize_for_app_id(
+        &warp_core::channel::ChannelState::app_id(),
+        participates_in_gui_profile_ownership,
+    ) {
+        return;
+    }
     log::info!("Initializing app services");
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    linux::init(_ctx);
+    linux::init(ctx);
     #[cfg(target_os = "macos")]
     mac::init();
     #[cfg(windows)]
-    windows::init(_ctx);
+    windows::init(ctx);
 }
 
 pub fn teardown(_ctx: &mut AppContext) {

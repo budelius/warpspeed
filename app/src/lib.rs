@@ -2238,7 +2238,7 @@ pub(crate) fn initialize_app(
 
     // Register initial keybindings prior to creating menus
     ai::init(ctx);
-    app_services::init(ctx);
+    app_services::init(launch_mode.participates_in_gui_profile_ownership(), ctx);
     // // TODO: Temporarily disabling keybindings for WASM builds. Will be implemented in future WASM support.
     #[cfg(not(target_family = "wasm"))]
     code::editor::find::view::init(ctx);

@@ -54,16 +54,16 @@ The source checkpoint was opened read-only and copied to a temporary directory. 
 
 The release-mode test was repeated after integrating the latest `dev` branch:
 
-- bounded V1 parse: 658 ms;
-- validated migration, including rollback copy: 424 ms;
-- total first migration path: 1,082 ms;
+- bounded V1 parse: 665 ms;
+- validated migration, including rollback copy: 353 ms;
+- total first migration path: 1,018 ms;
 - V2 size: 14,886,364 bytes;
-- V2 reread: 85 ms;
+- V2 reread: 74 ms;
 - retained decoded output: 11,079,008 bytes;
-- sampled peak working set: 21,917,696 bytes;
-- sampled peak private memory: 11,104,256 bytes;
+- sampled peak working set: 23,003,136 bytes;
+- sampled peak private memory: 13,639,680 bytes;
 - child processes during parse/migration/reread: 0;
-- warnings in captured benchmark output: 0.
+- runtime warnings during parse/migration/reread: 0.
 
 ## 3. Restoration side-effect validation
 

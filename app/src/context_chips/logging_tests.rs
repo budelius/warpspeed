@@ -146,6 +146,31 @@ fn scalar_fields_are_bounded() {
 }
 
 #[test]
+fn custom_chip_names_and_titles_are_bounded() {
+    let custom_name = "k".repeat(MAX_LOGGED_COMMAND_BYTES + 10_000);
+    let chip_title = "t".repeat(MAX_LOGGED_COMMAND_BYTES + 10_000);
+    let chip_kind = ContextChipKind::Custom { title: custom_name };
+    let entry = format_log_entry(&ChipCommandLogEntry {
+        chip_kind: &chip_kind,
+        chip_title: &chip_title,
+        phase: PromptChipExecutionPhase::Value,
+        shell_type: ShellType::Zsh,
+        working_directory: None,
+        command: "custom command",
+        output: None,
+        timed_out: false,
+    });
+
+    assert!(entry.contains("chip_kind: Custom"));
+    assert!(entry.contains(&format!(
+        "chip_title: {} <truncated original_bytes={} retained_bytes={MAX_LOGGED_COMMAND_BYTES}>",
+        "t".repeat(MAX_LOGGED_COMMAND_BYTES),
+        chip_title.len()
+    )));
+    assert!(entry.len() < MAX_LOGGED_COMMAND_BYTES + 2_000);
+}
+
+#[test]
 fn runtime_logger_drops_entries_when_its_queue_is_full() {
     let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
     let dropped_entries = std::sync::Arc::new(AtomicU64::new(0));

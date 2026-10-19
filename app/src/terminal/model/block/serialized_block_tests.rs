@@ -106,6 +106,27 @@ fn tiny_output_budget_remains_bounded() {
 }
 
 #[test]
+fn minimum_visible_output_budget_retains_a_truncation_marker() {
+    let bounded = bound_stylized_output(vec![b'x'; 100], MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES);
+
+    assert_eq!(bounded.bytes, visible_truncated_output());
+    assert!(bounded.truncated);
+}
+
+#[test]
+fn enforcing_a_budget_repairs_a_nonvisible_truncated_output() {
+    let mut block = SerializedBlock::new_for_test(Vec::new(), TERMINAL_STYLE_RESET.to_vec());
+    block.stylized_output_truncated = true;
+    block.stylized_output_original_bytes = Some(100);
+
+    block.enforce_output_budget(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES);
+
+    assert_eq!(block.stylized_output, visible_truncated_output());
+    assert!(block.stylized_output_truncated);
+    assert_eq!(block.stylized_output_original_bytes, Some(100));
+}
+
+#[test]
 fn deserializing_legacy_arrays_bounds_output_while_reading() {
     let original_len = MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES + 4096;
     let block = SerializedBlock::new_for_test(b"echo legacy".to_vec(), vec![b'x'; original_len]);

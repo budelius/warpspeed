@@ -25,7 +25,9 @@ use crate::app_state::{
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::terminal::CLIAgent;
-use crate::terminal::model::block::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES;
+use crate::terminal::model::block::{
+    MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES, MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES, SerializedBlock,
+};
 
 const LEGACY_SESSION_FORMAT_VERSION: u32 = 1;
 const SESSION_FORMAT_VERSION: u32 = 2;
@@ -71,20 +73,41 @@ struct CheckpointBudgetStats {
     truncated_blocks: usize,
 }
 
-fn command_block_mut(
-    item: &mut SerializedBlockListItem,
-) -> &mut crate::terminal::model::block::SerializedBlock {
+fn command_block(item: &SerializedBlockListItem) -> &SerializedBlock {
     match item {
         SerializedBlockListItem::Command { block } => block,
     }
 }
 
+fn command_block_mut(item: &mut SerializedBlockListItem) -> &mut SerializedBlock {
+    match item {
+        SerializedBlockListItem::Command { block } => block,
+    }
+}
+
+fn output_requires_indicator(block: &SerializedBlock) -> bool {
+    !block.stylized_output.is_empty() || block.stylized_output_truncated
+}
+
 fn enforce_block_list_output_budget(blocks: &mut [SerializedBlockListItem], max_bytes: usize) {
     let mut remaining = max_bytes;
+    let mut remaining_indicators = blocks
+        .iter()
+        .filter(|item| output_requires_indicator(command_block(item)))
+        .count();
     for item in blocks.iter_mut().rev() {
         let block = command_block_mut(item);
         block.enforce_command_budget();
-        block.enforce_output_budget(remaining.min(MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES));
+        let requires_indicator = output_requires_indicator(block);
+        remaining_indicators = remaining_indicators.saturating_sub(usize::from(requires_indicator));
+        let reserved = remaining_indicators.saturating_mul(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES);
+        let mut block_budget = remaining
+            .saturating_sub(reserved)
+            .min(MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES);
+        if requires_indicator {
+            block_budget = block_budget.max(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES.min(remaining));
+        }
+        block.enforce_output_budget(block_budget);
         remaining = remaining.saturating_sub(block.stylized_output.len());
     }
 }
@@ -125,12 +148,19 @@ impl<'de> Visitor<'de> for PaneBlocksVisitor {
             {
                 let block = command_block_mut(&mut blocks[oldest_output_index]);
                 let previous_len = block.stylized_output.len();
+                let minimum_len = usize::from(output_requires_indicator(block))
+                    * MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES;
+                if previous_len <= minimum_len {
+                    oldest_output_index += 1;
+                    continue;
+                }
                 let overflow = retained_bytes - MAX_PANE_STYLIZED_OUTPUT_BYTES;
-                block.enforce_output_budget(previous_len.saturating_sub(overflow));
+                let block_budget = previous_len.saturating_sub(overflow).max(minimum_len);
+                block.enforce_output_budget(block_budget);
                 retained_bytes = retained_bytes
                     .saturating_sub(previous_len)
                     .saturating_add(block.stylized_output.len());
-                if block.stylized_output.is_empty()
+                if block.stylized_output.len() >= previous_len
                     || retained_bytes > MAX_PANE_STYLIZED_OUTPUT_BYTES
                 {
                     oldest_output_index += 1;
@@ -266,9 +296,25 @@ fn enforce_checkpoint_budgets(block_lists: &mut Vec<StoredPaneBlocks>) -> Checkp
         locations.sort_by_key(|(_, _, timestamp)| std::cmp::Reverse(*timestamp));
 
         let mut remaining = MAX_WINDOW_STYLIZED_OUTPUT_BYTES;
+        let mut remaining_indicators = locations
+            .iter()
+            .filter(|(pane_index, block_index, _)| {
+                output_requires_indicator(command_block(
+                    &block_lists[*pane_index].blocks[*block_index],
+                ))
+            })
+            .count();
         for (pane_index, block_index, _) in locations {
             let block = command_block_mut(&mut block_lists[pane_index].blocks[block_index]);
-            block.enforce_output_budget(remaining);
+            let requires_indicator = output_requires_indicator(block);
+            remaining_indicators =
+                remaining_indicators.saturating_sub(usize::from(requires_indicator));
+            let reserved = remaining_indicators.saturating_mul(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES);
+            let mut block_budget = remaining.saturating_sub(reserved);
+            if requires_indicator {
+                block_budget = block_budget.max(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES.min(remaining));
+            }
+            block.enforce_output_budget(block_budget);
             remaining = remaining.saturating_sub(block.stylized_output.len());
         }
     }
@@ -816,18 +862,21 @@ fn save_to_dir(
     let pane_uuids = terminal_pane_uuids(&window);
     let path = session_path(dir, source);
     let mut stored_blocks: Vec<StoredPaneBlocks> = if preserve_existing_blocks {
-        read_stored_window(&path)
-            .ok()
-            .map(|mut stored| {
-                if let Err(error) = migrate_legacy_checkpoint(&path, &mut stored) {
-                    warp_core::safe_warn!(
-                        safe: ("Failed to migrate a stored terminal session before updating it"),
-                        full: ("Failed to migrate stored terminal session at {path:?}: {error:#}")
-                    );
-                }
+        let stored_blocks = match read_stored_window(&path) {
+            Ok(mut stored) => {
+                migrate_legacy_checkpoint(&path, &mut stored)?;
                 stored.block_lists
-            })
-            .unwrap_or_default()
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+        stored_blocks
             .into_iter()
             .filter(|pane| pane_uuids.contains(&pane.uuid))
             .collect()

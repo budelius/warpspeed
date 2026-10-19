@@ -229,6 +229,47 @@ fn loading_v1_checkpoint_migrates_atomically_and_retains_backup() {
 }
 
 #[test]
+fn preserving_blocks_does_not_replace_v1_when_migration_fails() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let path = dir.path().join("devops/2/window-0.json");
+    let stored = super::StoredWindowSession {
+        version: super::LEGACY_SESSION_FORMAT_VERSION,
+        source: source.clone(),
+        profile: Some("WarpSpeed".to_owned()),
+        window: window(source.clone()),
+        block_lists: vec![super::StoredPaneBlocks {
+            uuid: vec![1, 2, 3],
+            blocks: vec![
+                SerializedBlock::new_for_test(b"echo legacy".to_vec(), b"legacy output".to_vec())
+                    .into(),
+            ],
+        }],
+        saved_at_unix_seconds: 1_767_225_600,
+    };
+    super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+    let original = fs::read(&path).unwrap();
+    fs::write(super::legacy_backup_path(&path), b"{invalid backup")
+        .expect("invalid rollback should be written");
+
+    save_to_dir(
+        dir.path(),
+        &source,
+        &window(source.clone()),
+        &HashMap::new(),
+        true,
+        1_767_225_601,
+    )
+    .expect_err("a failed migration must stop the preserving save");
+
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(
+        super::read_checkpoint_file(&path).unwrap().version,
+        super::LEGACY_SESSION_FORMAT_VERSION
+    );
+}
+
+#[test]
 fn failed_temporary_checkpoint_validation_leaves_the_active_v1_unchanged() {
     let dir = tempfile::tempdir().expect("session directory should be created");
     let source = source();
@@ -450,13 +491,18 @@ fn pane_and_window_output_budgets_prioritize_recent_blocks() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(pane_sizes[0], 0);
-    assert_eq!(pane_sizes[1], super::MAX_PANE_STYLIZED_OUTPUT_BYTES);
+    assert!(pane_sizes[0] > 0);
+    assert!(pane_sizes[0] < pane_sizes[1]);
+    assert!(pane_sizes[1] < pane_sizes[2]);
     assert_eq!(pane_sizes[2], super::MAX_PANE_STYLIZED_OUTPUT_BYTES);
-    assert_eq!(
-        pane_sizes.iter().sum::<usize>(),
-        super::MAX_WINDOW_STYLIZED_OUTPUT_BYTES
+    assert!(
+        restored
+            .block_lists
+            .values()
+            .flatten()
+            .all(|item| !super::command_block(item).stylized_output.is_empty())
     );
+    assert!(pane_sizes.iter().sum::<usize>() <= super::MAX_WINDOW_STYLIZED_OUTPUT_BYTES);
 }
 
 #[test]

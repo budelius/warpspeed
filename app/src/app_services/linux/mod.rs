@@ -27,9 +27,11 @@ pub fn init(ctx: &mut AppContext) {
 
 /// Tears down application services.
 pub fn teardown(ctx: &mut AppContext) {
-    DBusServiceHost::handle(ctx).update(ctx, |service_host, _| {
-        service_host.terminate();
-    });
+    if ctx.has_singleton_model::<DBusServiceHost>() {
+        DBusServiceHost::handle(ctx).update(ctx, |service_host, _| {
+            service_host.terminate();
+        });
+    }
 }
 
 /// Attempts to forward startup arguments to an existing instance of the

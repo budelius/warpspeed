@@ -381,6 +381,10 @@ fn prompt_chip_log_filename(channel_logfile_name: &str, process_id: u32) -> Stri
 
 fn format_log_entry(entry: &ChipCommandLogEntry<'_>) -> String {
     let timestamp = Local::now().to_rfc3339_opts(SecondsFormat::Millis, false);
+    let chip_kind = match entry.chip_kind {
+        ContextChipKind::Custom { .. } => "Custom".to_owned(),
+        chip_kind => format!("{chip_kind:?}"),
+    };
     let status = if entry.timed_out {
         "timed_out"
     } else if entry
@@ -407,7 +411,7 @@ fn format_log_entry(entry: &ChipCommandLogEntry<'_>) -> String {
         "\
 ===== PROMPT CHIP EXECUTION BEGIN =====
 timestamp: {timestamp}
-chip_kind: {:?}
+chip_kind: {}
 chip_title: {}
 phase: {}
 shell_type: {:?}
@@ -421,8 +425,8 @@ exit_code: {exit_code}
 ===== PROMPT CHIP EXECUTION END =====
 
 ",
-        entry.chip_kind,
-        entry.chip_title,
+        format_scalar_field(Some(&chip_kind)),
+        format_scalar_field(Some(entry.chip_title)),
         entry.phase.as_str(),
         entry.shell_type,
         format_scalar_field(entry.working_directory),

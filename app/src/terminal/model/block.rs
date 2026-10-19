@@ -108,7 +108,11 @@ impl TranscriptScope {
     }
 }
 
-pub(super) const MAX_SERIALIZED_STYLIZED_OUTPUT_LINES: usize = 5000;
+pub(super) const MAX_SERIALIZED_STYLIZED_OUTPUT_LINES: usize = 1000;
+/// Maximum decoded command bytes retained in a serialized terminal block.
+pub(crate) const MAX_SERIALIZED_STYLIZED_COMMAND_BYTES: usize = 64 * 1024;
+/// Maximum decoded output bytes retained in a serialized terminal block.
+pub(crate) const MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Number of max lines to store that aren't stylized. We only store 50 lines as we only need
 /// non-stylized lines for command corrections and notifications whereas we need more lines for the

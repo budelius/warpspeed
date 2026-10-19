@@ -35,6 +35,12 @@ fn unknown_if_empty(value: &str) -> &str {
     if value.is_empty() { "unknown" } else { value }
 }
 
+pub(crate) fn version_identity() -> String {
+    RuntimePaths::collect()
+        .installed_version
+        .unwrap_or_else(|| unknown_if_empty(BUILD_REVISION).to_owned())
+}
+
 /// The installed version an executable belongs to, if it sits in the layout the
 /// installer creates.
 ///

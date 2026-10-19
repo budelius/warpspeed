@@ -56,12 +56,21 @@ type ChipFingerprint = u64;
 enum ChipUpdateStatus {
     #[default]
     Idle,
+    WaitingForContext,
     Loading,
     Ready,
     Cached,
     Disabled,
     TimedOut,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum GitRepositoryContext {
+    #[default]
+    Unknown,
+    NotRepository,
+    Attached,
 }
 
 /// ChipState stores the state and point-in-time information related to a specific chip.
@@ -166,6 +175,7 @@ pub struct CurrentPrompt {
     /// When set, branch, branch status, and diff stats are populated from
     /// `GitRepoStatusModel` filesystem events.
     git_repo_status: Option<WeakModelHandle<GitRepoStatusModel>>,
+    git_repository_context: GitRepositoryContext,
 
     /// When set, the `GithubPullRequest` chip value is populated from
     /// `GitHubRepoModel` for the current repository.
@@ -278,6 +288,7 @@ impl CurrentPrompt {
             same_line_prompt_enabled: prompt.as_ref(ctx).same_line_prompt_enabled(),
             separator: prompt.as_ref(ctx).separator(),
             git_repo_status: None,
+            git_repository_context: GitRepositoryContext::Unknown,
             github_repo_model: None,
             terminal_model,
         }
@@ -735,6 +746,32 @@ impl CurrentPrompt {
             self.set_chip_update_status(chip_kind, ChipUpdateStatus::Disabled);
             return;
         }
+        if matches!(
+            chip_kind,
+            ContextChipKind::ShellGitBranch
+                | ContextChipKind::GitBranchStatus
+                | ContextChipKind::GitDiffStats
+        ) {
+            let session_is_local = self
+                .latest_context
+                .as_ref()
+                .and_then(|context| context.active_block_metadata.session_id())
+                .and_then(|session_id| self.sessions.as_ref(ctx).get(session_id))
+                .map(|session| session.is_local());
+            match self.git_repository_context {
+                GitRepositoryContext::NotRepository => {
+                    self.update_chip_value(chip_kind, None);
+                    self.update_on_click_value(chip_kind, None);
+                    self.set_chip_update_status(chip_kind, ChipUpdateStatus::Disabled);
+                    return;
+                }
+                GitRepositoryContext::Unknown if session_is_local != Some(false) => {
+                    self.set_chip_update_status(chip_kind, ChipUpdateStatus::WaitingForContext);
+                    return;
+                }
+                GitRepositoryContext::Unknown | GitRepositoryContext::Attached => {}
+            }
+        }
         // A chip an external source keeps current needs no generator: the value
         // this would produce is overwritten by that source anyway. Returning
         // above the `match` skips the value command, and returning above the
@@ -766,10 +803,8 @@ impl CurrentPrompt {
         match generator {
             PromptGenerator::ShellCommand(cmd) => {
                 let Some(exec_ctx) = self.prepare_shell_command_context(cmd, ctx) else {
-                    log::warn!("Generator for {chip_kind:?}: could not prepare execution context");
-                    self.update_chip_value(chip_kind, None);
-                    self.update_on_click_value(chip_kind, None);
-                    self.set_chip_update_status(chip_kind, ChipUpdateStatus::Error);
+                    self.set_chip_fingerprint(chip_kind, None);
+                    self.set_chip_update_status(chip_kind, ChipUpdateStatus::WaitingForContext);
                     return;
                 };
 
@@ -1532,6 +1567,41 @@ impl CurrentPrompt {
         )
     }
 
+    fn replace_git_repository_context(&mut self, repository_context: GitRepositoryContext) -> bool {
+        if self.git_repository_context == repository_context {
+            return false;
+        }
+        self.git_repository_context = repository_context;
+        for chip_kind in [
+            ContextChipKind::ShellGitBranch,
+            ContextChipKind::GitBranchStatus,
+            ContextChipKind::GitDiffStats,
+        ] {
+            if let Some(state) = self.states.get_mut(&chip_kind) {
+                state.clear_abort_handlers();
+                state.clear_cache();
+            }
+        }
+        true
+    }
+
+    pub(crate) fn set_git_repository_context_without_refresh(
+        &mut self,
+        repository_context: GitRepositoryContext,
+    ) {
+        self.replace_git_repository_context(repository_context);
+    }
+
+    pub(crate) fn set_git_repository_context(
+        &mut self,
+        repository_context: GitRepositoryContext,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.replace_git_repository_context(repository_context) {
+            self.update_states_with_new_context(ctx);
+        }
+    }
+
     /// Set the per-repo git status model handle. When `Some`, subscribes to
     /// metadata events so git-backed prompt chips are updated from the
     /// per-repo status model. PR info is handled separately by
@@ -1549,6 +1619,7 @@ impl CurrentPrompt {
         }
 
         if handle.is_some() {
+            self.git_repository_context = GitRepositoryContext::Attached;
             for chip_kind in [
                 ContextChipKind::ShellGitBranch,
                 ContextChipKind::GitBranchStatus,

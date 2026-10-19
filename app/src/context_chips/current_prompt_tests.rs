@@ -43,7 +43,7 @@ use crate::terminal::cli_agent_sessions::{
 };
 use crate::terminal::model::block::BlockMetadata;
 use crate::terminal::model::session::{
-    CommandExecutor, ExecuteCommandOptions, SessionId, SessionInfo, Sessions,
+    BootstrapSessionType, CommandExecutor, ExecuteCommandOptions, SessionId, SessionInfo, Sessions,
 };
 use crate::terminal::model_events::{AnsiHandlerEvent, ModelEvent, ModelEventDispatcher};
 use crate::terminal::session_settings::{
@@ -667,6 +667,9 @@ fn test_disabling_chips() {
                     active_block_metadata: BlockMetadata::new(Some(session_id), None),
                     environment: Environment::default(),
                 });
+                current_prompt.set_git_repository_context_without_refresh(
+                    super::GitRepositoryContext::Attached,
+                );
                 // This is needed because we set latest_context directly.
                 current_prompt.update_states_with_new_context(ctx);
                 assert!(current_prompt.are_any_generators_running());
@@ -1326,6 +1329,7 @@ fn test_git_status_pr_info_updates_github_pr_chip_value() {
 fn setup_git_chip_prompt(
     app: &mut App,
     session_id: SessionId,
+    is_remote: bool,
 ) -> (
     Arc<RecordingCommandExecutor>,
     warpui::ModelHandle<CurrentPrompt>,
@@ -1387,8 +1391,15 @@ fn setup_git_chip_prompt(
     let executor_for_sessions = executor.clone();
     let sessions = app.add_model(move |ctx| {
         let mut sessions = Sessions::new_for_test().with_command_executor(executor_for_sessions);
+        let session_info = SessionInfo::new_for_test()
+            .with_id(session_id)
+            .with_session_type(if is_remote {
+                BootstrapSessionType::WarpifiedRemote
+            } else {
+                BootstrapSessionType::Local
+            });
         sessions.initialize_bootstrapped_session(
-            SessionInfo::new_for_test().with_id(session_id),
+            session_info,
             "test command".to_string(),
             vec![],
             None,
@@ -1409,7 +1420,8 @@ fn setup_git_chip_prompt(
 fn test_git_chips_run_no_shell_command_when_repo_model_supplies_values() {
     App::test((), |mut app| async move {
         let session_id = SessionId::from(4242);
-        let (executor, current_prompt, git_status) = setup_git_chip_prompt(&mut app, session_id);
+        let (executor, current_prompt, git_status) =
+            setup_git_chip_prompt(&mut app, session_id, false);
 
         current_prompt.update(&mut app, |cp, ctx| {
             cp.set_git_repo_status(Some(git_status.downgrade()), ctx);
@@ -1434,18 +1446,17 @@ fn test_git_chips_run_no_shell_command_when_repo_model_supplies_values() {
     });
 }
 
-/// The suppression is conditional on a repository model existing. A session
-/// without one has no other source for these values, so the shell generators
-/// must still run.
+/// A local session waits for repository detection instead of racing it with
+/// shell fallbacks. Detection will attach a repository model or mark the path
+/// as a known non-repository.
 #[cfg(feature = "local_fs")]
 #[test]
-fn test_git_chips_still_run_shell_command_without_a_repo_model() {
+fn test_local_git_chips_wait_for_repository_detection() {
     App::test((), |mut app| async move {
         let session_id = SessionId::from(4243);
-        let (executor, current_prompt, _git_status) = setup_git_chip_prompt(&mut app, session_id);
+        let (executor, current_prompt, _git_status) =
+            setup_git_chip_prompt(&mut app, session_id, false);
 
-        // Deliberately skip `set_git_repo_status`: nothing supplies these
-        // values externally, so the shell path is the only one left.
         current_prompt.update(&mut app, |cp, ctx| {
             cp.latest_context = Some(PromptContext {
                 active_block_metadata: BlockMetadata::new(
@@ -1462,9 +1473,118 @@ fn test_git_chips_still_run_shell_command_without_a_repo_model() {
 
         let commands = executor.commands.lock().clone();
         assert!(
-            commands.iter().any(|command| command.contains("git")),
-            "without a repository model the git chips must fall back to the shell, but ran: {commands:?}"
+            commands.is_empty(),
+            "local git chips should wait for repository detection, but ran: {commands:?}"
         );
+        app.read(|ctx| {
+            let prompt = current_prompt.as_ref(ctx);
+            for chip_kind in [
+                ContextChipKind::ShellGitBranch,
+                ContextChipKind::GitBranchStatus,
+                ContextChipKind::GitDiffStats,
+            ] {
+                assert_eq!(
+                    prompt.states[&chip_kind].update_status,
+                    ChipUpdateStatus::WaitingForContext
+                );
+            }
+        });
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_remote_git_failures_are_quiet_and_cached_by_context() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(4247);
+        let (executor, current_prompt, _git_status) =
+            setup_git_chip_prompt(&mut app, session_id, true);
+        executor.clear();
+        executor.response_queue.lock().extend((0..20).map(|_| {
+            RecordingCommandExecutor::failure_output("not a repository", ExitCode::from(128))
+        }));
+
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.latest_context = Some(PromptContext {
+                active_block_metadata: BlockMetadata::new(
+                    Some(session_id),
+                    Some("/remote/not-a-repository".to_string()),
+                ),
+                environment: Environment::default(),
+            });
+            cp.update_states_with_new_context(ctx);
+        });
+        current_prompt
+            .update(&mut app, |cp, ctx| cp.await_generators(ctx))
+            .await;
+        let commands = executor.commands.lock().clone();
+        let first_command_count = commands.len();
+        assert!(first_command_count > 0);
+        assert!(
+            commands
+                .iter()
+                .all(|command| command.contains("/dev/null") || command.contains("$null")),
+            "all Git fallbacks should suppress stderr: {commands:?}"
+        );
+
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.update_states_with_new_context(ctx);
+        });
+        current_prompt
+            .update(&mut app, |cp, ctx| cp.await_generators(ctx))
+            .await;
+        assert_eq!(executor.commands.lock().len(), first_command_count);
+
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.latest_context = Some(PromptContext {
+                active_block_metadata: BlockMetadata::new(
+                    Some(session_id),
+                    Some("/remote/different-directory".to_string()),
+                ),
+                environment: Environment::default(),
+            });
+            cp.update_states_with_new_context(ctx);
+        });
+        current_prompt
+            .update(&mut app, |cp, ctx| cp.await_generators(ctx))
+            .await;
+        assert!(executor.commands.lock().len() > first_command_count);
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_known_non_repository_disables_git_chips_without_shell_commands() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(4246);
+        let (executor, current_prompt, _git_status) =
+            setup_git_chip_prompt(&mut app, session_id, false);
+
+        current_prompt.update(&mut app, |cp, ctx| {
+            cp.latest_context = Some(PromptContext {
+                active_block_metadata: BlockMetadata::new(
+                    Some(session_id),
+                    Some("/tmp/not-a-repository".to_string()),
+                ),
+                environment: Environment::default(),
+            });
+            cp.set_git_repository_context(super::GitRepositoryContext::NotRepository, ctx);
+        });
+
+        assert!(executor.commands.lock().is_empty());
+        app.read(|ctx| {
+            let prompt = current_prompt.as_ref(ctx);
+            for chip_kind in [
+                ContextChipKind::ShellGitBranch,
+                ContextChipKind::GitBranchStatus,
+                ContextChipKind::GitDiffStats,
+            ] {
+                assert_eq!(
+                    prompt.states[&chip_kind].update_status,
+                    ChipUpdateStatus::Disabled
+                );
+            }
+        });
     });
 }
 
@@ -1475,7 +1595,8 @@ fn test_git_chips_still_run_shell_command_without_a_repo_model() {
 fn test_only_git_chips_are_updated_externally_by_the_repo_model() {
     App::test((), |mut app| async move {
         let session_id = SessionId::from(4244);
-        let (_executor, current_prompt, git_status) = setup_git_chip_prompt(&mut app, session_id);
+        let (_executor, current_prompt, git_status) =
+            setup_git_chip_prompt(&mut app, session_id, false);
 
         current_prompt.update(&mut app, |cp, ctx| {
             cp.set_git_repo_status(Some(git_status.downgrade()), ctx);
@@ -1511,7 +1632,8 @@ fn test_only_git_chips_are_updated_externally_by_the_repo_model() {
 fn test_branch_dropdown_falls_back_to_the_shell_when_the_model_supplies_no_lines() {
     App::test((), |mut app| async move {
         let session_id = SessionId::from(4245);
-        let (executor, current_prompt, git_status) = setup_git_chip_prompt(&mut app, session_id);
+        let (executor, current_prompt, git_status) =
+            setup_git_chip_prompt(&mut app, session_id, false);
 
         current_prompt.update(&mut app, |cp, ctx| {
             cp.set_git_repo_status(Some(git_status.downgrade()), ctx);

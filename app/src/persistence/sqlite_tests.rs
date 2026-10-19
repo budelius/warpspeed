@@ -16,9 +16,10 @@ use super::{
     decode_path, deduplicate_events, encode_path, get_all_codebase_index_metadata,
     read_sqlite_data, save_app_state, save_codebase_index_metadata, setup_database, start_writer,
 };
+use crate::ai::blocklist::SerializedBlockListItem;
 use crate::app_state::{
     AppState, CliAgentResumeDescriptor, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents,
-    LeafSnapshot, PaneNodeSnapshot, SessionHolder, TabGroupSnapshot, TabSnapshot,
+    LeafSnapshot, PaneNodeSnapshot, PaneUuid, SessionHolder, TabGroupSnapshot, TabSnapshot,
     TerminalPaneSnapshot, WindowSnapshot,
 };
 use crate::auth::UserUid;
@@ -34,7 +35,7 @@ use crate::server::ids::{ClientId, ServerId};
 use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
 use crate::terminal::cli_agent::CLIAgent;
-use crate::terminal::model::block::SerializedBlock;
+use crate::terminal::model::block::{MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES, SerializedBlock};
 use crate::terminal::model::session::SessionId;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::workspace::tab_group::TabGroupId;
@@ -242,6 +243,46 @@ fn tui_database_in_tui_subdirectory_round_trips_data() {
     );
     assert_eq!(restored.codebase_indices.len(), 1);
     assert_eq!(restored.codebase_indices[0].path, metadata.path);
+}
+
+#[test]
+fn sqlite_restored_blocks_are_bounded_before_checkpointing() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+    let app_state = AppState {
+        windows: vec![test_terminal_window_snapshot(false)],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+    let writer = start_writer(conn, database_path.clone()).expect("writer should start");
+    let original_len = MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES + 4096;
+    writer
+        .sender
+        .send(ModelEvent::SaveBlock(BlockCompleted {
+            pane_id: vec![1],
+            block: Arc::new(SerializedBlock::new_for_test(
+                b"echo oversized".to_vec(),
+                vec![b'x'; original_len],
+            )),
+            is_local: true,
+        }))
+        .unwrap();
+    writer.sender.send(ModelEvent::Terminate).unwrap();
+    writer.handle.join().unwrap();
+
+    let mut conn = setup_database(&database_path).expect("database should reopen");
+    let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::Full)
+        .expect("persisted data should load")
+        .app_state
+        .expect("app state should be restored");
+    let SerializedBlockListItem::Command { block } = &restored.block_lists[&PaneUuid(vec![1])][0];
+
+    assert!(block.stylized_output.len() <= MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES);
+    assert!(block.stylized_output_truncated);
+    assert_eq!(block.stylized_output_original_bytes, Some(original_len));
 }
 
 #[test]

@@ -13244,6 +13244,18 @@ impl Workspace {
         if self.window_process_restart_in_progress {
             return;
         }
+        if !crate::app_services::permits_window_process_handoff() {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "Restart WarpSpeed to restart this window without creating another profile writer."
+                            .to_owned(),
+                    ),
+                    ctx,
+                );
+            });
+            return;
+        }
 
         let window_id = ctx.window_id();
         if UnsavedStateSummary::for_window(window_id, ctx).has_unsaved_code_changes() {

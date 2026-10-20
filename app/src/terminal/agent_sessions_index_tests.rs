@@ -4,9 +4,11 @@ use std::time::{Duration, SystemTime};
 use warpui::EntityId;
 
 use super::*;
+use crate::app_state::SessionHolder;
 use crate::pane_group::PaneId;
 use crate::terminal::agent_session_history::{AgentSessionPreviewMessage, AgentSessionPreviewRole};
 use crate::terminal::cli_agent::CLIAgent;
+use crate::terminal::terminal_manager::HeldAgent;
 
 fn claude(id: &str, cwd: &str) -> CliAgentResumeDescriptor {
     CliAgentResumeDescriptor {
@@ -36,6 +38,9 @@ fn pane_at(index: usize, cwd: &str) -> PaneAgentInput {
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
         session_uuid_hex: None,
+        supervisor_session_id: None,
+        session_holder: None,
+        held_agent: None,
         latest_user_prompt: None,
         running: None,
         pending: None,
@@ -66,6 +71,7 @@ fn detached(id: u64, title: &str, cwd: &str, seconds: u64) -> DetachedInput {
         cwd: cwd.into(),
         detached_for_seconds: seconds,
         session_uuid_hex: String::new(),
+        holder: None,
     }
 }
 
@@ -226,12 +232,51 @@ fn detached_sessions_come_after_live_ones_most_recently_detached_first() {
     assert_eq!(
         rows[1].state,
         AgentSessionState::Detached {
-            session_id: warp_core::SessionId::from(2)
+            session_id: warp_core::SessionId::from(2),
+            holder: None,
         }
     );
     assert_eq!(rows[1].agent, None);
     assert_eq!(rows[1].title.as_deref(), Some("two"));
     assert!(matches!(rows[2].state, AgentSessionState::Detached { .. }));
+}
+
+#[test]
+fn a_foreign_detached_session_uses_its_saved_panes_agent_identity() {
+    let holder = SessionHolder {
+        channel: r"\\.\pipe\old-supervisor".into(),
+        version: "old-build".into(),
+        pid: 42,
+    };
+    let pane = PaneAgentInput {
+        supervisor_session_id: Some(SessionId::from(7)),
+        session_holder: Some(holder.clone()),
+        held_agent: Some(HeldAgent {
+            agent: CLIAgent::Pi,
+            session_id: "pi-session".into(),
+        }),
+        ..pane_at(0, "/work/repo")
+    };
+    let mut input = detached(7, "", "/work/repo", 5);
+    input.holder = Some(holder.clone());
+    let mut history = past_session(CLIAgent::Pi, "pi-session", "/work/repo");
+    history.last_prompt = Some("continue the migration".into());
+
+    let rows = build_rows(&[pane], &[input], &[history]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].agent, Some(CLIAgent::Pi));
+    assert_eq!(
+        rows[0].last_prompt.as_deref(),
+        Some("continue the migration")
+    );
+    assert_eq!(
+        rows[0].state,
+        AgentSessionState::Detached {
+            session_id: SessionId::from(7),
+            holder: Some(holder),
+        }
+    );
 }
 
 #[test]
@@ -415,7 +460,8 @@ fn each_state_has_its_label() {
     assert_eq!(AgentSessionState::Pending { locator }.label(), "○ pending");
     assert_eq!(
         AgentSessionState::Detached {
-            session_id: SessionId::from(1)
+            session_id: SessionId::from(1),
+            holder: None,
         }
         .label(),
         "detached"

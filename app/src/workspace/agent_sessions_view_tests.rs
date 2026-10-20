@@ -9,7 +9,7 @@ use warpui::platform::WindowStyle;
 use warpui::{App, EntityId, EntityIdSet, Event, Presenter, WindowId, WindowInvalidation};
 
 use super::*;
-use crate::app_state::CliAgentResumeDescriptor;
+use crate::app_state::{CliAgentResumeDescriptor, SessionHolder};
 use crate::pane_group::PaneId;
 use crate::terminal::agent_session_history::PastAgentSession;
 use crate::terminal::agent_sessions_index::{DetachedInput, build_rows, build_rows_with_scanned};
@@ -44,6 +44,9 @@ fn pane(index: usize, cwd: &str) -> PaneAgentInput {
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
         session_uuid_hex: None,
+        supervisor_session_id: None,
+        session_holder: None,
+        held_agent: None,
         latest_user_prompt: None,
         running: None,
         pending: None,
@@ -85,7 +88,26 @@ fn detached(id: u64, title: &str, cwd: &str) -> DetachedInput {
         cwd: cwd.into(),
         detached_for_seconds: id,
         session_uuid_hex: String::new(),
+        holder: None,
     }
+}
+
+#[test]
+fn a_foreign_supervisor_build_is_shown_in_session_details() {
+    let pane = PaneAgentInput {
+        session_holder: Some(SessionHolder {
+            channel: "old-supervisor".into(),
+            version: "old-build".into(),
+            pid: 42,
+        }),
+        ..running_pane(0, "session", "/work/repo")
+    };
+    let rows = build_rows(&[pane], &[], &[]);
+
+    assert_eq!(
+        supervisor_detail(&rows[0]).as_deref(),
+        Some("WarpSpeed old-build")
+    );
 }
 
 fn managed(job_id: &str, state: &str) -> RunSummary {

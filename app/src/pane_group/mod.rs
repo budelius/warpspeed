@@ -74,7 +74,8 @@ use crate::app_state::CodePaneSnapShot;
 use crate::app_state::{
     self, AIFactPaneSnapshot, BranchSnapshot, CliAgentResumeDescriptor,
     EnvVarCollectionPaneSnapshot, LeafContents, LeafSnapshot, NotebookPaneSnapshot,
-    PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot, TerminalPaneSnapshot, WorkflowPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, SessionHolder, SettingsPaneSnapshot, TerminalPaneSnapshot,
+    WorkflowPaneSnapshot,
 };
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
@@ -835,6 +836,10 @@ pub struct NewTerminalOptions {
     /// a shell. The shell start is deferred until the pane has been told which
     /// session to claim, so no process is forked and then thrown away.
     pub attach_session_id: Option<TerminalSessionId>,
+    /// The supervisor that offers the session.
+    pub attach_session_holder: Option<SessionHolder>,
+    /// The agent running in the session, when known before attachment.
+    pub attach_session_agent: Option<HeldAgent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3587,6 +3592,8 @@ impl PaneGroup {
     ) -> (PaneData, InitialFocus) {
         let uuid = Uuid::new_v4();
         let attach_session_id = options.attach_session_id;
+        let attach_session_holder = options.attach_session_holder;
+        let attach_session_agent = options.attach_session_agent;
         let shell_start = if attach_session_id.is_some() {
             ShellStartPolicy::Deferred
         } else {
@@ -3611,6 +3618,9 @@ impl PaneGroup {
 
         if let Some(session_id) = attach_session_id {
             terminal_manager.update(ctx, |manager, ctx| {
+                if attach_session_holder.is_some() || attach_session_agent.is_some() {
+                    manager.restore_session_holder(attach_session_holder, attach_session_agent);
+                }
                 manager.attach_detached_session(session_id, ctx);
                 manager.ensure_shell_started(ctx);
             });

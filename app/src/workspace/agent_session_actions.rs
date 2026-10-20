@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 
 use warp_util::path::ShellFamily;
 
-use crate::app_state::CliAgentResumeDescriptor;
+use crate::app_state::{CliAgentResumeDescriptor, SessionHolder};
 use crate::terminal::agent_session_history::is_safe_session_id;
 use crate::terminal::agent_sessions_index::{AgentSessionRow, AgentSessionState};
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::shell::ShellType;
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::workspace::PaneViewLocator;
 
 /// What a row's click does.
@@ -16,7 +17,11 @@ use crate::workspace::PaneViewLocator;
 pub enum AgentSessionAction {
     Focus(PaneViewLocator),
     Start(PaneViewLocator),
-    Attach(warp_core::SessionId),
+    Attach {
+        session_id: warp_core::SessionId,
+        holder: Option<SessionHolder>,
+        agent: Option<HeldAgent>,
+    },
     Managed {
         job_id: String,
         target: Option<PaneViewLocator>,
@@ -36,7 +41,7 @@ impl AgentSessionAction {
         match self {
             AgentSessionAction::Focus(_) => "Focus",
             AgentSessionAction::Start(_) => "Start",
-            AgentSessionAction::Attach(_) => "Attach",
+            AgentSessionAction::Attach { .. } => "Attach",
             AgentSessionAction::Managed { .. } => "Open",
             AgentSessionAction::Resume { .. } => "Resume",
         }
@@ -51,7 +56,14 @@ pub(crate) fn action_for(
     match &row.state {
         AgentSessionState::Running { locator } => Some(AgentSessionAction::Focus(*locator)),
         AgentSessionState::Pending { locator } => Some(AgentSessionAction::Start(*locator)),
-        AgentSessionState::Detached { session_id } => Some(AgentSessionAction::Attach(*session_id)),
+        AgentSessionState::Detached { session_id, holder } => Some(AgentSessionAction::Attach {
+            session_id: *session_id,
+            holder: holder.clone(),
+            agent: row
+                .agent
+                .zip(row.session_id.clone())
+                .map(|(agent, session_id)| HeldAgent { agent, session_id }),
+        }),
         AgentSessionState::KnownProcess { .. }
         | AgentSessionState::HeldByOtherBuild { .. }
         | AgentSessionState::NoKnownPane { .. } => None,

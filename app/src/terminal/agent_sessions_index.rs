@@ -6,12 +6,13 @@ use std::time::{Duration, SystemTime};
 
 use warp_core::SessionId;
 
-use crate::app_state::CliAgentResumeDescriptor;
+use crate::app_state::{CliAgentResumeDescriptor, SessionHolder};
 use crate::terminal::agent_session_history::{
     AgentSessionPreviewMessage, PastAgentSession, ResolvedPath, is_within_known,
 };
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::cli_agent_sessions::agent_process_scan::{Placement, SavedPane, ScannedAgent};
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::workspace::PaneViewLocator;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub(crate) enum AgentSessionState {
     },
     Detached {
         session_id: SessionId,
+        holder: Option<SessionHolder>,
     },
     KnownProcess {
         pid: u32,
@@ -68,6 +70,7 @@ pub(crate) struct AgentSessionRow {
     pub last_used: Option<SystemTime>,
     pub preview: Vec<AgentSessionPreviewMessage>,
     pub process_count: usize,
+    pub supervisor: Option<SessionHolder>,
     pub state: AgentSessionState,
 }
 
@@ -87,6 +90,9 @@ pub(crate) struct PaneAgentInput {
     pub pane_number: usize,
     pub cwd: Option<PathBuf>,
     pub session_uuid_hex: Option<String>,
+    pub supervisor_session_id: Option<SessionId>,
+    pub session_holder: Option<SessionHolder>,
+    pub held_agent: Option<HeldAgent>,
     pub latest_user_prompt: Option<String>,
     /// From `CLIAgentSessionsModel`.
     pub running: Option<CliAgentResumeDescriptor>,
@@ -94,12 +100,14 @@ pub(crate) struct PaneAgentInput {
     pub pending: Option<CliAgentResumeDescriptor>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DetachedInput {
     pub session_id: SessionId,
     pub title: String,
     pub cwd: PathBuf,
     pub detached_for_seconds: u64,
     pub session_uuid_hex: String,
+    pub holder: Option<SessionHolder>,
 }
 
 type ConversationKey = (CLIAgent, String);
@@ -110,6 +118,26 @@ fn key_of(descriptor: &CliAgentResumeDescriptor) -> Option<ConversationKey> {
 
 fn row_key(row: &AgentSessionRow) -> Option<ConversationKey> {
     Some((row.agent?, row.session_id.clone()?))
+}
+
+fn pane_holds_detached(pane: &PaneAgentInput, detached: &DetachedInput) -> bool {
+    pane.supervisor_session_id == Some(detached.session_id)
+        && detached.holder.as_ref().is_none_or(|holder| {
+            pane.session_holder
+                .as_ref()
+                .is_some_and(|pane_holder| pane_holder.channel == holder.channel)
+        })
+}
+
+fn held_descriptor(pane: &PaneAgentInput) -> Option<CliAgentResumeDescriptor> {
+    let held = pane.held_agent.as_ref()?;
+    Some(CliAgentResumeDescriptor {
+        agent: held.agent,
+        session_id: Some(held.session_id.clone()),
+        cwd: pane.cwd.clone().unwrap_or_default(),
+        title: None,
+        captured_unix_seconds: None,
+    })
 }
 
 fn live_row(
@@ -145,6 +173,7 @@ fn live_row(
             .map(|session| session.preview.clone())
             .unwrap_or_default(),
         process_count: 0,
+        supervisor: pane.session_holder.clone(),
         state,
     }
 }
@@ -160,6 +189,7 @@ fn past_row(past: &PastAgentSession, state: AgentSessionState) -> AgentSessionRo
         last_used: Some(past.modified),
         preview: past.preview.clone(),
         process_count: 0,
+        supervisor: None,
         state,
     }
 }
@@ -190,6 +220,7 @@ fn scanned_row(scanned: &ScannedAgent, history: Option<&PastAgentSession>) -> Ag
             last_used: None,
             preview: Vec::new(),
             process_count: scanned.process_count,
+            supervisor: None,
             state: state.clone(),
         },
         |history| past_row(history, state.clone()),
@@ -255,7 +286,11 @@ pub(crate) fn build_rows_with_scanned(
             ));
         } else if let Some(descriptor) = &pane.pending {
             let key = key_of(descriptor);
-            if key.as_ref().is_some_and(|key| live_keys.contains(key)) {
+            if detached
+                .iter()
+                .any(|input| pane_holds_detached(pane, input))
+                || key.as_ref().is_some_and(|key| live_keys.contains(key))
+            {
                 continue;
             }
             live_keys.extend(key);
@@ -274,7 +309,22 @@ pub(crate) fn build_rows_with_scanned(
     for input in detached_order {
         let state = AgentSessionState::Detached {
             session_id: input.session_id,
+            holder: input.holder.clone(),
         };
+        let pane = panes.iter().find(|pane| pane_holds_detached(pane, input));
+        let pane_descriptor = pane.and_then(|pane| {
+            pane.pending
+                .clone()
+                .or_else(|| held_descriptor(pane))
+                .map(|descriptor| (pane, descriptor))
+        });
+        if pane_descriptor
+            .as_ref()
+            .and_then(|(_, descriptor)| key_of(descriptor))
+            .is_some_and(|key| running_keys.contains(&key))
+        {
+            continue;
+        }
         let identified = (!input.session_uuid_hex.is_empty())
             .then(|| {
                 scanned.iter().find(|process| {
@@ -282,8 +332,21 @@ pub(crate) fn build_rows_with_scanned(
                 })
             })
             .flatten();
-        let row = match identified {
-            Some(process) => {
+        let row = match (pane_descriptor, identified) {
+            (Some((pane, descriptor)), _) => {
+                if let Some(key) = key_of(&descriptor) {
+                    detached_keys.insert(key);
+                }
+                let mut row = live_row(pane, &descriptor, history_for(&descriptor), state.clone());
+                row.title = row
+                    .title
+                    .or_else(|| Some(input.title.clone()).filter(|title| !title.is_empty()));
+                if row.cwd.as_os_str().is_empty() {
+                    row.cwd = input.cwd.clone();
+                }
+                row
+            }
+            (None, Some(process)) => {
                 let key = (process.agent, process.session_id.clone());
                 detached_keys.insert(key.clone());
                 let mut row = history_for_key(&key).map_or_else(
@@ -297,6 +360,7 @@ pub(crate) fn build_rows_with_scanned(
                         last_used: None,
                         preview: Vec::new(),
                         process_count: process.process_count,
+                        supervisor: input.holder.clone(),
                         state: state.clone(),
                     },
                     |history| past_row(history, state.clone()),
@@ -311,9 +375,10 @@ pub(crate) fn build_rows_with_scanned(
                     .unwrap_or_else(|| input.cwd.clone());
                 row.canonical_cwd = None;
                 row.process_count = process.process_count;
+                row.supervisor = input.holder.clone();
                 row
             }
-            None => AgentSessionRow {
+            (None, None) => AgentSessionRow {
                 agent: None,
                 session_id: None,
                 title: Some(input.title.clone()).filter(|title| !title.is_empty()),
@@ -323,6 +388,7 @@ pub(crate) fn build_rows_with_scanned(
                 last_used: None,
                 preview: Vec::new(),
                 process_count: 0,
+                supervisor: input.holder.clone(),
                 state,
             },
         };

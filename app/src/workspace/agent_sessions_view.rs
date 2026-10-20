@@ -147,7 +147,7 @@ impl ViewRow {
                     | AgentSessionState::Past => None,
                 },
                 detached_session: match row.state {
-                    AgentSessionState::Detached { session_id } => Some(session_id),
+                    AgentSessionState::Detached { session_id, .. } => Some(session_id),
                     AgentSessionState::Running { .. }
                     | AgentSessionState::Pending { .. }
                     | AgentSessionState::KnownProcess { .. }
@@ -1290,8 +1290,17 @@ fn process_warning(row: &AgentSessionRow) -> Option<String> {
     }
 }
 
+fn supervisor_detail(row: &AgentSessionRow) -> Option<String> {
+    row.supervisor
+        .as_ref()
+        .map(|holder| format!("WarpSpeed {}", holder.version))
+}
+
 fn local_preview_detail(row: &AgentSessionRow, cwd: &Path) -> String {
     let mut details = vec!["Local".to_owned(), row.state.label().to_owned()];
+    if let Some(holder) = supervisor_detail(row) {
+        details.push(holder);
+    }
     if let Some(placement) = placement_detail(row) {
         details.push(placement);
     }
@@ -1531,6 +1540,7 @@ fn render_row_contents(
             view_row @ ViewRow::Local { row, .. } => {
                 let detail = [
                     placement_detail(row),
+                    supervisor_detail(row),
                     Some(row.cwd.display().to_string()).filter(|cwd| !cwd.is_empty()),
                 ]
                 .into_iter()

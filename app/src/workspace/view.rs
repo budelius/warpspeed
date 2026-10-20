@@ -238,8 +238,9 @@ use crate::ai_assistant::panel::{AIAssistantPanelEvent, AIAssistantPanelView};
 use crate::ai_assistant::{AI_ASSISTANT_FEATURE_NAME, AI_ASSISTANT_LOGO_COLOR, AskAIType};
 use crate::app_state::{
     CliAgentResumeDescriptor, LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot,
-    NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot,
-    TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SessionHolder,
+    SettingsPaneSnapshot, TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+    WorkflowPaneSnapshot,
 };
 use crate::appearance::{Appearance, AppearanceManager};
 use crate::auth::AuthStateProvider;
@@ -431,6 +432,8 @@ use crate::terminal::ligature_settings::should_use_ligature_rendering;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::docker_sandbox::resolve_sbx_path_from_user_shell;
 #[cfg(feature = "local_tty")]
+use crate::terminal::local_tty::session_holder::{self, HolderVerdict};
+#[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::spawner::{PendingDetach, PtySpawner};
 use crate::terminal::model::blockgrid::BlockGrid;
 #[cfg(feature = "local_fs")]
@@ -449,6 +452,7 @@ use crate::terminal::settings::{SpacingMode, TerminalSettings};
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::terminal::terminal_manager::HeldAgent;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel as HandoffAmbientAgentViewModel;
 use crate::terminal::view::ambient_agent::{AuthSecretFtuxView, AuthSecretFtuxViewEvent};
@@ -13392,7 +13396,7 @@ impl Workspace {
                 candidates
                     .into_iter()
                     .filter_map(|(pane_uuid, terminal_view_id)| {
-                        Self::resolve_agent_resume_command(terminal_view_id, ctx)
+                        Self::resolve_agent_resume_command(terminal_view_id, None, None, ctx)
                             .map(|command| AgentResumeCommand { pane_uuid, command })
                     }),
             );
@@ -13647,7 +13651,16 @@ impl Workspace {
         cwd: Option<PathBuf>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let resume_command = Self::resolve_agent_resume_command(terminal_view.id(), ctx);
+        let attached_agent = terminal_view
+            .as_ref(ctx)
+            .connected_supervisor()
+            .and_then(|_| manager.as_ref(ctx).held_agent());
+        let resume_command = Self::resolve_agent_resume_command(
+            terminal_view.id(),
+            attached_agent,
+            cwd.as_deref(),
+            ctx,
+        );
 
         let restarted = manager.update(ctx, |manager, ctx| {
             manager.restart_session(target, cwd, ctx)
@@ -13692,30 +13705,41 @@ impl Workspace {
         });
     }
 
-    /// Looks up the tracked CLI agent session for `terminal_view_id` and returns the command that
-    /// reopens it. A Claude session's transcript is first forked at its last complete turn; a Pi
-    /// session is reopened as it stands. Returns `None` (logging why, except for the two
-    /// silent/expected cases) whenever resuming isn't possible:
-    /// - no tracked session, or a tracked session for an agent other than Claude or Pi
-    ///   (untracked/unsupported -- silent, by decision)
-    /// - no session id (untracked -- silent, by decision)
-    /// - no cwd on record for the session
-    /// - `fork_transcript_at_last_complete_turn` returns `Ok(None)` (nothing survived the trim)
-    /// - resolving the Claude config dir, or the fork itself, fails
+    /// Returns the command that reopens the pane's tracked agent, falling back to the restored
+    /// identity when the pane is attached to another supervisor. A Claude transcript is first
+    /// forked at its last complete turn; a Pi session is reopened as it stands.
     #[cfg(not(target_family = "wasm"))]
     fn resolve_agent_resume_command(
         terminal_view_id: EntityId,
+        attached_agent: Option<HeldAgent>,
+        attached_cwd: Option<&Path>,
         ctx: &AppContext,
     ) -> Option<String> {
-        let session = CLIAgentSessionsModel::as_ref(ctx).session(terminal_view_id)?;
-        match session.agent {
+        let tracked_session = CLIAgentSessionsModel::as_ref(ctx)
+            .session(terminal_view_id)
+            .map(|session| {
+                (
+                    session.agent,
+                    session.session_context.session_id.clone(),
+                    session.session_context.cwd.as_deref().map(PathBuf::from),
+                )
+            });
+        let (agent, session_id, cwd) = match tracked_session {
+            Some(session) => session,
+            None => {
+                let attached_agent = attached_agent?;
+                (
+                    attached_agent.agent,
+                    Some(attached_agent.session_id),
+                    attached_cwd.map(Path::to_path_buf),
+                )
+            }
+        };
+
+        match agent {
             crate::terminal::CLIAgent::Claude => {}
             crate::terminal::CLIAgent::Pi => {
-                return session
-                    .session_context
-                    .session_id
-                    .as_deref()
-                    .map(|session_id| format!("pi --session {session_id}"));
+                return session_id.map(|session_id| format!("pi --session {session_id}"));
             }
             crate::terminal::CLIAgent::Gemini
             | crate::terminal::CLIAgent::Codex
@@ -13735,9 +13759,8 @@ impl Workspace {
             | crate::terminal::CLIAgent::WarpTui
             | crate::terminal::CLIAgent::Unknown => return None,
         }
-        let session_context = session.session_context.clone();
 
-        let session_id = session_context.session_id?;
+        let session_id = session_id?;
         let uuid = match uuid::Uuid::parse_str(&session_id) {
             Ok(uuid) => uuid,
             Err(err) => {
@@ -13749,8 +13772,7 @@ impl Workspace {
             }
         };
 
-        let cwd = session_context.cwd.map(PathBuf::from)?;
-
+        let cwd = cwd?;
         let config_root = match claude_transcript::claude_config_dir() {
             Ok(dir) => dir,
             Err(err) => {
@@ -13777,9 +13799,12 @@ impl Workspace {
 
     #[cfg(target_family = "wasm")]
     fn resolve_agent_resume_command(
-        _terminal_view_id: EntityId,
-        _ctx: &AppContext,
+        terminal_view_id: EntityId,
+        attached_agent: Option<HeldAgent>,
+        attached_cwd: Option<&Path>,
+        ctx: &AppContext,
     ) -> Option<String> {
+        let _ = (terminal_view_id, attached_agent, attached_cwd, ctx);
         None
     }
 
@@ -15384,16 +15409,16 @@ impl Workspace {
             offered,
             "The supervisor is not holding an unattached session {session_id:?}"
         );
-        self.attach_detached_session(session_id, ctx);
+        self.attach_detached_session(session_id, None, None, ctx);
         Ok(())
     }
 
     /// What the agent-session rows are built from: this window's visible terminal panes, by tab
-    /// and then as laid out within the tab, and the sessions the supervisor holds with no pane
+    /// and then as laid out within the tab, and sessions compatible supervisors hold with no pane
     /// attached.
     ///
-    /// Asks the supervisor, a blocking round trip, so call it when a picker opens rather than
-    /// on every render.
+    /// Asks the current supervisor and those recorded by restored panes, using blocking round
+    /// trips, so call it when a picker opens rather than on every render.
     pub(crate) fn agent_session_inputs(
         &self,
         ctx: &AppContext,
@@ -15401,19 +15426,50 @@ impl Workspace {
         Vec<PaneAgentInput>,
         Result<Vec<DetachedInput>, detached_sessions::DetachedListError>,
     ) {
-        let detached = detached_sessions::list_checked(ctx).map(|sessions| {
-            sessions
-                .into_iter()
-                .map(|session| DetachedInput {
-                    session_id: session.session_id,
-                    title: session.title,
-                    cwd: session.cwd,
-                    detached_for_seconds: session.detached_for_seconds,
-                    session_uuid_hex: session.session_uuid_hex,
-                })
-                .collect()
-        });
-        (self.agent_pane_inputs(ctx), detached)
+        let panes = self.agent_pane_inputs(ctx);
+        let mut holders = self.session_holders(ctx);
+        for (_, workspace) in WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .filter(|(window_id, _)| *window_id != self.window_id)
+        {
+            holders.extend(workspace.as_ref(ctx).session_holders(ctx));
+        }
+        let detached =
+            detached_sessions::list_checked_across_holders(&holders, ctx).map(|sessions| {
+                sessions
+                    .into_iter()
+                    .map(|session| DetachedInput {
+                        session_id: session.session_id,
+                        title: session.title,
+                        cwd: session.cwd,
+                        detached_for_seconds: session.detached_for_seconds,
+                        session_uuid_hex: session.session_uuid_hex,
+                        holder: session.holder,
+                    })
+                    .collect()
+            });
+        (panes, detached)
+    }
+
+    fn session_holders(&self, ctx: &AppContext) -> Vec<SessionHolder> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| {
+                let pane_group = tab.pane_group.as_ref(ctx);
+                pane_group
+                    .terminal_pane_ids()
+                    .filter_map(|pane_id| pane_group.terminal_manager_for_pane_id(pane_id, ctx))
+                    .filter_map(|manager| {
+                        let manager = manager.as_ref(ctx);
+                        manager
+                            .withheld_restore()
+                            .and_then(|restore| restore.holder)
+                            .or_else(|| manager.session_holder())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     fn agent_pane_inputs(&self, ctx: &AppContext) -> Vec<PaneAgentInput> {
@@ -15430,7 +15486,10 @@ impl Workspace {
                 let latest_user_prompt = agent_sessions
                     .session(view.id())
                     .and_then(|session| session.session_context.latest_user_prompt());
-                let running =
+                let pane_cwd = pane_group
+                    .terminal_working_directory(pane_id, ctx)
+                    .map(PathBuf::from);
+                let tracked_running =
                     agent_sessions
                         .session(view.id())
                         .map(|session| CliAgentResumeDescriptor {
@@ -15446,6 +15505,45 @@ impl Workspace {
                             title: session.session_context.display_title(),
                             captured_unix_seconds: None,
                         });
+                let (supervisor_session_id, session_holder, held_agent) = pane_group
+                    .terminal_manager_for_pane_id(pane_id, ctx)
+                    .map(|manager| {
+                        let manager = manager.as_ref(ctx);
+                        let withheld = manager.withheld_restore();
+                        let supervisor_session_id = withheld
+                            .as_ref()
+                            .and_then(|restore| restore.session_id)
+                            .or_else(|| manager.persistent_session_id());
+                        let session_holder = withheld
+                            .as_ref()
+                            .and_then(|restore| restore.holder.clone())
+                            .or_else(|| manager.session_holder());
+                        #[cfg(feature = "local_tty")]
+                        let session_holder = session_holder
+                            .filter(|holder| holder.channel != session_holder::current_channel());
+                        #[cfg(not(feature = "local_tty"))]
+                        let session_holder = None;
+                        let held_agent = withheld
+                            .and_then(|restore| restore.agent)
+                            .or_else(|| manager.held_agent());
+                        (supervisor_session_id, session_holder, held_agent)
+                    })
+                    .unwrap_or_default();
+                let running = tracked_running.or_else(|| {
+                    let connected_holder = view.as_ref(ctx).connected_supervisor()?;
+                    let session_holder = session_holder.as_ref()?;
+                    if connected_holder.channel != session_holder.channel {
+                        return None;
+                    }
+                    let held_agent = held_agent.as_ref()?;
+                    Some(CliAgentResumeDescriptor {
+                        agent: held_agent.agent,
+                        session_id: Some(held_agent.session_id.clone()),
+                        cwd: pane_cwd.clone().unwrap_or_default(),
+                        title: None,
+                        captured_unix_seconds: None,
+                    })
+                });
                 panes.push(PaneAgentInput {
                     locator: PaneViewLocator {
                         pane_group_id,
@@ -15454,10 +15552,11 @@ impl Workspace {
                     tab_index,
                     tab_title: tab_title.clone(),
                     pane_number: position + 1,
-                    cwd: pane_group
-                        .terminal_working_directory(pane_id, ctx)
-                        .map(PathBuf::from),
+                    cwd: pane_cwd,
                     session_uuid_hex: pane_group.terminal_session_uuid(pane_id).map(hex::encode),
+                    supervisor_session_id,
+                    session_holder,
+                    held_agent,
                     latest_user_prompt,
                     running,
                     pending: pane_group.pending_agent_resume(pane_id, ctx),
@@ -15484,7 +15583,11 @@ impl Workspace {
                     });
                 self.start_agent_session(*locator, pending, ctx);
             }
-            AgentSessionAction::Attach(session_id) => self.attach_agent_session(*session_id, ctx),
+            AgentSessionAction::Attach {
+                session_id,
+                holder,
+                agent,
+            } => self.attach_agent_session(*session_id, holder.as_ref(), agent.as_ref(), ctx),
             AgentSessionAction::Managed { job_id, target } => {
                 self.show_agent_sessions(*target, ctx);
                 self.agent_sessions_modal.update(ctx, |modal, ctx| {
@@ -15506,9 +15609,59 @@ impl Workspace {
     fn attach_agent_session(
         &mut self,
         session_id: warp_core::SessionId,
+        holder: Option<&SessionHolder>,
+        agent: Option<&HeldAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if let Err(error) = self.attach_session_by_id(session_id, ctx) {
+        let result = match holder {
+            Some(holder) => match session_holder::verdict(&holder.channel, session_id) {
+                HolderVerdict::HeldDetached => {
+                    #[cfg(windows)]
+                    let adopt_result = (|| {
+                        use warp_terminal::local_tty::windows::supervisor_client::WindowsTerminalSupervisorClient;
+
+                        let client = WindowsTerminalSupervisorClient::for_existing_pipe(
+                            holder.channel.clone(),
+                        )?;
+                        PtySpawner::handle(ctx).update(ctx, |spawner, _| {
+                            spawner.adopt_supervisor(session_id, Arc::new(client));
+                        });
+                        Ok::<(), anyhow::Error>(())
+                    })();
+                    #[cfg(not(windows))]
+                    let adopt_result = Ok::<(), anyhow::Error>(());
+                    adopt_result.map(|()| {
+                        self.attach_detached_session(
+                            session_id,
+                            Some(holder.clone()),
+                            agent.cloned(),
+                            ctx,
+                        );
+                    })
+                }
+                HolderVerdict::HeldAttached => Err(anyhow::anyhow!(
+                    "another window is already attached to the session"
+                )),
+                HolderVerdict::Unknown => Err(anyhow::anyhow!(
+                    "the holding supervisor no longer offers the session"
+                )),
+            },
+            None => {
+                let offered = detached_sessions::list(ctx)
+                    .into_iter()
+                    .any(|session| session.session_id == session_id);
+                if offered {
+                    let holder = agent.is_some().then(session_holder::current_holder);
+                    self.attach_detached_session(session_id, holder, agent.cloned(), ctx);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "the supervisor no longer offers the session"
+                    ))
+                }
+            }
+        };
+        if let Err(error) = result {
             self.show_agent_session_error(format!("Couldn't attach the session: {error:#}"), ctx);
         }
     }
@@ -15517,8 +15670,11 @@ impl Workspace {
     fn attach_agent_session(
         &mut self,
         session_id: warp_core::SessionId,
+        holder: Option<&SessionHolder>,
+        agent: Option<&HeldAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
+        let _ = (holder, agent);
         self.show_agent_session_error(
             format!("Couldn't attach the session {session_id:?}: not supported in this build"),
             ctx,
@@ -15856,11 +16012,15 @@ impl Workspace {
     fn attach_detached_session(
         &mut self,
         session_id: warp_core::SessionId,
+        holder: Option<SessionHolder>,
+        agent: Option<HeldAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
                 attach_session_id: Some(session_id),
+                attach_session_holder: holder,
+                attach_session_agent: agent,
                 ..Default::default()
             })),
             Arc::new(HashMap::new()),
@@ -27895,7 +28055,9 @@ impl TypedActionView for Workspace {
                 self.confirm_move_all_agent_sessions(folder, ctx)
             }
             ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
-            AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
+            AttachDetachedSession { session_id } => {
+                self.attach_detached_session(*session_id, None, None, ctx)
+            }
             AgentSession(action) => self.perform_agent_session_action(action, ctx),
             ShowAgentSessions { focus } => self.show_agent_sessions(*focus, ctx),
             ShowAgentSessionsForTerminalView { terminal_view_id } => {

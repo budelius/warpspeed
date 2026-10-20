@@ -363,6 +363,10 @@ where
         self.0.session_holder.clone()
     }
 
+    fn held_agent(&self) -> Option<HeldAgent> {
+        self.0.held_agent.clone()
+    }
+
     fn withheld_restore(&self) -> Option<WithheldRestore> {
         self.0
             .withheld_restore

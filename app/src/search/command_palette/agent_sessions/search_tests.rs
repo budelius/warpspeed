@@ -38,6 +38,7 @@ fn row(title: Option<&str>, cwd: &str, state: AgentSessionState) -> AgentSession
         last_used: None,
         preview: Vec::new(),
         process_count: 0,
+        supervisor: None,
         state,
     }
 }
@@ -129,6 +130,7 @@ fn rows_fall_into_this_pane_running_elsewhere_detached_and_past() {
         "/work/here",
         AgentSessionState::Detached {
             session_id: warp_core::SessionId::from(7),
+            holder: None,
         },
     );
     let past_here = past_row("a", "/work/here/crate");
@@ -201,6 +203,9 @@ fn pane(index: usize, cwd: &str) -> PaneAgentInput {
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
         session_uuid_hex: None,
+        supervisor_session_id: None,
+        session_holder: None,
+        held_agent: None,
         latest_user_prompt: None,
         running: None,
         pending: None,

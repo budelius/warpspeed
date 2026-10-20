@@ -2034,6 +2034,10 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.session_holder.clone()
     }
 
+    fn held_agent(&self) -> Option<HeldAgent> {
+        self.held_agent.clone()
+    }
+
     fn withheld_restore(&self) -> Option<crate::terminal::terminal_manager::WithheldRestore> {
         self.withheld_restore
             .clone()

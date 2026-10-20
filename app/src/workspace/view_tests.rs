@@ -5634,6 +5634,110 @@ fn supervisor_restart_requires_confirmation_even_for_an_idle_shell_and_can_be_ca
     });
 }
 
+#[cfg(feature = "local_tty")]
+#[test]
+fn restart_under_current_supervisor_resumes_the_attached_pi_agent() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let holder = crate::app_state::SessionHolder {
+                channel: "older-supervisor".to_owned(),
+                version: "older-build".to_owned(),
+                pid: 42,
+            };
+            manager.update(ctx, |manager, _| {
+                manager.restore_session_holder(
+                    Some(holder.clone()),
+                    Some(crate::terminal::terminal_manager::HeldAgent {
+                        agent: crate::terminal::CLIAgent::Pi,
+                        session_id: "attached-pi-session".to_owned(),
+                    }),
+                );
+            });
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(Some(holder), ctx);
+            });
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(view.id())
+                    .is_none()
+            );
+
+            workspace.handle_action(
+                &WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
+                    terminal_view_id: view.id(),
+                },
+                ctx,
+            );
+            workspace.handle_restart_shell_confirmation_modal_body_event(
+                &RestartShellConfirmationEvent::Confirm,
+                ctx,
+            );
+            view
+        });
+
+        let buffer_text = terminal_view.read(&app, |terminal_view, ctx| {
+            terminal_view
+                .input()
+                .read(ctx, |input, ctx| input.buffer_text(ctx))
+        });
+        assert_eq!(buffer_text, "pi --session attached-pi-session");
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn attached_agent_from_another_supervisor_appears_in_sessions() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let holder = crate::app_state::SessionHolder {
+                channel: "older-supervisor".to_owned(),
+                version: "older-build".to_owned(),
+                pid: 42,
+            };
+            manager.update(ctx, |manager, _| {
+                manager.restore_session_holder(
+                    Some(holder.clone()),
+                    Some(crate::terminal::terminal_manager::HeldAgent {
+                        agent: crate::terminal::CLIAgent::Pi,
+                        session_id: "attached-pi-session".to_owned(),
+                    }),
+                );
+            });
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(Some(holder), ctx);
+            });
+
+            let panes = workspace.agent_pane_inputs(ctx);
+            let rows = crate::terminal::agent_sessions_index::build_rows(&panes, &[], &[]);
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].agent, Some(crate::terminal::CLIAgent::Pi));
+            assert_eq!(rows[0].session_id.as_deref(), Some("attached-pi-session"));
+            assert_eq!(
+                rows[0]
+                    .supervisor
+                    .as_ref()
+                    .map(|holder| holder.version.as_str()),
+                Some("older-build")
+            );
+            assert!(matches!(
+                rows[0].state,
+                crate::terminal::agent_sessions_index::AgentSessionState::Running { .. }
+            ));
+        });
+    });
+}
+
 #[test]
 fn restart_shell_does_not_prompt() {
     App::test((), |mut app| async move {
@@ -9129,6 +9233,9 @@ fn activating_a_past_session_opens_it_directly_without_the_palette() {
                     pane_number: 1,
                     cwd: Some(std::env::temp_dir()),
                     session_uuid_hex: None,
+                    supervisor_session_id: None,
+                    session_holder: None,
+                    held_agent: None,
                     latest_user_prompt: None,
                     running: None,
                     pending: None,

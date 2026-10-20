@@ -26,6 +26,7 @@ fn row(agent: Option<CLIAgent>, state: AgentSessionState) -> AgentSessionRow {
         last_used: None,
         preview: Vec::new(),
         process_count: 0,
+        supervisor: None,
         state,
     }
 }
@@ -82,7 +83,12 @@ fn each_action_has_its_label() {
     assert_eq!(AgentSessionAction::Focus(locator).label(), "Focus");
     assert_eq!(AgentSessionAction::Start(locator).label(), "Start");
     assert_eq!(
-        AgentSessionAction::Attach(warp_core::SessionId::from(1)).label(),
+        AgentSessionAction::Attach {
+            session_id: warp_core::SessionId::from(1),
+            holder: None,
+            agent: None,
+        }
+        .label(),
         "Attach"
     );
     assert_eq!(
@@ -134,10 +140,28 @@ fn each_state_maps_to_its_action() {
     );
 
     let session_id = warp_core::SessionId::from(7);
-    let detached = row(None, AgentSessionState::Detached { session_id });
+    let holder = SessionHolder {
+        channel: "old-supervisor".into(),
+        version: "old-build".into(),
+        pid: 42,
+    };
+    let detached = row(
+        Some(CLIAgent::Pi),
+        AgentSessionState::Detached {
+            session_id,
+            holder: Some(holder.clone()),
+        },
+    );
     assert_eq!(
         action_for(&detached, Some(target)),
-        Some(AgentSessionAction::Attach(session_id))
+        Some(AgentSessionAction::Attach {
+            session_id,
+            holder: Some(holder),
+            agent: Some(HeldAgent {
+                agent: CLIAgent::Pi,
+                session_id: "abc".into(),
+            }),
+        })
     );
 
     let past = row(Some(CLIAgent::Claude), AgentSessionState::Past);

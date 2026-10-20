@@ -38,7 +38,7 @@ pub struct WithheldRestore {
 }
 
 /// The agent a held session was running, identified the way its process registry records it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldAgent {
     pub agent: CLIAgent,
     pub session_id: String,
@@ -93,6 +93,11 @@ pub trait TerminalManager: Any {
     /// The supervisor holding [`Self::persistent_session_id`]: the one the pane was restored with
     /// until this manager's shell starts, then this build's.
     fn session_holder(&self) -> Option<SessionHolder> {
+        None
+    }
+
+    /// The agent recorded when this manager's supervised session was saved.
+    fn held_agent(&self) -> Option<HeldAgent> {
         None
     }
 

@@ -8,13 +8,18 @@
 //! Everything here answers falsely -- unsupported, empty -- when there is no
 //! supervisor to talk to, so callers can ask unconditionally.
 
+#[cfg(all(feature = "local_tty", windows))]
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use warp_core::features::FeatureFlag;
 use warpui::{AppContext, SingletonEntity};
 
+use crate::app_state::SessionHolder;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::spawner::PtySpawner;
+#[cfg(all(feature = "local_tty", windows))]
+use crate::terminal::local_tty::{session_holder, session_holder::current_channel};
 
 /// A detached session as the picker shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +41,9 @@ pub struct DetachedSession {
 
     /// The pane UUID supplied to the shell at spawn time.
     pub session_uuid_hex: String,
+
+    /// The non-current supervisor that offered this session.
+    pub holder: Option<SessionHolder>,
 }
 
 /// Why the detached sessions could not be listed.
@@ -92,25 +100,82 @@ pub fn list_checked(ctx: &AppContext) -> Result<Vec<DetachedSession>, DetachedLi
             // A session another pane is already using would refuse a second
             // attach, so offering it would promise something that cannot happen.
             .filter(|session| !session.attached)
-            .map(|session| DetachedSession {
-                session_id: session.session_id,
-                label: label_for(
-                    &session.metadata.title,
-                    &session.metadata.shell,
-                    &session.metadata.working_directory,
-                    session.detached_for_seconds,
-                ),
-                cwd: PathBuf::from(&session.metadata.working_directory),
-                title: session.metadata.title,
-                detached_for_seconds: session.detached_for_seconds,
-                shell_pid: session.shell_pid,
-                session_uuid_hex: session.session_uuid_hex,
-            })
+            .map(|session| detached_session(session, None))
             .collect())
     }
     #[cfg(not(feature = "local_tty"))]
     {
         Err(DetachedListError::Unsupported)
+    }
+}
+
+/// Lists detached sessions from the current supervisor and the compatible Windows supervisors
+/// recorded by restored panes.
+pub(crate) fn list_checked_across_holders(
+    holders: &[SessionHolder],
+    ctx: &AppContext,
+) -> Result<Vec<DetachedSession>, DetachedListError> {
+    let current = list_checked(ctx);
+    #[cfg(all(feature = "local_tty", windows))]
+    {
+        let (mut sessions, current_error) = match current {
+            Ok(sessions) => (sessions, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        let mut answered = current_error.is_none();
+        let mut channels = HashSet::from([current_channel()]);
+        let mut session_ids = sessions
+            .iter()
+            .map(|session| session.session_id)
+            .collect::<HashSet<_>>();
+        for holder in holders {
+            if !channels.insert(holder.channel.clone()) {
+                continue;
+            }
+            let Some(supervisor_sessions) = session_holder::list_sessions(&holder.channel) else {
+                continue;
+            };
+            answered = true;
+            sessions.extend(
+                supervisor_sessions
+                    .into_iter()
+                    .filter(|session| !session.attached && session_ids.insert(session.session_id))
+                    .map(|session| detached_session(session, Some(holder.clone()))),
+            );
+        }
+        sessions.sort_by_key(|session| session.detached_for_seconds);
+        if answered {
+            Ok(sessions)
+        } else {
+            Err(current_error.unwrap_or(DetachedListError::Unsupported))
+        }
+    }
+    #[cfg(not(all(feature = "local_tty", windows)))]
+    {
+        let _ = holders;
+        current
+    }
+}
+
+#[cfg(feature = "local_tty")]
+fn detached_session(
+    session: warp_terminal::local_tty::supervisor::message::SessionSummary,
+    holder: Option<SessionHolder>,
+) -> DetachedSession {
+    DetachedSession {
+        session_id: session.session_id,
+        label: label_for(
+            &session.metadata.title,
+            &session.metadata.shell,
+            &session.metadata.working_directory,
+            session.detached_for_seconds,
+        ),
+        cwd: PathBuf::from(&session.metadata.working_directory),
+        title: session.metadata.title,
+        detached_for_seconds: session.detached_for_seconds,
+        shell_pid: session.shell_pid,
+        session_uuid_hex: session.session_uuid_hex,
+        holder,
     }
 }
 

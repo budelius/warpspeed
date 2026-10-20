@@ -10854,3 +10854,22 @@ fn pending_command_retries_until_the_session_history_is_appendable() {
         );
     });
 }
+
+#[test]
+fn restored_blocks_do_not_refresh_prompt_state_individually() {
+    assert!(!should_refresh_prompt_after_block_completion(
+        &BlockType::Restored
+    ));
+    assert!(!should_refresh_prompt_after_block_completion(
+        &BlockType::InBandCommand
+    ));
+    assert!(should_refresh_prompt_after_block_completion(
+        &BlockType::BootstrapHidden
+    ));
+
+    let refreshes = std::iter::repeat_n(BlockType::Restored, 1_000)
+        .chain([BlockType::BootstrapHidden])
+        .filter(should_refresh_prompt_after_block_completion)
+        .count();
+    assert_eq!(refreshes, 1);
+}

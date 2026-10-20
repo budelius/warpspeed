@@ -318,6 +318,12 @@ pub enum WorkspaceAction {
     ConfirmMoveSessionToAgentCtrl {
         terminal_view_id: EntityId,
     },
+    /// Starts a recorded session that no pane currently holds on AgentCtrl staging.
+    ConfirmStartPastSessionOnAgentCtrl {
+        agent: CLIAgent,
+        session_id: String,
+        cwd: PathBuf,
+    },
     /// Offers to start a fresh AgentCtrl run on staging in the repository of the focused pane's
     /// directory. Nothing starts until `ConfirmStartAgentOnAgentCtrl` picks the agent.
     StartAgentOnAgentCtrl,
@@ -1135,6 +1141,7 @@ impl WorkspaceAction {
             | MoveSessionToAgentCtrl
             | MoveSessionToAgentCtrlForTerminalView { .. }
             | ConfirmMoveSessionToAgentCtrl { .. }
+            | ConfirmStartPastSessionOnAgentCtrl { .. }
             | StartAgentOnAgentCtrl
             | StartAgentOnAgentCtrlForTerminalView { .. }
             | ConfirmStartAgentOnAgentCtrl { .. }

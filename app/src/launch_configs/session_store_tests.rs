@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use chrono::{Local, TimeZone as _};
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::vec2f;
 
@@ -26,6 +28,23 @@ use crate::terminal::ShellLaunchData;
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::model::block::SerializedBlock;
 use crate::terminal::shell::ShellType;
+
+fn oversized_output(byte: u8, additional_bytes: usize) -> Vec<u8> {
+    vec![byte; super::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES + additional_bytes]
+}
+
+fn dense_ansi_output(additional_bytes: usize) -> Vec<u8> {
+    oversized_output(0x1b, additional_bytes)
+}
+
+fn source() -> LaunchConfigWindowSource {
+    LaunchConfigWindowSource {
+        path: PathBuf::from("/home/warp/.warp/session_configurations/devops.toml"),
+        document_index: 2,
+        window_index: 0,
+        config_name: "DEVOPS".to_string(),
+    }
+}
 
 fn window(source: LaunchConfigWindowSource) -> WindowSnapshot {
     let conversation_id = AIConversationId::new();
@@ -126,6 +145,491 @@ fn atomic_write_retries_a_temporarily_blocked_windows_replacement() {
 
     let stored = std::fs::read_to_string(path).expect("the replacement catalog should be readable");
     assert_eq!(stored, r#"["new"]"#);
+}
+
+#[test]
+fn v2_checkpoint_uses_compact_bytes_and_bounds_oversized_output() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let oversized = oversized_output(b'x', 4096);
+    let block_lists = HashMap::from([(
+        PaneUuid(vec![1, 2, 3]),
+        vec![SerializedBlock::new_for_test(Vec::new(), oversized).into()],
+    )]);
+
+    save_to_dir(
+        dir.path(),
+        &source,
+        &window(source.clone()),
+        &block_lists,
+        false,
+        1_767_225_600,
+    )
+    .expect("window session should save");
+
+    let path = dir.path().join("devops/2/window-0.json");
+    let json = fs::read_to_string(&path).expect("checkpoint should be readable");
+    let restored = load_from_dir(dir.path(), &source)
+        .expect("window session should load")
+        .expect("window session should exist");
+    let item = &restored.block_lists[&PaneUuid(vec![1, 2, 3])][0];
+    let SerializedBlockListItem::Command { block } = item;
+
+    assert!(json.contains("\"version\":2"));
+    assert!(json.contains("\"stylized_output\":\""));
+    assert!(json.contains("\"stylized_output_truncated\":true"));
+    assert!(json.contains(&format!(
+        "\"stylized_output_original_bytes\":{}",
+        super::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES + 4096
+    )));
+    assert!(block.stylized_output.len() <= super::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES);
+    assert!(
+        block
+            .stylized_output
+            .starts_with(b"\x1b[0m[older output truncated]\r\n")
+    );
+}
+
+#[test]
+fn loading_v1_checkpoint_migrates_atomically_and_retains_backup() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let path = dir.path().join("devops/2/window-0.json");
+    let stored = super::StoredWindowSession {
+        version: super::LEGACY_SESSION_FORMAT_VERSION,
+        source: source.clone(),
+        profile: Some("WarpSpeed".to_owned()),
+        window: window(source.clone()),
+        block_lists: vec![super::StoredPaneBlocks {
+            uuid: vec![1, 2, 3],
+            blocks: vec![
+                SerializedBlock::new_for_test(b"echo legacy".to_vec(), b"legacy output".to_vec())
+                    .into(),
+            ],
+        }],
+        saved_at_unix_seconds: 1_767_225_600,
+    };
+    super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+
+    let restored = load_from_dir(dir.path(), &source)
+        .expect("v1 checkpoint should load")
+        .expect("v1 checkpoint should exist");
+    let migrated_json = fs::read_to_string(&path).expect("migrated checkpoint should be readable");
+    let backup_path = super::legacy_backup_path(&path);
+    let backup_json = fs::read_to_string(&backup_path).expect("legacy backup should be retained");
+    let checksum = fs::read_to_string(super::legacy_backup_checksum_path(&backup_path))
+        .expect("legacy backup checksum should be retained");
+
+    assert_eq!(restored.window, stored.window);
+    assert!(migrated_json.contains("\"version\":2"));
+    assert!(migrated_json.contains("\"stylized_output\":\""));
+    assert!(backup_json.contains("\"version\":1"));
+    assert!(backup_json.contains("\"stylized_output\":["));
+    assert_eq!(checksum.trim(), super::file_sha256(&backup_path).unwrap());
+}
+
+#[test]
+fn preserving_blocks_does_not_replace_v1_when_migration_fails() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let path = dir.path().join("devops/2/window-0.json");
+    let stored = super::StoredWindowSession {
+        version: super::LEGACY_SESSION_FORMAT_VERSION,
+        source: source.clone(),
+        profile: Some("WarpSpeed".to_owned()),
+        window: window(source.clone()),
+        block_lists: vec![super::StoredPaneBlocks {
+            uuid: vec![1, 2, 3],
+            blocks: vec![
+                SerializedBlock::new_for_test(b"echo legacy".to_vec(), b"legacy output".to_vec())
+                    .into(),
+            ],
+        }],
+        saved_at_unix_seconds: 1_767_225_600,
+    };
+    super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+    let original = fs::read(&path).unwrap();
+    fs::write(super::legacy_backup_path(&path), b"{invalid backup")
+        .expect("invalid rollback should be written");
+
+    save_to_dir(
+        dir.path(),
+        &source,
+        &window(source.clone()),
+        &HashMap::new(),
+        true,
+        1_767_225_601,
+    )
+    .expect_err("a failed migration must stop the preserving save");
+
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(
+        super::read_checkpoint_file(&path).unwrap().version,
+        super::LEGACY_SESSION_FORMAT_VERSION
+    );
+}
+
+#[test]
+fn failed_temporary_checkpoint_validation_leaves_the_active_v1_unchanged() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let path = dir.path().join("devops/2/window-0.json");
+    let stored = super::StoredWindowSession {
+        version: super::LEGACY_SESSION_FORMAT_VERSION,
+        source: source.clone(),
+        profile: Some("WarpSpeed".to_owned()),
+        window: window(source),
+        block_lists: Vec::new(),
+        saved_at_unix_seconds: 1_767_225_600,
+    };
+    super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+    let original = fs::read(&path).unwrap();
+
+    super::write_checkpoint_atomically(&path, &stored)
+        .expect_err("a temporary v1 checkpoint must fail v2 validation");
+
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn backup_without_checksum_recovers_after_an_interrupted_migration() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let path = dir.path().join("devops/2/window-0.json");
+    let stored = super::StoredWindowSession {
+        version: super::LEGACY_SESSION_FORMAT_VERSION,
+        source: source.clone(),
+        profile: Some("WarpSpeed".to_owned()),
+        window: window(source.clone()),
+        block_lists: Vec::new(),
+        saved_at_unix_seconds: 1_767_225_600,
+    };
+    super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+    let backup_path = super::ensure_legacy_backup(&path).unwrap();
+    fs::remove_file(super::legacy_backup_checksum_path(&backup_path)).unwrap();
+    fs::write(&path, b"{interrupted").unwrap();
+
+    let restored = load_from_dir(dir.path(), &source)
+        .expect("backup recovery should succeed")
+        .expect("recovered checkpoint should exist");
+
+    assert_eq!(restored.window, stored.window);
+    assert!(super::legacy_backup_checksum_path(&backup_path).is_file());
+    assert!(fs::read_to_string(path).unwrap().contains("\"version\":2"));
+}
+
+#[test]
+fn every_migration_boundary_retains_a_valid_checkpoint_or_rollback() {
+    for interruption in [
+        super::MigrationBoundary::RollbackPrepared,
+        super::MigrationBoundary::TemporaryValidated,
+        super::MigrationBoundary::ActiveReplaced,
+    ] {
+        let dir = tempfile::tempdir().expect("session directory should be created");
+        let source = source();
+        let path = dir.path().join("devops/2/window-0.json");
+        let stored = super::StoredWindowSession {
+            version: super::LEGACY_SESSION_FORMAT_VERSION,
+            source: source.clone(),
+            profile: Some("WarpSpeed".to_owned()),
+            window: window(source),
+            block_lists: Vec::new(),
+            saved_at_unix_seconds: 1_767_225_600,
+        };
+        super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+        let mut parsed = super::read_checkpoint_file(&path).unwrap();
+
+        super::migrate_legacy_checkpoint_with_hook(&path, &mut parsed, |boundary| {
+            if boundary == interruption {
+                anyhow::bail!("injected interruption at {boundary:?}");
+            }
+            Ok(())
+        })
+        .expect_err("injected interruption should stop migration");
+
+        let backup_path = super::legacy_backup_path(&path);
+        super::validate_legacy_backup(&backup_path).expect("rollback should remain valid");
+        let active = super::read_checkpoint_file(&path).expect("active checkpoint should be valid");
+        let expected_active_version = if interruption == super::MigrationBoundary::ActiveReplaced {
+            super::SESSION_FORMAT_VERSION
+        } else {
+            super::LEGACY_SESSION_FORMAT_VERSION
+        };
+        assert_eq!(active.version, expected_active_version);
+    }
+}
+
+#[test]
+fn oversized_v1_integer_array_is_bounded_during_migration() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let path = dir.path().join("devops/2/window-0.json");
+    let original_len = super::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES + 128 * 1024;
+    let stored = super::StoredWindowSession {
+        version: super::LEGACY_SESSION_FORMAT_VERSION,
+        source: source.clone(),
+        profile: Some("WarpSpeed".to_owned()),
+        window: window(source.clone()),
+        block_lists: vec![super::StoredPaneBlocks {
+            uuid: vec![1, 2, 3],
+            blocks: vec![
+                SerializedBlock::new_for_test(
+                    b"echo dense".to_vec(),
+                    dense_ansi_output(128 * 1024),
+                )
+                .into(),
+            ],
+        }],
+        saved_at_unix_seconds: 1_767_225_600,
+    };
+    super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+
+    let restored = load_from_dir(dir.path(), &source)
+        .expect("v1 checkpoint should load")
+        .expect("v1 checkpoint should exist");
+    let SerializedBlockListItem::Command { block } =
+        &restored.block_lists[&PaneUuid(vec![1, 2, 3])][0];
+
+    assert!(block.stylized_output.len() <= super::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES);
+    assert!(block.stylized_output_truncated);
+    assert_eq!(block.stylized_output_original_bytes, Some(original_len));
+    assert!(
+        block
+            .stylized_output
+            .starts_with(b"\x1b[0m[older output truncated]\r\n")
+    );
+    assert!(super::legacy_backup_path(&path).is_file());
+}
+
+#[test]
+fn unreadable_active_checkpoint_recovers_from_validated_legacy_backup() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let path = dir.path().join("devops/2/window-0.json");
+    let stored = super::StoredWindowSession {
+        version: super::LEGACY_SESSION_FORMAT_VERSION,
+        source: source.clone(),
+        profile: Some("WarpSpeed".to_owned()),
+        window: window(source.clone()),
+        block_lists: Vec::new(),
+        saved_at_unix_seconds: 1_767_225_600,
+    };
+    super::write_json_atomically(&path, &stored).expect("v1 checkpoint should save");
+    load_from_dir(dir.path(), &source).expect("initial migration should succeed");
+    fs::write(&path, b"{corrupt").expect("active checkpoint should be corruptible");
+
+    let restored = load_from_dir(dir.path(), &source)
+        .expect("backup recovery should succeed")
+        .expect("recovered checkpoint should exist");
+
+    assert_eq!(restored.window, stored.window);
+    assert!(fs::read_to_string(path).unwrap().contains("\"version\":2"));
+}
+
+#[test]
+fn pane_and_window_output_budgets_prioritize_recent_blocks() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let source = source();
+    let mut snapshot = window(source.clone());
+    let terminal = match &snapshot.tabs[0].root {
+        PaneNodeSnapshot::Leaf(leaf) => leaf.clone(),
+        PaneNodeSnapshot::Branch(_) => unreachable!(),
+    };
+    let pane_uuids = [vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
+    snapshot.tabs[0].root = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Vertical,
+        children: pane_uuids
+            .iter()
+            .map(|uuid| {
+                let mut leaf = terminal.clone();
+                let LeafContents::Terminal(terminal) = &mut leaf.contents else {
+                    unreachable!();
+                };
+                terminal.uuid = uuid.clone();
+                (PaneFlex(1.0), PaneNodeSnapshot::Leaf(leaf))
+            })
+            .collect(),
+    });
+    let mut block_lists = HashMap::new();
+    for (pane_index, uuid) in pane_uuids.iter().enumerate() {
+        let blocks = (0..8)
+            .map(|block_index| {
+                let mut block = SerializedBlock::new_for_test(
+                    format!("pane {pane_index} block {block_index}").into_bytes(),
+                    vec![b'a' + pane_index as u8; super::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES],
+                );
+                block.start_ts = Local
+                    .timestamp_opt((pane_index * 8 + block_index) as i64, 0)
+                    .single();
+                block.into()
+            })
+            .collect();
+        block_lists.insert(PaneUuid(uuid.clone()), blocks);
+    }
+
+    save_to_dir(
+        dir.path(),
+        &source,
+        &snapshot,
+        &block_lists,
+        false,
+        1_767_225_600,
+    )
+    .expect("window session should save");
+    let restored = load_from_dir(dir.path(), &source)
+        .expect("window session should load")
+        .expect("window session should exist");
+    let pane_sizes = pane_uuids
+        .iter()
+        .map(|uuid| {
+            restored.block_lists[&PaneUuid(uuid.clone())]
+                .iter()
+                .map(|item| match item {
+                    SerializedBlockListItem::Command { block } => block.stylized_output.len(),
+                })
+                .sum::<usize>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(pane_sizes[0] > 0);
+    assert!(pane_sizes[0] < pane_sizes[1]);
+    assert!(pane_sizes[1] < pane_sizes[2]);
+    assert_eq!(pane_sizes[2], super::MAX_PANE_STYLIZED_OUTPUT_BYTES);
+    assert!(
+        restored
+            .block_lists
+            .values()
+            .flatten()
+            .all(|item| !super::command_block(item).stylized_output.is_empty())
+    );
+    assert!(pane_sizes.iter().sum::<usize>() <= super::MAX_WINDOW_STYLIZED_OUTPUT_BYTES);
+}
+
+#[test]
+fn checkpoint_cardinality_limits_retain_the_most_recent_history() {
+    let mut block_lists = (0..3)
+        .map(|pane_index| {
+            let blocks = (0..(super::MAX_RESTORED_BLOCKS_PER_PANE + 2))
+                .map(|block_index| {
+                    let sequence =
+                        pane_index * (super::MAX_RESTORED_BLOCKS_PER_PANE + 2) + block_index;
+                    let mut block = SerializedBlock::new_for_test(
+                        format!("command {sequence}").into_bytes(),
+                        Vec::new(),
+                    );
+                    block.start_ts = Local.timestamp_opt(sequence as i64, 0).single();
+                    block.into()
+                })
+                .collect();
+            super::StoredPaneBlocks {
+                uuid: vec![pane_index as u8],
+                blocks,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    super::enforce_checkpoint_budgets(&mut block_lists);
+
+    let retained = block_lists
+        .iter()
+        .flat_map(|pane| &pane.blocks)
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), super::MAX_RESTORED_BLOCKS_PER_WINDOW);
+    assert!(
+        block_lists
+            .iter()
+            .all(|pane| pane.blocks.len() <= super::MAX_RESTORED_BLOCKS_PER_PANE)
+    );
+    let oldest_retained = retained
+        .iter()
+        .filter_map(|block| block.start_ts())
+        .min()
+        .unwrap();
+    assert_eq!(
+        oldest_retained.timestamp(),
+        (super::MAX_RESTORED_BLOCKS_PER_PANE + 4) as i64
+    );
+}
+
+#[test]
+fn checkpoint_cardinality_limits_drop_old_empty_pane_histories() {
+    let mut block_lists = (0..=super::MAX_STORED_PANE_BLOCK_LISTS)
+        .map(|pane_index| {
+            let mut block = SerializedBlock::new_for_test(Vec::new(), Vec::new());
+            block.start_ts = Local.timestamp_opt(pane_index as i64, 0).single();
+            super::StoredPaneBlocks {
+                uuid: pane_index.to_le_bytes().to_vec(),
+                blocks: vec![block.into()],
+            }
+        })
+        .collect::<Vec<_>>();
+
+    super::enforce_checkpoint_budgets(&mut block_lists);
+
+    assert_eq!(block_lists.len(), super::MAX_STORED_PANE_BLOCK_LISTS);
+    assert!(
+        block_lists
+            .iter()
+            .all(|pane| pane.uuid != 0usize.to_le_bytes())
+    );
+}
+
+#[test]
+fn checkpoint_file_size_is_rejected_before_deserialization() {
+    let dir = tempfile::tempdir().expect("session directory should be created");
+    let path = dir.path().join("oversized.json");
+    let file = fs::File::create(&path).expect("checkpoint should be created");
+    file.set_len(super::MAX_CHECKPOINT_FILE_BYTES + 1)
+        .expect("logical checkpoint length should be set");
+
+    let error = match super::read_checkpoint_file(&path) {
+        Ok(_) => panic!("oversized checkpoint should be rejected before parsing"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("exceeding"));
+}
+
+#[test]
+#[ignore = "set WARPSPEED_LEGACY_CHECKPOINT to benchmark a copied real checkpoint"]
+fn representative_legacy_checkpoint_migration_benchmark() {
+    let source_path = std::env::var_os("WARPSPEED_LEGACY_CHECKPOINT")
+        .map(PathBuf::from)
+        .expect("WARPSPEED_LEGACY_CHECKPOINT must point to a V1 checkpoint");
+    let temp_dir = tempfile::tempdir().expect("benchmark directory should be created");
+    let path = temp_dir.path().join("window-0.json");
+    fs::copy(&source_path, &path).expect("legacy fixture should be copied");
+
+    let migration_started = instant::Instant::now();
+    let mut stored = super::read_checkpoint_file(&path).expect("legacy fixture should parse");
+    let parse_duration = migration_started.elapsed();
+    super::migrate_legacy_checkpoint(&path, &mut stored).expect("legacy fixture should migrate");
+    let migration_duration = migration_started.elapsed();
+    let migrated_bytes = fs::metadata(&path).unwrap().len();
+    let reread_started = instant::Instant::now();
+    let migrated = super::read_checkpoint_file(&path).expect("migrated fixture should parse");
+    let reread_duration = reread_started.elapsed();
+    let retained_output_bytes = migrated
+        .block_lists
+        .iter()
+        .flat_map(|pane| &pane.blocks)
+        .map(|item| match item {
+            SerializedBlockListItem::Command { block } => block.stylized_output.len(),
+        })
+        .sum::<usize>();
+
+    eprintln!(
+        "legacy_bytes={} parse_ms={} migration_ms={} migrated_bytes={} reread_ms={} retained_output_bytes={}",
+        fs::metadata(source_path).unwrap().len(),
+        parse_duration.as_millis(),
+        migration_duration.as_millis(),
+        migrated_bytes,
+        reread_duration.as_millis(),
+        retained_output_bytes
+    );
+    assert!(migrated_bytes <= 25 * 1024 * 1024);
+    assert!(retained_output_bytes <= super::MAX_WINDOW_STYLIZED_OUTPUT_BYTES);
+    assert!(super::legacy_backup_path(&path).is_file());
 }
 
 #[test]

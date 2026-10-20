@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Adding a variant at the end of an enum is safe for bincode only in one
 /// direction, and the two ends here can be either older or newer than one
 /// another, so treat any change as a bump.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// A request from the `sessions` command to a running window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +24,9 @@ pub enum Request {
 
     /// Every terminal pane this instance has open.
     ListPanes,
+
+    /// Every unattached terminal session held by this instance's supervisor.
+    ListDetachedSessions,
 
     /// Hands one pane's session to the supervisor and closes the pane.
     DetachSession { session_id: u64 },
@@ -120,6 +123,11 @@ pub enum Response {
     /// The answer to [`Request::ListPanes`].
     Panes { panes: Vec<PaneSummary> },
 
+    /// The answer to [`Request::ListDetachedSessions`].
+    DetachedSessions {
+        sessions: Vec<DetachedSessionSummary>,
+    },
+
     /// The answer to [`Request::ListStoredSessions`].
     StoredSessions { sessions: Vec<StoredSessionInfo> },
 
@@ -206,6 +214,17 @@ pub struct PaneSummary {
     /// tab: [`Self::agent`] and [`Self::agent_session_id`] are then the saved ones, and nothing is
     /// running to move.
     pub agent_not_resumed: bool,
+}
+
+/// One terminal session an instance's supervisor holds without an attached pane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetachedSessionSummary {
+    pub session_id: u64,
+    pub title: String,
+    pub working_directory: String,
+    pub detached_for_seconds: u64,
+    pub shell_pid: u32,
+    pub session_uuid_hex: String,
 }
 
 /// One saved session that can be reopened.

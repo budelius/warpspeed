@@ -17,6 +17,10 @@ fn dashboard_deep_link_opens_only_the_fixed_managed_session() {
         intent.cli_arguments(),
         format!("agent-ctrl open {job_id} --environment staging")
     );
+    assert_eq!(
+        intent.takeover_cli_arguments(),
+        format!("agent-ctrl attach {job_id} --takeover --environment staging")
+    );
 }
 
 #[test]
@@ -1019,6 +1023,7 @@ fn list_runs_parses_repo_and_branch() {
                 node_name: None,
                 paused_at: None,
                 pause_allowed: None,
+                resume_allowed: None,
             },
             RunSummary {
                 job_id: "job-plain".to_owned(),
@@ -1031,6 +1036,7 @@ fn list_runs_parses_repo_and_branch() {
                 node_name: None,
                 paused_at: None,
                 pause_allowed: None,
+                resume_allowed: None,
             },
         ]
     );

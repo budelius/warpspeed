@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 use super::{
     AgentSessionPreviewMessage, AgentSessionPreviewRole, PastAgentSession, ResolvedPath,
     UnidentifiedAgent, current_dsh_log, describe, dsh_sessions, is_within_known, kimi_sessions,
-    match_for_restore, pi_candidates, resolve_folders, vibe_sessions,
+    match_for_restore, pi_candidates, resolve_folders, sessions_in_folder, vibe_sessions,
 };
 use crate::terminal::CLIAgent;
 
@@ -50,6 +50,43 @@ fn pi_transcript_supplies_session_identity_directory_and_title() {
             },
         ]
     );
+}
+
+#[test]
+fn a_folder_scan_returns_sessions_beyond_the_global_recent_limit() {
+    let root = tempfile::tempdir().expect("temporary root should be created");
+    let project = root.path().join("--project--");
+    fs::create_dir(&project).expect("project directory should be created");
+    let cwd = root.path().join("repo");
+    fs::create_dir(&cwd).expect("session directory should be created");
+    for index in 0..205 {
+        let header = serde_json::json!({
+            "type": "session",
+            "id": format!("session-{index}"),
+            "cwd": cwd,
+        });
+        fs::write(
+            project.join(format!(
+                "2026-09-28T09-53-21-590Z_file_session-{index}.jsonl"
+            )),
+            format!("{header}\n"),
+        )
+        .expect("transcript should be written");
+    }
+    let child_header = serde_json::json!({
+        "type": "session",
+        "id": "child-session",
+        "cwd": cwd.join("crate"),
+    });
+    fs::write(
+        project.join("2026-09-28T09-53-21-590Z_file_child-session.jsonl"),
+        format!("{child_header}\n"),
+    )
+    .expect("child transcript should be written");
+
+    let sessions = sessions_in_folder(pi_candidates(root.path()), &cwd);
+
+    assert_eq!(sessions.len(), 206);
 }
 
 #[test]

@@ -46,6 +46,7 @@ pub(crate) struct OutgoingWindowHandoff {
     ready_path: PathBuf,
     release_path: PathBuf,
     abort_path: PathBuf,
+    replacement_rejected: bool,
 }
 
 impl IncomingWindowHandoff {
@@ -100,6 +101,10 @@ impl IncomingWindowHandoff {
         write_marker(&self.ready_path).context("Failed to acknowledge window process handoff")
     }
 
+    pub(crate) fn reject(&self) -> Result<()> {
+        write_marker(&self.abort_path).context("Failed to reject window process handoff")
+    }
+
     /// Whether the original process released the window. `false` when it aborted the handoff
     /// or never answered.
     pub(crate) async fn wait_for_release(self) -> bool {
@@ -132,9 +137,11 @@ impl IncomingWindowHandoff {
 }
 
 impl OutgoingWindowHandoff {
-    pub(crate) async fn wait_until_ready(self) -> (Self, bool) {
-        let ready = wait_for_path(&self.ready_path, READY_TIMEOUT).await;
-        (self, ready)
+    pub(crate) async fn wait_until_ready(mut self) -> (Self, bool) {
+        let wait_result =
+            wait_for_path_or_abort(&self.ready_path, &self.abort_path, READY_TIMEOUT).await;
+        self.replacement_rejected = matches!(wait_result, ReadyWaitResult::Rejected);
+        (self, matches!(wait_result, ReadyWaitResult::Ready))
     }
 
     pub(crate) fn release(&self) -> Result<()> {
@@ -148,7 +155,9 @@ impl OutgoingWindowHandoff {
     /// launches a regular restore that fights this process for the window's sessions. One that
     /// never acknowledged is presumed stuck and killed.
     pub(crate) fn abort(mut self) {
-        let _ = write_marker(&self.abort_path);
+        if !self.replacement_rejected {
+            let _ = write_marker(&self.abort_path);
+        }
         if !self.ready_path.is_file() {
             let _ = self.child.kill();
         }
@@ -200,6 +209,7 @@ pub(crate) fn launch(
             request_path,
             ready_path,
             release_path,
+            replacement_rejected: false,
         }),
         Err(error) => {
             let _ = fs::remove_file(request_path);
@@ -247,15 +257,30 @@ fn abort_path(request_path: &Path) -> PathBuf {
     request_path.with_extension("abort")
 }
 
-async fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadyWaitResult {
+    Ready,
+    Rejected,
+    TimedOut,
+}
+
+async fn wait_for_path_or_abort(
+    path: &Path,
+    abort_path: &Path,
+    timeout: Duration,
+) -> ReadyWaitResult {
     let started = Instant::now();
     while started.elapsed() < timeout {
         if path.is_file() {
-            return true;
+            return ReadyWaitResult::Ready;
+        }
+        if abort_path.is_file() {
+            let _ = fs::remove_file(abort_path);
+            return ReadyWaitResult::Rejected;
         }
         Timer::after(POLL_INTERVAL).await;
     }
-    false
+    ReadyWaitResult::TimedOut
 }
 
 /// The executable the replacement process runs: this one.

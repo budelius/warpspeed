@@ -7,6 +7,7 @@ fn row(state: &str, pause_allowed: bool) -> FleetRow {
         agent: "staging-claude-interactive-rw".to_owned(),
         node_name: Some("agent-ctrl-node-0".to_owned()),
         pause_allowed,
+        resume_allowed: false,
         branch: None,
         branch_url: None,
         last_activity: None,

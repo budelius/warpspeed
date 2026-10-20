@@ -14,8 +14,8 @@ fn assert_round_trips<T: Serialize + DeserializeOwned + std::fmt::Debug>(value: 
 }
 
 #[test]
-fn protocol_version_is_three() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+fn protocol_version_is_four() {
+    assert_eq!(PROTOCOL_VERSION, 4);
 }
 
 #[test]
@@ -92,6 +92,21 @@ fn move_responses_round_trip() {
     assert_round_trips(Response::MoveState {
         step: "done:job-1".to_owned(),
         pushed_branch: Some("gitea/agentctrl/handoff-1".to_owned()),
+    });
+}
+
+#[test]
+fn detached_sessions_round_trip() {
+    assert_round_trips(Request::ListDetachedSessions);
+    assert_round_trips(Response::DetachedSessions {
+        sessions: vec![DetachedSessionSummary {
+            session_id: 7,
+            title: "Claude".to_owned(),
+            working_directory: "/srv/app".to_owned(),
+            detached_for_seconds: 60,
+            shell_pid: 42,
+            session_uuid_hex: "aabbccdd".to_owned(),
+        }],
     });
 }
 

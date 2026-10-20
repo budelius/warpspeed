@@ -82,9 +82,29 @@ fn remote_titles_distinguish_runs_of_the_same_repository() {
 }
 
 #[test]
-fn remote_actions_do_not_offer_resume_for_finished_runs() {
-    assert_eq!(managed_action_label("paused"), "Resume & attach");
-    assert_eq!(managed_action_label("running"), "Attach here");
-    assert_eq!(managed_action_label("failed"), "View transcript");
-    assert_eq!(managed_action_label("stopped"), "View transcript");
+fn remote_actions_resume_paused_and_recoverable_interrupted_runs() {
+    let paused = run("job-paused", "paused", "https://git/repo.git", "node-1");
+    let running = run("job-running", "running", "https://git/repo.git", "node-1");
+    let failed = run("job-failed", "failed", "https://git/repo.git", "node-1");
+    let mut recoverable = run(
+        "job-recoverable",
+        "interrupted",
+        "https://git/repo.git",
+        "node-1",
+    );
+    recoverable.resume_allowed = Some(true);
+    let interrupted = run(
+        "job-interrupted",
+        "interrupted",
+        "https://git/repo.git",
+        "node-1",
+    );
+
+    assert_eq!(managed_action_label(&paused), "Resume & attach");
+    assert_eq!(managed_action_label(&running), "Attach here");
+    assert!(managed_can_take_over(&running));
+    assert!(!managed_can_take_over(&paused));
+    assert_eq!(managed_action_label(&failed), "View transcript");
+    assert_eq!(managed_action_label(&recoverable), "Resume & attach");
+    assert_eq!(managed_action_label(&interrupted), "View transcript");
 }

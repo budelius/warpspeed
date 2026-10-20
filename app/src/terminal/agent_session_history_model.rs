@@ -1,6 +1,9 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
 use warpui::{Entity, ModelContext, SingletonEntity};
 
-use super::agent_session_history::{PastAgentSession, find_all_resumable};
+use super::agent_session_history::{PastAgentSession, find_all_resumable, find_all_resumable_in};
 use super::cli_agent_sessions::agent_process_scan::{ScannedAgent, scan};
 
 pub(crate) enum AgentSessionHistoryEvent {
@@ -15,6 +18,9 @@ fn scan_agents() -> Vec<ScannedAgent> {
 #[derive(Default)]
 pub(crate) struct AgentSessionHistoryModel {
     sessions: Vec<PastAgentSession>,
+    recent_sessions: Vec<PastAgentSession>,
+    folder_sessions: Vec<(PathBuf, Vec<PastAgentSession>)>,
+    refreshing_folders: HashSet<PathBuf>,
     scanned_agents: Vec<ScannedAgent>,
     loaded: bool,
     refreshing: bool,
@@ -40,6 +46,38 @@ impl AgentSessionHistoryModel {
 
     pub(crate) fn refresh(&mut self, ctx: &mut ModelContext<Self>) {
         self.refresh_snapshot_with(find_all_resumable, scan_agents, ctx);
+    }
+
+    /// Adds every recorded session in `folder` to the recent machine-wide snapshot.
+    pub(crate) fn refresh_folder(&mut self, folder: &Path, ctx: &mut ModelContext<Self>) {
+        if folder.as_os_str().is_empty() {
+            return;
+        }
+        let folder = folder.to_path_buf();
+        if !self.refreshing_folders.insert(folder.clone()) {
+            return;
+        }
+        let scan_folder = folder.clone();
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        ctx.background_executor()
+            .spawn(async move {
+                let _ = sender.send(find_all_resumable_in(&scan_folder));
+            })
+            .detach();
+        ctx.spawn(receiver, move |model, sessions, ctx| {
+            model.refreshing_folders.remove(&folder);
+            if let Ok(sessions) = sessions {
+                match model
+                    .folder_sessions
+                    .iter_mut()
+                    .find(|(scanned, _)| *scanned == folder)
+                {
+                    Some((_, current)) => *current = sessions,
+                    None => model.folder_sessions.push((folder, sessions)),
+                }
+                model.rebuild_sessions(ctx);
+            }
+        });
     }
 
     #[cfg(test)]
@@ -83,11 +121,32 @@ impl AgentSessionHistoryModel {
         scanned_agents: Vec<ScannedAgent>,
         ctx: &mut ModelContext<Self>,
     ) {
-        let changed =
-            !self.loaded || self.sessions != sessions || self.scanned_agents != scanned_agents;
-        self.sessions = sessions;
+        let was_loaded = self.loaded;
+        let agents_changed = self.scanned_agents != scanned_agents;
+        self.recent_sessions = sessions;
         self.scanned_agents = scanned_agents;
         self.loaded = true;
+        self.rebuild_sessions_if(!was_loaded || agents_changed, ctx);
+    }
+
+    fn rebuild_sessions(&mut self, ctx: &mut ModelContext<Self>) {
+        self.rebuild_sessions_if(false, ctx);
+    }
+
+    fn rebuild_sessions_if(&mut self, force_update: bool, ctx: &mut ModelContext<Self>) {
+        let mut sessions = self.recent_sessions.clone();
+        for (_, folder_sessions) in &self.folder_sessions {
+            for session in folder_sessions {
+                if !sessions.iter().any(|current| {
+                    current.agent == session.agent && current.session_id == session.session_id
+                }) {
+                    sessions.push(session.clone());
+                }
+            }
+        }
+        sessions.sort_by(|left, right| right.modified.cmp(&left.modified));
+        let changed = force_update || self.sessions != sessions;
+        self.sessions = sessions;
         if changed {
             ctx.emit(AgentSessionHistoryEvent::Updated);
         }

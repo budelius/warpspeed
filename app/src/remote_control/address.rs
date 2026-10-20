@@ -73,8 +73,8 @@ pub fn marker_path(pid: u32) -> PathBuf {
 /// supervisor, and a second directory chosen separately would be a second
 /// chance to get them wrong.
 ///
-/// What reaching this channel grants is worth stating. A caller can list panes,
-/// move a session between the supervisor and a window, and quit the app. It can
+/// What reaching this channel grants is worth stating. A caller can list panes and detached
+/// session metadata, move a session between the supervisor and a window, and quit the app. It can
 /// also read every pane's agent session id, agent directory, and transcript
 /// path, and move a pane's agent session to AgentCtrl unattended: that pushes a
 /// handoff commit of the working tree, untracked files that are not ignored

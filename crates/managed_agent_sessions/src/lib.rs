@@ -59,6 +59,16 @@ impl ManagedSessionDeepLink {
             self.job_id
         )
     }
+
+    pub fn takeover_cli_arguments(&self) -> String {
+        let environment = match self.environment {
+            ManagedEnvironment::Staging => "staging",
+        };
+        format!(
+            "agent-ctrl attach {} --takeover --environment {environment}",
+            self.job_id
+        )
+    }
 }
 
 pub fn parse_managed_session_deep_link(url: &reqwest::Url) -> Result<ManagedSessionDeepLink> {
@@ -477,6 +487,9 @@ pub struct RunSummary {
     /// Whether the dashboard would accept a pause now; absent from dashboards that predate it.
     #[serde(default)]
     pub pause_allowed: Option<bool>,
+    /// Whether the dashboard can resume or restart this run; absent from older dashboards.
+    #[serde(default)]
+    pub resume_allowed: Option<bool>,
 }
 
 pub fn list_repositories(environment: ManagedEnvironment) -> Result<Vec<RepositoryInfo>> {
@@ -1205,15 +1218,15 @@ pub fn pause_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunCon
     pause_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
 }
 
-/// Asks the dashboard to resume a paused run on a node with a free slot. With every node full it
-/// fails with an error [`is_node_at_capacity`] recognizes.
+/// Asks the dashboard to resume a paused run or restart a recoverable interrupted run on a node
+/// with a free slot. With every node full it fails with an error [`is_node_at_capacity`] recognizes.
 pub fn resume_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunControlOutcome> {
     validate_job_id(job_id)?;
     let token = dashboard_token()?;
     resume_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
 }
 
-/// Resumes a paused run and waits for the corresponding resumed event before returning.
+/// Resumes or restarts a recoverable run and waits for the corresponding resumed event.
 pub fn resume_run_and_wait(
     environment: ManagedEnvironment,
     job_id: &str,

@@ -48,6 +48,7 @@ impl AgentSessionSearchItem {
     fn state_hint(&self) -> Option<&'static str> {
         match self.row.state {
             AgentSessionState::Running { .. }
+            | AgentSessionState::RunningInOtherInstance { .. }
             | AgentSessionState::Pending { .. }
             | AgentSessionState::KnownProcess { .. }
             | AgentSessionState::HeldByOtherBuild { .. }

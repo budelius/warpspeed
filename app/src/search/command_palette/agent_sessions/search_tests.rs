@@ -130,6 +130,7 @@ fn rows_fall_into_this_pane_running_elsewhere_detached_and_past() {
         "/work/here",
         AgentSessionState::Detached {
             session_id: warp_core::SessionId::from(7),
+            instance_pid: None,
             holder: None,
         },
     );
@@ -197,7 +198,8 @@ fn section_titles() {
 
 fn pane(index: usize, cwd: &str) -> PaneAgentInput {
     PaneAgentInput {
-        locator: locator(index),
+        locator: Some(locator(index)),
+        remote_instance_pid: None,
         tab_index: index,
         tab_title: format!("tab {index}"),
         pane_number: 1,
@@ -261,7 +263,7 @@ fn run_agents_query(
 #[test]
 fn mixer_returns_agent_sessions_under_the_agents_filter() {
     let here = pane(0, "/work/here");
-    let focused = here.locator;
+    let focused = here.locator.unwrap();
     run_agents_query(
         (
             vec![here],

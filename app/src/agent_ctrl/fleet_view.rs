@@ -106,7 +106,8 @@ impl FleetView {
                 ctx.notify();
             }
             FleetModelEvent::PreviewUpdated => ctx.notify(),
-            FleetModelEvent::ResumeForAttachSucceeded { .. } => {}
+            FleetModelEvent::ResumeForAttachSucceeded { .. }
+            | FleetModelEvent::RestartForAttachSucceeded { .. } => {}
         });
         let mut view = Self {
             model,

@@ -391,7 +391,7 @@ fn managed_runs_are_searchable_and_keep_state_specific_actions() {
     assert_eq!(managed_action_label(run), "Resume & attach");
     assert_eq!(
         managed_action_label(&managed("job-done", "completed")),
-        "View transcript"
+        "Restart from branch"
     );
     assert_eq!(
         managed_action_label(&managed("job-running", "running")),

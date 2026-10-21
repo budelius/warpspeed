@@ -65,13 +65,45 @@ pub(crate) fn managed_can_take_over(run: &RunSummary) -> bool {
     matches!(run.state.as_str(), "active" | "running" | "waiting")
 }
 
+pub(crate) fn managed_can_restart(run: &RunSummary) -> bool {
+    is_finished_state(&run.state)
+        && !managed_can_resume(run)
+        && run
+            .repo_url
+            .as_deref()
+            .is_some_and(|repo_url| !repo_url.trim().is_empty())
+        && run
+            .branch
+            .as_deref()
+            .is_some_and(|branch| !branch.trim().is_empty())
+        && !run.agent_name.trim().is_empty()
+}
+
 pub(crate) fn managed_action_label(run: &RunSummary) -> &'static str {
     if managed_can_resume(run) {
         "Resume & attach"
+    } else if managed_can_restart(run) {
+        "Restart from branch"
     } else if is_finished_state(&run.state) {
         "View transcript"
     } else {
         "Attach here"
+    }
+}
+
+pub(crate) fn managed_recovery_notice(run: &RunSummary) -> Option<&'static str> {
+    if !is_finished_state(&run.state) || managed_can_resume(run) {
+        None
+    } else if managed_can_restart(run) {
+        Some(
+            "AgentCtrl has no recoverable checkpoint for this run. Restart from branch starts a \
+             new agent conversation from its recorded code branch.",
+        )
+    } else {
+        Some(
+            "AgentCtrl has no recoverable checkpoint for this run. Its transcript remains \
+             available, but the agent conversation cannot be resumed.",
+        )
     }
 }
 

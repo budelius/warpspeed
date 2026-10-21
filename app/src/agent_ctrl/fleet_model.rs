@@ -39,6 +39,8 @@ pub struct FleetBackend {
     /// Starts a run of an AgentCtrl profile (first argument) on a repository URL (second),
     /// returning its job id.
     pub start: fn(&str, &str) -> anyhow::Result<String>,
+    /// Starts a new run from an existing run's branch.
+    pub restart: fn(&str, &str, &str) -> anyhow::Result<String>,
     pub stop: fn(&str) -> anyhow::Result<()>,
     pub pause: fn(&str) -> anyhow::Result<()>,
     pub resume: fn(&str) -> anyhow::Result<()>,
@@ -62,6 +64,15 @@ impl FleetBackend {
                     profile,
                     repo_url,
                     None,
+                    None,
+                )
+            },
+            restart: |profile, repo_url, branch| {
+                managed_agent_sessions::start_run_on_repo(
+                    ManagedEnvironment::Staging,
+                    profile,
+                    repo_url,
+                    Some(branch),
                     None,
                 )
             },
@@ -148,7 +159,15 @@ impl FleetRow {
 pub enum FleetModelEvent {
     Updated,
     PreviewUpdated,
-    ResumeForAttachSucceeded { job_id: String, requester: EntityId },
+    ResumeForAttachSucceeded {
+        job_id: String,
+        requester: EntityId,
+    },
+    RestartForAttachSucceeded {
+        source_job_id: String,
+        job_id: String,
+        requester: EntityId,
+    },
 }
 
 pub struct FleetModel {
@@ -453,6 +472,38 @@ impl FleetModel {
                 if let Err(error) = result {
                     me.action_error = Some(start_failure_message(&error));
                     ctx.emit(FleetModelEvent::Updated);
+                }
+                me.refresh(ctx);
+            },
+        );
+    }
+
+    /// Starts a new run on the repository and branch from `source_job_id`, then tells only the
+    /// requesting view to attach to the new job.
+    pub fn restart_for_attach(
+        &mut self,
+        source_job_id: String,
+        profile: String,
+        repo_url: String,
+        branch: String,
+        requester: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.action_error = None;
+        let restart = self.backend.restart;
+        ctx.spawn(
+            async move { blocking::unblock(move || restart(&profile, &repo_url, &branch)).await },
+            move |me, result, ctx| {
+                match result {
+                    Ok(job_id) => ctx.emit(FleetModelEvent::RestartForAttachSucceeded {
+                        source_job_id,
+                        job_id,
+                        requester,
+                    }),
+                    Err(error) => {
+                        me.action_error = Some(start_failure_message(&error));
+                        ctx.emit(FleetModelEvent::Updated);
+                    }
                 }
                 me.refresh(ctx);
             },

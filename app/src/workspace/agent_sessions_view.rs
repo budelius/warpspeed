@@ -28,8 +28,9 @@ use warpui::{
 
 use crate::agent_ctrl::fleet_model::{FleetModel, FleetModelEvent, is_finished_state};
 use crate::agent_ctrl::session_picker::{
-    managed_action_label, managed_agent_label, managed_can_resume, managed_can_take_over,
-    managed_run_detail, managed_run_title, matching_runs,
+    managed_action_label, managed_agent_label, managed_can_restart, managed_can_resume,
+    managed_can_take_over, managed_recovery_notice, managed_run_detail, managed_run_title,
+    matching_runs,
 };
 use crate::appearance::Appearance;
 use crate::editor::{
@@ -529,7 +530,18 @@ impl AgentSessionsView {
                 me.pending_managed_open = None;
                 ctx.emit(AgentSessionsViewEvent::OpenManaged(job_id.clone()))
             }
-            FleetModelEvent::ResumeForAttachSucceeded { .. } => {}
+            FleetModelEvent::RestartForAttachSucceeded {
+                source_job_id,
+                job_id,
+                requester,
+            } if *requester == ctx.view_id()
+                && me.pending_managed_open.as_deref() == Some(source_job_id) =>
+            {
+                me.pending_managed_open = None;
+                ctx.emit(AgentSessionsViewEvent::OpenManaged(job_id.clone()))
+            }
+            FleetModelEvent::ResumeForAttachSucceeded { .. }
+            | FleetModelEvent::RestartForAttachSucceeded { .. } => {}
         });
 
         let filter_states = SessionFilter::ALL
@@ -1015,6 +1027,26 @@ impl AgentSessionsView {
                     model.resume_for_attach(run.job_id, requester, ctx)
                 });
             }
+            ViewRow::Managed { run } if managed_can_restart(&run) => {
+                let Some(repo_url) = run.repo_url else {
+                    return;
+                };
+                let Some(branch) = run.branch else {
+                    return;
+                };
+                let requester = ctx.view_id();
+                self.pending_managed_open = Some(run.job_id.clone());
+                self.fleet_model.update(ctx, |model, ctx| {
+                    model.restart_for_attach(
+                        run.job_id,
+                        run.agent_name,
+                        repo_url,
+                        branch,
+                        requester,
+                        ctx,
+                    )
+                });
+            }
             ViewRow::Managed { run } if is_finished_state(&run.state) => {
                 self.request_selected_preview(true, ctx);
             }
@@ -1194,6 +1226,9 @@ impl AgentSessionsView {
                 }
             }
             ViewRow::Managed { run } => {
+                if let Some(notice) = managed_recovery_notice(run) {
+                    content.add_child(render_preview_message("Recovery", notice, app));
+                }
                 let model = self.fleet_model.as_ref(app);
                 if model.is_previewing(&run.job_id) {
                     content.add_child(preview_placeholder("Loading transcript…", app));

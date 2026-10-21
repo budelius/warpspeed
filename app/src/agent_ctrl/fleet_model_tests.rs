@@ -181,6 +181,10 @@ fn no_start(_: &str, _: &str) -> anyhow::Result<String> {
     panic!("not started in these tests")
 }
 
+fn no_restart(_: &str, _: &str, _: &str) -> anyhow::Result<String> {
+    panic!("not restarted in these tests")
+}
+
 fn no_stop(_: &str) -> anyhow::Result<()> {
     panic!("not stopped in these tests")
 }
@@ -216,6 +220,7 @@ fn backend(list: fn() -> anyhow::Result<FleetSnapshot>) -> FleetBackend {
     FleetBackend {
         list,
         start: no_start,
+        restart: no_restart,
         stop: no_stop,
         pause: no_pause,
         resume: no_resume,
@@ -281,6 +286,59 @@ fn resume_for_attach_announces_success_only_after_agent_ctrl_accepts_it() {
         });
 
         assert_eq!(events.next().await.as_deref(), Some("job-paused"));
+    });
+}
+
+fn restart_expected_branch(profile: &str, repo_url: &str, branch: &str) -> anyhow::Result<String> {
+    assert_eq!(profile, "staging-claude-interactive-rw");
+    assert_eq!(repo_url, WARP);
+    assert_eq!(branch, "agent/job-old");
+    Ok("job-new".to_owned())
+}
+
+#[test]
+fn restart_for_attach_starts_on_the_old_branch_and_opens_the_new_job() {
+    App::test((), |mut app| async move {
+        let model = app.add_model(|_| {
+            FleetModel::with_backend(FleetBackend {
+                restart: restart_expected_branch,
+                ..backend(list_two_runs)
+            })
+        });
+        let requester = warpui::EntityId::new();
+        let (sender, mut events) = futures::channel::mpsc::unbounded();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&model, move |_, event, _| {
+                if let FleetModelEvent::RestartForAttachSucceeded {
+                    source_job_id,
+                    job_id,
+                    requester: actual_requester,
+                } = event
+                {
+                    let _ = sender.unbounded_send((
+                        source_job_id.clone(),
+                        job_id.clone(),
+                        *actual_requester,
+                    ));
+                }
+            });
+        });
+
+        model.update(&mut app, |model, ctx| {
+            model.restart_for_attach(
+                "job-old".to_owned(),
+                "staging-claude-interactive-rw".to_owned(),
+                WARP.to_owned(),
+                "agent/job-old".to_owned(),
+                requester,
+                ctx,
+            )
+        });
+
+        assert_eq!(
+            events.next().await,
+            Some(("job-old".to_owned(), "job-new".to_owned(), requester))
+        );
     });
 }
 

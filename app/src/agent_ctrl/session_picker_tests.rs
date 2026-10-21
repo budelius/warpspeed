@@ -82,10 +82,12 @@ fn remote_titles_distinguish_runs_of_the_same_repository() {
 }
 
 #[test]
-fn remote_actions_resume_paused_and_recoverable_interrupted_runs() {
+fn remote_actions_resume_recoverable_runs_and_restart_terminal_branches() {
     let paused = run("job-paused", "paused", "https://git/repo.git", "node-1");
     let running = run("job-running", "running", "https://git/repo.git", "node-1");
     let failed = run("job-failed", "failed", "https://git/repo.git", "node-1");
+    let mut restartable = run("job-stopped", "stopped", "https://git/repo.git", "node-1");
+    restartable.branch = Some("agent/job-stopped".to_owned());
     let mut recoverable = run(
         "job-recoverable",
         "interrupted",
@@ -93,12 +95,13 @@ fn remote_actions_resume_paused_and_recoverable_interrupted_runs() {
         "node-1",
     );
     recoverable.resume_allowed = Some(true);
-    let interrupted = run(
+    let mut interrupted = run(
         "job-interrupted",
         "interrupted",
         "https://git/repo.git",
         "node-1",
     );
+    interrupted.branch = Some("agent/job-interrupted".to_owned());
 
     assert_eq!(managed_action_label(&paused), "Resume & attach");
     assert_eq!(managed_action_label(&running), "Attach here");
@@ -106,5 +109,21 @@ fn remote_actions_resume_paused_and_recoverable_interrupted_runs() {
     assert!(!managed_can_take_over(&paused));
     assert_eq!(managed_action_label(&failed), "View transcript");
     assert_eq!(managed_action_label(&recoverable), "Resume & attach");
-    assert_eq!(managed_action_label(&interrupted), "View transcript");
+    assert_eq!(managed_action_label(&interrupted), "Restart from branch");
+    assert_eq!(managed_action_label(&restartable), "Restart from branch");
+    assert_eq!(managed_recovery_notice(&recoverable), None);
+    assert_eq!(
+        managed_recovery_notice(&interrupted),
+        Some(
+            "AgentCtrl has no recoverable checkpoint for this run. Restart from branch starts a \
+             new agent conversation from its recorded code branch."
+        )
+    );
+    assert_eq!(
+        managed_recovery_notice(&failed),
+        Some(
+            "AgentCtrl has no recoverable checkpoint for this run. Its transcript remains \
+             available, but the agent conversation cannot be resumed."
+        )
+    );
 }

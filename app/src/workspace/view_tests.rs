@@ -7079,6 +7079,7 @@ fn register_fleet_test_models(app: &mut App) {
             FleetModel::with_backend(FleetBackend {
                 list: list_no_runs,
                 start: start_nothing,
+                restart: restart_nothing,
                 stop: stop_nothing,
                 pause: pause_nothing,
                 resume: resume_nothing,
@@ -8387,6 +8388,7 @@ fn initialize_app_for_run_list(
         FleetModel::with_backend(FleetBackend {
             list,
             start: start_nothing,
+            restart: restart_nothing,
             stop: stop_nothing,
             pause: pause_nothing,
             resume: resume_nothing,
@@ -9726,6 +9728,7 @@ fn fleet_row_pause_and_resume_reach_agent_ctrl() {
             FleetModel::with_backend(FleetBackend {
                 list: list_no_runs,
                 start: start_nothing,
+                restart: restart_nothing,
                 stop: stop_nothing,
                 pause: pause_recording,
                 resume: resume_recording,

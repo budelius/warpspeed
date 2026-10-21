@@ -7318,13 +7318,13 @@ fn move_session_is_not_offered_for_unsupported_remote_or_unidentified_sessions()
 }
 
 #[test]
-fn move_session_is_not_offered_without_a_local_shell_directory() {
+fn move_session_uses_the_agents_directory_when_the_shell_has_none() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
         let cwd = TempDir::new().unwrap();
         let workspace = mock_workspace(&mut app);
 
-        workspace.update(&mut app, |workspace, ctx| {
+        let terminal_view_id = workspace.update(&mut app, |workspace, ctx| {
             let terminal_view = workspace
                 .focused_terminal_view(ctx)
                 .expect("mock workspace has a focused terminal pane");
@@ -7336,9 +7336,17 @@ fn move_session_is_not_offered_without_a_local_shell_directory() {
                 cwd.path(),
                 ctx,
             );
+            terminal_view.id()
         });
 
-        assert!(!move_session_is_offered(&workspace, &mut app));
+        assert!(move_session_is_offered(&workspace, &mut app));
+        let source = app.read(|ctx| {
+            workspace
+                .as_ref(ctx)
+                .agent_ctrl_move_source(terminal_view_id, None, ctx)
+                .expect("the agent-reported directory makes the session movable")
+        });
+        assert_eq!(source.cwd, cwd.path());
     });
 }
 
@@ -8349,6 +8357,10 @@ fn list_associated_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::Fleet
 
 fn start_nothing(_: &str, _: &str) -> anyhow::Result<String> {
     anyhow::bail!("tests never start a run")
+}
+
+fn restart_nothing(_: &str, _: &str, _: &str) -> anyhow::Result<String> {
+    anyhow::bail!("tests never restart a run")
 }
 
 fn stop_nothing(_: &str) -> anyhow::Result<()> {

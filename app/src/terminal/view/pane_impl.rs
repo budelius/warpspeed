@@ -1,5 +1,7 @@
 //! This module contains the implementation of `BackingView` for `TerminalView`, as well as
 //! business logic for integrating the terminal view with the pane infra (`crate::pane_group`).
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use std::path::Path;
 use std::path::PathBuf;
 
 use settings::Setting as _;
@@ -678,8 +680,8 @@ impl TerminalView {
 
     /// The local agent session in this pane that can be moved into an AgentCtrl managed run.
     ///
-    /// Its directory is the shell's, else `fallback_cwd`: a restored pane, or one whose directory
-    /// has gone, still holds the agent.
+    /// Its directory is the shell's, otherwise the agent's hook-reported directory or a validated
+    /// `fallback_cwd`: a restored pane, or one whose directory has gone, still holds the agent.
     ///
     /// Locks the terminal model, so callers must not already hold that lock.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -692,23 +694,26 @@ impl TerminalView {
         // the session file stays keyed by the directory the agent was launched from.
         let cwd = self
             .active_session_path_if_local(ctx)
-            .or_else(|| self.agent_recorded_cwd(fallback_cwd?, ctx));
+            .or_else(|| self.agent_recorded_cwd(fallback_cwd, ctx));
         self.agent_ctrl_move_source_in(cwd, ctx)
     }
 
-    /// `cwd` only if this pane's agent itself recorded it, as its hook-reported directory or in
-    /// its session history, so a remote-control caller cannot choose which repository is pushed.
+    /// Returns the agent's hook-reported directory, or validates a caller-recovered directory
+    /// against the hook and session history so the caller cannot choose which repository is pushed.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
-    fn agent_recorded_cwd(&self, cwd: &std::path::Path, ctx: &AppContext) -> Option<PathBuf> {
+    fn agent_recorded_cwd(
+        &self,
+        recovered_cwd: Option<&std::path::Path>,
+        ctx: &AppContext,
+    ) -> Option<PathBuf> {
         let sessions = CLIAgentSessionsModel::as_ref(ctx);
         let session = sessions.session(self.view_id)?;
+        let hook_cwd = session.session_context.cwd.as_deref().map(Path::new);
+        let Some(cwd) = recovered_cwd else {
+            return hook_cwd.map(Path::to_path_buf);
+        };
         let session_id = sessions.session_id(self.view_id)?;
-        let hook_reported = session
-            .session_context
-            .cwd
-            .as_deref()
-            .is_some_and(|hook_cwd| std::path::Path::new(hook_cwd) == cwd);
-        let recorded = hook_reported
+        let recorded = hook_cwd == Some(cwd)
             || agent_session_history::find_all(session.agent)
                 .iter()
                 .any(|past| past.session_id == session_id && past.cwd == cwd);
@@ -747,10 +752,11 @@ impl TerminalView {
         let repo = local_path
             .as_ref()
             .and_then(|_| self.current_local_repo_path());
+        let move_path = local_path.or_else(|| self.agent_recorded_cwd(None, ctx));
         AgentCtrlPaneActions {
             can_start_agent: repo.is_some(),
             can_move_all: repo.and_then(std::path::Path::parent).is_some(),
-            can_move_session: self.agent_ctrl_move_source_in(local_path, ctx).is_some(),
+            can_move_session: self.agent_ctrl_move_source_in(move_path, ctx).is_some(),
         }
     }
 

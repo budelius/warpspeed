@@ -207,9 +207,9 @@ fn move_session_starts_a_move_for_a_qualifying_pane() {
 }
 
 /// A pane whose shell reports no directory -- a restored pane, or one whose directory is gone --
-/// still moves when the caller recovered the agent's directory from its hooks or its history.
+/// still moves using the agent's hook-reported directory.
 #[test]
-fn move_session_uses_the_callers_directory_when_the_pane_has_none() {
+fn move_session_uses_the_agents_directory_when_the_pane_has_none() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
         let agent_cwd = TempDir::new().unwrap();
@@ -229,25 +229,11 @@ fn move_session_uses_the_callers_directory_when_the_pane_has_none() {
             ""
         );
 
-        let without_cwd = app.update(|ctx| {
-            handle(
-                Request::MoveSessionToAgentCtrl {
-                    terminal_view_id: terminal_view_id.as_u64(),
-                    cwd: None,
-                },
-                ctx,
-            )
-        });
-        assert!(
-            matches!(without_cwd, Response::Failed { .. }),
-            "{without_cwd:?}"
-        );
-
         let (response, step) = app.update(|ctx| {
             let response = handle(
                 Request::MoveSessionToAgentCtrl {
                     terminal_view_id: terminal_view_id.as_u64(),
-                    cwd: Some(agent_cwd_text.clone()),
+                    cwd: None,
                 },
                 ctx,
             );

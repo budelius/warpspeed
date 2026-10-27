@@ -1245,6 +1245,7 @@ impl CurrentPrompt {
             );
         }
 
+        chips.retain(|chip_kind| chip_kind.to_chip().is_some());
         chips
     }
     /// Chips whose values we should actively maintain in state.

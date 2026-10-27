@@ -246,13 +246,6 @@ pub fn shell_git_line_changes() -> ShellCommandGenerator {
     ShellCommandGenerator::new(command, Some(vec!["git".to_owned()]))
 }
 
-pub fn kubernetes_current_context() -> ShellCommandGenerator {
-    ShellCommandGenerator::new(
-        ShellCommand::portable("kubectl config current-context"),
-        Some(vec!["kubectl".to_owned()]),
-    )
-}
-
 /// Generator function that shows the current svn "branch".
 /// Since svn uses directories for different branches and tags,
 /// we take the latest directory of the working copy as the branch/tag name.

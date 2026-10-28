@@ -39,6 +39,76 @@ fn test_files() -> EphemeralSshFiles {
 }
 
 #[test]
+fn gateway_ticket_accepts_only_the_pinned_short_lived_endpoint() {
+    let now = DateTime::parse_from_rfc3339("2026-10-28T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let ticket = TerminalGatewayTicket {
+        protocol: TERMINAL_GATEWAY_PROTOCOL.to_string(),
+        ticket: "payload.signature".to_string(),
+        expires_at: "2026-10-28T12:00:30Z".to_string(),
+        websocket_url: TERMINAL_GATEWAY_SOCKET_URL.to_string(),
+    };
+
+    assert!(validate_gateway_ticket(&ticket, now).is_ok());
+
+    let wrong_endpoint = TerminalGatewayTicket {
+        websocket_url: "wss://example.test/api/agent-control/terminal/socket".to_string(),
+        ..ticket
+    };
+    assert!(validate_gateway_ticket(&wrong_endpoint, now).is_err());
+}
+
+#[test]
+fn gateway_ticket_rejects_expired_or_header_unsafe_credentials() {
+    let now = DateTime::parse_from_rfc3339("2026-10-28T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let expired = TerminalGatewayTicket {
+        protocol: TERMINAL_GATEWAY_PROTOCOL.to_string(),
+        ticket: "payload.signature".to_string(),
+        expires_at: "2026-10-28T12:00:00Z".to_string(),
+        websocket_url: TERMINAL_GATEWAY_SOCKET_URL.to_string(),
+    };
+    assert!(validate_gateway_ticket(&expired, now).is_err());
+
+    let unsafe_ticket = TerminalGatewayTicket {
+        ticket: "payload,another-protocol".to_string(),
+        expires_at: "2026-10-28T12:00:30Z".to_string(),
+        ..expired
+    };
+    assert!(validate_gateway_ticket(&unsafe_ticket, now).is_err());
+}
+
+#[test]
+fn local_terminal_input_detaches_only_on_control_close_bracket() {
+    let detach = Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+    assert_eq!(local_terminal_input(detach), LocalTerminalInput::Detach);
+
+    let close_bracket = Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
+    assert_eq!(
+        local_terminal_input(close_bracket),
+        LocalTerminalInput::Bytes(b"]".to_vec())
+    );
+}
+
+#[test]
+fn terminal_keys_are_encoded_for_the_remote_pty() {
+    assert_eq!(
+        encode_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+        Some(b"\x1b[1;5A".to_vec())
+    );
+    assert_eq!(
+        encode_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        Some(vec![0x03])
+    );
+    assert_eq!(
+        encode_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+        Some(b"\x1bx".to_vec())
+    );
+}
+
+#[test]
 fn endpoint_validation_accepts_only_the_fixed_private_target() {
     assert!(validate_endpoint(&endpoint()).is_ok());
     for invalid in [

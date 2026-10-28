@@ -3,8 +3,8 @@ use warpui::{App, SingletonEntity};
 
 use super::Prompt;
 use crate::auth::AuthStateProvider;
-use crate::context_chips::ContextChipKind;
 use crate::context_chips::prompt::{PromptConfiguration, PromptSelection};
+use crate::context_chips::{ContextChipKind, available_chips};
 use crate::settings::WarpPromptSeparator;
 use crate::terminal::session_settings::SessionSettings;
 use crate::test_util::settings::initialize_settings_for_tests;
@@ -63,6 +63,21 @@ fn test_prompt_config_after_nomalization() {
     assert_eq!(
         normalized.chip_kinds(),
         vec![ContextChipKind::ShellGitBranch]
+    );
+}
+
+#[test]
+fn test_kubernetes_context_chip_is_disabled() {
+    assert!(ContextChipKind::KubernetesContext.to_chip().is_none());
+    assert!(
+        !available_chips().contains(&ContextChipKind::KubernetesContext),
+        "the disabled chip must not be offered in prompt settings"
+    );
+    assert!(
+        !PromptConfiguration::default_prompt()
+            .chip_kinds()
+            .contains(&ContextChipKind::KubernetesContext),
+        "the disabled chip must not be part of the default prompt"
     );
 }
 

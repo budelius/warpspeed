@@ -103,6 +103,24 @@ fn listed_pane(terminal_view_id: EntityId, app: &mut App) -> PaneSummary {
 }
 
 #[test]
+fn list_windows_includes_the_workspace_window() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let workspace_window = app.read(|ctx| workspace.window_id(ctx));
+
+        let Response::Windows { windows } = app.update(|ctx| handle(Request::ListWindows, ctx))
+        else {
+            panic!("expected windows");
+        };
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_id, workspace_window.to_string());
+        assert!(windows[0].has_workspace);
+    });
+}
+
+#[test]
 fn list_panes_reports_the_agent_session_of_each_pane() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);

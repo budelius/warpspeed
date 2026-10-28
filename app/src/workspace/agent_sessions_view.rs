@@ -48,7 +48,11 @@ use crate::terminal::agent_sessions_index::{
 };
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::cli_agent_sessions::agent_process_scan::{SavedPane, ScannedAgent};
-use crate::terminal::detached_sessions::DetachedListError;
+use crate::terminal::detached_sessions::{DetachedListError, humanize_age};
+use crate::terminal::system_overview::{
+    BuildOverview, InstanceOverview, PaneOverview, SupervisorOverview, SystemOverview,
+    WindowOverview,
+};
 use crate::util::time_format::format_approx_duration_from_now;
 use crate::util::truncation::truncate_from_end;
 use crate::view_components::action_button::{ActionButtonTheme, SecondaryTheme};
@@ -65,15 +69,17 @@ pub(crate) enum SessionFilter {
     RunningAndDetached,
     AgentCtrl,
     Past,
+    System,
 }
 
 impl SessionFilter {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::All,
         Self::CurrentDirectory,
         Self::RunningAndDetached,
         Self::AgentCtrl,
         Self::Past,
+        Self::System,
     ];
 
     fn label(self) -> &'static str {
@@ -83,6 +89,7 @@ impl SessionFilter {
             Self::RunningAndDetached => "Running & detached",
             Self::AgentCtrl => "AgentCtrl",
             Self::Past => "Past sessions",
+            Self::System => "System overview",
         }
     }
 }
@@ -278,7 +285,7 @@ pub(crate) fn view_rows(
         SessionFilter::All => true,
         SessionFilter::CurrentDirectory => is_current(row),
         SessionFilter::RunningAndDetached => is_running_or_detached(row),
-        SessionFilter::AgentCtrl => false,
+        SessionFilter::AgentCtrl | SessionFilter::System => false,
         SessionFilter::Past => matches!(row.state, AgentSessionState::Past),
     };
     let has_exact_match = rows
@@ -440,6 +447,7 @@ pub enum AgentSessionsViewAction {
     StartOnAgentCtrl(RowKey),
     TakeOverManaged(RowKey),
     SetFilter(SessionFilter),
+    RefreshSystem,
     Close,
 }
 
@@ -495,6 +503,11 @@ pub struct AgentSessionsView {
     pending_managed_open: Option<String>,
     pending_process_end: Option<u32>,
     process_end_errors: HashMap<u32, String>,
+    system_overview: Option<SystemOverview>,
+    system_overview_loading: bool,
+    system_overview_error: Option<String>,
+    system_scroll_state: ClippedScrollStateHandle,
+    system_refresh_state: MouseStateHandle,
 }
 
 impl AgentSessionsView {
@@ -576,6 +589,11 @@ impl AgentSessionsView {
             pending_managed_open: None,
             pending_process_end: None,
             process_end_errors: HashMap::new(),
+            system_overview: None,
+            system_overview_loading: false,
+            system_overview_error: None,
+            system_scroll_state: ClippedScrollStateHandle::new(),
+            system_refresh_state: MouseStateHandle::default(),
         }
     }
 
@@ -977,6 +995,29 @@ impl AgentSessionsView {
         self.pending_process_end = None;
         self.preferred_managed_job_id = None;
         self.rebuild_view_rows(ctx);
+        if filter == SessionFilter::System && self.system_overview.is_none() {
+            self.refresh_system_overview(ctx);
+        }
+    }
+
+    fn refresh_system_overview(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.system_overview_loading {
+            return;
+        }
+        self.system_overview_loading = true;
+        self.system_overview_error = None;
+        ctx.spawn(
+            async { tokio::task::spawn_blocking(crate::terminal::system_overview::collect).await },
+            |me, result, ctx| {
+                me.system_overview_loading = false;
+                match result {
+                    Ok(overview) => me.system_overview = Some(overview),
+                    Err(error) => me.system_overview_error = Some(error.to_string()),
+                }
+                ctx.notify();
+            },
+        );
+        ctx.notify();
     }
 
     fn activate(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
@@ -1121,6 +1162,96 @@ impl AgentSessionsView {
             Fill::None,
         )
         .with_overlayed_scrollbar()
+        .finish()
+    }
+
+    fn render_system_overview(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let font = appearance.ui_font_family();
+        let font_size = appearance.ui_font_size();
+        let main_color = theme.active_ui_text_color().into_solid();
+        let sub_color = theme.sub_text_color(theme.surface_2()).into_solid();
+        let summary = self.system_overview.as_ref().map_or_else(
+            || "Discovering the running Warp system…".to_owned(),
+            |overview| {
+                format!(
+                    "{} processes · {} supervisors · {} windows · {} panes",
+                    overview.process_count(),
+                    overview.supervisor_count(),
+                    overview.window_count(),
+                    overview.pane_count(),
+                )
+            },
+        );
+        let refresh = Hoverable::new(self.system_refresh_state.clone(), move |state| {
+            render_button("Refresh", state.is_hovered(), app)
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(AgentSessionsViewAction::RefreshSystem);
+        })
+        .finish();
+        let mut content = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(12.)
+            .with_child(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(
+                        Expanded::new(
+                            1.,
+                            Flex::column()
+                                .with_spacing(3.)
+                                .with_child(
+                                    Text::new("Running Warp system", font, font_size + 2.)
+                                        .with_style(Properties::default().weight(Weight::Bold))
+                                        .with_color(main_color)
+                                        .finish(),
+                                )
+                                .with_child(
+                                    Text::new(summary, font, font_size - 1.)
+                                        .with_color(sub_color)
+                                        .finish(),
+                                )
+                                .finish(),
+                        )
+                        .finish(),
+                    )
+                    .with_child(refresh)
+                    .finish(),
+            );
+        if self.system_overview_loading {
+            content.add_child(preview_placeholder(
+                "Refreshing processes and supervisors…",
+                app,
+            ));
+        }
+        if let Some(error) = &self.system_overview_error {
+            content.add_child(preview_error(error, app));
+        }
+        match &self.system_overview {
+            Some(overview) if overview.builds.is_empty() => content.add_child(preview_placeholder(
+                "No running Warp processes were discovered.",
+                app,
+            )),
+            Some(overview) => {
+                for build in &overview.builds {
+                    content.add_child(render_system_build(build, app));
+                }
+            }
+            None => {}
+        }
+        ClippedScrollable::vertical(
+            self.system_scroll_state.clone(),
+            Container::new(content.finish())
+                .with_uniform_padding(20.)
+                .finish(),
+            ScrollbarWidth::Auto,
+            theme.nonactive_ui_detail().into(),
+            theme.active_ui_detail().into(),
+            Fill::None,
+        )
         .finish()
     }
 
@@ -1341,6 +1472,323 @@ impl AgentSessionsView {
         }
         has_action.then(|| actions.finish())
     }
+}
+
+fn render_system_build(build: &BuildOverview, app: &AppContext) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font = appearance.ui_font_family();
+    let font_size = appearance.ui_font_size();
+    let main_color = theme.active_ui_text_color().into_solid();
+    let sub_color = theme.sub_text_color(theme.surface_2()).into_solid();
+    let build_title = build.profile.as_ref().map_or_else(
+        || format!("Warp build {}", build.version),
+        |profile| format!("Warp build {} · profile {profile}", build.version),
+    );
+    let mut content = Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(8.)
+        .with_child(
+            Text::new(build_title, font, font_size + 1.)
+                .with_style(Properties::default().weight(Weight::Bold))
+                .with_color(main_color)
+                .finish(),
+        )
+        .with_child(
+            Text::new(build.executable.display().to_string(), font, font_size - 1.)
+                .with_color(sub_color)
+                .finish(),
+        );
+    for instance in &build.instances {
+        content.add_child(render_system_instance(instance, app));
+    }
+    if let Some(supervisor) = &build.supervisor {
+        content.add_child(render_system_supervisor(
+            supervisor,
+            &build.supervisor_pids,
+            app,
+        ));
+    } else if !build.supervisor_pids.is_empty() {
+        content.add_child(system_group(
+            format!(
+                "Supervisor process · PID {}",
+                build
+                    .supervisor_pids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            build
+                .supervisor_error
+                .as_deref()
+                .unwrap_or("The process is running, but its supervisor channel did not answer."),
+            Vec::new(),
+            app,
+        ));
+    }
+    if let Some(error) = &build.supervisor_error
+        && build.supervisor_pids.is_empty()
+    {
+        content.add_child(preview_error(error, app));
+    }
+    if !build.other_process_pids.is_empty() {
+        content.add_child(system_row(
+            "Other Warp processes".to_owned(),
+            format!(
+                "PID {}",
+                build
+                    .other_process_pids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            app,
+        ));
+    }
+    Container::new(content.finish())
+        .with_uniform_padding(14.)
+        .with_background(theme.surface_overlay_1())
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+        .finish()
+}
+
+fn render_system_instance(instance: &InstanceOverview, app: &AppContext) -> Box<dyn Element> {
+    let pane_count = instance
+        .windows
+        .iter()
+        .map(|window| window.panes.len())
+        .sum::<usize>();
+    let mut children = Vec::new();
+    if let Some(error) = &instance.error {
+        children.push(preview_error(error, app));
+    }
+    for window in &instance.windows {
+        children.push(render_system_window(window, app));
+    }
+    system_group(
+        format!("App process · PID {}", instance.pid),
+        &format!(
+            "{} · {} windows · {pane_count} panes",
+            instance.version,
+            instance.windows.len()
+        ),
+        children,
+        app,
+    )
+}
+
+fn render_system_window(window: &WindowOverview, app: &AppContext) -> Box<dyn Element> {
+    let children = window
+        .panes
+        .iter()
+        .map(|pane| render_system_pane(pane, app))
+        .collect();
+    let title = window.index.map_or_else(
+        || format!("Window {}", window.id),
+        |index| format!("Window {} · {}", index + 1, window.id),
+    );
+    let mut details = vec![format!("{} panes", window.panes.len())];
+    if window.is_active {
+        details.push("active".to_owned());
+    }
+    if !window.has_workspace {
+        details.push("no workspace".to_owned());
+    }
+    system_group(title, &details.join(" · "), children, app)
+}
+
+fn render_system_pane(pane: &PaneOverview, app: &AppContext) -> Box<dyn Element> {
+    let title = if !pane.title.is_empty() {
+        pane.title.clone()
+    } else if let Some(agent) = &pane.agent {
+        agent.clone()
+    } else if !pane.shell.is_empty() {
+        pane.shell.clone()
+    } else {
+        "Terminal".to_owned()
+    };
+    let title = format!("Pane · {title}");
+    let session = pane
+        .session_id
+        .map_or_else(|| "unsupervised".to_owned(), |id| format!("session {id}"));
+    let mut details = vec![format!("Tab {}", pane.tab_index + 1)];
+    if let Some(terminal_view_id) = pane.terminal_view_id {
+        details.push(format!("pane {terminal_view_id}"));
+    }
+    details.push(session);
+    if !pane.shell.is_empty() {
+        details.push(pane.shell.clone());
+    }
+    details.extend([
+        if pane.is_busy {
+            "busy".to_owned()
+        } else {
+            "idle".to_owned()
+        },
+        if pane.survives_quit {
+            "survives quit".to_owned()
+        } else {
+            "ends on quit".to_owned()
+        },
+    ]);
+    if pane.has_running_agent {
+        details.push(pane.agent.as_deref().map_or_else(
+            || "agent running".to_owned(),
+            |agent| format!("{agent} running"),
+        ));
+    } else if pane.agent_not_resumed {
+        details.push("agent waiting to resume".to_owned());
+    }
+    if let Some(session_id) = pane.agent_session_id.as_deref() {
+        details.push(format!("agent session {session_id}"));
+    }
+    if !pane.working_directory.is_empty() {
+        details.push(pane.working_directory.clone());
+    }
+    system_row(title, details.join(" · "), app)
+}
+
+fn render_system_supervisor(
+    supervisor: &SupervisorOverview,
+    pids: &[u32],
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let attached = supervisor
+        .sessions
+        .iter()
+        .filter(|session| session.attached)
+        .count();
+    let detached = supervisor.sessions.len() - attached;
+    let pid = if pids.is_empty() {
+        "PID unavailable".to_owned()
+    } else {
+        format!(
+            "PID {}",
+            pids.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let protocol = supervisor.protocol_version.map_or_else(
+        || "protocol unknown".to_owned(),
+        |version| format!("protocol v{version}"),
+    );
+    let mut children = vec![system_row(
+        "Channel".to_owned(),
+        supervisor.channel.clone(),
+        app,
+    )];
+    children.push(system_row(
+        "State directory".to_owned(),
+        supervisor.state_directory.clone(),
+        app,
+    ));
+    children.extend(
+        supervisor
+            .sessions
+            .iter()
+            .map(|session| render_supervisor_session(session, app)),
+    );
+    system_group(
+        format!("Terminal supervisor · {pid}"),
+        &format!(
+            "{protocol} · {} sessions · {attached} attached · {detached} detached",
+            supervisor.sessions.len()
+        ),
+        children,
+        app,
+    )
+}
+
+fn render_supervisor_session(
+    session: &crate::terminal::system_overview::SupervisorSessionOverview,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let title = if session.title.is_empty() {
+        format!("Session {}", session.session_id)
+    } else {
+        session.title.clone()
+    };
+    let state = if session.attached {
+        "attached"
+    } else {
+        "detached"
+    };
+    let mut details = vec![format!("session {}", session.session_id), state.to_owned()];
+    if !session.shell.is_empty() {
+        details.push(session.shell.clone());
+    }
+    if !session.attached {
+        details.push(format!(
+            "detached for {}",
+            humanize_age(session.detached_for_seconds)
+        ));
+    }
+    if session.shell_pid > 0 {
+        details.push(format!("shell PID {}", session.shell_pid));
+    }
+    if !session.working_directory.is_empty() {
+        details.push(session.working_directory.clone());
+    }
+    system_row(title, details.join(" · "), app)
+}
+
+fn system_group(
+    title: String,
+    detail: &str,
+    children: Vec<Box<dyn Element>>,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font = appearance.ui_font_family();
+    let font_size = appearance.ui_font_size();
+    let mut content = Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(6.)
+        .with_child(
+            Text::new(title, font, font_size)
+                .with_style(Properties::default().weight(Weight::Bold))
+                .with_color(theme.active_ui_text_color().into_solid())
+                .finish(),
+        )
+        .with_child(
+            Text::new(detail.to_owned(), font, font_size - 1.)
+                .with_color(theme.sub_text_color(theme.surface_2()).into_solid())
+                .finish(),
+        );
+    for child in children {
+        content.add_child(child);
+    }
+    Container::new(content.finish())
+        .with_uniform_padding(10.)
+        .with_border(Border::all(1.).with_border_fill(theme.outline()))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(5.)))
+        .finish()
+}
+
+fn system_row(title: String, detail: String, app: &AppContext) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font = appearance.ui_font_family();
+    let font_size = appearance.ui_font_size();
+    Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(2.)
+        .with_child(
+            Text::new(title, font, font_size)
+                .with_color(theme.active_ui_text_color().into_solid())
+                .finish(),
+        )
+        .with_child(
+            Text::new(detail, font, font_size - 1.)
+                .with_color(theme.sub_text_color(theme.surface_2()).into_solid())
+                .finish(),
+        )
+        .finish()
 }
 
 fn session_label(row: &AgentSessionRow) -> String {
@@ -1842,6 +2290,7 @@ fn filter_count(
             .iter()
             .filter(|row| matches!(row.state, AgentSessionState::Past))
             .count(),
+        SessionFilter::System => 0,
     }
 }
 
@@ -1905,7 +2354,7 @@ fn render_header(close_state: MouseStateHandle, app: &AppContext) -> Box<dyn Ele
         )
         .with_child(
             Text::new_inline(
-                "Open local and AgentCtrl sessions without leaving this view",
+                "Open sessions and inspect every running Warp process on this computer",
                 font,
                 appearance.ui_font_size() - 1.,
             )
@@ -2025,6 +2474,7 @@ impl TypedActionView for AgentSessionsView {
                 }
             }
             AgentSessionsViewAction::SetFilter(filter) => self.set_filter(*filter, ctx),
+            AgentSessionsViewAction::RefreshSystem => self.refresh_system_overview(ctx),
             AgentSessionsViewAction::Close => ctx.emit(AgentSessionsViewEvent::Close),
         }
     }
@@ -2036,7 +2486,7 @@ impl View for AgentSessionsView {
     }
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
-        if focus_ctx.is_self_focused() {
+        if focus_ctx.is_self_focused() && self.selected_filter != SessionFilter::System {
             ctx.focus(&self.query_editor);
         }
     }
@@ -2067,12 +2517,18 @@ impl View for AgentSessionsView {
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_spacing(2.);
         for filter in SessionFilter::ALL {
-            let count = filter_count(
-                filter,
-                &self.rows,
-                managed_count,
-                current_folder.as_ref().map(|(_, folder)| folder),
-            );
+            let count = if filter == SessionFilter::System {
+                self.system_overview
+                    .as_ref()
+                    .map_or(0, SystemOverview::process_count)
+            } else {
+                filter_count(
+                    filter,
+                    &self.rows,
+                    managed_count,
+                    current_folder.as_ref().map(|(_, folder)| folder),
+                )
+            };
             let state = self.filter_states.get(&filter).cloned().unwrap_or_default();
             filters.add_child(render_filter_button(
                 filter,
@@ -2082,19 +2538,39 @@ impl View for AgentSessionsView {
                 app,
             ));
         }
-        let sidebar = Container::new(
-            Flex::column()
+        let mut sidebar_content =
+            Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        if self.selected_filter != SessionFilter::System {
+            sidebar_content.add_child(render_search_box(&self.query_editor, app));
+        }
+        sidebar_content.add_child(
+            Container::new(filters.finish())
+                .with_horizontal_padding(12.)
+                .with_padding_top(8.)
+                .finish(),
+        );
+        let sidebar = Container::new(sidebar_content.finish())
+            .with_border(Border::right(1.).with_border_fill(theme.outline()))
+            .finish();
+
+        if self.selected_filter == SessionFilter::System {
+            let content = Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(render_search_box(&self.query_editor, app))
                 .with_child(
-                    Container::new(filters.finish())
-                        .with_horizontal_padding(12.)
+                    ConstrainedBox::new(sidebar)
+                        .with_width(SIDEBAR_WIDTH)
                         .finish(),
                 )
-                .finish(),
-        )
-        .with_border(Border::right(1.).with_border_fill(theme.outline()))
-        .finish();
+                .with_child(Expanded::new(1., self.render_system_overview(app)).finish())
+                .finish();
+            return Flex::column()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(render_header(self.close_state.clone(), app))
+                .with_child(Expanded::new(1., content).finish())
+                .finish();
+        }
 
         let mut master = Flex::column()
             .with_main_axis_size(MainAxisSize::Max)

@@ -347,7 +347,7 @@ fn test_environment_updates_only_refresh_matching_session() {
 }
 
 #[test]
-fn test_live_environment_refresh_ignores_in_band_precmd() {
+fn test_disabled_kubernetes_chip_never_runs() {
     App::test((), |mut app| async move {
         let session_id = SessionId::from(456);
         app.add_singleton_model(|_| {
@@ -417,7 +417,10 @@ fn test_live_environment_refresh_ignores_in_band_precmd() {
                 current_prompt.await_generators(ctx)
             })
             .await;
-        executor.clear();
+        assert!(
+            executor.commands.lock().is_empty(),
+            "a saved Kubernetes chip must not run during initial prompt setup"
+        );
 
         current_prompt.update(&mut app, |current_prompt, ctx| {
             current_prompt.handle_model_event(
@@ -442,9 +445,9 @@ fn test_live_environment_refresh_ignores_in_band_precmd() {
                 current_prompt.await_generators(ctx)
             })
             .await;
-        assert_eq!(
-            executor.commands.lock().as_slice(),
-            ["kubectl config current-context"]
+        assert!(
+            executor.commands.lock().is_empty(),
+            "a saved Kubernetes chip must remain disabled after environment updates"
         );
     });
 }

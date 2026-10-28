@@ -86,6 +86,12 @@ pub enum SessionsCommand {
         instance: InstanceArg,
     },
 
+    /// List every window of a running Warp instance.
+    Windows {
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
     /// Hand a live pane's session to the supervisor and close the pane.
     ///
     /// The shell keeps running. What was in the pane is preserved and comes

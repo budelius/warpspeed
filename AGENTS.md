@@ -79,6 +79,11 @@ Warp has two front-ends that share the `warp_core`/`warpui` Entity/model core (A
 - `Element`s describe visual layout (Flutter-inspired), rendered on the GPU (WGSL).
 - Mouse input uses `MouseStateHandle`: create it once during construction and reference/clone it wherever mouse input is tracked. An inline `MouseStateHandle::default()` while rendering means no mouse interactions work. (The TUI's hover/click elements — `TuiHoverable`, `tui_collapsible` — also build on `MouseStateHandle`, so the same ownership rule applies there.)
 
+**GUI window crash isolation**:
+- Each restored WarpSpeed window must run in its own crash-isolated GUI worker process so one failed window cannot terminate the others.
+- Keep one coordinator as the effective AppId/profile owner. Window workers must not independently claim ownership or open shared profile state for writing.
+- During a multi-window restart, wait for each window worker to become ready before starting the next one. If the build cannot provide this isolation safely, stop and report the limitation rather than restoring all windows into one GUI process or bypassing profile ownership.
+
 **TUI rendering** (`crates/warp_tui` + `crates/warpui_core/src/elements/tui` — TUI-specific):
 - Headless console front-end. The `TuiElement` trait lays out and paints into a cell-grid `TuiBuffer`; crossterm input is converted to `TuiEvent`. No GPU/WGSL, pixel geometry, or `.app` bundle.
 

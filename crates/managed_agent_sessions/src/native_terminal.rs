@@ -5,15 +5,24 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
-use std::{fs, thread};
+use std::{fs, io, thread};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use command::blocking::Command;
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use futures::{SinkExt as _, StreamExt as _};
 use instant::Instant;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use warp_cli::managed_sessions::ManagedEnvironment;
+use websocket::{Message, WebSocket, WebsocketMessage as _};
 
 use super::{
     EnvironmentProfile, SessionDescriptor, dashboard_token, fetch_descriptor, profile, send,
@@ -24,6 +33,13 @@ const SSH_USER: &str = "agentctrl";
 const ATTACH_WAIT: Duration = Duration::from_secs(30);
 const ATTACH_POLL: Duration = Duration::from_millis(500);
 const CHILD_POLL: Duration = Duration::from_millis(200);
+const TERMINAL_GATEWAY_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
+const TERMINAL_GATEWAY_ORIGIN: &str = "https://dash-dev.stozn.ai";
+const TERMINAL_GATEWAY_PROTOCOL: &str = "stozn-agentctrl-terminal-v1";
+const TERMINAL_GATEWAY_SOCKET_URL: &str =
+    "wss://dash-backend-dev.stozn.ai/api/agent-control/terminal/socket";
+const INPUT_POLL: Duration = Duration::from_millis(10);
+const MAX_TERMINAL_DIMENSION: u16 = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum NativeAttachOutcome {
@@ -53,6 +69,24 @@ struct RenewalResponse {
 struct RevokeResponse {
     authorization_id: String,
     revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalGatewayTicket {
+    protocol: String,
+    ticket: String,
+    expires_at: String,
+    websocket_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalGatewayControl {
+    #[serde(rename = "type")]
+    kind: String,
+    code: Option<serde_json::Value>,
+    message: Option<String>,
+    job_id: Option<String>,
+    execution_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -246,6 +280,14 @@ fn attach_descriptor(
         })
         .context("native terminal descriptor has no current execution generation")?;
     validate_opaque_id("execution generation", generation)?;
+    match attach_through_gateway(&descriptor.job_id, generation, takeover) {
+        Ok(()) => return Ok(()),
+        Err(error) if gateway_is_unavailable(&error) => {
+            eprintln!("Live terminal gateway is unavailable; trying direct private SSH.");
+        }
+        Err(error) => return Err(error),
+    }
+
     let files = EphemeralSshFiles::create()?;
     let client_id = uuid::Uuid::new_v4().to_string();
     let authorization = create_authorization(
@@ -322,6 +364,459 @@ fn attach_descriptor(
             "Native terminal connection exited with status {}",
             status.code().unwrap_or(-1)
         )
+    }
+}
+
+fn attach_through_gateway(job_id: &str, generation: &str, takeover: bool) -> Result<()> {
+    let ticket = create_gateway_ticket(job_id, takeover)?;
+    validate_gateway_ticket(&ticket, Utc::now())?;
+    eprintln!(
+        "Attaching to the native Pi terminal through STOZN's authenticated terminal gateway."
+    );
+    eprintln!("Press Ctrl-] to detach without stopping the managed run.");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the Live terminal runtime")?;
+    runtime.block_on(run_gateway_terminal(ticket, job_id, generation))?;
+    println!("Detached. The managed run was not stopped.");
+    Ok(())
+}
+
+fn create_gateway_ticket(job_id: &str, takeover: bool) -> Result<TerminalGatewayTicket> {
+    let token = dashboard_token()?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(Policy::none())
+        .build()
+        .context("failed to create the Live terminal gateway client")?;
+    let response = client
+        .post(format!(
+            "{TERMINAL_GATEWAY_BASE_URL}/api/agent-control/runs/{job_id}/terminal/tickets"
+        ))
+        .bearer_auth(token)
+        .header("X-Stozn-Client", "warpspeed")
+        .json(&json!({ "takeover": takeover }))
+        .send()
+        .context("Live terminal ticket request failed")?;
+    if !response.status().is_success() {
+        return Err(super::http_error(response));
+    }
+    response
+        .json()
+        .context("invalid Live terminal ticket response")
+}
+
+fn validate_gateway_ticket(ticket: &TerminalGatewayTicket, now: DateTime<Utc>) -> Result<()> {
+    if ticket.protocol != TERMINAL_GATEWAY_PROTOCOL
+        || ticket.websocket_url != TERMINAL_GATEWAY_SOCKET_URL
+        || ticket.ticket.is_empty()
+        || ticket.ticket.len() > 4_096
+        || ticket.ticket.split('.').count() != 2
+        || !ticket
+            .ticket
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        bail!("Live terminal ticket response is invalid");
+    }
+    let expires_at = DateTime::parse_from_rfc3339(&ticket.expires_at)
+        .context("Live terminal ticket expiry is invalid")?
+        .with_timezone(&Utc);
+    if expires_at <= now || expires_at > now + chrono::Duration::seconds(120) {
+        bail!("Live terminal ticket expiry is invalid");
+    }
+    Ok(())
+}
+
+fn gateway_is_unavailable(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<super::HttpStatusError>()
+        .is_some_and(|error| {
+            matches!(
+                error.status,
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            )
+        })
+        || super::has_error_code(error, StatusCode::CONFLICT, "terminal_unsupported")
+}
+
+async fn run_gateway_terminal(
+    ticket: TerminalGatewayTicket,
+    job_id: &str,
+    generation: &str,
+) -> Result<()> {
+    let socket = WebSocket::connect_with_headers(
+        &ticket.websocket_url,
+        [ticket.protocol.as_str(), ticket.ticket.as_str()],
+        vec![("Origin", TERMINAL_GATEWAY_ORIGIN.to_string())],
+    )
+    .await
+    .context("could not connect to the Live terminal gateway")?;
+    let (mut sink, mut stream) = socket.split().await;
+    let (cols, rows) = terminal_size()?;
+    sink.send(Message::new_text(
+        json!({ "type": "hello", "cols": cols, "rows": rows }).to_string(),
+    ))
+    .await
+    .context("could not initialize the Live terminal")?;
+
+    loop {
+        let message = stream
+            .next()
+            .await
+            .context("Live terminal gateway closed before it was ready")?
+            .context("Live terminal gateway failed before it was ready")?;
+        match gateway_message(message, job_id, generation, false)? {
+            GatewayMessage::Ready => break,
+            GatewayMessage::Continue => {}
+            GatewayMessage::Finished => {
+                bail!("Live terminal gateway closed before it was ready");
+            }
+        }
+    }
+
+    let _raw_mode = RawModeGuard::enter()?;
+    let mut poll = tokio::time::interval(INPUT_POLL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            message = stream.next() => {
+                let Some(message) = message else {
+                    bail!("Live terminal connection closed unexpectedly");
+                };
+                match gateway_message(message.context("Live terminal connection failed")?, job_id, generation, true)? {
+                    GatewayMessage::Ready | GatewayMessage::Continue => {}
+                    GatewayMessage::Finished => return Ok(()),
+                }
+            }
+            _ = poll.tick() => {
+                while event::poll(Duration::ZERO).context("failed to read Live terminal input")? {
+                    match local_terminal_input(event::read().context("failed to read Live terminal input")?) {
+                        LocalTerminalInput::Bytes(bytes) => {
+                            for chunk in bytes.chunks(64 * 1024) {
+                                sink.send(Message::new_binary(chunk.to_vec()))
+                                    .await
+                                    .context("failed to send Live terminal input")?;
+                            }
+                        }
+                        LocalTerminalInput::Resize(cols, rows) => {
+                            sink.send(Message::new_text(
+                                json!({ "type": "resize", "cols": cols, "rows": rows }).to_string(),
+                            ))
+                            .await
+                            .context("failed to resize the Live terminal")?;
+                        }
+                        LocalTerminalInput::Detach => {
+                            let _ = sink.close().await;
+                            return Ok(());
+                        }
+                        LocalTerminalInput::Ignore => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum GatewayMessage {
+    Ready,
+    Continue,
+    Finished,
+}
+
+fn gateway_message(
+    message: Message,
+    job_id: &str,
+    generation: &str,
+    ready: bool,
+) -> Result<GatewayMessage> {
+    if let Some(bytes) = message.binary() {
+        if !ready {
+            bail!("Live terminal sent output before it was ready");
+        }
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(bytes)
+            .and_then(|()| stdout.flush())
+            .context("failed to display Live terminal output")?;
+        return Ok(GatewayMessage::Continue);
+    }
+    let Some(text) = message.text() else {
+        return Ok(GatewayMessage::Continue);
+    };
+    if text.len() > 4_096 {
+        bail!("Live terminal returned an oversized control message");
+    }
+    let control: TerminalGatewayControl =
+        serde_json::from_str(text).context("Live terminal returned an invalid control message")?;
+    match control.kind.as_str() {
+        "ready" => {
+            if ready
+                || control.job_id.as_deref() != Some(job_id)
+                || control.execution_generation.as_deref() != Some(generation)
+            {
+                bail!("Live terminal ready message did not match the requested run");
+            }
+            Ok(GatewayMessage::Ready)
+        }
+        "pong" => Ok(GatewayMessage::Continue),
+        "exit" => Ok(GatewayMessage::Finished),
+        "error" => {
+            let code = control.code.as_ref().and_then(serde_json::Value::as_str);
+            if code == Some("writer_exists") {
+                bail!(
+                    "Live terminal is open elsewhere; disconnect it or retry with `agent-ctrl attach {job_id} --takeover`"
+                );
+            }
+            let message = control
+                .message
+                .filter(|message| {
+                    !message.is_empty()
+                        && message.len() <= 500
+                        && !message.chars().any(char::is_control)
+                })
+                .unwrap_or_else(|| "Live terminal connection failed".to_string());
+            bail!("{message}")
+        }
+        _ => bail!("Live terminal returned an unsupported control message"),
+    }
+}
+
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> Result<Self> {
+        crossterm::terminal::enable_raw_mode().context("failed to enter Live terminal raw mode")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LocalTerminalInput {
+    Bytes(Vec<u8>),
+    Resize(u16, u16),
+    Detach,
+    Ignore,
+}
+
+fn terminal_size() -> Result<(u16, u16)> {
+    let (cols, rows) = crossterm::terminal::size().context("failed to read terminal size")?;
+    Ok(clamp_terminal_size(cols, rows))
+}
+
+fn clamp_terminal_size(cols: u16, rows: u16) -> (u16, u16) {
+    (
+        cols.clamp(2, MAX_TERMINAL_DIMENSION),
+        rows.clamp(2, MAX_TERMINAL_DIMENSION),
+    )
+}
+
+fn local_terminal_input(event: Event) -> LocalTerminalInput {
+    match event {
+        Event::Key(key)
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && key.code == KeyCode::Char(']')
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            LocalTerminalInput::Detach
+        }
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            encode_key(key).map_or(LocalTerminalInput::Ignore, LocalTerminalInput::Bytes)
+        }
+        Event::Key(_) => LocalTerminalInput::Ignore,
+        Event::Mouse(mouse) => LocalTerminalInput::Bytes(encode_mouse(mouse)),
+        Event::Paste(text) => LocalTerminalInput::Bytes(
+            [
+                b"\x1b[200~".as_slice(),
+                text.as_bytes(),
+                b"\x1b[201~".as_slice(),
+            ]
+            .concat(),
+        ),
+        Event::Resize(cols, rows) => {
+            let (cols, rows) = clamp_terminal_size(cols, rows);
+            LocalTerminalInput::Resize(cols, rows)
+        }
+        Event::FocusGained => LocalTerminalInput::Bytes(b"\x1b[I".to_vec()),
+        Event::FocusLost => LocalTerminalInput::Bytes(b"\x1b[O".to_vec()),
+    }
+}
+
+fn encode_key(key: KeyEvent) -> Option<Vec<u8>> {
+    let modifier = xterm_modifier(key.modifiers);
+    let sequence = match key.code {
+        KeyCode::Char(character) => {
+            let mut bytes = Vec::new();
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                bytes.push(0x1b);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && let Some(control) = control_character(character)
+            {
+                bytes.push(control);
+                return Some(bytes);
+            }
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            return Some(bytes);
+        }
+        KeyCode::Backspace => "\x7f".to_string(),
+        KeyCode::Enter => "\r".to_string(),
+        KeyCode::Left => modified_csi("D", modifier),
+        KeyCode::Right => modified_csi("C", modifier),
+        KeyCode::Up => modified_csi("A", modifier),
+        KeyCode::Down => modified_csi("B", modifier),
+        KeyCode::Home => modified_csi("H", modifier),
+        KeyCode::End => modified_csi("F", modifier),
+        KeyCode::PageUp => modified_tilde_csi(5, modifier),
+        KeyCode::PageDown => modified_tilde_csi(6, modifier),
+        KeyCode::Tab => "\t".to_string(),
+        KeyCode::BackTab => "\x1b[Z".to_string(),
+        KeyCode::Delete => modified_tilde_csi(3, modifier),
+        KeyCode::Insert => modified_tilde_csi(2, modifier),
+        KeyCode::F(number) => function_key(number, modifier)?,
+        KeyCode::Null => "\0".to_string(),
+        KeyCode::Esc => "\x1b".to_string(),
+        KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => return None,
+    };
+    let mut bytes = Vec::new();
+    if key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(
+            key.code,
+            KeyCode::Backspace | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab | KeyCode::Null
+        )
+    {
+        bytes.push(0x1b);
+    }
+    bytes.extend_from_slice(sequence.as_bytes());
+    Some(bytes)
+}
+
+fn control_character(character: char) -> Option<u8> {
+    match character {
+        '@' | ' ' | '2' => Some(0x00),
+        'a'..='z' => Some(character as u8 - b'a' + 1),
+        'A'..='Z' => Some(character as u8 - b'A' + 1),
+        '[' | '3' => Some(0x1b),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '6' => Some(0x1e),
+        '_' | '7' | '/' => Some(0x1f),
+        '?' | '8' => Some(0x7f),
+        _ => None,
+    }
+}
+
+fn xterm_modifier(modifiers: KeyModifiers) -> u8 {
+    1 + u8::from(modifiers.contains(KeyModifiers::SHIFT))
+        + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
+        + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn modified_csi(suffix: &str, modifier: u8) -> String {
+    if modifier == 1 {
+        format!("\x1b[{suffix}")
+    } else {
+        format!("\x1b[1;{modifier}{suffix}")
+    }
+}
+
+fn modified_tilde_csi(number: u8, modifier: u8) -> String {
+    if modifier == 1 {
+        format!("\x1b[{number}~")
+    } else {
+        format!("\x1b[{number};{modifier}~")
+    }
+}
+
+fn function_key(number: u8, modifier: u8) -> Option<String> {
+    let suffix = match number {
+        1 => "P",
+        2 => "Q",
+        3 => "R",
+        4 => "S",
+        _ => "",
+    };
+    if !suffix.is_empty() {
+        return Some(if modifier == 1 {
+            format!("\x1bO{suffix}")
+        } else {
+            format!("\x1b[1;{modifier}{suffix}")
+        });
+    }
+    let code = match number {
+        5 => 15,
+        6 => 17,
+        7 => 18,
+        8 => 19,
+        9 => 20,
+        10 => 21,
+        11 => 23,
+        12 => 24,
+        13 => 25,
+        14 => 26,
+        15 => 28,
+        16 => 29,
+        17 => 31,
+        18 => 32,
+        19 => 33,
+        20 => 34,
+        _ => return None,
+    };
+    Some(modified_tilde_csi(code, modifier))
+}
+
+fn encode_mouse(mouse: MouseEvent) -> Vec<u8> {
+    let (mut code, released) = match mouse.kind {
+        MouseEventKind::Down(button) => (mouse_button_code(button), false),
+        MouseEventKind::Up(button) => (mouse_button_code(button), true),
+        MouseEventKind::Drag(button) => (32 + mouse_button_code(button), false),
+        MouseEventKind::Moved => (35, false),
+        MouseEventKind::ScrollUp => (64, false),
+        MouseEventKind::ScrollDown => (65, false),
+        MouseEventKind::ScrollLeft => (66, false),
+        MouseEventKind::ScrollRight => (67, false),
+    };
+    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        code += 4;
+    }
+    if mouse.modifiers.contains(KeyModifiers::ALT) {
+        code += 8;
+    }
+    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+        code += 16;
+    }
+    format!(
+        "\x1b[<{};{};{}{}",
+        code,
+        mouse.column.saturating_add(1),
+        mouse.row.saturating_add(1),
+        if released { 'm' } else { 'M' }
+    )
+    .into_bytes()
+}
+
+fn mouse_button_code(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
     }
 }
 

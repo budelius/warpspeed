@@ -126,6 +126,7 @@ fn rich_input_submit_strategy(agent: CLIAgent) -> RichInputSubmitStrategy {
     match agent {
         CLIAgent::Codex => RichInputSubmitStrategy::BracketedPaste,
         CLIAgent::OhMyPi => RichInputSubmitStrategy::BracketedPaste,
+        CLIAgent::Pi => RichInputSubmitStrategy::BracketedPaste,
         CLIAgent::Kimi => RichInputSubmitStrategy::BracketedPaste,
         CLIAgent::Copilot => RichInputSubmitStrategy::BracketedPasteDelayedEnter,
         CLIAgent::Claude
@@ -136,7 +137,6 @@ fn rich_input_submit_strategy(agent: CLIAgent) -> RichInputSubmitStrategy {
         CLIAgent::Hermes => RichInputSubmitStrategy::BracketedPaste,
         CLIAgent::Amp
         | CLIAgent::Droid
-        | CLIAgent::Pi
         | CLIAgent::Goose
         | CLIAgent::Vibe
         | CLIAgent::Antigravity

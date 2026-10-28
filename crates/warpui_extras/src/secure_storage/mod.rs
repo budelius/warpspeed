@@ -10,6 +10,7 @@
 #[cfg_attr(target_os = "windows", path = "windows.rs")]
 mod imp;
 mod noop;
+mod read_only;
 mod unavailable;
 
 // Treat this as a noop on web, as there is no backing storage which is "secure".
@@ -66,6 +67,31 @@ pub fn register_noop(service_name: &str, ctx: &mut warpui_core::AppContext) {
 /// Reads report missing values, while writes and removals succeed without accessing storage.
 pub fn register_unavailable(ctx: &mut warpui_core::AppContext) {
     ctx.add_singleton_model(|_| -> Model { Box::new(unavailable::SecureStorage) });
+}
+
+pub fn register_read_only(
+    service_name: &str,
+    fallback_dir: std::path::PathBuf,
+    ctx: &mut warpui_core::AppContext,
+) {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let inner: Model = Box::new(imp::SecureStorage::new_with_fallback(
+        service_name,
+        fallback_dir,
+    ));
+    #[cfg(target_os = "windows")]
+    let inner: Model = Box::new(imp::SecureStorage::new_with_path(
+        service_name,
+        fallback_dir,
+    ));
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "windows")))]
+    let inner: Model = {
+        let _ = fallback_dir;
+        Box::new(imp::SecureStorage::new(service_name))
+    };
+    ctx.add_singleton_model(move |_| -> Model {
+        Box::new(read_only::ReadOnlySecureStorage::new(inner))
+    });
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

@@ -8,7 +8,8 @@ use futures::{AsyncRead, AsyncWrite};
 use warpui_core::r#async::executor::{Background, BackgroundTask};
 
 use super::protocol::{
-    ConnectionAddress, ProtocolError, Request, Response, receive_message, send_message,
+    ConnectionAddress, ProtocolError, Request, Response, deserialize_bounded, receive_message,
+    send_message, serialize_bounded,
 };
 use super::service::{Service, ServiceId, service_id};
 use crate::platform::server::{ConnectionImpl, ConnectionListenerImpl};
@@ -22,7 +23,7 @@ use crate::service::ServiceImpl;
 /// implementation.
 #[async_trait]
 pub(super) trait AnyServiceImpl: Send + Sync {
-    async fn handle_request(&self, request: &[u8]) -> Vec<u8>;
+    async fn handle_request(&self, request: &[u8]) -> std::result::Result<Vec<u8>, ProtocolError>;
 
     fn clone_service(&self) -> Box<dyn AnyServiceImpl>;
 }
@@ -33,11 +34,12 @@ where
     S: Service,
     I: ServiceImpl<Service = S> + Clone + Sized,
 {
-    async fn handle_request(&self, request_bytes: &[u8]) -> Vec<u8> {
-        let request: S::Request =
-            bincode::deserialize(request_bytes).expect("Failed to deserialize request bytes.");
-        bincode::serialize::<S::Response>(&I::handle_request(self, request).await)
-            .expect("Should be able to serialize response.")
+    async fn handle_request(
+        &self,
+        request_bytes: &[u8],
+    ) -> std::result::Result<Vec<u8>, ProtocolError> {
+        let request: S::Request = deserialize_bounded(request_bytes)?;
+        serialize_bounded::<S::Response>(&I::handle_request(self, request).await)
     }
 
     fn clone_service(&self) -> Box<dyn AnyServiceImpl> {
@@ -266,10 +268,10 @@ impl Server {
                     bytes,
                 }) => {
                     let response_message = match services.get(&service_id) {
-                        Some(service) => {
-                            let response_bytes = service.handle_request(&bytes[..]).await;
-                            Response::success(id, service_id, response_bytes)
-                        }
+                        Some(service) => match service.handle_request(&bytes[..]).await {
+                            Ok(response_bytes) => Response::success(id, service_id, response_bytes),
+                            Err(error) => Response::failure(id, error.to_string()),
+                        },
                         None => {
                             Response::failure(id, format!("No such service (ID: {service_id})"))
                         }

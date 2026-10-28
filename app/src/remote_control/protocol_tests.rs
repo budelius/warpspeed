@@ -14,8 +14,8 @@ fn assert_round_trips<T: Serialize + DeserializeOwned + std::fmt::Debug>(value: 
 }
 
 #[test]
-fn protocol_version_is_four() {
-    assert_eq!(PROTOCOL_VERSION, 4);
+fn protocol_version_is_five() {
+    assert_eq!(PROTOCOL_VERSION, 5);
 }
 
 #[test]
@@ -108,6 +108,34 @@ fn detached_sessions_round_trip() {
             session_uuid_hex: "aabbccdd".to_owned(),
         }],
     });
+}
+
+#[test]
+fn windows_round_trip() {
+    assert_round_trips(Request::ListWindows);
+    assert_round_trips(Response::Windows {
+        windows: vec![WindowSummary {
+            window_id: "2".to_owned(),
+            index: 1,
+            is_active: true,
+            has_workspace: true,
+        }],
+    });
+}
+
+#[test]
+fn windows_variants_are_appended_for_cross_build_safety() {
+    assert_eq!(
+        &bincode::serialize(&Request::ListWindows).unwrap()[..4],
+        &11_u32.to_le_bytes()
+    );
+    assert_eq!(
+        &bincode::serialize(&Response::Windows {
+            windows: Vec::new()
+        })
+        .unwrap()[..4],
+        &8_u32.to_le_bytes()
+    );
 }
 
 #[test]

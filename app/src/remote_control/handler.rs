@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use warpui::AppContext;
 
-use super::protocol::{DetachedSessionSummary, PaneSummary, Request, Response, StoredSessionInfo};
+use super::protocol::{
+    DetachedSessionSummary, PaneSummary, Request, Response, StoredSessionInfo, WindowSummary,
+};
 
 /// Carries out one request.
 pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
@@ -19,6 +21,7 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
             version: super::build_identity(),
         },
         Request::ListPanes => list_panes(ctx),
+        Request::ListWindows => list_windows(ctx),
         Request::ListDetachedSessions => list_detached_sessions(ctx),
         Request::DetachSession { session_id } => detach(session_id.into(), ctx),
         Request::AttachSession { session_id } => attach(session_id.into(), ctx),
@@ -123,6 +126,30 @@ fn list_panes(_ctx: &mut AppContext) -> Response {
     Response::Failed {
         error: "This build has no local terminals".to_owned(),
     }
+}
+
+fn list_windows(ctx: &mut AppContext) -> Response {
+    use std::collections::HashSet;
+
+    use warpui::SingletonEntity;
+
+    let active_window = ctx.windows().active_window();
+    let workspace_windows = crate::workspace::WorkspaceRegistry::as_ref(ctx)
+        .all_workspaces(ctx)
+        .into_iter()
+        .map(|(window_id, _)| window_id)
+        .collect::<HashSet<_>>();
+    let windows = ctx
+        .window_ids()
+        .enumerate()
+        .map(|(index, window_id)| WindowSummary {
+            window_id: window_id.to_string(),
+            index: index as u32,
+            is_active: active_window == Some(window_id),
+            has_workspace: workspace_windows.contains(&window_id),
+        })
+        .collect();
+    Response::Windows { windows }
 }
 
 fn list_detached_sessions(ctx: &mut AppContext) -> Response {

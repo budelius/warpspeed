@@ -31,6 +31,7 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
         SessionsCommand::Agents => list_agents(json),
         SessionsCommand::Instances => list_instances(json),
         SessionsCommand::Panes { instance } => list_panes(instance.pid, json),
+        SessionsCommand::Windows { instance } => list_windows(instance.pid, json),
         SessionsCommand::Detach { session, instance } => act(
             instance.pid,
             Request::DetachSession {
@@ -457,6 +458,37 @@ fn list_instances(json: bool) -> Result<()> {
     println!("{:<8}  BUILD", "PID");
     for row in rows {
         println!("{:<8}  {}", row.pid, row.version);
+    }
+    Ok(())
+}
+
+fn list_windows(pid: Option<u32>, json: bool) -> Result<()> {
+    let instance = client::select_instance(pid)?;
+    let windows = match instance.call(Request::ListWindows)? {
+        Response::Windows { windows } => windows,
+        other => bail!(unexpected(other)),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&windows)?);
+        return Ok(());
+    }
+    if windows.is_empty() {
+        println!("This Warp instance has no windows.");
+        return Ok(());
+    }
+    println!(
+        "{:<8}  {:<8}  {:<9}  WORKSPACE",
+        "INDEX", "WINDOW", "ACTIVE"
+    );
+    for window in windows {
+        println!(
+            "{:<8}  {:<8}  {:<9}  {}",
+            window.index + 1,
+            window.window_id,
+            if window.is_active { "yes" } else { "no" },
+            if window.has_workspace { "yes" } else { "no" },
+        );
     }
     Ok(())
 }

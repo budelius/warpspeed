@@ -230,6 +230,7 @@ impl CrashRecovery {
                 let launch_mode = crate::LaunchMode::App {
                     args: warp_cli::AppArgs::default(),
                     api_key: None,
+                    gui_process_role: crate::window_process::role::GuiProcessRole::LegacyOwner,
                 };
                 crate::crash_recovery::CrashRecovery::new(&launch_mode, user_preferences)
             })

@@ -121,6 +121,7 @@ mod voltron;
 mod warp_managed_paths_watcher;
 #[cfg(target_family = "wasm")]
 mod wasm_nux_dialog;
+mod window_process;
 mod window_process_handoff;
 mod window_settings;
 mod word_block_editor;
@@ -218,14 +219,14 @@ pub mod workspace;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Deref;
+use std::path::Path;
 #[cfg(feature = "local_fs")]
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use ::settings::{Setting, ToggleableSetting};
-#[cfg(feature = "local_tty")]
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use appearance::{Appearance, AppearanceManager};
 use channel::ChannelState;
 use interval_timer::IntervalTimer;
@@ -331,7 +332,9 @@ use crate::server::telemetry::{
     AppStartupInfo, CloseTarget, LaunchConfigUiLocation, PaletteSource, TelemetryCollector,
 };
 use crate::session_management::{RunningSessionSummary, SessionNavigationData};
-use crate::settings::cloud_preferences_syncer::initialize_cloud_preferences_syncer;
+use crate::settings::cloud_preferences_syncer::{
+    initialize_cloud_preferences_syncer, initialize_read_only_cloud_preferences_syncer,
+};
 use crate::settings::manager::SettingsManager;
 use crate::settings::{AISettings, AccessibilitySettings, ScrollSettings, SelectionSettings};
 use crate::settings_view::DisplayCount;
@@ -416,6 +419,7 @@ pub(crate) enum LaunchMode {
         args: warp_cli::AppArgs,
         /// API key for server authentication, if provided via `--api-key` or `WARP_API_KEY`.
         api_key: Option<String>,
+        gui_process_role: window_process::role::GuiProcessRole,
     },
 
     /// Run the Warp command-line SDK.
@@ -476,12 +480,62 @@ enum AuthInitialization {
 impl LaunchMode {
     pub(crate) fn participates_in_gui_profile_ownership(&self) -> bool {
         match self {
-            LaunchMode::App { .. } => true,
+            LaunchMode::App {
+                gui_process_role, ..
+            } => gui_process_role.owns_profile(),
             LaunchMode::CommandLine { .. }
             | LaunchMode::Test { .. }
             | LaunchMode::RemoteServerProxy
             | LaunchMode::RemoteServerDaemon { .. }
             | LaunchMode::Tui { .. } => false,
+        }
+    }
+
+    fn resolve_gui_process_role(&mut self) -> Result<()> {
+        if let LaunchMode::App {
+            gui_process_role, ..
+        } = self
+        {
+            *gui_process_role = window_process::role::GuiProcessRole::from_environment(
+                FeatureFlag::WindowProcessIsolation.is_enabled(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn is_window_coordinator(&self) -> bool {
+        matches!(
+            self,
+            LaunchMode::App {
+                gui_process_role: window_process::role::GuiProcessRole::Coordinator,
+                ..
+            }
+        )
+    }
+
+    fn is_window_worker(&self) -> bool {
+        matches!(
+            self,
+            LaunchMode::App {
+                gui_process_role: window_process::role::GuiProcessRole::WindowWorker { .. },
+                ..
+            }
+        )
+    }
+
+    fn window_worker_bootstrap_path(&self) -> Option<&Path> {
+        match self {
+            LaunchMode::App {
+                gui_process_role:
+                    window_process::role::GuiProcessRole::WindowWorker { bootstrap_path },
+                ..
+            } => Some(bootstrap_path),
+            LaunchMode::App { .. }
+            | LaunchMode::CommandLine { .. }
+            | LaunchMode::Test { .. }
+            | LaunchMode::RemoteServerProxy
+            | LaunchMode::RemoteServerDaemon { .. }
+            | LaunchMode::Tui { .. } => None,
         }
     }
 
@@ -619,7 +673,8 @@ impl LaunchMode {
             LaunchMode::RemoteServerProxy | LaunchMode::RemoteServerDaemon { .. } => true,
             // The TUI front-end renders to the terminal, with no GUI window.
             LaunchMode::Tui { .. } => true,
-            LaunchMode::App { .. } | LaunchMode::Test { .. } => false,
+            LaunchMode::App { .. } => self.is_window_coordinator(),
+            LaunchMode::Test { .. } => false,
         }
     }
 
@@ -629,7 +684,16 @@ impl LaunchMode {
     /// processes (daemon, CLI, proxy, TUI) would otherwise contend for the fixed port.
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     fn should_start_local_http_server(&self) -> bool {
-        !self.is_headless()
+        match self {
+            LaunchMode::App {
+                gui_process_role, ..
+            } => gui_process_role.owns_profile(),
+            LaunchMode::CommandLine { .. }
+            | LaunchMode::Test { .. }
+            | LaunchMode::RemoteServerProxy
+            | LaunchMode::RemoteServerDaemon { .. }
+            | LaunchMode::Tui { .. } => !self.is_headless(),
+        }
     }
 
     /// Returns `true` if this process can build and sync codebase indices.
@@ -641,7 +705,10 @@ impl LaunchMode {
             LaunchMode::RemoteServerDaemon { .. } => {
                 FeatureFlag::RemoteCodebaseIndexing.is_enabled()
             }
-            LaunchMode::App { .. } | LaunchMode::Test { .. } => true,
+            LaunchMode::App {
+                gui_process_role, ..
+            } => gui_process_role.owns_profile(),
+            LaunchMode::Test { .. } => true,
             LaunchMode::RemoteServerProxy => false,
             // Codebase indexing stays off for the TUI until it has deferred
             // persisted-index restore and multi-process-safe snapshot writes
@@ -656,7 +723,9 @@ impl LaunchMode {
     #[cfg(enable_crash_recovery)]
     pub(crate) fn crash_recovery_enabled(&self) -> bool {
         match self {
-            LaunchMode::App { .. } => true,
+            LaunchMode::App {
+                gui_process_role, ..
+            } => gui_process_role.owns_profile(),
             LaunchMode::CommandLine { .. }
             | LaunchMode::Test { .. }
             | LaunchMode::RemoteServerProxy
@@ -978,6 +1047,7 @@ pub fn run() -> Result<()> {
     run_internal(LaunchMode::App {
         args: args.into_app_args(),
         api_key,
+        gui_process_role: window_process::role::GuiProcessRole::LegacyOwner,
     })
 }
 
@@ -1148,6 +1218,40 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     // The `run` function already initializes feature flags, but ensure they're initialized here
     // for other entrypoints.
     features::init_feature_flags();
+    launch_mode.resolve_gui_process_role()?;
+    let window_process_build_identity =
+        if launch_mode.is_window_coordinator() || launch_mode.is_window_worker() {
+            Some(build_info::executable_identity()?)
+        } else {
+            None
+        };
+    let window_process_profile_identity = ChannelState::data_domain();
+    let window_worker_bootstrap = if let Some(path) = launch_mode.window_worker_bootstrap_path() {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .context("failed to read system time for window worker bootstrap")?
+            .as_secs();
+        Some(window_process::worker::consume_bootstrap(
+            path,
+            window_process_build_identity.as_deref().unwrap_or_default(),
+            &window_process_profile_identity,
+            now,
+        )?)
+    } else {
+        None
+    };
+    let isolated_window_startup = if let Some(bootstrap) = window_worker_bootstrap.as_ref() {
+        let background_executor = Arc::new(warpui::r#async::executor::Background::default());
+        let (client, serialized_window) = warpui::r#async::block_on(
+            window_process::worker::connect_and_receive_window(bootstrap, background_executor),
+        )?;
+        let payload: window_process::worker::StartupPayload =
+            serde_json::from_slice(&serialized_window)
+                .context("failed to decode isolated window restore snapshot")?;
+        Some((client, payload))
+    } else {
+        None
+    };
 
     #[cfg(feature = "crash_reporting")]
     if launch_mode.needs_crash_reporting() {
@@ -1173,6 +1277,7 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     let _enter = span.enter();
 
     let log_destination = launch_mode.log_destination();
+    let log_process_id_suffix = launch_mode.is_window_worker().then(std::process::id);
 
     cfg_if::cfg_if! {
         if #[cfg(enable_crash_recovery)] {
@@ -1182,6 +1287,7 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
                 warp_logging::init(warp_logging::LogConfig {
                     frontend: launch_mode.log_frontend(),
                     log_destination,
+                    process_id_suffix: log_process_id_suffix,
                     ..Default::default()
                 })?;
             }
@@ -1189,6 +1295,7 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
             warp_logging::init(warp_logging::LogConfig {
                 frontend: launch_mode.log_frontend(),
                 log_destination,
+                process_id_suffix: log_process_id_suffix,
                 ..Default::default()
             })?;
         }
@@ -1298,8 +1405,16 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     // cloud-sync behavior for this launch mode.
     ::settings::set_settings_mode(launch_mode.settings_mode());
 
-    let private_preferences = settings::init_private_user_preferences();
-    let (public_preferences, startup_toml_parse_error) = settings::init_public_user_preferences();
+    let private_preferences = if launch_mode.is_window_worker() {
+        settings::init_read_only_private_user_preferences()
+    } else {
+        settings::init_private_user_preferences()
+    };
+    let (public_preferences, startup_toml_parse_error) = if launch_mode.is_window_worker() {
+        settings::init_read_only_public_user_preferences()
+    } else {
+        settings::init_public_user_preferences()
+    };
 
     // When the SettingsFile feature flag is enabled, public settings live in
     // the TOML-backed store. When disabled, they live in the platform-native
@@ -1452,11 +1567,16 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     );
 
     app_builder.run(move |ctx| {
+        if launch_mode.is_window_worker() {
+            ctx.set_window_count_limit(Some(1));
+        }
+
         #[cfg(not(target_family = "wasm"))]
-        // Rotate the log files in the background.
-        ctx.background_executor()
-            .spawn(warp_logging::rotate_log_files())
-            .detach();
+        if !launch_mode.is_window_worker() {
+            ctx.background_executor()
+                .spawn(warp_logging::rotate_log_files())
+                .detach();
+        }
 
         ctx.add_singleton_model(|ctx| {
             AppExecutionMode::new(
@@ -1505,6 +1625,7 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
         // and listing one as an instance to address would be a lie.
         #[cfg(feature = "local_tty")]
         if matches!(launch_mode, LaunchMode::App { .. })
+            && !launch_mode.is_window_coordinator()
             && FeatureFlag::PersistentTerminalSessions.is_enabled()
         {
             ctx.add_singleton_model(remote_control::RemoteControlServer::new);
@@ -1524,7 +1645,15 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
             LaunchMode::Tui { .. } => {
                 unreachable!("the `tui` launch mode requires the `tui` feature")
             }
-            other => launch(ctx, app_state, other, incoming_window_handoff),
+            other => launch(
+                ctx,
+                app_state,
+                other,
+                incoming_window_handoff,
+                isolated_window_startup,
+                window_process_build_identity,
+                window_process_profile_identity,
+            ),
         }
     })
 }
@@ -1636,7 +1765,13 @@ pub(crate) fn initialize_app(
     // Daemon auth arrives through the client handshake, so avoid platform keychains that may
     // require an interactive unlock prompt. Other headless modes still use secure storage for
     // persisted login and BYO provider credentials.
-    if matches!(launch_mode, LaunchMode::RemoteServerDaemon { .. }) {
+    if launch_mode.is_window_worker() {
+        warpui_extras::secure_storage::register_read_only(
+            &secure_storage_service_name,
+            warp_core::paths::state_dir(),
+            ctx,
+        );
+    } else if matches!(launch_mode, LaunchMode::RemoteServerDaemon { .. }) {
         warpui_extras::secure_storage::register_unavailable(ctx);
     } else {
         // Register an implementation of the secure storage service.
@@ -1665,7 +1800,11 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(WarpConfig::new);
     ctx.add_singleton_model(|_ctx| SettingsManager::default());
 
-    let user_defaults_on_startup = settings::init(startup_toml_parse_error, ctx);
+    let user_defaults_on_startup = settings::init(
+        startup_toml_parse_error,
+        !launch_mode.is_window_worker(),
+        ctx,
+    );
     timer.mark_interval_end("READ_USER_DEFAULTS_AND_INITIALIZE_SETTINGS");
 
     if FeatureFlag::UIZoom.is_enabled() {
@@ -1773,8 +1912,17 @@ pub(crate) fn initialize_app(
         | LaunchMode::RemoteServerProxy
         | LaunchMode::Test { .. } => persistence::PersistedDataScope::Full,
     };
-    let (sqlite_data, writer_handles) =
-        persistence::initialize(ctx, persistence_scope, persisted_data_scope);
+    let persistence_access = if launch_mode.is_window_worker() {
+        persistence::PersistenceAccess::ReadOnly
+    } else {
+        persistence::PersistenceAccess::ReadWrite
+    };
+    let (sqlite_data, writer_handles) = persistence::initialize(
+        ctx,
+        persistence_scope,
+        persisted_data_scope,
+        persistence_access,
+    );
     timer.mark_interval_end("SQLITE_INITIALIZED");
 
     let persistence_writer = PersistenceWriter::new(writer_handles);
@@ -1976,7 +2124,7 @@ pub(crate) fn initialize_app(
     }
     timer.mark_interval_end("INIT_CRASH_REPORTING");
 
-    if let LaunchMode::App { .. } = launch_mode {
+    if launch_mode.participates_in_gui_profile_ownership() {
         autoupdate::check_and_report_update_errors(ctx);
     }
 
@@ -2231,7 +2379,9 @@ pub(crate) fn initialize_app(
     let server_api_clone = server_api.clone();
     ctx.add_singleton_model(|ctx| {
         let telemetry_collector = TelemetryCollector::new(server_api_clone);
-        telemetry_collector.initialize_telemetry_collection(ctx);
+        if !launch_mode.is_window_worker() {
+            telemetry_collector.initialize_telemetry_collection(ctx);
+        }
         telemetry_collector
     });
     timer.mark_interval_end("INITIALIZE_TELEMETRY_COLLECTION");
@@ -2481,11 +2631,15 @@ pub(crate) fn initialize_app(
 
     let toml_file_path = settings::user_preferences_toml_file_path();
     ctx.add_singleton_model(move |ctx| {
-        initialize_cloud_preferences_syncer(
-            toml_file_path,
-            startup_toml_parse_error_for_syncer.as_deref(),
-            ctx,
-        )
+        if launch_mode.is_window_worker() {
+            initialize_read_only_cloud_preferences_syncer(toml_file_path, ctx)
+        } else {
+            initialize_cloud_preferences_syncer(
+                toml_file_path,
+                startup_toml_parse_error_for_syncer.as_deref(),
+                ctx,
+            )
+        }
     });
     ai::custom_endpoints::init(launch_mode, ctx);
 
@@ -3344,6 +3498,12 @@ fn launch(
     app_state: Option<AppState>,
     launch_mode: LaunchMode,
     incoming_window_handoff: Option<window_process_handoff::IncomingWindowHandoff>,
+    isolated_window_startup: Option<(
+        window_process::coordinator::WorkerClient,
+        window_process::worker::StartupPayload,
+    )>,
+    window_process_build_identity: Option<String>,
+    window_process_profile_identity: String,
 ) {
     IntervalTimer::handle(ctx).update(ctx, |timer, _ctx| {
         timer.mark_interval_end("APP_LAUNCHED");
@@ -3370,13 +3530,22 @@ fn launch(
                 .iter()
                 .any(is_cloud_agent_web_home_launch_url);
             let handoff_restore = incoming_window_handoff.is_some();
-            let recover_interrupted = matches!(launch_mode, LaunchMode::App { .. })
+            let isolated_worker = isolated_window_startup.is_some();
+            let isolated_restore = isolated_window_startup
+                .as_ref()
+                .is_some_and(|(_, payload)| payload.window.is_some());
+            let isolated_urls = isolated_window_startup
+                .as_ref()
+                .map(|(_, payload)| payload.urls.clone())
+                .unwrap_or_default();
+            let recover_interrupted = launch_mode.participates_in_gui_profile_ownership()
                 && !should_skip_restore
                 && !handoff_restore
+                && !isolated_worker
                 && launch_mode.args().urls.is_empty()
                 && *GeneralSettings::as_ref(ctx).restore_session;
             #[cfg(feature = "local_fs")]
-            let recovered_state = if matches!(launch_mode, LaunchMode::App { .. }) {
+            let recovered_state = if launch_mode.participates_in_gui_profile_ownership() {
                 session_recovery::begin(recover_interrupted)
                     .map_err(|error| {
                         report_error!(error.context("Failed to initialize session recovery"));
@@ -3388,10 +3557,11 @@ fn launch(
             };
             #[cfg(not(feature = "local_fs"))]
             let recovered_state: Option<AppState> = None;
-            let force_restore = handoff_restore || recovered_state.is_some();
+            let force_restore = handoff_restore || isolated_restore || recovered_state.is_some();
             #[cfg(not(target_family = "wasm"))]
             let starts_empty = matches!(launch_mode, LaunchMode::App { .. })
                 && !handoff_restore
+                && !isolated_worker
                 && !remote_control::should_restore_at_startup();
             #[cfg(target_family = "wasm")]
             let starts_empty = false;
@@ -3402,8 +3572,16 @@ fn launch(
             } else {
                 Vec::new()
             };
-            if let Some(handoff) = incoming_window_handoff.as_ref() {
-                let conversation_ids = handoff.window().conversation_ids_to_restore();
+            if let Some(window) = isolated_window_startup
+                .as_ref()
+                .and_then(|(_, payload)| payload.window.as_ref())
+                .or_else(|| {
+                    incoming_window_handoff
+                        .as_ref()
+                        .map(|handoff| handoff.window())
+                })
+            {
+                let conversation_ids = window.conversation_ids_to_restore();
                 BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
                     history.detach_conversations_for_restore(&conversation_ids)
                 });
@@ -3424,8 +3602,11 @@ fn launch(
                     conversations.release_conversations(&conversation_ids)
                 });
             }
-            let mut app_state = match incoming_window_handoff.as_ref() {
-                Some(handoff) => {
+            let isolated_window = isolated_window_startup
+                .as_ref()
+                .and_then(|(_, payload)| payload.window.as_ref());
+            let mut app_state = match (incoming_window_handoff.as_ref(), isolated_window) {
+                (Some(handoff), _) => {
                     let (block_lists, running_mcp_servers) = app_state
                         .map(|state| (state.block_lists, state.running_mcp_servers))
                         .unwrap_or_default();
@@ -3436,15 +3617,28 @@ fn launch(
                         running_mcp_servers,
                     })
                 }
-                None if recovered_state.is_some() => recovered_state.map(|mut recovered| {
-                    if let Some(state) = app_state {
-                        recovered.block_lists = state.block_lists;
-                        recovered.running_mcp_servers = state.running_mcp_servers;
-                    }
-                    recovered
-                }),
-                None if should_skip_restore || starts_empty => None,
-                None => app_state,
+                (None, Some(window)) => {
+                    let (block_lists, running_mcp_servers) = app_state
+                        .map(|state| (state.block_lists, state.running_mcp_servers))
+                        .unwrap_or_default();
+                    Some(AppState {
+                        windows: vec![window.clone()],
+                        active_window_index: Some(0),
+                        block_lists,
+                        running_mcp_servers,
+                    })
+                }
+                (None, None) if recovered_state.is_some() => {
+                    recovered_state.map(|mut recovered| {
+                        if let Some(state) = app_state {
+                            recovered.block_lists = state.block_lists;
+                            recovered.running_mcp_servers = state.running_mcp_servers;
+                        }
+                        recovered
+                    })
+                }
+                (None, None) if should_skip_restore || starts_empty => None,
+                (None, None) => app_state,
             };
             if !interrupted_sessions.is_empty()
                 && let Some(app_state) = app_state.as_mut()
@@ -3457,6 +3651,68 @@ fn launch(
                     })
                 });
             }
+            if launch_mode.is_window_coordinator() {
+                let manager = window_process_build_identity
+                    .ok_or_else(|| anyhow!("window-process build identity is unavailable"))
+                    .and_then(|build_identity| {
+                        let aggregate_state = app_state.clone().unwrap_or_else(|| AppState {
+                            windows: Vec::new(),
+                            active_window_index: None,
+                            block_lists: Default::default(),
+                            running_mcp_servers: Vec::new(),
+                        });
+                        let persistence_sender = PersistenceWriter::as_ref(ctx)
+                            .sender()
+                            .context("window coordinator has no persistence writer")?;
+                        let mut manager = window_process::manager::CoordinatorManager::start(
+                            build_identity,
+                            window_process_profile_identity,
+                            warp_core::paths::state_dir(),
+                            aggregate_state,
+                            persistence_sender,
+                            ctx.background_executor().clone(),
+                        )?;
+                        if let Some(state) = app_state.as_ref()
+                            && !state.windows.is_empty()
+                        {
+                            let uri_target = state
+                                .active_window_index
+                                .filter(|index| *index < state.windows.len())
+                                .unwrap_or(0);
+                            for (index, window) in state.windows.iter().enumerate() {
+                                let payload = window_process::worker::StartupPayload {
+                                    window: Some(window.clone()),
+                                    urls: if index == uri_target {
+                                        launch_mode.args().urls.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                };
+                                manager.queue_window(serde_json::to_vec(&payload)?)?;
+                            }
+                        } else {
+                            let payload = window_process::worker::StartupPayload {
+                                window: None,
+                                urls: launch_mode.args().urls.clone(),
+                            };
+                            manager.queue_window(serde_json::to_vec(&payload)?)?;
+                        }
+                        Ok(manager)
+                    });
+                match manager {
+                    Ok(mut manager) => {
+                        ctx.add_singleton_model(move |ctx| {
+                            manager.start_polling(ctx);
+                            manager
+                        });
+                    }
+                    Err(error) => {
+                        report_error!(error.context("Failed to initialize window coordinator"));
+                        ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                    }
+                }
+                return;
+            }
             if app_state
                 .as_ref()
                 .is_some_and(|app_state| !app_state.windows.is_empty())
@@ -3465,7 +3721,7 @@ fn launch(
                 let arg = OpenFromRestoredArg {
                     app_state,
                     force_restore,
-                    defer_shell_start: handoff_restore,
+                    defer_shell_start: handoff_restore || isolated_restore,
                 };
                 ctx.dispatch_global_action("root_view:open_from_restored", &arg);
             }
@@ -3495,9 +3751,38 @@ fn launch(
                 }
             }
 
+            if isolated_worker && ctx.window_ids().count() == 0 {
+                ctx.dispatch_global_action("root_view:open_new", &());
+            }
+
+            if let Some((mut client, _)) = isolated_window_startup {
+                if ctx.window_ids().count() != 1 {
+                    report_error!("Isolated window worker restored an invalid window count");
+                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                    return;
+                }
+                let ready = warpui::r#async::block_on(
+                    client.send(window_process::protocol::WorkerMessage::Ready),
+                );
+                if !matches!(
+                    ready,
+                    Ok(window_process::protocol::CoordinatorMessage::Ack { .. })
+                ) {
+                    report_error!("Isolated window worker readiness was rejected");
+                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                    return;
+                }
+                let connection = ctx.add_singleton_model(move |ctx| {
+                    window_process::worker::WorkerConnection::new(client, ctx)
+                });
+                ctx.on_first_frame_drawn(move |ctx| {
+                    connection.update(ctx, |connection, ctx| connection.first_frame_presented(ctx));
+                });
+            }
+
             // Process any URLs that were provided on the command line (which may be
             // file:// URLs or ones using our custom URL scheme).
-            for url in launch_mode.args().urls.iter() {
+            for url in launch_mode.args().urls.iter().chain(&isolated_urls) {
                 uri::handle_incoming_uri(url, ctx);
             }
 
@@ -3508,7 +3793,9 @@ fn launch(
             }
 
             #[cfg(feature = "local_fs")]
-            if matches!(launch_mode, LaunchMode::App { .. }) {
+            if launch_mode.participates_in_gui_profile_ownership()
+                && !launch_mode.is_window_coordinator()
+            {
                 let state =
                     (*GeneralSettings::as_ref(ctx).restore_session).then(|| get_app_state(ctx));
                 warp_errors::report_if_error!(

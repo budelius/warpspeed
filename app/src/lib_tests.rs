@@ -5,6 +5,7 @@ fn app_api_key_requires_validation() {
     let app = LaunchMode::App {
         args: Default::default(),
         api_key: Some("app-api-key".to_owned()),
+        gui_process_role: window_process::role::GuiProcessRole::LegacyOwner,
     };
 
     assert!(matches!(
@@ -52,6 +53,7 @@ fn startup_without_api_key_loads_persisted_auth() {
     let app = LaunchMode::App {
         args: Default::default(),
         api_key: None,
+        gui_process_role: window_process::role::GuiProcessRole::LegacyOwner,
     };
 
     assert!(matches!(
@@ -86,6 +88,7 @@ fn app_keeps_default_secure_storage_service_name() {
     let launch_mode = LaunchMode::App {
         args: Default::default(),
         api_key: None,
+        gui_process_role: window_process::role::GuiProcessRole::LegacyOwner,
     };
 
     assert_eq!(
@@ -110,6 +113,7 @@ fn startup_auth_is_non_blocking_only_for_tui() {
         LaunchMode::App {
             args: Default::default(),
             api_key: None,
+            gui_process_role: window_process::role::GuiProcessRole::LegacyOwner,
         },
         LaunchMode::CommandLine {
             command: CliCommand::Whoami,
@@ -147,6 +151,7 @@ fn launch_modes_select_expected_logging_frontend() {
     let app = LaunchMode::App {
         args: Default::default(),
         api_key: None,
+        gui_process_role: window_process::role::GuiProcessRole::LegacyOwner,
     };
     let test = LaunchMode::Test {
         driver: Box::new(None),

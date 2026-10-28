@@ -141,7 +141,9 @@ fn toggle_focus_reporting(_: &(), ctx: &mut AppContext) {
 }
 
 fn save_app(_: &(), ctx: &mut AppContext) {
-    if !AppExecutionMode::as_ref(ctx).can_save_session() {
+    if !AppExecutionMode::as_ref(ctx).can_save_session()
+        || ctx.has_singleton_model::<crate::window_process::manager::CoordinatorManager>()
+    {
         return;
     }
 
@@ -161,6 +163,23 @@ fn save_app(_: &(), ctx: &mut AppContext) {
     // during a drag, so we have to short-circuit at this boundary. The
     // first save after the drag finalizes will rewrite the snapshot.
     if CrossWindowTabDrag::as_ref(ctx).is_active() {
+        return;
+    }
+
+    if save_app_state
+        && ctx.has_singleton_model::<crate::window_process::worker::WorkerConnection>()
+    {
+        let app_state = get_app_state(ctx);
+        if let [window] = app_state.windows.as_slice() {
+            crate::window_process::worker::WorkerConnection::handle(ctx).update(
+                ctx,
+                |connection, ctx| {
+                    warp_errors::report_if_error!(connection.save_window(window, ctx));
+                },
+            );
+        } else {
+            report_error!("Isolated window worker cannot persist multiple windows");
+        }
         return;
     }
 

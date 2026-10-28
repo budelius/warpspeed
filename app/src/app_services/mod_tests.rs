@@ -37,6 +37,19 @@ fn only_gui_launches_participate_in_profile_ownership() {
     let gui = LaunchMode::App {
         args: warp_cli::AppArgs::default(),
         api_key: None,
+        gui_process_role: crate::window_process::role::GuiProcessRole::LegacyOwner,
+    };
+    let coordinator = LaunchMode::App {
+        args: warp_cli::AppArgs::default(),
+        api_key: None,
+        gui_process_role: crate::window_process::role::GuiProcessRole::Coordinator,
+    };
+    let worker = LaunchMode::App {
+        args: warp_cli::AppArgs::default(),
+        api_key: None,
+        gui_process_role: crate::window_process::role::GuiProcessRole::WindowWorker {
+            bootstrap_path: "worker.json".into(),
+        },
     };
     let test_helper = LaunchMode::Test {
         driver: Box::new(None),
@@ -48,6 +61,8 @@ fn only_gui_launches_participate_in_profile_ownership() {
     };
 
     assert!(gui.participates_in_gui_profile_ownership());
+    assert!(coordinator.participates_in_gui_profile_ownership());
+    assert!(!worker.participates_in_gui_profile_ownership());
     assert!(!test_helper.participates_in_gui_profile_ownership());
     assert!(!remote_proxy.participates_in_gui_profile_ownership());
     assert!(!remote_daemon.participates_in_gui_profile_ownership());

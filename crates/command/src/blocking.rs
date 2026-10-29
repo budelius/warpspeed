@@ -552,6 +552,38 @@ impl Command {
     }
 
     pub fn spawn(&mut self) -> io::Result<Child> {
+        self.configure_default_stdio();
+        let child = self.spawn_inner();
+        self.assign_child_job_if_requested(&child);
+        child
+    }
+
+    #[cfg(windows)]
+    pub fn spawn_with_required_breakaway(&mut self) -> io::Result<Child> {
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+        if self.creation_flags & CREATE_BREAKAWAY_FROM_JOB == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "required breakaway flag is missing",
+            ));
+        }
+        self.configure_default_stdio();
+        let child = self.inner.spawn();
+        self.assign_child_job_if_requested(&child);
+        child
+    }
+
+    pub fn independent_process_group(&mut self) -> &mut Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            self.inner.process_group(0);
+        }
+        self
+    }
+
+    fn configure_default_stdio(&mut self) {
         if self.stdin_is_default {
             self.inner.stdin(Stdio::null());
         }
@@ -561,8 +593,11 @@ impl Command {
         if self.stderr_is_default {
             self.inner.stderr(Stdio::null());
         }
+    }
 
-        let child = self.spawn_inner();
+    fn assign_child_job_if_requested(&self, child: &io::Result<Child>) {
+        #[cfg(not(windows))]
+        let _ = child;
 
         #[cfg(windows)]
         if self.kill_on_parent_process_close
@@ -577,8 +612,6 @@ impl Command {
                 report_error!(e, extra: { "program" => ?self.inner.get_program() });
             }
         }
-
-        child
     }
 
     /// Executes the command as a child process, waiting for it to finish and

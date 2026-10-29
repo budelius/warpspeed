@@ -1,6 +1,6 @@
 # WarpSpeed per-window process isolation implementation plan
 
-> **Status:** Design plan only. Do not weaken profile ownership or manipulate the user's running WarpSpeed processes while implementing it.
+> **Status:** Feature-disabled foundation in progress. Shared-write proxies, complete cross-window routing, coordinator recovery, platform lifecycle acceptance, and process tests still block rollout. Do not weaken profile ownership or manipulate the user's running WarpSpeed processes while implementing it.
 
 **Goal:** Run every normal WarpSpeed top-level window in its own GUI worker process so a crash, fatal render error, or hot main-thread loop in one window cannot terminate the other windows.
 

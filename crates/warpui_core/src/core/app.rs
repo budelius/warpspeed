@@ -614,6 +614,7 @@ pub struct AppContext {
     /// when layout moves the active cursor.
     last_observed_active_cursor_positions: FxHashMap<WindowId, Option<CursorInfo>>,
     pub(super) windows: FxHashMap<WindowId, Window>,
+    window_count_limit: Option<usize>,
     pub(super) ref_counts: Arc<Mutex<RefCounts>>,
     pub(super) platform_delegate: Box<dyn platform::Delegate>,
 
@@ -796,6 +797,7 @@ impl AppContext {
             models: Default::default(),
             singleton_models: Default::default(),
             windows: Default::default(),
+            window_count_limit: None,
             ref_counts: Arc::new(Mutex::new(RefCounts::default())),
             last_frame_position_cache: Default::default(),
             last_observed_active_cursor_positions: Default::default(),
@@ -876,6 +878,18 @@ impl AppContext {
         }
 
         ctx
+    }
+
+    /// Limits the number of simultaneously open top-level windows in this process.
+    ///
+    /// Attempts to exceed the limit terminate the initiating operation before a platform window is
+    /// created.
+    pub fn set_window_count_limit(&mut self, limit: Option<usize>) {
+        assert!(
+            limit.is_none_or(|limit| self.windows.len() <= limit),
+            "the current window count exceeds the new process window limit"
+        );
+        self.window_count_limit = limit;
     }
 
     /// Registers a provider that creates an [`AssetSource`] for a given URL.
@@ -2459,6 +2473,11 @@ impl AppContext {
         T: View + TypedActionView,
         F: FnOnce(&mut ViewContext<T>) -> T,
     {
+        assert!(
+            self.window_count_limit
+                .is_none_or(|limit| self.windows.len() < limit),
+            "process top-level window limit exceeded"
+        );
         let (window_id, _root_view_id) =
             self.insert_window_internal(None, add_window_options, |window_id, ctx| {
                 ctx.windows.insert(window_id, Window::default());

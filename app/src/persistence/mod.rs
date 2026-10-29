@@ -81,6 +81,12 @@ pub enum PersistenceScope {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistenceAccess {
+    ReadWrite,
+    ReadOnly,
+}
+
 /// The [`PersistenceScope`] this process's persistence was initialized with.
 ///
 /// Set once by [`initialize`]. Code that opens ad-hoc read-only connections
@@ -172,13 +178,14 @@ pub fn initialize(
     ctx: &mut AppContext,
     scope: PersistenceScope,
     data_scope: PersistedDataScope,
+    access: PersistenceAccess,
 ) -> (Option<Box<PersistedData>>, Option<WriterHandles>) {
     // Record the scope for ad-hoc read-only connections; keep the first value
     // if this is ever called more than once in a process (e.g. tests).
     let _ = CURRENT_SCOPE.set(scope.clone());
     cfg_if::cfg_if! {
         if #[cfg(feature = "local_fs")] {
-            sqlite::initialize(ctx, scope, data_scope)
+            sqlite::initialize(ctx, scope, data_scope, access)
         } else {
             (None, None)
         }

@@ -23,5 +23,16 @@ warpui_core.workspace = true
 [dev-dependencies]
 parking_lot.workspace = true
 
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 interprocess = {version = "1.2.1", features = ["tokio_support"]}
+tokio = { workspace = true, features = ["sync"] }
+
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["net", "sync"] }
+windows = { workspace = true, features = [
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }

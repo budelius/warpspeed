@@ -108,6 +108,13 @@ pub fn initialize_cloud_preferences_syncer(
     )
 }
 
+pub fn initialize_read_only_cloud_preferences_syncer(
+    toml_file_path: PathBuf,
+    ctx: &mut ModelContext<CloudPreferencesSyncer>,
+) -> CloudPreferencesSyncer {
+    CloudPreferencesSyncer::new(false, toml_file_path, false, ctx)
+}
+
 /// Handles syncing CloudPreferences (the Warp Drive objects) and local Settings models that
 /// have been created using the define_settings_group macro.
 pub struct CloudPreferencesSyncer {

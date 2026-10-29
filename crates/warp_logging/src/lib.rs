@@ -36,6 +36,8 @@ pub struct LogConfig {
     /// `rotate_log_files` behavior. `None` preserves the existing unbounded-within-session
     /// growth (warpdotdev/warp#10879).
     pub max_file_size_bytes: Option<u64>,
+    /// PID appended to the channel log filename for an isolated GUI worker.
+    pub process_id_suffix: Option<u32>,
 }
 
 #[cfg_attr(not(target_family = "wasm"), path = "native.rs")]

@@ -122,6 +122,7 @@ const SETTINGS_FILE_MIGRATION_COMPLETE_KEY: &str = "SettingsFileMigrationComplet
 
 pub fn init(
     startup_toml_parse_error: Option<user_preferences::Error>,
+    allow_persistence_migration: bool,
     ctx: &mut AppContext,
 ) -> UserDefaultsOnStartup {
     ctx.add_singleton_model(|_| SettingsInitializer::new());
@@ -131,7 +132,7 @@ pub fn init(
     // One-time migration: copy public settings from the platform-native store
     // into the TOML file so existing users don't lose their customizations
     // when the settings file feature is first enabled.
-    if needs_settings_file_migration(ctx) {
+    if allow_persistence_migration && needs_settings_file_migration(ctx) {
         migrate_native_settings_to_settings_file(ctx);
     }
 
@@ -317,6 +318,12 @@ pub fn init_private_user_preferences() -> settings::PrivatePreferences {
     settings::PrivatePreferences::new(init_platform_native_preferences())
 }
 
+pub fn init_read_only_private_user_preferences() -> settings::PrivatePreferences {
+    settings::PrivatePreferences::new(Box::new(
+        user_preferences::read_only::ReadOnlyPreferences::new(init_platform_native_preferences()),
+    ))
+}
+
 /// Initializes the public UserPreferences provider.
 ///
 /// When the `SettingsFile` feature flag is enabled, public settings are stored
@@ -348,6 +355,17 @@ pub fn init_public_user_preferences() -> (user_preferences::Model, Option<user_p
             }
         }
     }
+}
+
+pub fn init_read_only_public_user_preferences()
+-> (user_preferences::Model, Option<user_preferences::Error>) {
+    let (preferences, error) = init_public_user_preferences();
+    (
+        Box::new(user_preferences::read_only::ReadOnlyPreferences::new(
+            preferences,
+        )),
+        error,
+    )
 }
 
 /// Returns `true` when we should migrate public settings from the

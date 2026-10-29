@@ -1621,14 +1621,27 @@ pub(crate) fn open_new_window_get_handles(
     )
 }
 
+fn request_isolated_window(ctx: &mut AppContext) -> bool {
+    if !ctx.has_singleton_model::<crate::window_process::worker::WorkerConnection>() {
+        return false;
+    }
+    crate::window_process::worker::WorkerConnection::handle(ctx)
+        .update(ctx, |connection, ctx| connection.open_window(ctx));
+    true
+}
+
 /// Opens a new window.
 fn open_new(_: &(), ctx: &mut AppContext) {
-    open_new_window_get_handles(None, ctx);
+    if !request_isolated_window(ctx) {
+        open_new_window_get_handles(None, ctx);
+    }
 }
 
 /// Opens a new window with a specific shell
 fn open_new_with_shell(shell: &Option<AvailableShell>, ctx: &mut AppContext) {
-    open_new_window_get_handles(shell.to_owned(), ctx);
+    if !request_isolated_window(ctx) {
+        open_new_window_get_handles(shell.to_owned(), ctx);
+    }
 }
 
 /// Global action that performs a few steps:

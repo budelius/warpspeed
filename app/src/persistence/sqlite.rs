@@ -65,7 +65,7 @@ use super::model::{
 };
 use super::{
     BlockCompleted, FinishedCommandMetadata, ModelEvent, PersistedData, PersistedDataScope,
-    PersistenceScope, StartedCommandMetadata, WriterHandles, schema,
+    PersistenceAccess, PersistenceScope, StartedCommandMetadata, WriterHandles, schema,
 };
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -133,25 +133,37 @@ pub fn initialize(
     ctx: &mut AppContext,
     scope: PersistenceScope,
     data_scope: PersistedDataScope,
+    access: PersistenceAccess,
 ) -> (Option<Box<PersistedData>>, Option<WriterHandles>) {
     unsafe {
         // Set up logging before any SQLite calls.
         init_logging();
     }
     let database_path = database_file_path_for_scope(&scope);
-    match init_db(&scope) {
+    let connection = match access {
+        PersistenceAccess::ReadWrite => init_db(&scope),
+        PersistenceAccess::ReadOnly => database_path
+            .to_str()
+            .ok_or_else(|| anyhow!("Failed to convert db path to a string"))
+            .and_then(establish_ro_connection),
+    };
+    match connection {
         Ok(mut conn) => {
             let mut persisted_data = read_persisted_data(&mut conn, ctx, data_scope);
 
-            let writer_handles = match start_writer(conn, database_path.clone()) {
-                Ok(writer_handles) => Some(writer_handles),
-                Err(err) => {
-                    send_telemetry_from_app_ctx!(
-                        TelemetryEvent::DatabaseWriteError(err.to_string()),
-                        ctx
-                    );
-                    report_db_error("starting writer", err, &database_path);
-                    None
+            let writer_handles = if access == PersistenceAccess::ReadOnly {
+                None
+            } else {
+                match start_writer(conn, database_path.clone()) {
+                    Ok(writer_handles) => Some(writer_handles),
+                    Err(err) => {
+                        send_telemetry_from_app_ctx!(
+                            TelemetryEvent::DatabaseWriteError(err.to_string()),
+                            ctx
+                        );
+                        report_db_error("starting writer", err, &database_path);
+                        None
+                    }
                 }
             };
 
@@ -227,13 +239,15 @@ fn establish_connection(database_url: &str, read_only: bool) -> Result<SqliteCon
     // The auto-checkpoint interval is lowered from the default of 1000 because all writes
     // already run in a background thread and can afford to checkpoint slightly more often.
     // At the default value, the WAL can grow larger than a typical database (for our usage).
-    conn.batch_execute(
-        r#"
-        PRAGMA journal_mode=WAL;
-        PRAGMA wal_autocheckpoint=500;
-    "#,
-    )
-    .context("Failed to enable WAL")?;
+    if !read_only {
+        conn.batch_execute(
+            r#"
+            PRAGMA journal_mode=WAL;
+            PRAGMA wal_autocheckpoint=500;
+        "#,
+        )
+        .context("Failed to enable WAL")?;
+    }
 
     Ok(conn)
 }

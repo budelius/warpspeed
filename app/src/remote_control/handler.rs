@@ -33,6 +33,9 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
             cwd,
         } => move_session_to_agent_ctrl(terminal_view_id, cwd.map(PathBuf::from), ctx),
         Request::MoveStatus { terminal_view_id } => move_status(terminal_view_id, ctx),
+        Request::RestartSessionInCurrentSupervisor { terminal_view_id } => {
+            restart_session_in_current_supervisor(terminal_view_id, ctx)
+        }
         #[cfg(feature = "local_tty")]
         Request::CliAgentEvent {
             token,
@@ -305,6 +308,31 @@ fn move_session_to_agent_ctrl(
 fn move_session_to_agent_ctrl(_: u64, _: Option<PathBuf>, _: &mut AppContext) -> Response {
     Response::Failed {
         error: "This build cannot move sessions to AgentCtrl".to_owned(),
+    }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn restart_session_in_current_supervisor(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+    let held = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
+        workspace_holding_terminal_view(view_id, ctx).map(|workspace| (view_id, workspace))
+    });
+    let Some((view_id, workspace)) = held else {
+        return Response::Failed {
+            error: format!("No pane in this instance has terminal view {terminal_view_id}"),
+        };
+    };
+    match workspace.update(ctx, |workspace, ctx| {
+        workspace.restart_in_current_supervisor_unattended(view_id, ctx)
+    }) {
+        Ok(()) => Response::Done,
+        Err(error) => Response::Failed { error },
+    }
+}
+
+#[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+fn restart_session_in_current_supervisor(_: u64, _: &mut AppContext) -> Response {
+    Response::Failed {
+        error: "This build has no local terminals".to_owned(),
     }
 }
 

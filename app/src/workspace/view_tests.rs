@@ -5636,7 +5636,7 @@ fn supervisor_restart_requires_confirmation_even_for_an_idle_shell_and_can_be_ca
 
 #[cfg(feature = "local_tty")]
 #[test]
-fn restart_under_current_supervisor_resumes_the_attached_pi_agent() {
+fn unattended_supervisor_restart_resumes_the_attached_pi_agent() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let workspace = mock_workspace(&mut app);
@@ -5667,16 +5667,11 @@ fn restart_under_current_supervisor_resumes_the_attached_pi_agent() {
                     .is_none()
             );
 
-            workspace.handle_action(
-                &WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
-                    terminal_view_id: view.id(),
-                },
-                ctx,
+            assert_eq!(
+                workspace.restart_in_current_supervisor_unattended(view.id(), ctx),
+                Ok(())
             );
-            workspace.handle_restart_shell_confirmation_modal_body_event(
-                &RestartShellConfirmationEvent::Confirm,
-                ctx,
-            );
+            assert!(!workspace.restart_shell_confirmation_modal.is_open());
             view
         });
 

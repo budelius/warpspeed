@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Adding a variant at the end of an enum is safe for bincode only in one
 /// direction, and the two ends here can be either older or newer than one
 /// another, so treat any change as a bump.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A request from the `sessions` command to a running window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +83,9 @@ pub enum Request {
 
     /// Every window this instance has open, including windows without terminal panes.
     ListWindows,
+
+    /// Replaces a pane's shell from another supervisor and resumes its recorded agent.
+    RestartSessionInCurrentSupervisor { terminal_view_id: u64 },
 }
 
 /// The largest [`Request::CliAgentEvent`] notification an instance accepts, in bytes.

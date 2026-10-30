@@ -14,8 +14,8 @@ fn assert_round_trips<T: Serialize + DeserializeOwned + std::fmt::Debug>(value: 
 }
 
 #[test]
-fn protocol_version_is_five() {
-    assert_eq!(PROTOCOL_VERSION, 5);
+fn protocol_version_is_six() {
+    assert_eq!(PROTOCOL_VERSION, 6);
 }
 
 #[test]
@@ -124,10 +124,17 @@ fn windows_round_trip() {
 }
 
 #[test]
-fn windows_variants_are_appended_for_cross_build_safety() {
+fn window_and_restart_variants_are_appended_for_cross_build_safety() {
     assert_eq!(
         &bincode::serialize(&Request::ListWindows).unwrap()[..4],
         &11_u32.to_le_bytes()
+    );
+    assert_eq!(
+        &bincode::serialize(&Request::RestartSessionInCurrentSupervisor {
+            terminal_view_id: 42,
+        })
+        .unwrap()[..4],
+        &12_u32.to_le_bytes()
     );
     assert_eq!(
         &bincode::serialize(&Response::Windows {

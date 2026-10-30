@@ -55,6 +55,20 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
             json,
             &format!("Opened saved session {name}"),
         ),
+        SessionsCommand::RestartInCurrentSupervisor {
+            terminal_view,
+            instance,
+        } => act(
+            instance.pid,
+            Request::RestartSessionInCurrentSupervisor {
+                terminal_view_id: terminal_view.terminal_view_id,
+            },
+            json,
+            &format!(
+                "Restarted terminal view {} under the current supervisor",
+                terminal_view.terminal_view_id
+            ),
+        ),
     }
 }
 

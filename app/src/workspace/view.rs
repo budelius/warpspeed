@@ -13652,6 +13652,42 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn restart_in_current_supervisor_unattended(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<(), String> {
+        if self.pending_shell_restart.is_some() {
+            return Err("Another shell restart is awaiting confirmation".to_owned());
+        }
+        if !self.focus_terminal_view_locally(terminal_view_id, ctx) {
+            return Err(format!(
+                "No pane in this window has terminal view {terminal_view_id}"
+            ));
+        }
+        let Some(view) = self.focused_terminal_view(ctx) else {
+            return Err("The terminal view is no longer available".to_owned());
+        };
+        if view.as_ref(ctx).connected_supervisor().is_none() {
+            let Some(manager) = self.focused_terminal_manager(ctx) else {
+                return Err("The terminal session is no longer available".to_owned());
+            };
+            return manager
+                .update(ctx, |manager, ctx| manager.take_over_held_session(ctx))
+                .then_some(())
+                .ok_or_else(|| "The pane has no held session to take over".to_owned());
+        }
+        self.start_shell_restart(None, true, ctx);
+        if self.pending_shell_restart.is_none() {
+            return Err("The pane is not connected to another supervisor".to_owned());
+        }
+        self.handle_restart_shell_confirmation_modal_body_event(
+            &RestartShellConfirmationEvent::Confirm,
+            ctx,
+        );
+        Ok(())
+    }
+
     /// Restarts `manager`'s session in place and, if the pane hosted a resumable Claude
     /// session, enqueues a `claude --resume <uuid>` continuation so it picks back up once
     /// the replacement shell bootstraps (`set_pending_command_queue` / `execute_pending_command`

@@ -58,6 +58,14 @@ pub struct SessionArg {
     pub session_id: u64,
 }
 
+/// A terminal view id, as `sessions panes` prints it.
+#[derive(Debug, Clone, Args)]
+pub struct TerminalViewArg {
+    /// The id of the terminal view to act on.
+    #[arg(long = "terminal-view", value_name = "ID")]
+    pub terminal_view_id: u64,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum SessionsCommand {
     /// List the sessions the supervisor is holding.
@@ -127,6 +135,18 @@ pub enum SessionsCommand {
     Open {
         /// The saved session's name, as `stored` lists it. Case does not matter.
         name: String,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// Replace a pane's shell from an older supervisor and resume its attached agent.
+    ///
+    /// This ends the original shell and any process still running in it. Use it only after
+    /// deciding that the old process may be terminated.
+    RestartInCurrentSupervisor {
+        #[command(flatten)]
+        terminal_view: TerminalViewArg,
 
         #[command(flatten)]
         instance: InstanceArg,

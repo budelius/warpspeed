@@ -38,6 +38,9 @@ const TERMINAL_GATEWAY_ORIGIN: &str = "https://dash-dev.stozn.ai";
 const TERMINAL_GATEWAY_PROTOCOL: &str = "stozn-agentctrl-terminal-v1";
 const TERMINAL_GATEWAY_SOCKET_URL: &str =
     "wss://dash-backend-dev.stozn.ai/api/agent-control/terminal/socket";
+const TERMINAL_GATEWAY_KEEPALIVE: Duration = Duration::from_secs(30);
+const TERMINAL_GATEWAY_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const TERMINAL_GATEWAY_WRITER_RETRIES: usize = 5;
 const INPUT_POLL: Duration = Duration::from_millis(10);
 const MAX_TERMINAL_DIMENSION: u16 = 500;
 
@@ -368,8 +371,6 @@ fn attach_descriptor(
 }
 
 fn attach_through_gateway(job_id: &str, generation: &str, takeover: bool) -> Result<()> {
-    let ticket = create_gateway_ticket(job_id, takeover)?;
-    validate_gateway_ticket(&ticket, Utc::now())?;
     eprintln!(
         "Attaching to the native Pi terminal through STOZN's authenticated terminal gateway."
     );
@@ -379,9 +380,40 @@ fn attach_through_gateway(job_id: &str, generation: &str, takeover: bool) -> Res
         .enable_all()
         .build()
         .context("failed to start the Live terminal runtime")?;
-    runtime.block_on(run_gateway_terminal(ticket, job_id, generation))?;
-    println!("Detached. The managed run was not stopped.");
-    Ok(())
+    let mut reconnecting = false;
+    let mut writer_retries = 0;
+    loop {
+        if reconnecting {
+            thread::sleep(TERMINAL_GATEWAY_RECONNECT_DELAY);
+        }
+        let ticket = match create_gateway_ticket(job_id, takeover) {
+            Ok(ticket) => ticket,
+            Err(error) if reconnecting && gateway_ticket_error_is_retryable(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        validate_gateway_ticket(&ticket, Utc::now())?;
+        match runtime.block_on(run_gateway_terminal(ticket, job_id, generation))? {
+            GatewayTerminalOutcome::Detached => {
+                println!("Detached. The managed run was not stopped.");
+                return Ok(());
+            }
+            GatewayTerminalOutcome::Reconnect => {
+                reconnecting = true;
+                writer_retries = 0;
+                eprintln!("\r\nLive terminal connection was interrupted; reconnecting.");
+            }
+            GatewayTerminalOutcome::WriterExists
+                if reconnecting && writer_retries < TERMINAL_GATEWAY_WRITER_RETRIES =>
+            {
+                writer_retries += 1;
+            }
+            GatewayTerminalOutcome::WriterExists => {
+                bail!(
+                    "Live terminal is open elsewhere; disconnect it or retry with `agent-ctrl attach {job_id} --takeover`"
+                );
+            }
+        }
+    }
 }
 
 fn create_gateway_ticket(job_id: &str, takeover: bool) -> Result<TerminalGatewayTicket> {
@@ -430,6 +462,19 @@ fn validate_gateway_ticket(ticket: &TerminalGatewayTicket, now: DateTime<Utc>) -
     Ok(())
 }
 
+fn gateway_ticket_error_is_retryable(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<super::HttpStatusError>()
+            .is_some_and(|error| {
+                error.status == StatusCode::TOO_MANY_REQUESTS || error.status.is_server_error()
+            })
+            || cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.is_connect() || error.is_timeout() || error.is_request())
+    })
+}
+
 fn gateway_is_unavailable(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<super::HttpStatusError>()
@@ -446,7 +491,7 @@ async fn run_gateway_terminal(
     ticket: TerminalGatewayTicket,
     job_id: &str,
     generation: &str,
-) -> Result<()> {
+) -> Result<GatewayTerminalOutcome> {
     let socket = WebSocket::connect_with_headers(
         &ticket.websocket_url,
         [ticket.protocol.as_str(), ticket.ticket.as_str()],
@@ -462,33 +507,49 @@ async fn run_gateway_terminal(
     .await
     .context("could not initialize the Live terminal")?;
 
+    let mut output_filter = TerminalOutputFilter::default();
     loop {
         let message = stream
             .next()
             .await
             .context("Live terminal gateway closed before it was ready")?
             .context("Live terminal gateway failed before it was ready")?;
-        match gateway_message(message, job_id, generation, false)? {
+        match gateway_message(message, job_id, generation, false, &mut output_filter)? {
             GatewayMessage::Ready => break,
             GatewayMessage::Continue => {}
-            GatewayMessage::Finished => {
-                bail!("Live terminal gateway closed before it was ready");
-            }
+            GatewayMessage::WriterExists => return Ok(GatewayTerminalOutcome::WriterExists),
+            GatewayMessage::Reconnect => bail!("Live terminal gateway closed before it was ready"),
         }
     }
 
     let _raw_mode = RawModeGuard::enter()?;
     let mut poll = tokio::time::interval(INPUT_POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + TERMINAL_GATEWAY_KEEPALIVE,
+        TERMINAL_GATEWAY_KEEPALIVE,
+    );
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             message = stream.next() => {
                 let Some(message) = message else {
-                    bail!("Live terminal connection closed unexpectedly");
+                    return Ok(GatewayTerminalOutcome::Reconnect);
                 };
-                match gateway_message(message.context("Live terminal connection failed")?, job_id, generation, true)? {
+                let Ok(message) = message else {
+                    return Ok(GatewayTerminalOutcome::Reconnect);
+                };
+                match gateway_message(message, job_id, generation, true, &mut output_filter)? {
                     GatewayMessage::Ready | GatewayMessage::Continue => {}
-                    GatewayMessage::Finished => return Ok(()),
+                    GatewayMessage::Reconnect => return Ok(GatewayTerminalOutcome::Reconnect),
+                    GatewayMessage::WriterExists => {
+                        return Ok(GatewayTerminalOutcome::WriterExists);
+                    }
+                }
+            }
+            _ = keepalive.tick() => {
+                if sink.send(gateway_keepalive()).await.is_err() {
+                    return Ok(GatewayTerminalOutcome::Reconnect);
                 }
             }
             _ = poll.tick() => {
@@ -510,7 +571,7 @@ async fn run_gateway_terminal(
                         }
                         LocalTerminalInput::Detach => {
                             let _ = sink.close().await;
-                            return Ok(());
+                            return Ok(GatewayTerminalOutcome::Detached);
                         }
                         LocalTerminalInput::Ignore => {}
                     }
@@ -520,10 +581,57 @@ async fn run_gateway_terminal(
     }
 }
 
+fn gateway_keepalive() -> Message {
+    Message::new_text(json!({ "type": "ping" }).to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GatewayTerminalOutcome {
+    Detached,
+    Reconnect,
+    WriterExists,
+}
+
+#[derive(Default)]
+struct TerminalOutputFilter {
+    pending: Vec<u8>,
+}
+
+impl TerminalOutputFilter {
+    fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+        const QUERIES: [&[u8]; 4] = [b"\x1b[>c", b"\x1b[>0c", b"\x1b[>q", b"\x1b[>0q"];
+
+        let mut output = Vec::with_capacity(bytes.len());
+        for byte in bytes {
+            if self.pending.is_empty() && *byte != b'\x1b' {
+                output.push(*byte);
+                continue;
+            }
+            self.pending.push(*byte);
+            loop {
+                if QUERIES.iter().any(|query| *query == self.pending) {
+                    self.pending.clear();
+                    break;
+                }
+                if QUERIES.iter().any(|query| query.starts_with(&self.pending)) {
+                    break;
+                }
+                output.push(self.pending.remove(0));
+                if self.pending.is_empty() {
+                    break;
+                }
+            }
+        }
+        output
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum GatewayMessage {
     Ready,
     Continue,
-    Finished,
+    Reconnect,
+    WriterExists,
 }
 
 fn gateway_message(
@@ -531,14 +639,16 @@ fn gateway_message(
     job_id: &str,
     generation: &str,
     ready: bool,
+    output_filter: &mut TerminalOutputFilter,
 ) -> Result<GatewayMessage> {
     if let Some(bytes) = message.binary() {
         if !ready {
             bail!("Live terminal sent output before it was ready");
         }
+        let bytes = output_filter.push(bytes);
         let mut stdout = io::stdout().lock();
         stdout
-            .write_all(bytes)
+            .write_all(&bytes)
             .and_then(|()| stdout.flush())
             .context("failed to display Live terminal output")?;
         return Ok(GatewayMessage::Continue);
@@ -562,13 +672,14 @@ fn gateway_message(
             Ok(GatewayMessage::Ready)
         }
         "pong" => Ok(GatewayMessage::Continue),
-        "exit" => Ok(GatewayMessage::Finished),
+        "exit" => Ok(GatewayMessage::Reconnect),
         "error" => {
             let code = control.code.as_ref().and_then(serde_json::Value::as_str);
+            if matches!(code, Some("idle_timeout" | "duration_limit")) {
+                return Ok(GatewayMessage::Reconnect);
+            }
             if code == Some("writer_exists") {
-                bail!(
-                    "Live terminal is open elsewhere; disconnect it or retry with `agent-ctrl attach {job_id} --takeover`"
-                );
+                return Ok(GatewayMessage::WriterExists);
             }
             let message = control
                 .message

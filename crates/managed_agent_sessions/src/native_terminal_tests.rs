@@ -81,6 +81,110 @@ fn gateway_ticket_rejects_expired_or_header_unsafe_credentials() {
 }
 
 #[test]
+fn gateway_retries_only_transient_ticket_failures() {
+    for status in [
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let error = anyhow::Error::new(super::super::HttpStatusError {
+            status,
+            body: String::new(),
+        });
+        assert!(gateway_ticket_error_is_retryable(&error));
+    }
+
+    let rejected = anyhow::Error::new(super::super::HttpStatusError {
+        status: StatusCode::UNAUTHORIZED,
+        body: String::new(),
+    });
+    assert!(!gateway_ticket_error_is_retryable(&rejected));
+}
+
+#[test]
+fn gateway_output_suppresses_terminal_identity_queries() {
+    let mut filter = TerminalOutputFilter::default();
+
+    assert_eq!(filter.push(b"prefix\x1b[>"), b"prefix");
+    assert_eq!(filter.push(b"cmiddle\x1b[>0"), b"middle");
+    assert_eq!(
+        filter.push(b"qsuffix\x1b[?25h\x1b[>4;2m"),
+        b"suffix\x1b[?25h\x1b[>4;2m"
+    );
+}
+
+#[test]
+fn gateway_keepalive_is_a_ping_control_message() {
+    assert_eq!(gateway_keepalive().text(), Some(r#"{"type":"ping"}"#));
+}
+
+#[test]
+fn gateway_idle_and_duration_limits_trigger_reconnection() {
+    for code in ["idle_timeout", "duration_limit"] {
+        let message = Message::new_text(
+            json!({
+                "type": "error",
+                "code": code,
+                "message": "Live terminal disconnected",
+            })
+            .to_string(),
+        );
+
+        assert_eq!(
+            gateway_message(
+                message,
+                "job-123",
+                "generation-123",
+                true,
+                &mut TerminalOutputFilter::default(),
+            )
+            .unwrap(),
+            GatewayMessage::Reconnect
+        );
+    }
+}
+
+#[test]
+fn gateway_remote_exit_triggers_reconnection() {
+    let message = Message::new_text(json!({ "type": "exit", "code": 0 }).to_string());
+
+    assert_eq!(
+        gateway_message(
+            message,
+            "job-123",
+            "generation-123",
+            true,
+            &mut TerminalOutputFilter::default(),
+        )
+        .unwrap(),
+        GatewayMessage::Reconnect
+    );
+}
+
+#[test]
+fn gateway_writer_conflicts_remain_distinct_from_reconnects() {
+    let message = Message::new_text(
+        json!({
+            "type": "error",
+            "code": "writer_exists",
+            "message": "Live terminal is open elsewhere",
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        gateway_message(
+            message,
+            "job-123",
+            "generation-123",
+            false,
+            &mut TerminalOutputFilter::default(),
+        )
+        .unwrap(),
+        GatewayMessage::WriterExists
+    );
+}
+
+#[test]
 fn local_terminal_input_detaches_only_on_control_close_bracket() {
     let detach = Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
     assert_eq!(local_terminal_input(detach), LocalTerminalInput::Detach);

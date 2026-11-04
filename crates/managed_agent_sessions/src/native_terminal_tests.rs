@@ -161,6 +161,23 @@ fn gateway_remote_exit_triggers_reconnection() {
 }
 
 #[test]
+fn gateway_interruptions_reconnect_during_initial_handshake() {
+    let message = gateway_message(
+        Message::new_text(json!({ "type": "exit", "code": 0 }).to_string()),
+        "job-123",
+        "generation-123",
+        false,
+        &mut TerminalOutputFilter::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        gateway_terminal_outcome(&message),
+        Some(GatewayTerminalOutcome::Reconnect)
+    );
+}
+
+#[test]
 fn gateway_writer_conflicts_remain_distinct_from_reconnects() {
     let message = Message::new_text(
         json!({

@@ -388,7 +388,13 @@ fn attach_through_gateway(job_id: &str, generation: &str, takeover: bool) -> Res
         }
         let ticket = match create_gateway_ticket(job_id, takeover) {
             Ok(ticket) => ticket,
-            Err(error) if reconnecting && gateway_ticket_error_is_retryable(&error) => continue,
+            Err(error) if gateway_ticket_error_is_retryable(&error) => {
+                if !reconnecting {
+                    eprintln!("\r\nLive terminal ticket request was interrupted; reconnecting.");
+                }
+                reconnecting = true;
+                continue;
+            }
             Err(error) => return Err(error),
         };
         validate_gateway_ticket(&ticket, Utc::now())?;
@@ -492,33 +498,39 @@ async fn run_gateway_terminal(
     job_id: &str,
     generation: &str,
 ) -> Result<GatewayTerminalOutcome> {
-    let socket = WebSocket::connect_with_headers(
+    let socket = match WebSocket::connect_with_headers(
         &ticket.websocket_url,
         [ticket.protocol.as_str(), ticket.ticket.as_str()],
         vec![("Origin", TERMINAL_GATEWAY_ORIGIN.to_string())],
     )
     .await
-    .context("could not connect to the Live terminal gateway")?;
+    {
+        Ok(socket) => socket,
+        Err(_) => return Ok(GatewayTerminalOutcome::Reconnect),
+    };
     let (mut sink, mut stream) = socket.split().await;
     let (cols, rows) = terminal_size()?;
-    sink.send(Message::new_text(
-        json!({ "type": "hello", "cols": cols, "rows": rows }).to_string(),
-    ))
-    .await
-    .context("could not initialize the Live terminal")?;
+    if sink
+        .send(Message::new_text(
+            json!({ "type": "hello", "cols": cols, "rows": rows }).to_string(),
+        ))
+        .await
+        .is_err()
+    {
+        return Ok(GatewayTerminalOutcome::Reconnect);
+    }
 
     let mut output_filter = TerminalOutputFilter::default();
     loop {
-        let message = stream
-            .next()
-            .await
-            .context("Live terminal gateway closed before it was ready")?
-            .context("Live terminal gateway failed before it was ready")?;
-        match gateway_message(message, job_id, generation, false, &mut output_filter)? {
-            GatewayMessage::Ready => break,
-            GatewayMessage::Continue => {}
-            GatewayMessage::WriterExists => return Ok(GatewayTerminalOutcome::WriterExists),
-            GatewayMessage::Reconnect => bail!("Live terminal gateway closed before it was ready"),
+        let Some(Ok(message)) = stream.next().await else {
+            return Ok(GatewayTerminalOutcome::Reconnect);
+        };
+        let message = gateway_message(message, job_id, generation, false, &mut output_filter)?;
+        if let Some(outcome) = gateway_terminal_outcome(&message) {
+            return Ok(outcome);
+        }
+        if message == GatewayMessage::Ready {
+            break;
         }
     }
 
@@ -557,17 +569,17 @@ async fn run_gateway_terminal(
                     match local_terminal_input(event::read().context("failed to read Live terminal input")?) {
                         LocalTerminalInput::Bytes(bytes) => {
                             for chunk in bytes.chunks(64 * 1024) {
-                                sink.send(Message::new_binary(chunk.to_vec()))
-                                    .await
-                                    .context("failed to send Live terminal input")?;
+                                if sink.send(Message::new_binary(chunk.to_vec())).await.is_err() {
+                                    return Ok(GatewayTerminalOutcome::Reconnect);
+                                }
                             }
                         }
                         LocalTerminalInput::Resize(cols, rows) => {
-                            sink.send(Message::new_text(
+                            if sink.send(Message::new_text(
                                 json!({ "type": "resize", "cols": cols, "rows": rows }).to_string(),
-                            ))
-                            .await
-                            .context("failed to resize the Live terminal")?;
+                            )).await.is_err() {
+                                return Ok(GatewayTerminalOutcome::Reconnect);
+                            }
                         }
                         LocalTerminalInput::Detach => {
                             let _ = sink.close().await;
@@ -590,6 +602,14 @@ enum GatewayTerminalOutcome {
     Detached,
     Reconnect,
     WriterExists,
+}
+
+fn gateway_terminal_outcome(message: &GatewayMessage) -> Option<GatewayTerminalOutcome> {
+    match message {
+        GatewayMessage::Ready | GatewayMessage::Continue => None,
+        GatewayMessage::Reconnect => Some(GatewayTerminalOutcome::Reconnect),
+        GatewayMessage::WriterExists => Some(GatewayTerminalOutcome::WriterExists),
+    }
 }
 
 #[derive(Default)]

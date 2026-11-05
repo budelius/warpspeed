@@ -763,8 +763,22 @@ pub(crate) fn is_within_known(
     };
     #[cfg(windows)]
     {
-        let normalize = |path: &Path| path.to_string_lossy().replace('\\', "/").to_lowercase();
+        let normalize = |path: &Path| {
+            let path = path.to_string_lossy().replace('\\', "/");
+            let bytes = path.as_bytes();
+            let path = if bytes.len() >= 2
+                && bytes[0] == b'/'
+                && bytes[1].is_ascii_alphabetic()
+                && (bytes.len() == 2 || bytes[2] == b'/')
+            {
+                format!("{}:{}", char::from(bytes[1]), &path[2..])
+            } else {
+                path
+            };
+            path.to_lowercase()
+        };
         let (path, folder) = (normalize(path), normalize(folder));
+        let path = path.trim_end_matches('/');
         let folder = folder.trim_end_matches('/');
         path == folder
             || path

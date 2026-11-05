@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Local};
-use managed_agent_sessions::{RunPreviewEvent, RunSummary};
+use managed_agent_sessions::{RunPreviewEvent, RunSummary, normalize_repo_url};
 use warp_core::ui::Icon;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
@@ -381,6 +381,27 @@ pub(crate) fn supervisor_rows(error: &DetachedListError) -> Vec<ViewRow> {
     }
 }
 
+fn managed_runs_in_current_repo(
+    runs: &[RunSummary],
+    current_job_id: Option<&str>,
+) -> Vec<RunSummary> {
+    let Some(repo_url) = current_job_id
+        .and_then(|job_id| runs.iter().find(|run| run.job_id == job_id))
+        .and_then(|run| run.repo_url.as_deref())
+        .map(normalize_repo_url)
+    else {
+        return Vec::new();
+    };
+    runs.iter()
+        .filter(|run| {
+            run.repo_url
+                .as_deref()
+                .is_some_and(|run_repo_url| normalize_repo_url(run_repo_url) == repo_url)
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn managed_view_rows(
     runs: &[RunSummary],
     error: Option<&str>,
@@ -500,6 +521,7 @@ pub struct AgentSessionsView {
     preview_scroll_state: ClippedScrollStateHandle,
     list_width: ResizableStateHandle,
     preferred_managed_job_id: Option<String>,
+    current_managed_job_id: Option<String>,
     pending_managed_open: Option<String>,
     pending_process_end: Option<u32>,
     process_end_errors: HashMap<u32, String>,
@@ -586,6 +608,7 @@ impl AgentSessionsView {
             preview_scroll_state: ClippedScrollStateHandle::new(),
             list_width: resizable_state_handle(LIST_WIDTH),
             preferred_managed_job_id: None,
+            current_managed_job_id: None,
             pending_managed_open: None,
             pending_process_end: None,
             process_end_errors: HashMap::new(),
@@ -621,6 +644,9 @@ impl AgentSessionsView {
         ctx: &mut ViewContext<Self>,
     ) {
         let (past, scanned_agents) = history;
+        let current_managed_job_id = focus
+            .as_ref()
+            .and_then(|focus| focus.managed_job_id.clone());
         let (focus, preferred_managed_job_id) = match focus {
             Some(focus) => (Some(focus.locator), focus.managed_job_id),
             None => (None, None),
@@ -632,6 +658,7 @@ impl AgentSessionsView {
         self.scanned_agents = scanned_agents.to_vec();
         self.history_loaded = history_loaded;
         self.preferred_managed_job_id = preferred_managed_job_id;
+        self.current_managed_job_id = current_managed_job_id;
         self.pending_managed_open = None;
         self.pending_process_end = None;
         self.process_end_errors.clear();
@@ -802,11 +829,18 @@ impl AgentSessionsView {
             }
         }
         let model = self.fleet_model.as_ref(ctx);
+        let current_managed_runs =
+            managed_runs_in_current_repo(model.runs(), self.current_managed_job_id.as_deref());
         if matches!(
             self.selected_filter,
-            SessionFilter::All | SessionFilter::AgentCtrl
+            SessionFilter::All | SessionFilter::AgentCtrl | SessionFilter::CurrentDirectory
         ) {
-            rows.extend(managed_view_rows(model.runs(), model.last_error(), &query));
+            let (managed_runs, error) = if self.selected_filter == SessionFilter::CurrentDirectory {
+                (current_managed_runs.as_slice(), None)
+            } else {
+                (model.runs(), model.last_error())
+            };
+            rows.extend(managed_view_rows(managed_runs, error, &query));
         }
         rows.extend(past);
         for row in &rows {
@@ -2274,13 +2308,17 @@ fn filter_count(
     filter: SessionFilter,
     rows: &[AgentSessionRow],
     managed_count: usize,
+    current_managed_count: usize,
     current_folder: Option<&ResolvedPath>,
 ) -> usize {
     match filter {
         SessionFilter::All => rows.len() + managed_count,
-        SessionFilter::CurrentDirectory => current_folder.map_or(0, |folder| {
-            rows.iter().filter(|row| is_row_within(row, folder)).count()
-        }),
+        SessionFilter::CurrentDirectory => {
+            current_managed_count
+                + current_folder.map_or(0, |folder| {
+                    rows.iter().filter(|row| is_row_within(row, folder)).count()
+                })
+        }
         SessionFilter::RunningAndDetached => rows
             .iter()
             .filter(|row| is_running_or_detached(row))
@@ -2512,7 +2550,11 @@ impl View for AgentSessionsView {
         };
 
         let current_folder = focused_folder(&self.panes, self.target);
-        let managed_count = self.fleet_model.as_ref(app).runs().len();
+        let managed_runs = self.fleet_model.as_ref(app).runs();
+        let managed_count = managed_runs.len();
+        let current_managed_count =
+            managed_runs_in_current_repo(managed_runs, self.current_managed_job_id.as_deref())
+                .len();
         let mut filters = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_spacing(2.);
@@ -2526,6 +2568,7 @@ impl View for AgentSessionsView {
                     filter,
                     &self.rows,
                     managed_count,
+                    current_managed_count,
                     current_folder.as_ref().map(|(_, folder)| folder),
                 )
             };

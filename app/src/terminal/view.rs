@@ -17106,8 +17106,14 @@ impl TerminalView {
             )
         };
 
-        let is_cli_agent_paste =
-            !should_paste_in_input && !middle_click && self.has_active_cli_agent_session(ctx);
+        let cli_agent = if !should_paste_in_input && !middle_click {
+            CLIAgentSessionsModel::as_ref(ctx)
+                .session(self.view_id)
+                .map(|session| session.agent)
+        } else {
+            None
+        };
+        let is_cli_agent_paste = cli_agent.is_some();
 
         // If we're pasting into a CLI coding agent (e.g. Claude Code) that has its own native
         // handling for pasted file paths and images, skip shell-escaping and let the agent
@@ -17161,11 +17167,12 @@ impl TerminalView {
                 .replace_all(copied.as_str(), "\r")
                 .to_string();
 
-            if needs_bracketed_paste {
-                // If bracketed paste is enabled in the current grid, then we should surround any
-                // paste operation with `\x1b[200~` and `\x1b[201~` so that the application knows
-                // the text came from paste, rather than from direct user input.
-                // See https://cirw.in/blog/bracketed-paste for more info on bracketed paste
+            let is_multiline = copied.contains('\n') || copied.contains('\r');
+            let force_bracketed_paste =
+                is_multiline && matches!(cli_agent, Some(CLIAgent::Pi | CLIAgent::OhMyPi));
+            if needs_bracketed_paste || force_bracketed_paste {
+                // An attached Pi session can lose the mode sequence that originally enabled
+                // bracketed paste, but Pi still needs the markers to preserve embedded newlines.
                 copied = format!("{BRACKETED_PASTE_PREFIX}{copied}{BRACKETED_PASTE_SUFFIX}");
             }
             self.write_user_bytes_to_pty(copied.into_bytes(), ctx);

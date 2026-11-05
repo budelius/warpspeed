@@ -369,6 +369,18 @@ fn is_within_matches_the_folder_and_its_subfolders() {
     assert!(!is_within(Path::new("/elsewhere"), root.path()));
 }
 
+#[cfg(windows)]
+#[test]
+fn msys2_drive_path_is_within_the_equivalent_windows_folder() {
+    let folder = ResolvedPath::new(Path::new("T:/projects/IWAKAN/martin-wieser.me"));
+
+    assert!(is_within_known(
+        Path::new("/t/projects/IWAKAN/martin-wieser.me"),
+        None,
+        &folder,
+    ));
+}
+
 #[test]
 fn nothing_is_within_an_empty_folder_and_an_empty_path_is_within_nothing() {
     let root = tempfile::tempdir().unwrap();

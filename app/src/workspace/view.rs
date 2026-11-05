@@ -30810,7 +30810,7 @@ impl View for Workspace {
                 .set
                 .insert("Workspace_PaneCanMoveSessionToAgentCtrl");
         }
-        if agent_ctrl_actions.can_start_agent {
+        if agent_ctrl_actions.can_start_agent && !agent_ctrl_actions.can_move_session {
             context.set.insert("Workspace_PaneCanStartAgentOnAgentCtrl");
         }
         if agent_ctrl_actions.can_move_all {

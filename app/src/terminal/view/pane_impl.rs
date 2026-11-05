@@ -804,12 +804,13 @@ impl TerminalView {
         }
         if agent_ctrl_actions.can_move_session {
             items.push(
-                MenuItemFields::new("Move session to AgentCtrl")
+                MenuItemFields::new("Move session to Obachan")
                     .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
                     .into_item(),
             );
         }
-        if !model.shared_session_status().is_viewer()
+        if !agent_ctrl_actions.can_move_session
+            && !model.shared_session_status().is_viewer()
             && cfg!(all(feature = "local_fs", feature = "local_tty"))
         {
             let mut start_in_obachan = MenuItemFields::new("Start in Obachan")

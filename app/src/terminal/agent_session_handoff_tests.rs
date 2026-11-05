@@ -796,6 +796,25 @@ fn repo_url_for_falls_back_to_origin() {
 }
 
 #[test]
+fn repo_url_for_supports_an_explicit_gitlab_remote() {
+    let repo = TempDir::new().unwrap();
+    let repo = repo.path();
+    init_repo(repo);
+    git(
+        repo,
+        &["remote", "add", "gitlab", "https://gitlab.com/acme/app.git"],
+    );
+
+    assert_eq!(
+        repo_url_for(repo).unwrap(),
+        (
+            "gitlab".to_owned(),
+            "https://gitlab.com/acme/app.git".to_owned()
+        )
+    );
+}
+
+#[test]
 fn repo_url_for_fails_without_a_usable_remote() {
     let repo = TempDir::new().unwrap();
     init_repo(repo.path());

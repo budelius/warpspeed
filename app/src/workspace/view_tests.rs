@@ -5684,6 +5684,124 @@ fn unattended_supervisor_restart_resumes_the_attached_pi_agent() {
     });
 }
 
+fn tracked_pi_session(
+    session_id: Option<&str>,
+) -> crate::terminal::cli_agent_sessions::CLIAgentSession {
+    crate::terminal::cli_agent_sessions::CLIAgentSession {
+        agent: crate::terminal::CLIAgent::Pi,
+        status: crate::terminal::cli_agent_sessions::CLIAgentSessionStatus::InProgress,
+        session_context: crate::terminal::cli_agent_sessions::CLIAgentSessionContext {
+            session_id: session_id.map(str::to_owned),
+            ..Default::default()
+        },
+        input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+        should_auto_toggle_input: false,
+        listener: None,
+        plugin_version: None,
+        remote_host: None,
+        draft_text: None,
+        custom_command_prefix: None,
+        received_rich_notification: false,
+    }
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn supervisor_restart_resumes_a_tracked_pi_session_without_a_reported_id() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let holder = crate::app_state::SessionHolder {
+                channel: "older-supervisor".to_owned(),
+                version: "older-build".to_owned(),
+                pid: 42,
+            };
+            manager.update(ctx, |manager, _| {
+                manager.restore_session_holder(
+                    Some(holder.clone()),
+                    Some(crate::terminal::terminal_manager::HeldAgent {
+                        agent: crate::terminal::CLIAgent::Pi,
+                        session_id: "attached-pi-session".to_owned(),
+                    }),
+                );
+            });
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(Some(holder), ctx);
+            });
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(view.id(), tracked_pi_session(None), ctx);
+            });
+
+            assert_eq!(
+                workspace.restart_in_current_supervisor_unattended(view.id(), ctx),
+                Ok(())
+            );
+            view
+        });
+
+        let buffer_text = terminal_view.read(&app, |terminal_view, ctx| {
+            terminal_view
+                .input()
+                .read(ctx, |input, ctx| input.buffer_text(ctx))
+        });
+        assert_eq!(buffer_text, "pi --session attached-pi-session");
+    });
+}
+
+#[test]
+fn unattended_restart_resumes_the_pi_agent_of_a_pane_in_this_supervisor() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(view.id(), tracked_pi_session(Some("local-pi-session")), ctx);
+            });
+
+            assert_eq!(
+                workspace.restart_shell_unattended(view.id(), ctx),
+                Ok(Some("pi --session local-pi-session".to_owned()))
+            );
+            assert!(!workspace.restart_shell_confirmation_modal.is_open());
+            assert!(workspace.pending_shell_restart.is_none());
+            view
+        });
+
+        let buffer_text = terminal_view.read(&app, |terminal_view, ctx| {
+            terminal_view
+                .input()
+                .read(ctx, |input, ctx| input.buffer_text(ctx))
+        });
+        assert_eq!(buffer_text, "pi --session local-pi-session");
+    });
+}
+
+#[test]
+fn unattended_restart_rejects_an_unknown_terminal_view() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let other_workspace = mock_workspace(&mut app);
+        let foreign_view = other_workspace.update(&mut app, |workspace, ctx| {
+            workspace.focused_terminal_view(ctx).unwrap().id()
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                workspace
+                    .restart_shell_unattended(foreign_view, ctx)
+                    .is_err()
+            );
+        });
+    });
+}
+
 #[cfg(feature = "local_tty")]
 #[test]
 fn attached_agent_from_another_supervisor_appears_in_sessions() {

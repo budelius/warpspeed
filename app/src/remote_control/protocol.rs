@@ -86,6 +86,10 @@ pub enum Request {
 
     /// Replaces a pane's shell from another supervisor and resumes its recorded agent.
     RestartSessionInCurrentSupervisor { terminal_view_id: u64 },
+
+    /// Replaces any pane's shell with a new one under this instance's supervisor and resumes the
+    /// agent it was running, without asking for confirmation.
+    RestartSession { terminal_view_id: u64 },
 }
 
 /// The largest [`Request::CliAgentEvent`] notification an instance accepts, in bytes.
@@ -162,6 +166,12 @@ pub enum Response {
 
     /// The answer to [`Request::ListWindows`].
     Windows { windows: Vec<WindowSummary> },
+
+    /// The answer to [`Request::RestartSession`].
+    Restarted {
+        /// The command parked to resume the pane's agent, `None` when there was none to resume.
+        resume_command: Option<String>,
+    },
 }
 
 /// One window of a running instance.

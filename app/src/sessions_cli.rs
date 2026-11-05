@@ -55,6 +55,18 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
             json,
             &format!("Opened saved session {name}"),
         ),
+        SessionsCommand::Restart {
+            terminal_view_id,
+            all_agents,
+            except_views,
+            instance,
+        } => restart(
+            instance.pid,
+            *terminal_view_id,
+            *all_agents,
+            except_views,
+            json,
+        ),
         SessionsCommand::RestartInCurrentSupervisor {
             terminal_view,
             instance,
@@ -671,6 +683,145 @@ fn act(pid: Option<u32>, request: Request, json: bool, done: &str) -> Result<()>
         Response::Done => report_done(json, done),
         Response::Failed { error } => bail!(error),
         other => bail!(unexpected(other)),
+    }
+}
+
+/// How long a restarted pane gets for its resumed agent to report in before the restart is
+/// called a failure.
+const AGENT_RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// What happened to one pane under `sessions restart`.
+#[derive(Serialize)]
+struct RestartReport {
+    terminal_view_id: u64,
+    agent: Option<String>,
+    agent_session_id: Option<String>,
+    resume_command: Option<String>,
+    /// Whether the resumed agent was seen running in the pane again.
+    agent_running: bool,
+}
+
+/// Restarts one pane, or every pane running an agent, and checks that each resumed agent comes
+/// back before moving to the next.
+///
+/// Stops at the first pane whose agent does not come back: every later restart would end another
+/// agent the same way, and the panes not yet reached keep theirs.
+fn restart(
+    pid: Option<u32>,
+    terminal_view_id: Option<u64>,
+    all_agents: bool,
+    except_views: &[u64],
+    json: bool,
+) -> Result<()> {
+    let instance = client::select_instance(pid)?;
+    let panes = match instance.call(Request::ListPanes)? {
+        Response::Panes { panes } => panes,
+        Response::Failed { error } => bail!(error),
+        other => bail!(unexpected(other)),
+    };
+    let targets: Vec<PaneSummary> = if all_agents {
+        panes
+            .into_iter()
+            .filter(|pane| pane.has_running_agent)
+            .filter(|pane| {
+                pane.terminal_view_id
+                    .is_some_and(|id| !except_views.contains(&id))
+            })
+            .collect()
+    } else {
+        let id = terminal_view_id.context("Name a --terminal-view or pass --all-agents")?;
+        let pane = panes
+            .into_iter()
+            .find(|pane| pane.terminal_view_id == Some(id))
+            .with_context(|| format!("No pane in this instance has terminal view {id}"))?;
+        vec![pane]
+    };
+
+    let mut reports = Vec::new();
+    let mut failure = None;
+    for pane in targets {
+        let Some(id) = pane.terminal_view_id else {
+            continue;
+        };
+        let resume_command = match instance.call(Request::RestartSession {
+            terminal_view_id: id,
+        })? {
+            Response::Restarted { resume_command } => resume_command,
+            Response::Failed { error } => {
+                failure = Some(format!("Restarting terminal view {id} failed: {error}"));
+                break;
+            }
+            other => bail!(unexpected(other)),
+        };
+        let agent_running =
+            resume_command.is_some() && wait_for_agent(&instance, id, AGENT_RESUME_TIMEOUT);
+        let report = RestartReport {
+            terminal_view_id: id,
+            agent: pane.agent,
+            agent_session_id: pane.agent_session_id,
+            resume_command,
+            agent_running,
+        };
+        if !json {
+            println!("{}", describe_restart(&report));
+        }
+        let lost_agent = report.agent.is_some() && !report.agent_running;
+        reports.push(report);
+        if lost_agent {
+            failure = Some(format!(
+                "The agent in terminal view {id} did not come back; stopped before restarting                  any other pane"
+            ));
+            break;
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+    }
+    match failure {
+        Some(error) => bail!(error),
+        None => Ok(()),
+    }
+}
+
+/// Polls the instance until the pane reports a running agent again, or `timeout` passes.
+fn wait_for_agent(
+    instance: &client::Instance,
+    terminal_view_id: u64,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = instant::Instant::now() + timeout;
+    loop {
+        let running = matches!(
+            instance.call(Request::ListPanes),
+            Ok(Response::Panes { panes })
+                if panes.iter().any(|pane| {
+                    pane.terminal_view_id == Some(terminal_view_id) && pane.has_running_agent
+                })
+        );
+        if running {
+            return true;
+        }
+        if instant::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+fn describe_restart(report: &RestartReport) -> String {
+    let id = report.terminal_view_id;
+    match (&report.resume_command, report.agent_running) {
+        (Some(command), true) => format!("Restarted terminal view {id}; resumed `{command}`"),
+        (Some(command), false) => {
+            format!("Restarted terminal view {id}; `{command}` did not report back")
+        }
+        (None, _) => match &report.agent {
+            Some(agent) => {
+                format!("Restarted terminal view {id}; its {agent} session could not be resumed")
+            }
+            None => format!("Restarted terminal view {id}; it had no agent to resume"),
+        },
     }
 }
 

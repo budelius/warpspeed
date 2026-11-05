@@ -146,6 +146,30 @@ fn window_and_restart_variants_are_appended_for_cross_build_safety() {
 }
 
 #[test]
+fn restart_session_variants_are_appended_for_cross_build_safety() {
+    assert_eq!(
+        &bincode::serialize(&Request::RestartSession {
+            terminal_view_id: 42,
+        })
+        .unwrap()[..4],
+        &13_u32.to_le_bytes()
+    );
+    assert_eq!(
+        &bincode::serialize(&Response::Restarted {
+            resume_command: None,
+        })
+        .unwrap()[..4],
+        &9_u32.to_le_bytes()
+    );
+    assert_round_trips(Request::RestartSession {
+        terminal_view_id: 42,
+    });
+    assert_round_trips(Response::Restarted {
+        resume_command: Some("pi --session 01a111f1".to_owned()),
+    });
+}
+
+#[test]
 fn pane_summary_with_agent_details_round_trips() {
     let pane = PaneSummary {
         session_id: Some(7),

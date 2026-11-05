@@ -152,6 +152,36 @@ pub enum SessionsCommand {
         instance: InstanceArg,
     },
 
+    /// Replace a pane's shell with a new one and resume the agent it was running.
+    ///
+    /// Works on any pane, whichever supervisor holds its shell, and asks no confirmation: the
+    /// original shell and everything still running in it end. Picks up a newly installed agent
+    /// version, since the agent starts again from its recorded session.
+    #[command(group(
+        clap::ArgGroup::new("target").required(true).args(["terminal_view_id", "all_agents"])
+    ))]
+    Restart {
+        /// The id of the terminal view to restart, as `panes` prints it.
+        #[arg(long = "terminal-view", value_name = "ID")]
+        terminal_view_id: Option<u64>,
+
+        /// Restart every pane that is running an agent, one after another.
+        #[arg(long)]
+        all_agents: bool,
+
+        /// A terminal view to leave alone under `--all-agents`, such as the one running this
+        /// command. Repeatable.
+        #[arg(
+            long = "except-view",
+            value_name = "ID",
+            conflicts_with = "terminal_view_id"
+        )]
+        except_views: Vec<u64>,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
     /// End a session the supervisor is holding, killing its shell.
     ///
     /// Only reaches detached sessions. A session a window is using belongs to

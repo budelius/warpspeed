@@ -13610,17 +13610,7 @@ impl Workspace {
             .block_list()
             .active_block()
             .is_active_and_long_running();
-        // A shell that died before bootstrapping never reported a directory, so fall back to the
-        // one the pane was started or restored in rather than the process's own.
-        let cwd = view
-            .as_ref(ctx)
-            .pwd_if_local(ctx)
-            .or_else(|| {
-                self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
-                    pane_group.terminal_working_directory(pane_group.focused_pane_id(ctx), ctx)
-                })
-            })
-            .map(PathBuf::from);
+        let cwd = self.focused_restart_cwd(&view, ctx);
 
         if is_busy || restart_in_current_supervisor {
             let running_command = manager
@@ -13650,6 +13640,24 @@ impl Workspace {
         } else {
             Self::restart_shell_and_resume_agent(manager, view, target, cwd, ctx);
         }
+    }
+
+    /// The directory a restarted shell in the focused pane starts in. A shell that died before
+    /// bootstrapping never reported one, so this falls back to the directory the pane was started
+    /// or restored in rather than the process's own.
+    fn focused_restart_cwd(
+        &self,
+        view: &ViewHandle<TerminalView>,
+        ctx: &ViewContext<Self>,
+    ) -> Option<PathBuf> {
+        view.as_ref(ctx)
+            .pwd_if_local(ctx)
+            .or_else(|| {
+                self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
+                    pane_group.terminal_working_directory(pane_group.focused_pane_id(ctx), ctx)
+                })
+            })
+            .map(PathBuf::from)
     }
 
     pub(crate) fn restart_in_current_supervisor_unattended(
@@ -13688,6 +13696,41 @@ impl Workspace {
         Ok(())
     }
 
+    /// Restarts a pane's shell under the current supervisor, whichever supervisor holds it now,
+    /// and parks its agent's resume command for the new shell. Skips the confirmation a busy
+    /// pane would get: the caller has already decided its running process may end.
+    ///
+    /// Returns the parked resume command, if the pane had a resumable agent.
+    pub(crate) fn restart_shell_unattended(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<Option<String>, String> {
+        if self.pending_shell_restart.is_some() {
+            return Err("Another shell restart is awaiting confirmation".to_owned());
+        }
+        if !self.focus_terminal_view_locally(terminal_view_id, ctx) {
+            return Err(format!(
+                "No pane in this window has terminal view {terminal_view_id}"
+            ));
+        }
+        let (Some(manager), Some(view)) = (
+            self.focused_terminal_manager(ctx),
+            self.focused_terminal_view(ctx),
+        ) else {
+            return Err("The terminal session is no longer available".to_owned());
+        };
+        if !manager.as_ref(ctx).supports_session_restart() {
+            return Err("This pane has no local session to restart".to_owned());
+        }
+        // Without an explicit target the restart falls back to the model's launch data, which a
+        // pane attached from another supervisor may not have, and then starts the default shell.
+        let target = view.as_ref(ctx).shell_launch_data_if_local(ctx);
+        let cwd = self.focused_restart_cwd(&view, ctx);
+        Self::restart_shell_and_resume_agent(manager, view, target, cwd, ctx)
+            .ok_or_else(|| "The pane's terminal manager declined the restart".to_owned())
+    }
+
     /// Restarts `manager`'s session in place and, if the pane hosted a resumable Claude
     /// session, enqueues a `claude --resume <uuid>` continuation so it picks back up once
     /// the replacement shell bootstraps (`set_pending_command_queue` / `execute_pending_command`
@@ -13702,13 +13745,16 @@ impl Workspace {
     /// transcript-fork error) is logged and otherwise ignored: the shell still restarts with
     /// no banner, no warning, no extra confirmation. Getting the shell back matters more than
     /// getting the agent back.
+    ///
+    /// Returns `None` when the terminal manager declined the restart, and otherwise the resume
+    /// command parked for the new shell, if any.
     fn restart_shell_and_resume_agent(
         manager: ModelHandle<Box<dyn TerminalManager>>,
         terminal_view: ViewHandle<TerminalView>,
         target: Option<ShellLaunchData>,
         cwd: Option<PathBuf>,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> Option<Option<String>> {
         let attached_agent = terminal_view
             .as_ref(ctx)
             .connected_supervisor()
@@ -13733,7 +13779,7 @@ impl Workspace {
                 "The pane's terminal manager declined the restart; leaving its session, and \
                  any tracked CLI agent, alone"
             );
-            return;
+            return None;
         }
 
         // The restart killed the PTY, so the agent that owned this session is
@@ -13746,11 +13792,12 @@ impl Workspace {
         // session id lives nowhere else.
         Self::clear_tracked_agent_session(terminal_view.id(), ctx);
 
-        if let Some(command) = resume_command {
+        if let Some(command) = &resume_command {
             terminal_view.update(ctx, |terminal_view, ctx| {
-                terminal_view.set_pending_command_queue(vec![command], ctx);
+                terminal_view.set_pending_command_queue(vec![command.clone()], ctx);
             });
         }
+        Some(resume_command)
     }
 
     /// Drops the CLI agent session tracked against `terminal_view_id`, if any.
@@ -13773,15 +13820,27 @@ impl Workspace {
         attached_cwd: Option<&Path>,
         ctx: &AppContext,
     ) -> Option<String> {
-        let tracked_session = CLIAgentSessionsModel::as_ref(ctx)
-            .session(terminal_view_id)
-            .map(|session| {
-                (
-                    session.agent,
-                    session.session_context.session_id.clone(),
-                    session.session_context.cwd.as_deref().map(PathBuf::from),
-                )
-            });
+        let sessions = CLIAgentSessionsModel::as_ref(ctx);
+        // Pi's plugin never reports a session id in its context, so the id recovered from the
+        // agent's history is the only one there is for it.
+        let tracked_session = sessions.session(terminal_view_id).map(|session| {
+            let attached = attached_agent
+                .as_ref()
+                .filter(|attached| attached.agent == session.agent);
+            (
+                session.agent,
+                sessions
+                    .session_id(terminal_view_id)
+                    .map(str::to_owned)
+                    .or_else(|| attached.map(|attached| attached.session_id.clone())),
+                session
+                    .session_context
+                    .cwd
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .or_else(|| attached_cwd.map(Path::to_path_buf)),
+            )
+        });
         let (agent, session_id, cwd) = match tracked_session {
             Some(session) => session,
             None => {

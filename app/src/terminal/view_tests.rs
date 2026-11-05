@@ -8309,6 +8309,59 @@ fn drag_drop_image_in_cli_agent_long_running_command_pastes_via_clipboard() {
 }
 
 #[test]
+fn multiline_text_paste_into_pi_uses_bracketed_paste() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _agent_view = FeatureFlag::AgentView.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let pty_writes = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.set_session(
+                    view.view_id,
+                    CLIAgentSession {
+                        agent: CLIAgent::Pi,
+                        status: CLIAgentSessionStatus::InProgress,
+                        session_context: CLIAgentSessionContext::default(),
+                        input_state: CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        remote_host: None,
+                        plugin_version: None,
+                        draft_text: None,
+                        custom_command_prefix: None,
+                        received_rich_notification: false,
+                    },
+                    ctx,
+                );
+            });
+            view.model.lock().simulate_long_running_block("pi", "");
+            ctx.clipboard()
+                .write(ClipboardContent::plain_text("line1\nline2".to_owned()));
+
+            view.handle_action(&TerminalAction::Paste, ctx);
+        });
+
+        let writes = pty_writes.borrow();
+        assert_eq!(writes.len(), 1);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(BRACKETED_PASTE_START);
+        expected.extend_from_slice(b"line1\rline2");
+        expected.extend_from_slice(BRACKETED_PASTE_END);
+        assert_eq!(writes[0], expected);
+    })
+}
+
+#[test]
 fn paste_raw_image_clipboard_in_cli_agent_sends_correct_bytes() {
     fn run_for_agent(agent: CLIAgent) {
         App::test((), move |mut app| async move {

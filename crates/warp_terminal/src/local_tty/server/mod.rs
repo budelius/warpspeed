@@ -208,7 +208,11 @@ impl TerminalServer {
                 // Tell the terminal server process what process ID it should
                 // expect its parent to have.  This allows it to terminate
                 // itself when it detects its parent process to have changed.
-                .arg(warp_cli::parent_flag())
+                .arg(format!(
+                    "{}={}",
+                    warp_cli::parent_flag(),
+                    std::process::id()
+                ))
                 .spawn()
                 .context("Failed to spawn terminal server process")?;
 
@@ -232,7 +236,7 @@ impl TerminalServer {
     }
 
     fn new_persistent() -> Result<Self> {
-        let socket_path = persistent::socket_path();
+        let socket_path = persistent::socket_path()?;
         let client = Arc::new(TerminalServerClient::new_persistent(socket_path.clone()));
         if client.ping().is_ok() {
             log::info!("Connected to the terminal session supervisor");
@@ -253,7 +257,11 @@ impl TerminalServer {
                 })
                 .env(PERSISTENT_SERVER_SOCKET_ENV, &socket_path)
                 .arg(warp_cli::terminal_server_subcommand())
-                .arg(warp_cli::parent_flag())
+                .arg(format!(
+                    "{}={}",
+                    warp_cli::parent_flag(),
+                    std::process::id()
+                ))
                 .spawn()
                 .context("Failed to spawn terminal session supervisor")?
         };

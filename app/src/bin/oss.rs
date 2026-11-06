@@ -26,6 +26,8 @@ fn main() -> Result<()> {
     // DOGFOOD_FLAGS, which would turn on ~50 unrelated in-development features at the same time.
     state = state.with_additional_features(&[
         warp_core::features::FeatureFlag::PersistentLaunchConfigSessions,
+        warp_core::features::FeatureFlag::PersistentTerminalSessions,
+        warp_core::features::FeatureFlag::TerminalLifecycleRecovery,
     ]);
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);

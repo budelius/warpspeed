@@ -74,7 +74,6 @@ fn start_daemon() {
                 transport.receive_timeout(CONTROL_TIMEOUT).unwrap(),
                 Message::Pong { .. }
             ));
-            transport.send(&Message::ResponseReceived).unwrap();
             return;
         }
         assert!(Instant::now() < deadline, "the supervisor never started");

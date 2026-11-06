@@ -7330,7 +7330,7 @@ fn move_session_is_offered(workspace: &ViewHandle<Workspace>, app: &mut App) -> 
             .pane_header_overflow_menu_items(ctx);
         let labelled = items.iter().any(|item| {
             item.fields()
-                .is_some_and(|fields| fields.label() == "Move session to AgentCtrl")
+                .is_some_and(|fields| fields.label() == "Move session to Obachan")
         });
         let mapped = items.iter().any(|item| {
             matches!(
@@ -8027,6 +8027,25 @@ fn start_agent_on_agent_ctrl_is_offered_only_for_a_local_repo_pane() {
             });
         });
         assert!(start_agent_on_agent_ctrl_is_offered(&workspace, &mut app));
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            seed_agent_session(
+                terminal_view.id(),
+                crate::terminal::CLIAgent::Pi,
+                Some(MOVE_SESSION_ID),
+                None,
+                repo.path(),
+                ctx,
+            );
+        });
+        assert!(move_session_is_offered(&workspace, &mut app));
+        assert!(
+            !start_agent_on_agent_ctrl_is_offered(&workspace, &mut app),
+            "a movable local session must offer migration instead of a fresh agent chooser"
+        );
     });
 }
 
@@ -8097,6 +8116,80 @@ fn configured_warp_repository() -> managed_agent_sessions::RepositoryInfo {
         reachable: true,
         error: None,
     }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_in_obachan_migrates_the_only_running_session_in_the_repo() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let repo = TempDir::new().unwrap();
+        init_repo_with_gitea_remote(repo.path());
+        let workspace = mock_workspace(&mut app);
+
+        let (agent_view_id, start_view_id) = workspace.update(&mut app, |workspace, ctx| {
+            let agent_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            let pane_group = workspace.active_tab_pane_group().clone();
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.add_terminal_pane(Direction::Right, None, ctx);
+            });
+            let start_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("the new split is focused");
+            for view in [&agent_view, &start_view] {
+                view.update(ctx, |view, ctx| {
+                    view.set_active_local_session_for_test(repo.path(), ctx);
+                    view.set_current_repo_path_for_test(Some(repo.path()));
+                });
+            }
+            seed_agent_session(
+                agent_view.id(),
+                crate::terminal::CLIAgent::Pi,
+                Some(MOVE_SESSION_ID),
+                None,
+                repo.path(),
+                ctx,
+            );
+            (agent_view.id(), start_view.id())
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.start_agent_on_agent_ctrl_for_terminal_view(start_view_id, ctx)
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(15) => workspace_toast_texts(&workspace, &mut app)
+                .iter()
+                .any(|toast| toast.starts_with("Move this Pi session to AgentCtrl staging?")),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        assert!(
+            !workspace_toast_texts(&workspace, &mut app)
+                .iter()
+                .any(|toast| toast.starts_with("Start which agent"))
+        );
+        let move_targets = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .toast_stack
+                    .as_ref(ctx)
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(_, action)| match action {
+                        Some(WorkspaceAction::ConfirmMoveSessionToAgentCtrl {
+                            terminal_view_id,
+                        }) => Some(*terminal_view_id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(move_targets, [agent_view_id]);
+    });
 }
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]

@@ -400,6 +400,30 @@ fn managed_runs_are_searchable_and_keep_state_specific_actions() {
 }
 
 #[test]
+fn current_directory_includes_agent_ctrl_runs_from_the_focused_managed_repo() {
+    let current = managed("job-current", "running");
+    let same_repo = managed("job-same-repo", "paused");
+    let mut other_repo = managed("job-other-repo", "running");
+    other_repo.repo_url = Some("https://gitlab.com/acme/other.git".to_owned());
+    let runs = [current, same_repo, other_repo];
+
+    let rows = managed_view_rows(
+        &managed_runs_in_current_repo(&runs, Some("job-current")),
+        None,
+        "",
+    );
+
+    assert_eq!(
+        kinds(&rows),
+        [
+            "section:AgentCtrl:2",
+            "managed:job-current",
+            "managed:job-same-repo"
+        ]
+    );
+}
+
+#[test]
 fn managed_session_details_include_last_activity_age_and_date() {
     let mut run = managed("job-running", "running");
     run.last_activity_at = Some("2020-01-15T12:00:00Z".to_owned());
@@ -442,7 +466,7 @@ fn filter_counts_are_independent_of_the_all_sessions_deduplication() {
     let (_, current_folder) = focused_folder(&panes, target.locator).unwrap();
 
     assert_eq!(
-        filter_count(SessionFilter::All, &rows, 2, Some(&current_folder)),
+        filter_count(SessionFilter::All, &rows, 2, 1, Some(&current_folder)),
         5
     );
     assert_eq!(
@@ -450,25 +474,27 @@ fn filter_counts_are_independent_of_the_all_sessions_deduplication() {
             SessionFilter::CurrentDirectory,
             &rows,
             2,
+            1,
             Some(&current_folder)
         ),
-        3
+        4
     );
     assert_eq!(
         filter_count(
             SessionFilter::RunningAndDetached,
             &rows,
             2,
+            1,
             Some(&current_folder)
         ),
         2
     );
     assert_eq!(
-        filter_count(SessionFilter::AgentCtrl, &rows, 2, Some(&current_folder)),
+        filter_count(SessionFilter::AgentCtrl, &rows, 2, 1, Some(&current_folder)),
         2
     );
     assert_eq!(
-        filter_count(SessionFilter::Past, &rows, 2, Some(&current_folder)),
+        filter_count(SessionFilter::Past, &rows, 2, 1, Some(&current_folder)),
         1
     );
 }

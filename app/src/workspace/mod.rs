@@ -1033,7 +1033,7 @@ pub fn init(app: &mut AppContext) {
     // as `Workspace_PaneCanDetachSession`.
     app.register_editable_bindings([EditableBinding::new(
         "workspace:move_session_to_agent_ctrl",
-        "Move session to AgentCtrl",
+        "Move session to Obachan",
         WorkspaceAction::MoveSessionToAgentCtrl,
     )
     .with_group(bindings::BindingGroup::Terminal.as_str())
@@ -1047,7 +1047,8 @@ pub fn init(app: &mut AppContext) {
     .with_group(bindings::BindingGroup::Terminal.as_str())
     .with_context_predicate(id!("Workspace"))]);
 
-    // Offered only on local panes inside a git work tree, whose repository the run starts in.
+    // Offered on a local repository pane when it can migrate another pane's sole movable session
+    // or start a fresh run.
     app.register_editable_bindings([EditableBinding::new(
         "workspace:start_agent_on_agent_ctrl",
         "Start in Obachan",

@@ -407,6 +407,8 @@ use crate::terminal::agent_session_handoff::{
     start_agent_unavailable_message, stop_request_outcome,
 };
 use crate::terminal::agent_session_history::is_safe_session_id;
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_history::{ResolvedPath, is_within_known};
 use crate::terminal::agent_session_history_model::{
     AgentSessionHistoryEvent, AgentSessionHistoryModel,
 };
@@ -14228,6 +14230,27 @@ impl Workspace {
             .agent_ctrl_move_source(fallback_cwd, ctx)
     }
 
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn only_agent_ctrl_move_source_in_repo(
+        &self,
+        repo: &Path,
+        ctx: &AppContext,
+    ) -> Option<EntityId> {
+        let repo = ResolvedPath::new(repo);
+        let mut matches = self.tabs.iter().flat_map(|tab| {
+            tab.pane_group
+                .as_ref(ctx)
+                .terminal_views(ctx)
+                .into_iter()
+                .filter_map(|view| {
+                    let source = view.as_ref(ctx).agent_ctrl_move_source(None, ctx)?;
+                    is_within_known(&source.cwd, None, &repo).then_some(view.id())
+                })
+        });
+        let only = matches.next()?;
+        matches.next().is_none().then_some(only)
+    }
+
     /// Asks the user to confirm moving the agent session in `terminal_view_id` to AgentCtrl.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     fn move_session_to_agent_ctrl_for_terminal_view(
@@ -15091,20 +15114,30 @@ impl Workspace {
             return;
         }
 
-        let Some(cwd) = self
+        let Some((cwd, repo)) = self
             .terminal_view_by_id(terminal_view_id, ctx)
-            .and_then(|view| view.as_ref(ctx).active_session_path_if_local(ctx))
+            .and_then(|view| {
+                let view = view.as_ref(ctx);
+                Some((
+                    view.active_session_path_if_local(ctx)?,
+                    view.current_local_repo_path()?.to_path_buf(),
+                ))
+            })
         else {
             self.show_agent_ctrl_start_toast(
                 terminal_view_id,
                 DismissibleToast::error(
-                    "This pane has no local directory to start an agent from.".to_owned(),
+                    "This pane has no local Git repository to start an agent from.".to_owned(),
                 ),
                 false,
                 ctx,
             );
             return;
         };
+        if let Some(move_source_id) = self.only_agent_ctrl_move_source_in_repo(&repo, ctx) {
+            self.move_session_to_agent_ctrl_for_terminal_view(move_source_id, ctx);
+            return;
+        }
         ctx.spawn(
             async move {
                 blocking::unblock(move || {

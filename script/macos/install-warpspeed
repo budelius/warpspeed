@@ -33,7 +33,11 @@ if [[ "$destination" != /*.app || -L "$destination" ]]; then
   echo "Destination must be an absolute .app path, not a symlink." >&2
   exit 1
 fi
-if /bin/ps -axo comm= | grep -F -- "$destination/Contents/MacOS/" >/dev/null; then
+app_is_running() {
+  /bin/ps -axo command= | awk -v executable="$destination/Contents/MacOS/warp-oss" \
+    '$1 == executable && $2 != "--terminal-session-supervisor" { found = 1 } END { exit !found }'
+}
+if app_is_running; then
   echo "Quit $destination before installing; running sessions were left untouched." >&2
   exit 1
 fi
@@ -70,7 +74,7 @@ trap cleanup EXIT
 ditto "$source_bundle" "$staging/app.app"
 codesign --verify --deep --strict "$staging/app.app"
 # Recheck after the build/copy, since the user may have launched the app in the meantime.
-if /bin/ps -axo comm= | grep -F -- "$destination/Contents/MacOS/" >/dev/null; then
+if app_is_running; then
   echo "Quit $destination before installing; running sessions were left untouched." >&2
   exit 1
 fi

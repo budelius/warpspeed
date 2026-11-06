@@ -502,7 +502,7 @@ impl CLIAgentSessionsModel {
                 terminal_view_id,
                 agent,
             });
-            ctx.dispatch_global_action("workspace:save_app", &());
+            ctx.dispatch_global_action("workspace:save_app", ());
         });
     }
 

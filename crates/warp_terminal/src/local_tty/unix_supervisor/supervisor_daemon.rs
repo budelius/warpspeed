@@ -107,12 +107,18 @@ fn serve_one_request(
     else {
         return Ok(());
     };
+    let lends_descriptor = matches!(
+        response,
+        crate::local_tty::supervisor::message::Message::SpawnResponse { .. }
+            | crate::local_tty::supervisor::message::Message::AttachResponse { .. }
+    );
     transport.send(&response)?;
 
-    // Waiting for the client's acknowledgement before dropping the connection:
-    // closing a Unix socket with a lent descriptor still in flight can discard
-    // the control message, and the client would attach to nothing.
-    let _ = transport.receive_timeout(IO_TIMEOUT);
+    if lends_descriptor {
+        // Closing a Unix socket with a lent descriptor still in flight can discard the control
+        // message, and the client would attach to nothing.
+        let _ = transport.receive_timeout(IO_TIMEOUT);
+    }
     Ok(())
 }
 

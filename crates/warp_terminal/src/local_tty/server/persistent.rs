@@ -63,10 +63,23 @@ const IDLE_SHUTDOWN_DELAY: Duration = Duration::from_secs(60);
 /// credentials included -- and could answer with an fd of their choosing as the
 /// PTY the user types into.
 fn socket_directory() -> PathBuf {
+    let state_dir = warp_core::paths::state_dir();
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .unwrap_or_else(warp_core::paths::state_dir);
+        .unwrap_or_else(|| {
+            #[cfg(target_os = "macos")]
+            {
+                let hash = Sha256::digest(state_dir.as_os_str().as_bytes());
+                return std::env::temp_dir().join(format!(
+                    "warp-terminal-{}-{}",
+                    nix::unistd::getuid().as_raw(),
+                    hex::encode(&hash[..6])
+                ));
+            }
+            #[cfg(not(target_os = "macos"))]
+            state_dir
+        });
     base.join(SOCKET_DIRECTORY_NAME)
 }
 

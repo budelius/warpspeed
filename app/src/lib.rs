@@ -3800,6 +3800,17 @@ fn launch(
                 isolated_connection = Some(connection.clone());
                 ctx.on_first_frame_drawn(move |ctx| {
                     connection.update(ctx, |connection, ctx| connection.first_frame_presented(ctx));
+                    let workspace = ctx
+                        .window_ids()
+                        .find_map(|window_id| WorkspaceRegistry::as_ref(ctx).get(window_id, ctx));
+                    match workspace {
+                        Some(workspace) => workspace.update(ctx, |workspace, ctx| {
+                            workspace.finish_isolated_window_restore(ctx);
+                        }),
+                        None => report_error!(
+                            "Isolated window worker presented a frame without a workspace"
+                        ),
+                    }
                 });
             }
 

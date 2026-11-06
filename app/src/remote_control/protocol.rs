@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Adding a variant at the end of an enum is safe for bincode only in one
 /// direction, and the two ends here can be either older or newer than one
 /// another, so treat any change as a bump.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// A request from the `sessions` command to a running window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +172,11 @@ pub enum Response {
         /// The command parked to resume the pane's agent, `None` when there was none to resume.
         resume_command: Option<String>,
     },
+
+    /// The answer to [`Request::RestartSession`] for a pane whose shell had not attached. Nothing
+    /// was restarted; the shell is being started, and the request can be repeated once
+    /// [`PaneSummary::shell_ready`] says it is up.
+    ShellStarting,
 }
 
 /// One window of a running instance.
@@ -216,6 +221,12 @@ pub struct PaneSummary {
 
     /// Whether a foreground command is still running in it.
     pub is_busy: bool,
+
+    /// Whether its shell has started or attached and finished bootstrapping.
+    pub shell_ready: bool,
+
+    /// Whether a command is waiting for its shell and has not been run yet.
+    pub command_parked: bool,
 
     /// Whether quitting Warp right now would keep this session alive.
     ///

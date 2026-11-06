@@ -15,7 +15,7 @@ fn assert_round_trips<T: Serialize + DeserializeOwned + std::fmt::Debug>(value: 
 
 #[test]
 fn protocol_version_is_six() {
-    assert_eq!(PROTOCOL_VERSION, 6);
+    assert_eq!(PROTOCOL_VERSION, 7);
 }
 
 #[test]
@@ -167,6 +167,7 @@ fn restart_session_variants_are_appended_for_cross_build_safety() {
     assert_round_trips(Response::Restarted {
         resume_command: Some("pi --session 01a111f1".to_owned()),
     });
+    assert_round_trips(Response::ShellStarting);
 }
 
 #[test]
@@ -180,6 +181,8 @@ fn pane_summary_with_agent_details_round_trips() {
         working_directory: "/srv/app".to_owned(),
         has_running_agent: true,
         is_busy: false,
+        shell_ready: true,
+        command_parked: false,
         survives_quit: true,
         terminal_view_id: Some(1234),
         agent: Some("claude".to_owned()),

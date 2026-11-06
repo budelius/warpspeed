@@ -15,6 +15,20 @@ use warpui::EntityId;
 
 use crate::pane_group::PaneId;
 
+/// What an unattended restart did with a pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnattendedRestart {
+    /// The shell was replaced.
+    Restarted {
+        /// The command parked to resume the pane's agent, if it had one.
+        resume_command: Option<String>,
+    },
+
+    /// Nothing was replaced: the pane's shell had not attached, so it could not be ended yet. Its
+    /// start is under way, and the restart can be asked for again once it is up.
+    ShellStarting,
+}
+
 /// A single terminal pane of one window.
 #[derive(Debug, Clone)]
 pub(crate) struct TerminalPaneInfo {
@@ -39,6 +53,12 @@ pub(crate) struct TerminalPaneInfo {
 
     /// Whether a foreground command is still running in the pane.
     pub(crate) is_busy: bool,
+
+    /// Whether the pane's shell has started or attached and finished bootstrapping.
+    pub(crate) shell_ready: bool,
+
+    /// Whether a command is waiting for the pane's shell and has not been run yet.
+    pub(crate) command_parked: bool,
 
     /// Whether this session is one that must outlive the window.
     ///

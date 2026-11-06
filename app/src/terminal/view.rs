@@ -16674,6 +16674,11 @@ impl TerminalView {
         ctx.notify();
     }
 
+    /// Whether a command is waiting for this pane's shell and has not been run yet.
+    pub(crate) fn has_unrun_pending_command(&self, ctx: &AppContext) -> bool {
+        !self.pending_command_queue.is_empty() || self.input.as_ref(ctx).has_pending_command()
+    }
+
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
         self.awaiting_pending_command_completion
             || !self.pending_command_queue.is_empty()

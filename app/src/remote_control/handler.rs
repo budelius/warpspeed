@@ -112,6 +112,8 @@ fn list_panes(ctx: &mut AppContext) -> Response {
                     working_directory: pane.working_directory,
                     has_running_agent: pane.has_running_agent,
                     is_busy: pane.is_busy,
+                    shell_ready: pane.shell_ready,
+                    command_parked: pane.command_parked,
                     survives_quit: pane.survives_quit,
                     terminal_view_id: Some(pane.terminal_view_id.as_u64()),
                     agent: pane.agent,
@@ -339,6 +341,8 @@ fn restart_session_in_current_supervisor(_: u64, _: &mut AppContext) -> Response
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 fn restart_session(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+    use crate::workspace::UnattendedRestart;
+
     let held = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
         workspace_holding_terminal_view(view_id, ctx).map(|workspace| (view_id, workspace))
     });
@@ -350,7 +354,10 @@ fn restart_session(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
     match workspace.update(ctx, |workspace, ctx| {
         workspace.restart_shell_unattended(view_id, ctx)
     }) {
-        Ok(resume_command) => Response::Restarted { resume_command },
+        Ok(UnattendedRestart::Restarted { resume_command }) => {
+            Response::Restarted { resume_command }
+        }
+        Ok(UnattendedRestart::ShellStarting) => Response::ShellStarting,
         Err(error) => Response::Failed { error },
     }
 }

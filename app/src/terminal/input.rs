@@ -7422,6 +7422,9 @@ impl Input {
             log::debug!("Holding the pending command: {reason:?}");
             return;
         }
+        if command.is_empty() {
+            log::warn!("A pending command's text was cleared from the input; nothing will run");
+        }
 
         self.try_execute_command(&command, ctx);
         self.has_pending_command = false;
@@ -15263,10 +15266,13 @@ impl Input {
                     &self.model.lock(),
                     ctx,
                 );
+            // A pending command lives in this buffer. It can be parked while the block completing
+            // here is still running, as a restart does, and is not that block's command.
             // Only clear the input buffer for user-executed commands, not agent-executed ones.
             let should_clear_buffer = !user_block.was_part_of_agent_interaction
                 && !cloud_setup_pre_first_exchange
-                && !self.has_queued_command_in_flight(ctx);
+                && !self.has_queued_command_in_flight(ctx)
+                && !self.has_pending_command;
             let latest_block_id = self.model.lock().block_list().active_block_id().clone();
             let input_contents_before_prompt_chip_command =
                 self.input_contents_before_prompt_chip_command.take();

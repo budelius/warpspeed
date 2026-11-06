@@ -165,7 +165,8 @@ pub enum SessionsCommand {
         #[arg(long = "terminal-view", value_name = "ID")]
         terminal_view_id: Option<u64>,
 
-        /// Restart every pane that is running an agent, one after another.
+        /// Restart every pane that is running an agent, one after another. A pane that has not
+        /// attached yet is opened first, so its tab comes to the front.
         #[arg(long)]
         all_agents: bool,
 

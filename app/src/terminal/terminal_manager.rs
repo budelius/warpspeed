@@ -80,6 +80,12 @@ pub trait TerminalManager: Any {
         false
     }
 
+    /// Whether this pane's shell is parked or still being started or attached, so it has no
+    /// session to end yet.
+    fn is_shell_start_outstanding(&self) -> bool {
+        self.has_deferred_shell()
+    }
+
     /// Returns the startup directory retained by a parked shell.
     fn deferred_shell_startup_directory(&self) -> Option<PathBuf> {
         None

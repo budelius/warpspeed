@@ -42,6 +42,8 @@ fn pane(spec: PaneSpec) -> PaneSummary {
         working_directory: spec.working_directory.to_owned(),
         has_running_agent: spec.agent.is_some(),
         is_busy: true,
+        shell_ready: true,
+        command_parked: false,
         survives_quit: true,
         terminal_view_id: Some(spec.terminal_view_id),
         agent: spec.agent.map(str::to_owned),

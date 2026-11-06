@@ -351,6 +351,10 @@ where
         self.0.is_shell_deferred()
     }
 
+    fn is_shell_start_outstanding(&self) -> bool {
+        self.0.is_shell_start_outstanding_inner()
+    }
+
     fn deferred_shell_startup_directory(&self) -> Option<PathBuf> {
         self.0.parked_shell_startup_directory()
     }
@@ -947,6 +951,10 @@ impl<S> TerminalManager<S> {
     /// The sole body of `TerminalManagerTrait::has_deferred_shell`. See
     /// [`Self::start_deferred_shell`] for why this is shared rather than
     /// duplicated.
+    pub(super) fn is_shell_start_outstanding_inner(&self) -> bool {
+        self.deferred_shell.is_some() || self.pending_shell_start.is_some()
+    }
+
     pub(super) fn is_shell_deferred(&self) -> bool {
         self.deferred_shell.is_some()
     }

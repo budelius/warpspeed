@@ -165,7 +165,9 @@ use super::util::{
     PaneViewLocator, TabMovement, TerminalSessionFallbackBehavior, WelcomeTipsViewState,
     WorkspaceMouseStates, WorkspaceState,
 };
-use super::{ActiveSession, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry, util};
+use super::{
+    ActiveSession, TabBarDropTargetData, TabBarLocation, UnattendedRestart, WorkspaceRegistry, util,
+};
 use crate::agent_ctrl::FleetPaneManager;
 use crate::agent_ctrl::fleet_model::{FleetModel, FleetModelEvent};
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
@@ -13700,12 +13702,14 @@ impl Workspace {
     /// and parks its agent's resume command for the new shell. Skips the confirmation a busy
     /// pane would get: the caller has already decided its running process may end.
     ///
-    /// Returns the parked resume command, if the pane had a resumable agent.
+    /// A pane whose shell has not attached yet is only started: the shell it would replace is not
+    /// reachable until then, and would outlive the restart with its agent still running. A pane
+    /// whose agent cannot be resumed is left running.
     pub(crate) fn restart_shell_unattended(
         &mut self,
         terminal_view_id: EntityId,
         ctx: &mut ViewContext<Self>,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<UnattendedRestart, String> {
         if self.pending_shell_restart.is_some() {
             return Err("Another shell restart is awaiting confirmation".to_owned());
         }
@@ -13723,12 +13727,36 @@ impl Workspace {
         if !manager.as_ref(ctx).supports_session_restart() {
             return Err("This pane has no local session to restart".to_owned());
         }
+        if manager.as_ref(ctx).is_shell_start_outstanding() {
+            manager.update(ctx, |manager, ctx| manager.ensure_shell_started(ctx));
+            return Ok(UnattendedRestart::ShellStarting);
+        }
         // Without an explicit target the restart falls back to the model's launch data, which a
         // pane attached from another supervisor may not have, and then starts the default shell.
         let target = view.as_ref(ctx).shell_launch_data_if_local(ctx);
         let cwd = self.focused_restart_cwd(&view, ctx);
-        Self::restart_shell_and_resume_agent(manager, view, target, cwd, ctx)
+        let resume_command =
+            Self::agent_resume_command_for_restart(&manager, &view, cwd.as_deref(), ctx);
+        if resume_command.is_none() && Self::pane_has_agent(&manager, &view, ctx) {
+            return Err(
+                "Its agent's session cannot be resumed, so the pane was left running".to_owned(),
+            );
+        }
+        Self::restart_shell_with_resume_command(manager, view, target, cwd, resume_command, ctx)
+            .map(|resume_command| UnattendedRestart::Restarted { resume_command })
             .ok_or_else(|| "The pane's terminal manager declined the restart".to_owned())
+    }
+
+    fn pane_has_agent(
+        manager: &ModelHandle<Box<dyn TerminalManager>>,
+        view: &ViewHandle<TerminalView>,
+        ctx: &ViewContext<Self>,
+    ) -> bool {
+        CLIAgentSessionsModel::as_ref(ctx)
+            .session(view.id())
+            .is_some()
+            || (view.as_ref(ctx).connected_supervisor().is_some()
+                && manager.as_ref(ctx).held_agent().is_some())
     }
 
     /// Restarts `manager`'s session in place and, if the pane hosted a resumable Claude
@@ -13755,17 +13783,39 @@ impl Workspace {
         cwd: Option<PathBuf>,
         ctx: &mut ViewContext<Self>,
     ) -> Option<Option<String>> {
+        let resume_command =
+            Self::agent_resume_command_for_restart(&manager, &terminal_view, cwd.as_deref(), ctx);
+        Self::restart_shell_with_resume_command(
+            manager,
+            terminal_view,
+            target,
+            cwd,
+            resume_command,
+            ctx,
+        )
+    }
+
+    fn agent_resume_command_for_restart(
+        manager: &ModelHandle<Box<dyn TerminalManager>>,
+        terminal_view: &ViewHandle<TerminalView>,
+        cwd: Option<&Path>,
+        ctx: &ViewContext<Self>,
+    ) -> Option<String> {
         let attached_agent = terminal_view
             .as_ref(ctx)
             .connected_supervisor()
             .and_then(|_| manager.as_ref(ctx).held_agent());
-        let resume_command = Self::resolve_agent_resume_command(
-            terminal_view.id(),
-            attached_agent,
-            cwd.as_deref(),
-            ctx,
-        );
+        Self::resolve_agent_resume_command(terminal_view.id(), attached_agent, cwd, ctx)
+    }
 
+    fn restart_shell_with_resume_command(
+        manager: ModelHandle<Box<dyn TerminalManager>>,
+        terminal_view: ViewHandle<TerminalView>,
+        target: Option<ShellLaunchData>,
+        cwd: Option<PathBuf>,
+        resume_command: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<Option<String>> {
         let restarted = manager.update(ctx, |manager, ctx| {
             manager.restart_session(target, cwd, ctx)
         });
@@ -15483,6 +15533,11 @@ impl Workspace {
                     pane_group.pending_agent_resume(pane_id, ctx)
                 };
 
+                let shell_ready = manager
+                    .as_ref()
+                    .is_some_and(|manager| !manager.as_ref(ctx).is_shell_start_outstanding())
+                    && view.as_ref(ctx).is_login_shell_bootstrapped();
+
                 panes.push(TerminalPaneInfo {
                     pane_group_id,
                     pane_id,
@@ -15490,6 +15545,8 @@ impl Workspace {
                     session_id,
                     has_running_agent,
                     is_busy,
+                    shell_ready,
+                    command_parked: view.as_ref(ctx).has_unrun_pending_command(ctx),
                     survives_quit: keep_idle_sessions || has_running_agent || is_busy,
                     title: agent_session
                         .and_then(|session| session.session_context.display_title())

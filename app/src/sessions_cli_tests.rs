@@ -10,6 +10,8 @@ fn pane(session_id: Option<u64>, survives_quit: bool) -> PaneSummary {
         working_directory: "/home/user".to_owned(),
         has_running_agent: false,
         is_busy: false,
+        shell_ready: true,
+        command_parked: false,
         survives_quit,
         terminal_view_id: None,
         agent: None,
@@ -101,4 +103,128 @@ fn a_multibyte_value_is_cut_without_splitting_a_character() {
     let cut = truncate("ünïcödë-shell-name", 6);
 
     assert_eq!(cut.chars().count(), 6, "got {cut:?}");
+}
+
+const NO_TIME: std::time::Duration = std::time::Duration::ZERO;
+
+const NO_WAITING: ResumeTimeouts = ResumeTimeouts {
+    shell: NO_TIME,
+    command: NO_TIME,
+    agent: NO_TIME,
+};
+
+/// A pane whose resumed agent has got as far as the given flags say.
+fn resuming_pane(shell_ready: bool, command_parked: bool, has_running_agent: bool) -> PaneSummary {
+    let mut pane = pane(Some(7), true);
+    pane.shell_ready = shell_ready;
+    pane.command_parked = command_parked;
+    pane.has_running_agent = has_running_agent;
+    pane
+}
+
+#[test]
+fn a_bulk_restart_covers_agents_in_panes_that_have_not_attached() {
+    let mut running = pane(Some(7), true);
+    running.agent = Some("pi".to_owned());
+    running.has_running_agent = true;
+    assert!(is_agent_pane(&running));
+
+    let mut unattached = pane(Some(8), true);
+    unattached.agent = Some("pi".to_owned());
+    unattached.shell_ready = false;
+    assert!(is_agent_pane(&unattached));
+}
+
+/// Restarting a shell with no agent in it ends work the user never asked to lose.
+#[test]
+fn a_bulk_restart_leaves_panes_without_an_agent_alone() {
+    let mut unattached = pane(Some(8), true);
+    unattached.shell_ready = false;
+
+    assert!(!is_agent_pane(&pane(Some(7), true)));
+    assert!(!is_agent_pane(&unattached));
+}
+
+/// A shell that is slow to bootstrap has not lost its agent; each stage has to be waited out
+/// before the next, and the report has to say which one stopped it.
+#[test]
+fn a_resume_reports_the_stage_it_stopped_at() {
+    let stopped_at = |pane: PaneSummary| wait_for_resume(|| Some(pane.clone()), NO_WAITING);
+
+    assert_eq!(
+        stopped_at(resuming_pane(false, true, false)),
+        ResumeProgress::ShellNotReady
+    );
+    assert_eq!(
+        stopped_at(resuming_pane(true, true, false)),
+        ResumeProgress::CommandNotRun
+    );
+    assert_eq!(
+        stopped_at(resuming_pane(true, false, false)),
+        ResumeProgress::AgentSilent
+    );
+    assert_eq!(
+        stopped_at(resuming_pane(true, false, true)),
+        ResumeProgress::AgentRunning
+    );
+}
+
+/// A pane still parked at its shell must not read as having run its command: the agent has not
+/// had the chance to report in yet.
+#[test]
+fn a_resume_waits_for_the_shell_before_judging_the_agent() {
+    let mut states = vec![
+        resuming_pane(true, false, true),
+        resuming_pane(true, true, false),
+        resuming_pane(false, true, false),
+    ];
+    let progress = wait_for_resume(
+        || {
+            let next = states.pop();
+            next.or_else(|| Some(resuming_pane(true, false, true)))
+        },
+        ResumeTimeouts {
+            shell: std::time::Duration::from_secs(5),
+            command: std::time::Duration::from_secs(5),
+            agent: NO_TIME,
+        },
+    );
+
+    assert_eq!(progress, ResumeProgress::AgentRunning);
+}
+
+#[test]
+fn a_pane_that_disappears_stops_the_wait() {
+    assert_eq!(
+        wait_for_resume(|| None, NO_WAITING),
+        ResumeProgress::ShellNotReady
+    );
+}
+
+#[test]
+fn a_failed_resume_says_where_the_command_is() {
+    let report = |resume_progress| RestartReport {
+        terminal_view_id: 5465,
+        agent: Some("pi".to_owned()),
+        agent_session_id: Some("01a14edb".to_owned()),
+        resume_command: Some("pi --session 01a14edb".to_owned()),
+        resume_progress,
+    };
+
+    assert_eq!(
+        describe_restart(&report(Some(ResumeProgress::AgentRunning))),
+        "Restarted terminal view 5465; resumed `pi --session 01a14edb`"
+    );
+    assert!(
+        describe_restart(&report(Some(ResumeProgress::ShellNotReady)))
+            .contains("parked until it is")
+    );
+    assert!(
+        describe_restart(&report(Some(ResumeProgress::CommandNotRun)))
+            .contains("still in the pane's input")
+    );
+    assert!(
+        describe_restart(&report(Some(ResumeProgress::AgentSilent)))
+            .contains("did not report back")
+    );
 }

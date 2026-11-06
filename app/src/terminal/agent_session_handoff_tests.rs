@@ -404,7 +404,7 @@ fn prepare_handoff_without_remote_fails() {
     };
 
     assert!(
-        format!("{error:#}").contains("no `gitea` or `origin` remote"),
+        format!("{error:#}").contains("no `gitea`, `origin`, or `gitlab` remote"),
         "{error:#}"
     );
 }

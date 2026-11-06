@@ -19,7 +19,7 @@ use crate::terminal::CLIAgent;
 
 const MAX_SESSION_ID_CHARS: usize = 128;
 const BRANCH_ID_CHARS: usize = 8;
-const PREFERRED_REMOTES: [&str; 2] = ["gitea", "origin"];
+const PREFERRED_REMOTES: [&str; 3] = ["gitea", "origin", "gitlab"];
 
 /// A local agent session the user asked to move into a managed run.
 #[derive(Clone, Debug)]
@@ -471,14 +471,19 @@ pub(crate) fn create_handoff_commit(repo: &Path, session_id: &str) -> Result<Str
     )
 }
 
-/// The remote a handoff branch is pushed to: `gitea` when present, else `origin`.
+/// The remote a handoff branch is pushed to: `gitea` when present, then `origin` or `gitlab`.
 pub(crate) fn select_remote(repo: &Path) -> Result<String> {
     let remotes = git(repo, ["remote"], &[])?;
     PREFERRED_REMOTES
         .into_iter()
         .find(|preferred| remotes.lines().any(|remote| remote.trim() == *preferred))
         .map(str::to_owned)
-        .ok_or_else(|| anyhow!("{} has no `gitea` or `origin` remote", repo.display()))
+        .ok_or_else(|| {
+            anyhow!(
+                "{} has no `gitea`, `origin`, or `gitlab` remote",
+                repo.display()
+            )
+        })
 }
 
 /// The remote [`select_remote`] picks for the repository containing `cwd`, and its URL without

@@ -324,8 +324,8 @@ pub enum WorkspaceAction {
         session_id: String,
         cwd: PathBuf,
     },
-    /// Offers to start a fresh AgentCtrl run on staging in the repository of the focused pane's
-    /// directory. Nothing starts until `ConfirmStartAgentOnAgentCtrl` picks the agent.
+    /// Migrates the repository's only movable local session, or offers a fresh AgentCtrl run when
+    /// none exists. Nothing fresh starts until `ConfirmStartAgentOnAgentCtrl` picks the agent.
     StartAgentOnAgentCtrl,
     StartAgentOnAgentCtrlForTerminalView {
         terminal_view_id: EntityId,

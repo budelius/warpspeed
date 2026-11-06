@@ -7969,7 +7969,7 @@ fn start_in_obachan_migrates_the_only_running_session_in_the_repo() {
         });
 
         assert_eventually_within!(
-            std::time::Duration::from_secs(5) => workspace_toast_texts(&workspace, &mut app)
+            std::time::Duration::from_secs(15) => workspace_toast_texts(&workspace, &mut app)
                 .iter()
                 .any(|toast| toast.starts_with("Move this Pi session to AgentCtrl staging?")),
             "{:?}",

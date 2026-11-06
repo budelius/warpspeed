@@ -14981,6 +14981,20 @@ impl Workspace {
         true
     }
 
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn movable_agent_sessions_in_repo(&self, repo: &Path, ctx: &AppContext) -> Vec<EntityId> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.pane_group.as_ref(ctx).terminal_views(ctx))
+            .filter_map(|view| {
+                let terminal = view.as_ref(ctx);
+                (terminal.current_local_repo_path() == Some(repo)
+                    && terminal.agent_ctrl_move_source(None, ctx).is_some())
+                .then_some(view.id())
+            })
+            .collect()
+    }
+
     /// Looks up the pane's repository and AgentCtrl's configured repositories off the main
     /// thread, then asks which agent to start there.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -14996,9 +15010,15 @@ impl Workspace {
             return;
         }
 
-        let Some(cwd) = self
+        let Some((cwd, repo)) = self
             .terminal_view_by_id(terminal_view_id, ctx)
-            .and_then(|view| view.as_ref(ctx).active_session_path_if_local(ctx))
+            .and_then(|view| {
+                let terminal = view.as_ref(ctx);
+                Some((
+                    terminal.active_session_path_if_local(ctx)?,
+                    terminal.current_local_repo_path().map(Path::to_path_buf),
+                ))
+            })
         else {
             self.show_agent_ctrl_start_toast(
                 terminal_view_id,
@@ -15010,6 +15030,31 @@ impl Workspace {
             );
             return;
         };
+
+        if let Some(repo) = repo {
+            let movable = self.movable_agent_sessions_in_repo(&repo, ctx);
+            match movable.as_slice() {
+                [movable_view_id] => {
+                    self.move_session_to_agent_ctrl_for_terminal_view(*movable_view_id, ctx);
+                    return;
+                }
+                [] => {}
+                _ => {
+                    self.show_agent_ctrl_start_toast(
+                        terminal_view_id,
+                        DismissibleToast::default(
+                            "Multiple local agent sessions are running in this repository. Open \
+                             the session you want and choose Move session to Obachan."
+                                .to_owned(),
+                        ),
+                        false,
+                        ctx,
+                    );
+                    return;
+                }
+            }
+        }
+
         ctx.spawn(
             async move {
                 blocking::unblock(move || {

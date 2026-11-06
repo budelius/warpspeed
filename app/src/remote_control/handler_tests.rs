@@ -340,14 +340,14 @@ fn move_steps_have_stable_labels() {
         (
             Some(MoveStep::CuttingOver {
                 job_id: job_id.clone(),
-                pushed_branch: "gitea/handoff/x".to_owned(),
+                pushed_branch: Some("gitea/handoff/x".to_owned()),
             }),
             "cutting_over",
         ),
         (
             Some(MoveStep::Done {
                 job_id,
-                pushed_branch: "gitea/handoff/x".to_owned(),
+                pushed_branch: Some("gitea/handoff/x".to_owned()),
             }),
             "done:job-1",
         ),
@@ -378,7 +378,7 @@ fn move_status_reports_the_move_of_a_pane_closed_mid_move() {
                 closed_view_id,
                 MoveStep::CuttingOver {
                     job_id: "job-1".to_owned(),
-                    pushed_branch: "gitea/handoff/x".to_owned(),
+                    pushed_branch: Some("gitea/handoff/x".to_owned()),
                 },
             )
         });
@@ -389,7 +389,7 @@ fn move_status_reports_the_move_of_a_pane_closed_mid_move() {
                 closed_view_id,
                 MoveStep::Done {
                     job_id: "job-1".to_owned(),
-                    pushed_branch: "gitea/handoff/x".to_owned(),
+                    pushed_branch: Some("gitea/handoff/x".to_owned()),
                 },
                 ctx,
             )

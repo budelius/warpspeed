@@ -172,6 +172,7 @@ fn pi_session_path_matches_id_in_project_dir() {
         &roots,
     )
     .unwrap_err();
+    assert!(is_missing_session_file(&missing));
     assert!(
         format!("{missing:#}").contains("no pi session file"),
         "{missing:#}"
@@ -445,7 +446,7 @@ fn move_session_failure_during_cut_over_asks_to_close_the_agent_manually() {
     let message = move_failure_message(
         &MoveStep::CuttingOver {
             job_id: "job-1".to_owned(),
-            pushed_branch: "gitea/handoff/x".to_owned(),
+            pushed_branch: Some("gitea/handoff/x".to_owned()),
         },
         "timed out",
         Some("gitea/handoff/x"),

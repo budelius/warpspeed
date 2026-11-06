@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
 use ai::project_context::model::ProjectContextModel;
@@ -2030,6 +2030,122 @@ fn test_workspace_sessions_retrieves_panes() {
     });
 }
 
+#[test]
+fn moving_a_tab_into_the_active_tab_preserves_all_of_its_panes() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (target_pane_group_id, expected_pane_ids) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.tabs[0].pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.handle_action(&PaneGroupAction::Add(Direction::Right), ctx);
+                });
+                let mut expected_pane_ids =
+                    workspace.tabs[0].pane_group.read(ctx, |pane_group, _| {
+                        pane_group.pane_ids().collect::<Vec<_>>()
+                    });
+
+                workspace.add_terminal_tab(false, ctx);
+                let target_pane_group_id = workspace.active_tab_pane_group().id();
+                expected_pane_ids.extend(
+                    workspace
+                        .active_tab_pane_group()
+                        .read(ctx, |pane_group, _| {
+                            pane_group.pane_ids().collect::<Vec<_>>()
+                        }),
+                );
+
+                workspace.handle_action(&WorkspaceAction::MoveTabIntoActiveTab(0), ctx);
+                (target_pane_group_id, expected_pane_ids)
+            });
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(workspace.active_tab_pane_group().id(), target_pane_group_id);
+            let actual_pane_ids = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .pane_ids()
+                .collect::<HashSet<_>>();
+            assert_eq!(actual_pane_ids, expected_pane_ids.into_iter().collect());
+        });
+    });
+}
+
+#[test]
+fn combining_selected_tabs_moves_them_into_the_active_tab() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (target_pane_group_id, expected_pane_ids) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.add_terminal_tab(false, ctx);
+                workspace.add_terminal_tab(false, ctx);
+                let target_pane_group_id = workspace.active_tab_pane_group().id();
+                let expected_pane_ids = workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| {
+                        tab.pane_group.read(ctx, |pane_group, _| {
+                            pane_group.pane_ids().collect::<Vec<_>>()
+                        })
+                    })
+                    .collect::<HashSet<_>>();
+                workspace.tabs[0].in_multi_selection = true;
+                workspace.tabs[1].in_multi_selection = true;
+
+                workspace.handle_action(&WorkspaceAction::CombineSelectedTabsIntoActiveTab, ctx);
+                (target_pane_group_id, expected_pane_ids)
+            });
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(workspace.active_tab_pane_group().id(), target_pane_group_id);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .pane_ids()
+                    .collect::<HashSet<_>>(),
+                expected_pane_ids
+            );
+            assert!(!workspace.tabs[0].in_multi_selection);
+        });
+    });
+}
+
+#[test]
+fn inactive_tab_menu_offers_moving_the_tab_into_the_active_tab() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.toggle_tab_right_click_menu(
+                0,
+                TabContextMenuAnchor::Pointer(Vector2F::zero()),
+                ctx,
+            );
+
+            let has_move_item = workspace.tab_right_click_menu.read(ctx, |menu, _| {
+                menu.items().iter().any(|item| {
+                    item.fields().is_some_and(|fields| {
+                        fields.label() == "Move tab into active tab as pane"
+                            && matches!(
+                                fields.on_select_action(),
+                                Some(WorkspaceAction::MoveTabIntoActiveTab(0))
+                            )
+                    })
+                })
+            });
+            assert!(has_move_item);
+        });
+    });
+}
+
 fn number_of_shared_sessions_in_tab(
     workspace: &Workspace,
     index: usize,
@@ -2878,8 +2994,16 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (focused), the options
         // for sharing are "Stop sharing" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                false,
+                ctx,
+            );
             assert!(
                 items[0].is_approximately_same_item_as(
                     &MenuItemFields::new("Stop sharing").into_item()
@@ -2903,8 +3027,16 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (unfocused), the options
         // for sharing are "Share session" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                false,
+                ctx,
+            );
             assert!(
                 items[0].is_approximately_same_item_as(
                     &MenuItemFields::new("Share session").into_item()
@@ -2923,8 +3055,16 @@ fn test_tab_context_menu_share_session_items() {
 
         // When there's no shared sessions in a tab, the only option is "Share session".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                false,
+                ctx,
+            );
             assert!(
                 items[0].is_approximately_same_item_as(
                     &MenuItemFields::new("Share session").into_item()
@@ -5542,6 +5682,7 @@ fn restart_and_change_shell_appear_in_pane_context_menus() {
                     workspace.tab_is_only_member_of_its_group(tab_index),
                     workspace.can_move_tab(tab_index, TabMovement::Left),
                     workspace.can_move_tab(tab_index, TabMovement::Right),
+                    false,
                     ctx,
                 );
                 let terminal_view = workspace

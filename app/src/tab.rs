@@ -424,6 +424,7 @@ impl TabData {
         is_only_member_of_group: bool,
         can_move_left: bool,
         can_move_right: bool,
+        can_move_into_active_tab: bool,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
         self.menu_items_with_pane_name_target(
@@ -433,6 +434,7 @@ impl TabData {
             is_only_member_of_group,
             can_move_left,
             can_move_right,
+            can_move_into_active_tab,
             None,
             ctx,
         )
@@ -447,6 +449,7 @@ impl TabData {
         is_only_member_of_group: bool,
         can_move_left: bool,
         can_move_right: bool,
+        can_move_into_active_tab: bool,
         pane_name_target: Option<PaneNameMenuTarget>,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
@@ -461,7 +464,14 @@ impl TabData {
             self.shell_menu_items(pane_name_target, ctx),
             self.window_process_menu_items(ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
-            self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
+            self.modify_tab_menu_items(
+                index,
+                can_move_left,
+                can_move_right,
+                can_move_into_active_tab,
+                pane_name_target,
+                ctx,
+            ),
             self.close_tab_menu_items(index, tabs_len, ctx),
             Self::save_config_menu_items(index),
             self.color_option_menu_items(index, terminal_colors),
@@ -645,7 +655,7 @@ impl TabData {
                     .into_item(),
             );
             items.push(
-                MenuItemFields::new("Restart under current supervisor…")
+                MenuItemFields::new("Restart & take over…")
                     .with_on_select_action(
                         WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
                             terminal_view_id,
@@ -774,6 +784,7 @@ impl TabData {
         index: usize,
         can_move_left: bool,
         can_move_right: bool,
+        can_move_into_active_tab: bool,
         pane_name_target: Option<PaneNameMenuTarget>,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
@@ -828,6 +839,18 @@ impl TabData {
                 })
                 .with_on_select_action(WorkspaceAction::MoveTabLeft(index))
                 .into_item(),
+            );
+        }
+        if can_move_into_active_tab {
+            let label = if self.pane_group.as_ref(ctx).pane_count() == 1 {
+                "Move tab into active tab as pane"
+            } else {
+                "Move tab into active tab as panes"
+            };
+            menu_items.push(
+                MenuItemFields::new(label)
+                    .with_on_select_action(WorkspaceAction::MoveTabIntoActiveTab(index))
+                    .into_item(),
             );
         }
         menu_items

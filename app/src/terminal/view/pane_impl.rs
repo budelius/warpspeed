@@ -802,7 +802,7 @@ impl TerminalView {
                     .into_item(),
             );
             items.push(
-                MenuItemFields::new("Restart under current supervisor…")
+                MenuItemFields::new("Restart & take over…")
                     .with_on_select_action(TerminalAction::RestartInCurrentSupervisor)
                     .into_item(),
             );

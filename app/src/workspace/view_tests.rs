@@ -9044,40 +9044,43 @@ fn associated_managed_session_is_selected_when_the_browser_opens() {
     App::test((), |mut app| async move {
         initialize_app_for_associated_run(&mut app);
         let workspace = mock_workspace(&mut app);
-        let (target, sessions_view) = workspace.update(&mut app, |workspace, ctx| {
-            let pane_group = workspace.active_tab_pane_group();
-            let target = PaneViewLocator {
-                pane_group_id: pane_group.id(),
-                pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
-            };
-            pane_group.update(ctx, |pane_group, ctx| {
-                assert!(pane_group.set_managed_session_job_id(
-                    target.pane_id,
-                    Some("job-associated".to_owned()),
-                    ctx,
-                ));
+        let (target, sessions_view, terminal_view) =
+            workspace.update(&mut app, |workspace, ctx| {
+                let pane_group = workspace.active_tab_pane_group();
+                let target = PaneViewLocator {
+                    pane_group_id: pane_group.id(),
+                    pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+                };
+                pane_group.update(ctx, |pane_group, ctx| {
+                    assert!(pane_group.set_managed_session_job_id(
+                        target.pane_id,
+                        Some("job-associated".to_owned()),
+                        ctx,
+                    ));
+                });
                 let terminal_view = pane_group
+                    .as_ref(ctx)
                     .terminal_view_from_pane_id(target.pane_id, ctx)
                     .expect("the associated pane is a terminal");
-                let items = terminal_view
-                    .as_ref(ctx)
-                    .pane_header_overflow_menu_items(ctx);
-                assert!(items.iter().any(|item| {
-                    item.fields().is_some_and(|fields| {
-                        fields.label() == "Resume in Obachan…"
-                            && matches!(
-                                fields.on_select_action(),
-                                Some(crate::terminal::view::TerminalAction::ShowAgentSessions)
-                            )
-                    })
-                }));
+                workspace.show_agent_sessions(Some(target), ctx);
+                (
+                    target,
+                    workspace.agent_sessions_modal.as_ref(ctx).body().clone(),
+                    terminal_view,
+                )
             });
-            workspace.show_agent_sessions(Some(target), ctx);
-            (
-                target,
-                workspace.agent_sessions_modal.as_ref(ctx).body().clone(),
-            )
+        let items = terminal_view.read(&app, |view, ctx| {
+            view.pane_header_overflow_menu_items(ctx)
         });
+        assert!(items.iter().any(|item| {
+            item.fields().is_some_and(|fields| {
+                fields.label() == "Resume in Obachan…"
+                    && matches!(
+                        fields.on_select_action(),
+                        Some(crate::terminal::view::TerminalAction::ShowAgentSessions)
+                    )
+            })
+        }));
 
         assert_eventually_within!(
             std::time::Duration::from_secs(5) => sessions_view

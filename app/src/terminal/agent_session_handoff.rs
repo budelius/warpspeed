@@ -19,7 +19,7 @@ use crate::terminal::CLIAgent;
 
 const MAX_SESSION_ID_CHARS: usize = 128;
 const BRANCH_ID_CHARS: usize = 8;
-const PREFERRED_REMOTES: [&str; 3] = ["gitea", "origin", "gitlab"];
+const PREFERRED_REMOTES: [&str; 3] = ["gitea", "gitlab", "origin"];
 
 /// A local agent session the user asked to move into a managed run.
 #[derive(Clone, Debug)]
@@ -471,7 +471,7 @@ pub(crate) fn create_handoff_commit(repo: &Path, session_id: &str) -> Result<Str
     )
 }
 
-/// The remote a handoff branch is pushed to: `gitea` when present, then `origin` or `gitlab`.
+/// The remote a handoff branch is pushed to: `gitea` when present, then `gitlab` or `origin`.
 pub(crate) fn select_remote(repo: &Path) -> Result<String> {
     let remotes = git(repo, ["remote"], &[])?;
     PREFERRED_REMOTES

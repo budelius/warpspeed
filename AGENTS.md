@@ -8,7 +8,7 @@ This file provides guidance when working with code in this repository.
 - `cargo run` / `./script/run` - Build and run the GUI desktop app locally
 - `./script/run-tui` - Build and run the headless TUI front-end (`crates/warp_tui`)
 - `cargo bundle --bin warp` - Bundle the main (GUI) app
-- `./script/macos/install-warpspeed` - Build/sign the native macOS debug OSS app and install it as `/Applications/warpseed.app`, without creating a DMG. Quit the installed app first; previous bundles are backed up. Use `--from-bundle PATH` to install an already-built signed OSS bundle or `--destination /absolute/path.app` for a separate install.
+- `./script/macos/install-warpspeed` - Build/sign the native macOS debug OSS app without creating a DMG. The `main` branch always installs as `/Applications/warpspeed.app`; the `dev` branch always installs as `/Applications/warpspeed-latest.app`. Quit the destination app first; previous bundles are backed up. Use `--from-bundle PATH` to install an already-built signed OSS bundle or `--destination /absolute/path.app` for a separate install.
 - `python3 script/macos/test_install_warpspeed.py` - Test macOS installation and backup behavior with temporary signed bundles.
 - `powershell -ExecutionPolicy Bypass -File ./script/windows/install-warpspeed.ps1` - Build and install WarpSpeed locally on Windows
 

@@ -9182,9 +9182,7 @@ fn associated_managed_session_is_selected_when_the_browser_opens() {
                     terminal_view,
                 )
             });
-        let items = terminal_view.read(&app, |view, ctx| {
-            view.pane_header_overflow_menu_items(ctx)
-        });
+        let items = terminal_view.read(&app, |view, ctx| view.pane_header_overflow_menu_items(ctx));
         assert!(items.iter().any(|item| {
             item.fields().is_some_and(|fields| {
                 fields.label() == "Resume in Obachan…"

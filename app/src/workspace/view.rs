@@ -8464,6 +8464,7 @@ impl Workspace {
                 is_only_member_of_group,
                 can_move_left,
                 can_move_right,
+                tab_index != self.active_tab_index,
                 ctx,
             )
         };
@@ -8550,6 +8551,7 @@ impl Workspace {
             is_only_member_of_group,
             can_move_left,
             can_move_right,
+            tab_index != self.active_tab_index,
             Some(pane_name_target),
             ctx,
         );
@@ -28492,6 +28494,7 @@ impl TypedActionView for Workspace {
             MoveActiveTabRight => self.move_tab(self.active_tab_index, TabMovement::Right, ctx),
             MoveTabLeft(index) => self.move_tab(*index, TabMovement::Left, ctx),
             MoveTabRight(index) => self.move_tab(*index, TabMovement::Right, ctx),
+            MoveTabIntoActiveTab(index) => self.move_tab_into_active_tab(*index, ctx),
             RenameTab(index) => self.rename_tab(*index, ctx),
             ResetTabName(index) => self.clear_tab_name(*index, ctx),
             RenamePane(locator) => self.rename_pane(*locator, ctx),
@@ -28603,6 +28606,7 @@ impl TypedActionView for Workspace {
             MoveSelectedTabsToGroup { group_id } => {
                 self.move_selected_tabs_to_group(*group_id, ctx)
             }
+            CombineSelectedTabsIntoActiveTab => self.combine_selected_tabs_into_active_tab(ctx),
             RemoveSelectedTabsFromGroup => self.remove_selected_tabs_from_group(ctx),
             RemoveActiveOrSelectedTabsFromGroup => {
                 self.remove_active_or_selected_tabs_from_group(ctx)

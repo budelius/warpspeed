@@ -478,7 +478,12 @@ pub(crate) fn select_remote(repo: &Path) -> Result<String> {
         .into_iter()
         .find(|preferred| remotes.lines().any(|remote| remote.trim() == *preferred))
         .map(str::to_owned)
-        .ok_or_else(|| anyhow!("{} has no `gitea` or `origin` remote", repo.display()))
+        .ok_or_else(|| {
+            anyhow!(
+                "{} has no `gitea`, `origin`, or `gitlab` remote",
+                repo.display()
+            )
+        })
 }
 
 /// The remote [`select_remote`] picks for the repository containing `cwd`, and its URL without

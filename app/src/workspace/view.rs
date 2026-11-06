@@ -14230,27 +14230,6 @@ impl Workspace {
             .agent_ctrl_move_source(fallback_cwd, ctx)
     }
 
-    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
-    fn only_agent_ctrl_move_source_in_repo(
-        &self,
-        repo: &Path,
-        ctx: &AppContext,
-    ) -> Option<EntityId> {
-        let repo = ResolvedPath::new(repo);
-        let mut matches = self.tabs.iter().flat_map(|tab| {
-            tab.pane_group
-                .as_ref(ctx)
-                .terminal_views(ctx)
-                .into_iter()
-                .filter_map(|view| {
-                    let source = view.as_ref(ctx).agent_ctrl_move_source(None, ctx)?;
-                    is_within_known(&source.cwd, None, &repo).then_some(view.id())
-                })
-        });
-        let only = matches.next()?;
-        matches.next().is_none().then_some(only)
-    }
-
     /// Asks the user to confirm moving the agent session in `terminal_view_id` to AgentCtrl.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     fn move_session_to_agent_ctrl_for_terminal_view(
@@ -15099,6 +15078,19 @@ impl Workspace {
         true
     }
 
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn movable_agent_sessions_in_repo(&self, repo: &Path, ctx: &AppContext) -> Vec<EntityId> {
+        let repo = ResolvedPath::new(repo);
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.pane_group.as_ref(ctx).terminal_views(ctx))
+            .filter_map(|view| {
+                let source = view.as_ref(ctx).agent_ctrl_move_source(None, ctx)?;
+                is_within_known(&source.cwd, None, &repo).then_some(view.id())
+            })
+            .collect()
+    }
+
     /// Looks up the pane's repository and AgentCtrl's configured repositories off the main
     /// thread, then asks which agent to start there.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -15134,10 +15126,29 @@ impl Workspace {
             );
             return;
         };
-        if let Some(move_source_id) = self.only_agent_ctrl_move_source_in_repo(&repo, ctx) {
-            self.move_session_to_agent_ctrl_for_terminal_view(move_source_id, ctx);
-            return;
+
+        let movable = self.movable_agent_sessions_in_repo(&repo, ctx);
+        match movable.as_slice() {
+            [movable_view_id] => {
+                self.move_session_to_agent_ctrl_for_terminal_view(*movable_view_id, ctx);
+                return;
+            }
+            [] => {}
+            _ => {
+                self.show_agent_ctrl_start_toast(
+                    terminal_view_id,
+                    DismissibleToast::default(
+                        "Multiple local agent sessions are running in this repository. Open the \
+                         session you want and choose Move session to Obachan."
+                            .to_owned(),
+                    ),
+                    false,
+                    ctx,
+                );
+                return;
+            }
         }
+
         ctx.spawn(
             async move {
                 blocking::unblock(move || {

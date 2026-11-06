@@ -1047,7 +1047,8 @@ pub fn init(app: &mut AppContext) {
     .with_group(bindings::BindingGroup::Terminal.as_str())
     .with_context_predicate(id!("Workspace"))]);
 
-    // Offered only on local repository panes that do not already hold a movable agent session.
+    // Offered on a local repository pane when it can migrate another pane's sole movable session
+    // or start a fresh run.
     app.register_editable_bindings([EditableBinding::new(
         "workspace:start_agent_on_agent_ctrl",
         "Start in Obachan",

@@ -926,6 +926,20 @@ fn parse_tab_path(url: &Url) -> Option<PathBuf> {
     Some(PathBuf::from(shellexpand::tilde(&raw).into_owned()))
 }
 
+/// Returns the requested initial directory when a URI explicitly asks for a new window.
+/// Window workers consume this request while constructing their one allowed window.
+pub(crate) fn isolated_new_window_path(url: &Url) -> Option<PathBuf> {
+    requests_new_window(url)
+        .then(|| parse_tab_path(url))
+        .flatten()
+}
+
+pub(crate) fn requests_new_window(url: &Url) -> bool {
+    url.scheme() == ChannelState::url_scheme()
+        && url.host_str() == Some("action")
+        && url.path() == "/new_window"
+}
+
 fn parse_positive_usize_query_param(url: &Url, name: &str) -> Result<Option<usize>> {
     let Some(raw) = url.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v) else {
         return Ok(None);

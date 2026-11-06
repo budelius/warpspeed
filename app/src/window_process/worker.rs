@@ -169,6 +169,12 @@ impl WorkerConnection {
             |connection, result, ctx| match result {
                 Ok(CoordinatorMessage::OpenUrl { url }) => {
                     match url::Url::parse(&url) {
+                        Ok(url) if crate::uri::requests_new_window(&url) => {
+                            // A worker may host exactly one window. Route a runtime new-window
+                            // request back to the coordinator instead of panicking at the process
+                            // window limit.
+                            connection.open_window(ctx);
+                        }
                         Ok(url) => crate::uri::handle_incoming_uri(&url, ctx),
                         Err(error) => warp_errors::report_error!(anyhow::anyhow!(
                             "Coordinator routed an invalid URL: {error}"

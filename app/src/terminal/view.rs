@@ -2539,6 +2539,7 @@ pub struct TerminalView {
     /// What this pane's shell was given as `WARP_AGENT_EVENT_TOKEN`.
     #[cfg(feature = "local_tty")]
     agent_event_token: Option<String>,
+    managed_session_job_id: Option<String>,
 
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
@@ -4492,6 +4493,7 @@ impl TerminalView {
             terminal_session_uuid_hex: None,
             #[cfg(feature = "local_tty")]
             agent_event_token: None,
+            managed_session_job_id: None,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,

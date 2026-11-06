@@ -19,6 +19,7 @@ integration_tests! {
     test_instant_prompt_bootstrap,
     test_unescaped_prompt_bootstraps,
     test_unnecessary_resizes,
+    test_maximize_pane_updates_terminal_size_without_window_resize,
     test_removing_tabs_out_of_order,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_suggestions_menu_positioning,

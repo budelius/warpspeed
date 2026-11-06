@@ -17,8 +17,17 @@ use warp_core::SessionId;
 use super::{api, protocol};
 use crate::local_tty::{self, PtySpawnResult};
 
-const SOCKET_FILE_NAME: &str = "terminal-session-supervisor-v1.sock";
-const SOCKET_DIRECTORY_NAME: &str = "terminal-session-supervisor";
+// macOS Unix socket paths must fit in 104 bytes, including the application support directory.
+const SOCKET_FILE_NAME: &str = if cfg!(target_os = "macos") {
+    "v1"
+} else {
+    "terminal-session-supervisor-v1.sock"
+};
+const SOCKET_DIRECTORY_NAME: &str = if cfg!(target_os = "macos") {
+    "pty"
+} else {
+    "terminal-session-supervisor"
+};
 const OUTPUT_DIRECTORY_NAME: &str = "terminal_session_output";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -54,14 +63,9 @@ const IDLE_SHUTDOWN_DELAY: Duration = Duration::from_secs(60);
 
 /// The directory holding the supervisor socket.
 ///
-/// `XDG_RUNTIME_DIR` when the platform provides one -- it is per-user and
-/// already 0700 -- and the app's state directory otherwise. Deliberately never
-/// `/tmp`: both components of the old name (the uid and a hash of the state
-/// directory) are derivable by any local user, so in a world-writable directory
-/// an attacker could pre-bind the path and be handed `SpawnShellRequest` -- the
-/// working directory and the complete environment, injected API keys and cloud
-/// credentials included -- and could answer with an fd of their choosing as the
-/// PTY the user types into.
+/// Uses `XDG_RUNTIME_DIR` when available, otherwise the app's state directory. The socket must
+/// live inside a verified, user-owned 0700 directory: a predictable socket directly in a shared
+/// temporary directory could be pre-bound by another user and receive shell credentials.
 fn socket_directory() -> PathBuf {
     let state_dir = warp_core::paths::state_dir();
     let base = std::env::var_os("XDG_RUNTIME_DIR")
@@ -83,14 +87,44 @@ fn socket_directory() -> PathBuf {
     base.join(SOCKET_DIRECTORY_NAME)
 }
 
-pub(super) fn socket_path() -> PathBuf {
-    let state_directory_hash = Sha256::digest(warp_core::paths::state_dir().as_os_str().as_bytes());
-    socket_directory().join(format!(
+fn socket_path_in(state_directory: &Path, directory: &Path) -> PathBuf {
+    let state_directory_hash = Sha256::digest(state_directory.as_os_str().as_bytes());
+    directory.join(format!(
         "{}-{}-{}",
         SOCKET_FILE_NAME,
         nix::unistd::getuid().as_raw(),
         hex::encode(&state_directory_hash[..8])
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn socket_path_with_fallback(
+    state_directory: &Path,
+    directory: &Path,
+    temporary_directory: &Path,
+) -> PathBuf {
+    let path = socket_path_in(state_directory, directory);
+    if nix::sys::socket::UnixAddr::new(&path).is_ok() {
+        path
+    } else {
+        socket_path_in(state_directory, &temporary_directory.join("warp-pty"))
+    }
+}
+
+pub(super) fn socket_path() -> Result<PathBuf> {
+    let state_directory = warp_core::paths::state_dir();
+    #[cfg(target_os = "macos")]
+    let path =
+        socket_path_with_fallback(&state_directory, &socket_directory(), &std::env::temp_dir());
+    #[cfg(not(target_os = "macos"))]
+    let path = socket_path_in(&state_directory, &socket_directory());
+
+    nix::sys::socket::UnixAddr::new(&path).with_context(|| {
+        format!("Terminal supervisor socket path {path:?} exceeds the platform limit; use a shorter runtime or temporary directory")
+    })?;
+    // Validate before the client connects, including when an existing supervisor is reused.
+    prepare_socket_directory(path.parent().expect("socket path has a directory"))?;
+    Ok(path)
 }
 
 /// A client process, identified by more than its PID.

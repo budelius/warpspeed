@@ -2,7 +2,12 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-destination="/Applications/warpspeed-latest.app"
+branch="$(git -C "$repo_root" symbolic-ref --quiet --short HEAD || true)"
+case "$branch" in
+  main) destination="/Applications/warpspeed.app" ;;
+  dev) destination="/Applications/warpspeed-latest.app" ;;
+  *) destination="" ;;
+esac
 source_bundle=""
 
 while (( $# )); do
@@ -18,6 +23,7 @@ while (( $# )); do
     --help|-h)
       echo "Usage: $0 [--from-bundle PATH] [--destination PATH]"
       echo "Builds the native debug OSS app by default, signs it, and installs without a DMG."
+      echo "Defaults: main -> /Applications/warpspeed.app; dev -> /Applications/warpspeed-latest.app."
       echo "Quit the destination app first. Existing installations are moved to a backup directory."
       exit 0
       ;;
@@ -25,6 +31,10 @@ while (( $# )); do
   esac
 done
 
+if [[ -z "$destination" ]]; then
+  echo "Use --destination when installing from branch '$branch'; only main and dev have fixed app names." >&2
+  exit 1
+fi
 if [[ "$(uname -s)" != Darwin ]]; then
   echo "This installer requires macOS." >&2
   exit 1

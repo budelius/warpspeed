@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+
+bundle="${1:?Usage: $0 APP_BUNDLE}"
+icon="$bundle/Contents/Resources/WarpOss.icns"
+iconset="$(mktemp -d)/WarpOss.iconset"
+trap 'rm -rf "$(dirname "$iconset")"' EXIT
+
+iconutil -c iconset "$icon" -o "$iconset"
+python3 - "$iconset" <<'PY'
+import pathlib
+import sys
+from PIL import Image, ImageDraw, ImageFont
+
+for path in pathlib.Path(sys.argv[1]).glob("*.png"):
+    image = Image.open(path).convert("RGBA")
+    size = image.width
+    diameter = int(size * 0.34)
+    margin = int(size * 0.035)
+    bounds = (size - diameter - margin, margin, size - margin, margin + diameter)
+    draw = ImageDraw.Draw(image)
+    draw.ellipse(bounds, fill="#E5484D", outline="white", width=max(2, size // 80))
+    font = ImageFont.truetype("/System/Library/Fonts/SFNS.ttf", max(10, diameter // 3))
+    text = "DEV"
+    text_bounds = draw.textbbox((0, 0), text, font=font)
+    x = (bounds[0] + bounds[2] - (text_bounds[2] - text_bounds[0])) / 2
+    y = (bounds[1] + bounds[3] - (text_bounds[3] - text_bounds[1])) / 2 - text_bounds[1]
+    draw.text((x, y), text, fill="white", font=font)
+    image.save(path)
+PY
+iconutil -c icns "$iconset" -o "$icon"

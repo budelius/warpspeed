@@ -82,6 +82,10 @@ cleanup() {
 trap cleanup EXIT
 
 ditto "$source_bundle" "$staging/app.app"
+if [[ "$destination" == */warpspeed-latest.app && -f "$staging/app.app/Contents/Resources/WarpOss.icns" ]]; then
+  "$repo_root/script/macos/badge-latest-icon" "$staging/app.app"
+  codesign --force --deep --sign - "$staging/app.app"
+fi
 codesign --verify --deep --strict "$staging/app.app"
 # Recheck after the build/copy, since the user may have launched the app in the meantime.
 if app_is_running; then

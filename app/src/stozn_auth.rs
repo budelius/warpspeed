@@ -141,6 +141,13 @@ impl StoznAuthManager {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        Self {
+            state: StoznAuthState::SignedOut,
+        }
+    }
+
     pub fn state(&self) -> &StoznAuthState {
         &self.state
     }

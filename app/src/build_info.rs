@@ -12,9 +12,12 @@
 //! identified after the fact.
 
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use channel_versions::{Changelog, MarkdownSection};
+use sha2::{Digest as _, Sha256};
 use warp_core::channel::ChannelState;
 
 /// The revision this binary was built from, stamped by `build.rs`.
@@ -33,6 +36,30 @@ const INSTALLED_VERSIONS_DIR: &str = "versions";
 fn unknown_if_empty(value: &str) -> &str {
     let value = value.trim();
     if value.is_empty() { "unknown" } else { value }
+}
+
+pub(crate) fn version_identity() -> String {
+    RuntimePaths::collect()
+        .installed_version
+        .unwrap_or_else(|| unknown_if_empty(BUILD_REVISION).to_owned())
+}
+
+pub(crate) fn executable_identity() -> Result<String> {
+    let executable = std::env::current_exe().context("failed to resolve the current executable")?;
+    let mut file = std::fs::File::open(&executable)
+        .with_context(|| format!("failed to open {}", executable.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read {}", executable.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// The installed version an executable belongs to, if it sits in the layout the

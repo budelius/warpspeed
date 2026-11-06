@@ -1,5 +1,7 @@
 //! This module contains the implementation of `BackingView` for `TerminalView`, as well as
 //! business logic for integrating the terminal view with the pane infra (`crate::pane_group`).
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use std::path::Path;
 use std::path::PathBuf;
 
 use settings::Setting as _;
@@ -52,7 +54,7 @@ use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shared_session::manager::Manager;
 use crate::terminal::shared_session::participant_avatar_view::render_participants_and_role_elements;
 use crate::terminal::shared_session::render_util::shared_session_indicator_color;
-use crate::terminal::{TerminalManager, TerminalView, detached_sessions};
+use crate::terminal::{TerminalManager, TerminalModel, TerminalView, detached_sessions};
 use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
 use crate::ui_components::buttons::icon_button_with_color;
 use crate::ui_components::icon_with_status::render_icon_with_status;
@@ -678,8 +680,8 @@ impl TerminalView {
 
     /// The local agent session in this pane that can be moved into an AgentCtrl managed run.
     ///
-    /// Its directory is the shell's, else `fallback_cwd`: a restored pane, or one whose directory
-    /// has gone, still holds the agent.
+    /// Its directory is the shell's, otherwise the agent's hook-reported directory or a validated
+    /// `fallback_cwd`: a restored pane, or one whose directory has gone, still holds the agent.
     ///
     /// Locks the terminal model, so callers must not already hold that lock.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -692,23 +694,26 @@ impl TerminalView {
         // the session file stays keyed by the directory the agent was launched from.
         let cwd = self
             .active_session_path_if_local(ctx)
-            .or_else(|| self.agent_recorded_cwd(fallback_cwd?, ctx));
+            .or_else(|| self.agent_recorded_cwd(fallback_cwd, ctx));
         self.agent_ctrl_move_source_in(cwd, ctx)
     }
 
-    /// `cwd` only if this pane's agent itself recorded it, as its hook-reported directory or in
-    /// its session history, so a remote-control caller cannot choose which repository is pushed.
+    /// Returns the agent's hook-reported directory, or validates a caller-recovered directory
+    /// against the hook and session history so the caller cannot choose which repository is pushed.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
-    fn agent_recorded_cwd(&self, cwd: &std::path::Path, ctx: &AppContext) -> Option<PathBuf> {
+    fn agent_recorded_cwd(
+        &self,
+        recovered_cwd: Option<&std::path::Path>,
+        ctx: &AppContext,
+    ) -> Option<PathBuf> {
         let sessions = CLIAgentSessionsModel::as_ref(ctx);
         let session = sessions.session(self.view_id)?;
+        let hook_cwd = session.session_context.cwd.as_deref().map(Path::new);
+        let Some(cwd) = recovered_cwd else {
+            return hook_cwd.map(Path::to_path_buf);
+        };
         let session_id = sessions.session_id(self.view_id)?;
-        let hook_reported = session
-            .session_context
-            .cwd
-            .as_deref()
-            .is_some_and(|hook_cwd| std::path::Path::new(hook_cwd) == cwd);
-        let recorded = hook_reported
+        let recorded = hook_cwd == Some(cwd)
             || agent_session_history::find_all(session.agent)
                 .iter()
                 .any(|past| past.session_id == session_id && past.cwd == cwd);
@@ -747,16 +752,86 @@ impl TerminalView {
         let repo = local_path
             .as_ref()
             .and_then(|_| self.current_local_repo_path());
+        let move_path = local_path.or_else(|| self.agent_recorded_cwd(None, ctx));
         AgentCtrlPaneActions {
             can_start_agent: repo.is_some(),
             can_move_all: repo.and_then(std::path::Path::parent).is_some(),
-            can_move_session: self.agent_ctrl_move_source_in(local_path, ctx).is_some(),
+            can_move_session: self.agent_ctrl_move_source_in(move_path, ctx).is_some(),
         }
     }
 
     #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
     pub(crate) fn agent_ctrl_pane_actions(&self, _: &AppContext) -> AgentCtrlPaneActions {
         AgentCtrlPaneActions::default()
+    }
+
+    pub(super) fn session_context_menu_items(
+        &self,
+        model: &TerminalModel,
+        agent_ctrl_actions: AgentCtrlPaneActions,
+        ctx: &AppContext,
+    ) -> Vec<MenuItem<TerminalAction>> {
+        let mut items = vec![];
+        if model.shell_launch_state().available_shell().is_some() {
+            items.extend([
+                MenuItemFields::new("Restart shell")
+                    .with_on_select_action(TerminalAction::RestartShell)
+                    .into_item(),
+                MenuItemFields::new("Change shell")
+                    .with_on_select_action(TerminalAction::ChangeShell)
+                    .into_item(),
+            ]);
+            if self.can_detach_session(ctx) {
+                items.push(
+                    MenuItemFields::new("Detach session")
+                        .with_on_select_action(TerminalAction::DetachSession)
+                        .into_item(),
+                );
+            }
+        }
+        #[cfg(feature = "local_tty")]
+        if let Some(holder) = &self.connected_supervisor {
+            items.push(
+                MenuItemFields::new(format!("Supervisor: build {}", holder.version))
+                    .with_disabled(true)
+                    .into_item(),
+            );
+            items.push(
+                MenuItemFields::new("Restart under current supervisor…")
+                    .with_on_select_action(TerminalAction::RestartInCurrentSupervisor)
+                    .into_item(),
+            );
+        }
+        if agent_ctrl_actions.can_move_session {
+            items.push(
+                MenuItemFields::new("Move session to Obachan")
+                    .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
+                    .into_item(),
+            );
+        }
+        if !agent_ctrl_actions.can_move_session
+            && !model.shared_session_status().is_viewer()
+            && cfg!(all(feature = "local_fs", feature = "local_tty"))
+        {
+            let mut start_in_obachan = MenuItemFields::new("Start in Obachan")
+                .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
+                .with_disabled(!agent_ctrl_actions.can_start_agent);
+            if !agent_ctrl_actions.can_start_agent {
+                start_in_obachan = start_in_obachan
+                    .with_tooltip("Open a local Git repository in this pane to start in Obachan");
+            }
+            items.push(start_in_obachan.into_item());
+        }
+        // Every agent-session action works on local shells and agents.
+        if !model.shared_session_status().is_viewer() && cfg!(feature = "local_tty") {
+            items.push(
+                MenuItemFields::new("Sessions…")
+                    .with_on_select_action(TerminalAction::ShowAgentSessions)
+                    .into_item(),
+            );
+        }
+
+        items
     }
 
     /// The folder holding this local pane's repository, whose agent sessions "move all" moves:
@@ -881,47 +956,12 @@ impl BackingView for TerminalView {
             );
         }
 
-        if model.shell_launch_state().available_shell().is_some() {
+        let session_items = self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+        if !session_items.is_empty() {
             if !items.is_empty() {
                 items.push(MenuItem::Separator);
             }
-            items.extend([
-                MenuItemFields::new("Restart shell")
-                    .with_on_select_action(TerminalAction::RestartShell)
-                    .into_item(),
-                MenuItemFields::new("Change shell")
-                    .with_on_select_action(TerminalAction::ChangeShell)
-                    .into_item(),
-            ]);
-            if self.can_detach_session(ctx) {
-                items.push(
-                    MenuItemFields::new("Detach session")
-                        .with_on_select_action(TerminalAction::DetachSession)
-                        .into_item(),
-                );
-            }
-        }
-        if agent_ctrl_actions.can_move_session {
-            items.push(
-                MenuItemFields::new("Move session to AgentCtrl")
-                    .with_on_select_action(TerminalAction::MoveSessionToAgentCtrl)
-                    .into_item(),
-            );
-        }
-        if agent_ctrl_actions.can_start_agent {
-            items.push(
-                MenuItemFields::new("Start agent on AgentCtrl in this repo")
-                    .with_on_select_action(TerminalAction::StartAgentOnAgentCtrl)
-                    .into_item(),
-            );
-        }
-        // Every agent-session action works on local shells and agents.
-        if !shared_session_status.is_viewer() && cfg!(feature = "local_tty") {
-            items.push(
-                MenuItemFields::new("Sessions…")
-                    .with_on_select_action(TerminalAction::ShowAgentSessions)
-                    .into_item(),
-            );
+            items.extend(session_items);
         }
 
         // Split-pane related items.

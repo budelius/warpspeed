@@ -23,6 +23,8 @@ fn summary(id: u64, attached: bool) -> SessionSummary {
         },
         detached_for_seconds: 3,
         attached,
+        shell_pid: 42,
+        session_uuid_hex: "a1b2c3".to_owned(),
     }
 }
 
@@ -104,6 +106,18 @@ fn a_detached_session_the_holder_lists_is_held_detached() {
     );
     assert_eq!(
         verdict_over(opener(sender), SessionId::from(42u64)),
+        HolderVerdict::HeldDetached
+    );
+    holder.join().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn v6_sessions_are_not_mistaken_for_missing_sessions() {
+    let (sender, receiver) = mpsc::channel();
+    let holder = fake_holder(receiver, 6, vec![summary(42, false)], None, 0);
+    assert_eq!(
+        verdict_over(opener(sender), SessionId::from(42)),
         HolderVerdict::HeldDetached
     );
     holder.join().unwrap();

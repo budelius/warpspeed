@@ -20,10 +20,13 @@ fn row(agent: Option<CLIAgent>, state: AgentSessionState) -> AgentSessionRow {
         agent,
         session_id: Some("abc".into()),
         title: None,
+        last_prompt: None,
         cwd: PathBuf::from("T:/p/x"),
         canonical_cwd: None,
         last_used: None,
         preview: Vec::new(),
+        process_count: 0,
+        supervisor: None,
         state,
     }
 }
@@ -80,7 +83,12 @@ fn each_action_has_its_label() {
     assert_eq!(AgentSessionAction::Focus(locator).label(), "Focus");
     assert_eq!(AgentSessionAction::Start(locator).label(), "Start");
     assert_eq!(
-        AgentSessionAction::Attach(warp_core::SessionId::from(1)).label(),
+        AgentSessionAction::Attach {
+            session_id: warp_core::SessionId::from(1),
+            holder: None,
+            agent: None,
+        }
+        .label(),
         "Attach"
     );
     assert_eq!(
@@ -132,10 +140,29 @@ fn each_state_maps_to_its_action() {
     );
 
     let session_id = warp_core::SessionId::from(7);
-    let detached = row(None, AgentSessionState::Detached { session_id });
+    let holder = SessionHolder {
+        channel: "old-supervisor".into(),
+        version: "old-build".into(),
+        pid: 42,
+    };
+    let detached = row(
+        Some(CLIAgent::Pi),
+        AgentSessionState::Detached {
+            session_id,
+            instance_pid: None,
+            holder: Some(holder.clone()),
+        },
+    );
     assert_eq!(
         action_for(&detached, Some(target)),
-        Some(AgentSessionAction::Attach(session_id))
+        Some(AgentSessionAction::Attach {
+            session_id,
+            holder: Some(holder),
+            agent: Some(HeldAgent {
+                agent: CLIAgent::Pi,
+                session_id: "abc".into(),
+            }),
+        })
     );
 
     let past = row(Some(CLIAgent::Claude), AgentSessionState::Past);
@@ -148,6 +175,25 @@ fn each_state_maps_to_its_action() {
             target: Some(target),
         })
     );
+}
+
+#[test]
+fn sessions_owned_by_another_warp_instance_have_no_local_action() {
+    let running = row(
+        Some(CLIAgent::Claude),
+        AgentSessionState::RunningInOtherInstance { instance_pid: 42 },
+    );
+    let detached = row(
+        Some(CLIAgent::Claude),
+        AgentSessionState::Detached {
+            session_id: warp_core::SessionId::from(7),
+            instance_pid: Some(42),
+            holder: None,
+        },
+    );
+
+    assert_eq!(action_for(&running, None), None);
+    assert_eq!(action_for(&detached, None), None);
 }
 
 #[test]
@@ -179,6 +225,42 @@ fn a_past_row_with_an_unsafe_session_id_has_no_action() {
         ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
     };
     assert!(action_for(&uuid_row, None).is_some());
+}
+
+#[test]
+fn past_supported_sessions_can_start_on_agent_ctrl() {
+    let claude = row(Some(CLIAgent::Claude), AgentSessionState::Past);
+    let source = agent_ctrl_handoff_source(&claude).expect("Claude can move");
+    assert_eq!(source.agent, CLIAgent::Claude);
+    assert_eq!(source.session_id, "abc");
+    assert_eq!(source.cwd, Path::new("T:/p/x"));
+
+    assert!(agent_ctrl_handoff_source(&row(Some(CLIAgent::Pi), AgentSessionState::Past)).is_some());
+    assert!(
+        agent_ctrl_handoff_source(&row(Some(CLIAgent::Gemini), AgentSessionState::Past)).is_none()
+    );
+    assert!(
+        agent_ctrl_handoff_source(&row(
+            Some(CLIAgent::Claude),
+            AgentSessionState::KnownProcess { pid: 42 }
+        ))
+        .is_none()
+    );
+}
+
+#[test]
+fn a_session_without_a_safe_id_or_folder_cannot_start_on_agent_ctrl() {
+    let unsafe_id = AgentSessionRow {
+        session_id: Some("../session".into()),
+        ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
+    };
+    let no_folder = AgentSessionRow {
+        cwd: PathBuf::new(),
+        ..row(Some(CLIAgent::Claude), AgentSessionState::Past)
+    };
+
+    assert!(agent_ctrl_handoff_source(&unsafe_id).is_none());
+    assert!(agent_ctrl_handoff_source(&no_folder).is_none());
 }
 
 #[test]

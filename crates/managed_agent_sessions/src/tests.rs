@@ -17,6 +17,10 @@ fn dashboard_deep_link_opens_only_the_fixed_managed_session() {
         intent.cli_arguments(),
         format!("agent-ctrl open {job_id} --environment staging")
     );
+    assert_eq!(
+        intent.takeover_cli_arguments(),
+        format!("agent-ctrl attach {job_id} --takeover --environment staging")
+    );
 }
 
 #[test]
@@ -111,6 +115,8 @@ fn bookmark_serialization_contains_only_safe_fields() {
         fleet_id: "fleet".to_owned(),
         job_id: "job-123".to_owned(),
         last_cursor: Some("cursor".to_owned()),
+        execution_generation: Some("pi-123".to_owned()),
+        transport: Some("native_ssh".to_owned()),
         display_name: Some("inspector".to_owned()),
         agent_name: Some("staging-pi-inspector".to_owned()),
         last_known_state: Some("running".to_owned()),
@@ -125,6 +131,8 @@ fn bookmark_serialization_contains_only_safe_fields() {
         "fleet_id",
         "job_id",
         "last_cursor",
+        "execution_generation",
+        "transport",
         "display_name",
         "agent_name",
         "last_known_state",
@@ -180,6 +188,8 @@ fn bookmark_upsert_preserves_creation_and_resume_cursor() {
         fleet_id: STAGING_FLEET_ID.to_owned(),
         job_id: "job-123".to_owned(),
         last_cursor: Some("old".to_owned()),
+        execution_generation: Some("pi-old".to_owned()),
+        transport: Some("events".to_owned()),
         display_name: None,
         agent_name: None,
         last_known_state: Some("running".to_owned()),
@@ -194,6 +204,8 @@ fn bookmark_upsert_preserves_creation_and_resume_cursor() {
             fleet_id: STAGING_FLEET_ID.to_owned(),
             job_id: "job-123".to_owned(),
             last_cursor: Some("next".to_owned()),
+            execution_generation: Some("pi-next".to_owned()),
+            transport: Some("native_ssh".to_owned()),
             display_name: Some("run".to_owned()),
             agent_name: Some("agent".to_owned()),
             last_known_state: Some("running".to_owned()),
@@ -218,6 +230,8 @@ fn descriptor_must_match_compiled_environment_identity() {
         state: "running".to_owned(),
         capabilities: vec!["watch".to_owned()],
         next_cursor: None,
+        execution_generation: None,
+        terminal: None,
     };
     assert!(
         validate_descriptor(profile(ManagedEnvironment::Staging), "job-123", &descriptor).is_ok()
@@ -890,6 +904,85 @@ fn list_repositories_parses_items() {
 }
 
 #[test]
+fn list_runs_fetches_every_page_and_deduplicates_jobs() {
+    let (base, requests) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [{"job_id": "job-1", "state": "running", "agent_name": "pi"}],
+                "next_cursor": "next+page/="
+            }),
+        ),
+        (
+            "200 OK",
+            json!({
+                "items": [
+                    {"job_id": "job-1", "state": "running", "agent_name": "pi"},
+                    {"job_id": "job-2", "state": "paused", "agent_name": "claude"},
+                    {"job_id": "job-3", "state": "completed", "agent_name": "codex"}
+                ],
+                "next_cursor": null
+            }),
+        ),
+    ]);
+    let runs = list_runs_with(&fixture_profile(base), "token").unwrap();
+    assert_eq!(
+        runs.iter()
+            .map(|run| run.job_id.as_str())
+            .collect::<Vec<_>>(),
+        ["job-1", "job-2", "job-3"]
+    );
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            "GET /api/agent-control/runs?limit=100 HTTP/1.1",
+            "GET /api/agent-control/runs?limit=100&cursor=next%2Bpage%2F%3D HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
+fn list_runs_rejects_a_malformed_cursor_instead_of_truncating_the_list() {
+    let base = http_fixture("200 OK", json!({"items": [], "next_cursor": 42}));
+    let error = list_runs_with(&fixture_profile(base), "token").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid managed-run list cursor")
+    );
+}
+
+#[test]
+fn list_runs_rejects_a_repeating_cursor() {
+    let (base, requests) = sequence_fixture(vec![(
+        "200 OK",
+        json!({"items": [], "next_cursor": "repeat"}),
+    )]);
+    let error = list_runs_with(&fixture_profile(base), "token").unwrap_err();
+    assert!(error.to_string().contains("pagination did not finish"));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn list_runs_does_not_hide_a_later_page_failure() {
+    let (base, _) = sequence_fixture(vec![
+        (
+            "200 OK",
+            json!({
+                "items": [{"job_id": "job-1", "state": "running", "agent_name": "pi"}],
+                "next_cursor": "next"
+            }),
+        ),
+        ("403 Forbidden", json!({"error": "forbidden"})),
+    ]);
+    let error = list_runs_with(&fixture_profile(base), "token").unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<HttpStatusError>().unwrap().status,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[test]
 fn list_runs_parses_repo_and_branch() {
     let base = http_fixture(
         "200 OK",
@@ -930,6 +1023,7 @@ fn list_runs_parses_repo_and_branch() {
                 node_name: None,
                 paused_at: None,
                 pause_allowed: None,
+                resume_allowed: None,
             },
             RunSummary {
                 job_id: "job-plain".to_owned(),
@@ -942,6 +1036,7 @@ fn list_runs_parses_repo_and_branch() {
                 node_name: None,
                 paused_at: None,
                 pause_allowed: None,
+                resume_allowed: None,
             },
         ]
     );
@@ -1406,9 +1501,32 @@ fn a_running_run_is_attached_without_a_pause_notice() {
     .unwrap();
 
     let banner = attach_banner(&descriptor);
-    assert!(
-        banner.starts_with("Attached to Inspector (running, capabilities: watch,input,close).")
-    );
+    assert!(banner.starts_with(
+        "Event history / fallback for Inspector (running, capabilities: watch,input,close)."
+    ));
     assert!(!banner.contains("Paused"), "{banner}");
     assert!(viewer_commands("running").contains("send <text>"));
+}
+
+#[test]
+fn staging_uses_the_public_api_and_rejects_untrusted_origin_overrides() {
+    assert_eq!(STAGING_BASE_URL, "https://agents-dev.obachan.dev");
+    assert_eq!(staging_base_url(None), STAGING_BASE_URL);
+    assert_eq!(staging_base_url(Some("")), STAGING_BASE_URL);
+    assert_eq!(
+        staging_base_url(Some("https://agents-dev.obachan.dev")),
+        "https://agents-dev.obachan.dev"
+    );
+    assert_eq!(
+        staging_base_url(Some("https://agents-dev.obachan.dev/")),
+        "https://agents-dev.obachan.dev"
+    );
+    assert_eq!(
+        staging_base_url(Some("https://evil.example")),
+        STAGING_BASE_URL
+    );
+    assert_eq!(
+        staging_base_url(Some("http://agents-dev.obachan.dev")),
+        STAGING_BASE_URL
+    );
 }

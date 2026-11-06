@@ -3040,7 +3040,9 @@ impl BlockList {
 
     pub fn reinit_shell(&mut self) {
         let active_block = self.active_block_mut();
-        active_block.finish(0);
+        if !active_block.finished() {
+            active_block.finish(0);
+        }
         self.update_active_block_height();
 
         self.create_warp_input_block();

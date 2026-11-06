@@ -8,8 +8,8 @@ use url::{Origin, ParseError, Url};
 use super::Channel;
 use crate::AppId;
 use crate::channel::config::{
-    ChannelConfig, IapConfig, McpOAuthProviderConfig, OzConfig, RudderStackDestination,
-    WarpServerConfig,
+    ChannelConfig, CrashReportingConfig, IapConfig, McpOAuthProviderConfig, OzConfig,
+    RudderStackDestination, WarpServerConfig,
 };
 use crate::features::FeatureFlag;
 
@@ -79,6 +79,11 @@ impl ChannelState {
 
     pub fn set(state: ChannelState) {
         *CHANNEL_STATE.lock() = state;
+    }
+
+    /// Configures an explicitly chosen crash-reporting destination before app initialization.
+    pub fn set_crash_reporting_config(config: CrashReportingConfig) {
+        CHANNEL_STATE.lock().config.crash_reporting_config = Some(config);
     }
 
     pub fn is_release_bundle() -> bool {

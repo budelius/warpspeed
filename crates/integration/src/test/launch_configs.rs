@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use warp::cmd_or_ctrl_shift;
 use warp::features::FeatureFlag;
 use warp::integration_testing::pane_group::assert_focused_pane_index;
 use warp::integration_testing::settings::set_window_custom_size;
@@ -21,6 +22,40 @@ use warpui_core::{ModelHandle, async_assert};
 
 use super::{TEST_ONLY_ASSETS, assert_approx_eq, new_builder};
 use crate::Builder;
+
+/// Saves the active window from the launch configuration modal.
+pub fn test_save_current_window_as_launch_config() -> Builder {
+    const FILE_NAME: &str = "saved-window.yaml";
+
+    new_builder()
+        .with_setup(|utils| {
+            integration_testing::launch_configs::use_test_config_directory(
+                utils.test_dir().join("authored-configs"),
+            );
+            std::fs::create_dir_all(integration_testing::launch_configs::launch_configs_dir())
+                .expect("Should be able to create launch configs dir");
+        })
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open the save launch configuration modal")
+                .with_keystrokes(&[cmd_or_ctrl_shift("p")])
+                .with_typed_characters(&["save or update launch configuration"])
+                .with_keystrokes(&["enter"]),
+        )
+        .with_step(
+            new_step_with_default_assertions("Save the current window")
+                .with_typed_characters(&["saved-window"])
+                .with_keystrokes(&["enter"]),
+        )
+        .with_step(
+            new_step_with_default_assertions("The launch configuration was saved")
+                .add_named_assertion("Saved launch configuration exists", |_app, _window_id| {
+                    let path =
+                        integration_testing::launch_configs::launch_configs_dir().join(FILE_NAME);
+                    async_assert!(path.is_file(), "Expected {} to exist", path.display())
+                }),
+        )
+}
 
 /// Adds a launch config to the mocked out warp config directory and verifies that
 /// the launch config appears in the launch config palette.

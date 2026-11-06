@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import pathlib
 import plistlib
 import shutil
@@ -30,13 +31,17 @@ class InstallWarpSpeedTests(unittest.TestCase):
         subprocess.run([
             "codesign", "--force", "--sign", "-", str(self.source)
         ], check=True, capture_output=True)
-        self.destination = self.root / "Applications" / "warpseed.app"
+        self.destination = self.root / "Applications" / "warpspeed-latest.app"
+        self.home = self.root / "home"
+        self.home.mkdir()
 
     def install(self):
+        environment = dict(os.environ)
+        environment["HOME"] = str(self.home)
         return subprocess.run([
             "bash", str(INSTALLER), "--from-bundle", str(self.source),
             "--destination", str(self.destination),
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, env=environment)
 
     def test_installs_signed_bundle_without_dmg(self):
         result = self.install()
@@ -45,14 +50,14 @@ class InstallWarpSpeedTests(unittest.TestCase):
         subprocess.run([
             "codesign", "--verify", "--deep", "--strict", str(self.destination)
         ], check=True, capture_output=True)
-        self.assertEqual(list(self.destination.parent.glob(".warpseed-install.*")), [])
+        self.assertEqual(list(self.destination.parent.glob(".warpspeed-install.*")), [])
 
     def test_preserves_previous_installation_in_backup(self):
         self.destination.mkdir(parents=True)
         (self.destination / "marker").write_text("previous installation")
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
-        backups = list(self.destination.parent.glob(".warpseed-backup.*"))
+        backups = list(self.destination.parent.glob(".warpspeed-backup.*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / "previous.app/marker").read_text(), "previous installation")
         self.assertFalse((self.destination / "marker").exists())
@@ -65,7 +70,21 @@ class InstallWarpSpeedTests(unittest.TestCase):
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.destination / "marker").read_text(), "previous installation")
-        self.assertEqual(list(self.destination.parent.glob(".warpseed-backup.*")), [])
+        self.assertEqual(list(self.destination.parent.glob(".warpspeed-backup.*")), [])
+
+    def test_reinstall_preserves_profile_and_session_storage(self):
+        profile = self.home / ".warp-oss"
+        state = self.home / "Library/Application Support/dev.warp.WarpOss"
+        profile.mkdir(parents=True)
+        state.mkdir(parents=True)
+        (profile / "agent-session").write_text("resume")
+        (state / "session-checkpoint").write_text("window")
+
+        self.assertEqual(self.install().returncode, 0)
+        self.assertEqual(self.install().returncode, 0)
+
+        self.assertEqual((profile / "agent-session").read_text(), "resume")
+        self.assertEqual((state / "session-checkpoint").read_text(), "window")
 
     def test_refuses_running_destination(self):
         result = self.install()
@@ -78,7 +97,7 @@ class InstallWarpSpeedTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("running sessions were left untouched", result.stderr)
             self.assertIsNone(process.poll())
-            self.assertEqual(list(self.destination.parent.glob(".warpseed-backup.*")), [])
+            self.assertEqual(list(self.destination.parent.glob(".warpspeed-backup.*")), [])
         finally:
             process.terminate()
             process.wait(timeout=10)

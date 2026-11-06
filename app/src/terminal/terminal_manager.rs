@@ -24,9 +24,10 @@ use crate::pane_group::pane::DetachType;
 use crate::settings::{BlockVisibilitySettings, DebugSettings, InputModeSettings};
 use crate::terminal::CLIAgent;
 
-/// What a restored pane was going to run before the guard found its session held elsewhere.
+/// A restored session that could not be attached because it is still held elsewhere.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WithheldRestore {
+    /// The agent resume command, or empty for a plain shell.
     pub command: String,
     /// `None` when no supervisor is known to hold the session and only the agent's own registry
     /// shows it still running.
@@ -37,7 +38,7 @@ pub struct WithheldRestore {
 }
 
 /// The agent a held session was running, identified the way its process registry records it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldAgent {
     pub agent: CLIAgent,
     pub session_id: String,
@@ -95,6 +96,11 @@ pub trait TerminalManager: Any {
         None
     }
 
+    /// The agent recorded when this manager's supervised session was saved.
+    fn held_agent(&self) -> Option<HeldAgent> {
+        None
+    }
+
     /// The resume command the guard is holding back until the user decides what to do with it.
     fn withheld_restore(&self) -> Option<WithheldRestore> {
         None
@@ -134,6 +140,14 @@ pub trait TerminalManager: Any {
         _holder: Option<SessionHolder>,
         _agent: Option<HeldAgent>,
     ) {
+    }
+
+    /// Attaches the held shell without ending it or running its resume command.
+    #[cfg(windows)]
+    #[must_use]
+    fn attach_held_session(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManager>>) -> bool {
+        let _ = ctx;
+        false
     }
 
     /// Ends the held session where it is and then runs the withheld command here.

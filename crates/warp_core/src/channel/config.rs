@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -130,10 +131,19 @@ pub struct AutoupdateConfig {
     pub show_autoupdate_menu_items: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CrashReportingConfig {
     /// The URL/DSN for sending error logs and crash reports to Sentry.
     pub sentry_url: Cow<'static, str>,
+}
+
+impl fmt::Debug for CrashReportingConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CrashReportingConfig")
+            .field("sentry_url", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Configuration for statically-bundled MCP OAuth credentials.
@@ -169,3 +179,7 @@ pub struct McpOAuthLoopbackClientConfig {
     #[serde(default)]
     pub client_secret: Option<Cow<'static, str>>,
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod tests;

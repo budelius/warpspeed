@@ -129,6 +129,26 @@ fn an_aborted_handoff_is_not_mistaken_for_a_release() {
 }
 
 #[test]
+fn rejected_handoff_stops_the_ready_wait_immediately() {
+    let directory = tempfile::tempdir().unwrap();
+    let request_path = directory.path().join("handoff.json");
+    let (ready_path, _) = marker_paths(&request_path);
+    let abort_path = abort_path(&request_path);
+    write_marker(&abort_path).unwrap();
+
+    let started = Instant::now();
+    let result = warpui::r#async::block_on(wait_for_path_or_abort(
+        &ready_path,
+        &abort_path,
+        READY_TIMEOUT,
+    ));
+
+    assert_eq!(result, ReadyWaitResult::Rejected);
+    assert!(started.elapsed() < READY_TIMEOUT);
+    assert!(!abort_path.exists());
+}
+
+#[test]
 fn the_abort_marker_shares_the_request_stem() {
     assert_eq!(
         abort_path(Path::new("handoff-id.json")),

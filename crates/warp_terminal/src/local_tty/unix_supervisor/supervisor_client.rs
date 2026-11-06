@@ -173,10 +173,14 @@ impl UnixTerminalSupervisorClient {
         };
         transport.send(&message)?;
         let response = transport.receive_timeout(CONTROL_TIMEOUT)?;
-        // Tells the supervisor the answer -- and any descriptor beside it --
-        // has been read, so it can drop the connection without discarding an
-        // in-flight control message.
-        transport.send(&Message::ResponseReceived)?;
+        if matches!(
+            response,
+            Message::SpawnResponse { .. } | Message::AttachResponse { .. }
+        ) {
+            // Tells the supervisor that the descriptor beside the answer has been read, so it can
+            // drop the connection without discarding an in-flight control message.
+            transport.send(&Message::ResponseReceived)?;
+        }
         Ok(response)
     }
 

@@ -2034,8 +2034,14 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.session_holder.clone()
     }
 
+    fn held_agent(&self) -> Option<HeldAgent> {
+        self.held_agent.clone()
+    }
+
     fn withheld_restore(&self) -> Option<crate::terminal::terminal_manager::WithheldRestore> {
-        self.withheld_restore.clone()
+        self.withheld_restore
+            .clone()
+            .or_else(|| self.pending_held_attach.clone())
     }
 
     fn restore_persistent_session(
@@ -2070,6 +2076,14 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
     fn restore_session_holder(&mut self, holder: Option<SessionHolder>, agent: Option<HeldAgent>) {
         self.session_holder = holder;
         self.held_agent = agent;
+    }
+
+    #[cfg(windows)]
+    fn attach_held_session(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool {
+        self.attach_held_session_inner(ctx)
     }
 
     fn take_over_held_session(

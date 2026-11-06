@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display};
 use std::marker::Unpin;
 
+use bincode::Options as _;
 use futures::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use futures::{AsyncRead, AsyncWrite};
 use serde::de::DeserializeOwned;
@@ -11,6 +12,7 @@ use super::service::ServiceId;
 
 /// The size of a usize, in bytes.
 const USIZE_SIZE: usize = std::mem::size_of::<usize>();
+pub(super) const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Unique "address" for a server/client connection.
 ///
@@ -141,7 +143,7 @@ where
     M: Message,
     W: AsyncWrite + Unpin,
 {
-    let serialized_msg = bincode::serialize(&message)?;
+    let serialized_msg = serialize_bounded(&message)?;
 
     // Create a buffer to hold the data to be written.
     let mut buf = Vec::with_capacity(serialized_msg.len() + USIZE_SIZE);
@@ -177,12 +179,41 @@ where
     // wire.
     let payload_len = usize::from_be_bytes(header_buf);
 
+    validate_message_len(payload_len)?;
+
     // Grow the initial buffer to a sufficient size and read the rest of the
     // message from the socket.
     let mut payload_buf = vec![0; payload_len];
     reader.read_exact(&mut payload_buf).await?;
 
     // Deserialize the message.
-    let message: M = bincode::deserialize(&payload_buf[..])?;
-    Ok(message)
+    deserialize_bounded(&payload_buf)
 }
+
+pub(super) fn serialize_bounded<M: Serialize>(message: &M) -> Result<Vec<u8>, ProtocolError> {
+    let bytes = bincode::serialize(message)?;
+    validate_message_len(bytes.len())?;
+    Ok(bytes)
+}
+
+pub(super) fn deserialize_bounded<M: DeserializeOwned>(bytes: &[u8]) -> Result<M, ProtocolError> {
+    validate_message_len(bytes.len())?;
+    Ok(bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(MAX_MESSAGE_BYTES as u64)
+        .deserialize(bytes)?)
+}
+
+fn validate_message_len(len: usize) -> Result<(), ProtocolError> {
+    if len > MAX_MESSAGE_BYTES {
+        return Err(ProtocolError::Other(format!(
+            "IPC message exceeds the {MAX_MESSAGE_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "protocol_tests.rs"]
+mod tests;

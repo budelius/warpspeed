@@ -440,6 +440,7 @@ pub struct TerminalPane {
     pub cli_agent_resume_descriptor: Option<String>,
     /// This is serialized JSON data for a SessionHolder struct.
     pub session_holder: Option<String>,
+    pub managed_session_job_id: Option<String>,
 }
 
 #[derive(Identifiable, Queryable, Selectable)]
@@ -623,6 +624,7 @@ pub struct NewTerminalPane {
     pub cli_agent_resume_descriptor: Option<String>,
     /// This is serialized JSON data for a SessionHolder struct.
     pub session_holder: Option<String>,
+    pub managed_session_job_id: Option<String>,
 }
 
 #[derive(Insertable)]

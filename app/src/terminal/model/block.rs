@@ -108,7 +108,11 @@ impl TranscriptScope {
     }
 }
 
-pub(super) const MAX_SERIALIZED_STYLIZED_OUTPUT_LINES: usize = 5000;
+pub(super) const MAX_SERIALIZED_STYLIZED_OUTPUT_LINES: usize = 1000;
+/// Maximum decoded command bytes retained in a serialized terminal block.
+pub(crate) const MAX_SERIALIZED_STYLIZED_COMMAND_BYTES: usize = 64 * 1024;
+/// Maximum decoded output bytes retained in a serialized terminal block.
+pub(crate) const MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Number of max lines to store that aren't stylized. We only store 50 lines as we only need
 /// non-stylized lines for command corrections and notifications whereas we need more lines for the
@@ -1671,6 +1675,12 @@ impl Block {
     // rather than the timestamp when the block was restored.
     pub fn override_start_ts(&mut self, ts: DateTime<Local>) {
         self.start_ts = Some(ts);
+    }
+
+    /// Restores a running command's replayed screen without the new-command render delay.
+    pub(super) fn restore_attached_output(&mut self, grid: GridHandler) {
+        self.output_grid.grid_handler = grid;
+        self.render_delay_complete.store(true, Ordering::Relaxed);
     }
 
     pub fn ready_to_render(&self) -> bool {

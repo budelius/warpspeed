@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use instant::Instant;
 use warp_core::SessionId;
-use warp_terminal::local_tty::supervisor::message::{Message, PROTOCOL_VERSION};
+#[cfg(not(windows))]
+use warp_terminal::local_tty::supervisor::message::PROTOCOL_VERSION;
+use warp_terminal::local_tty::supervisor::message::{Message, SessionSummary};
 use warp_terminal::local_tty::supervisor::transport::Transport;
 
 use crate::app_state::SessionHolder;
@@ -79,6 +81,11 @@ pub(crate) fn verdict(channel: &str, session_id: SessionId) -> HolderVerdict {
     verdict_over(|timeout| connect(channel, timeout), session_id)
 }
 
+/// Lists sessions from a compatible supervisor channel without letting a stale holder block the UI.
+pub(crate) fn list_sessions(channel: &str) -> Option<Vec<SessionSummary>> {
+    list_sessions_over(|timeout| connect(channel, timeout))
+}
+
 pub(crate) fn end_session(channel: &str, session_id: SessionId) -> Result<()> {
     let mut connected = false;
     let result = end_session_over(
@@ -99,19 +106,10 @@ pub(crate) fn end_session(channel: &str, session_id: SessionId) -> Result<()> {
 /// `open` is called once per request, with how long it may wait to connect: a supervisor serves a
 /// single request per connection.
 pub(crate) fn verdict_over<T: Transport>(
-    mut open: impl FnMut(Duration) -> Option<T>,
+    open: impl FnMut(Duration) -> Option<T>,
     session_id: SessionId,
 ) -> HolderVerdict {
-    let deadline = Instant::now() + VERDICT_TIMEOUT;
-    let Some(Message::Pong { protocol_version }) = ask(&mut open, Message::Ping, deadline) else {
-        return HolderVerdict::Unknown;
-    };
-    if protocol_version != PROTOCOL_VERSION {
-        return HolderVerdict::Unknown;
-    }
-    let Some(Message::ListSessionsResponse { sessions }) =
-        ask(&mut open, Message::ListSessions, deadline)
-    else {
+    let Some(sessions) = list_sessions_over(open) else {
         return HolderVerdict::Unknown;
     };
     match sessions
@@ -122,6 +120,31 @@ pub(crate) fn verdict_over<T: Transport>(
         Some(_) => HolderVerdict::HeldDetached,
         None => HolderVerdict::Unknown,
     }
+}
+
+/// `open` is called once per request, with how long it may wait to connect: a supervisor serves a
+/// single request per connection.
+pub(crate) fn list_sessions_over<T: Transport>(
+    mut open: impl FnMut(Duration) -> Option<T>,
+) -> Option<Vec<SessionSummary>> {
+    let deadline = Instant::now() + VERDICT_TIMEOUT;
+    let Message::Pong { protocol_version } = ask(&mut open, Message::Ping, deadline)? else {
+        return None;
+    };
+    #[cfg(windows)]
+    let compatible =
+        warp_terminal::local_tty::supervisor::compatibility::supports_protocol(protocol_version);
+    #[cfg(not(windows))]
+    let compatible = protocol_version == PROTOCOL_VERSION;
+    if !compatible {
+        return None;
+    }
+    let Message::ListSessionsResponse { sessions } =
+        ask(&mut open, Message::ListSessions, deadline)?
+    else {
+        return None;
+    };
+    Some(sessions)
 }
 
 /// `open` is called once per request, with how long it may wait to connect: a supervisor serves a

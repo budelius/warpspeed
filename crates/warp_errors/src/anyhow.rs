@@ -1,4 +1,5 @@
 use super::registration::AnyErrorRegistration;
+use super::{ReportLocation, with_report_location};
 
 /// A version of [`ErrorExt`] that works for [`anyhow::Error`] (which does not implement
 /// [`std::error::Error`]).
@@ -7,7 +8,7 @@ pub trait AnyhowErrorExt {
     fn is_actionable(&self) -> bool;
 
     /// Reports the error.
-    fn report_error(&self);
+    fn report_error(&self, location: ReportLocation);
 }
 
 impl AnyhowErrorExt for anyhow::Error {
@@ -23,8 +24,10 @@ impl AnyhowErrorExt for anyhow::Error {
         true
     }
 
-    fn report_error(&self) {
-        #[cfg(feature = "crash_reporting")]
-        sentry::integrations::anyhow::capture_anyhow(self);
+    fn report_error(&self, location: ReportLocation) {
+        with_report_location(location, || {
+            #[cfg(feature = "crash_reporting")]
+            sentry::integrations::anyhow::capture_anyhow(self);
+        });
     }
 }

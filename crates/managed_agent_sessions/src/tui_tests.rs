@@ -22,6 +22,8 @@ fn test_tui() -> ManagedSessionsTui {
             state: "running".to_owned(),
             capabilities: vec!["watch".to_owned(), "stop".to_owned()],
             next_cursor: None,
+            execution_generation: None,
+            terminal: None,
         },
         Vec::new(),
         updates_tx,
@@ -70,9 +72,10 @@ fn full_screen_contains_header_transcript_composer_and_controls() {
 
     assert!(lines[0].starts_with("┌ AgentCtrl "));
     assert!(lines[1].contains("Test run  running"));
-    assert!(lines[4].starts_with("┌ Conversation · 1 events "));
+    assert!(lines[4].starts_with("┌ Event history / fallback · 1 events "));
     assert!(lines.iter().any(|line| line.contains("AGENT  #7")));
     assert!(lines[14].starts_with("┌ Message "));
+    assert!(lines[15].starts_with("│ Type a follow-up message…"));
     assert!(lines[17].contains("Enter send"));
     assert!(lines[17].contains("/help commands"));
     assert!(lines[17].contains("Ctrl-O shell"));
@@ -90,7 +93,11 @@ fn composer_recognizes_run_controls_and_local_terminal_commands() {
     );
     assert_eq!(
         parse_composer_command("/ssh user@example.com -t tmux attach"),
-        ComposerCommand::LocalShell(Some("ssh user@example.com -t tmux attach".to_owned()))
+        ComposerCommand::Unknown("/ssh user@example.com -t tmux attach".to_owned())
+    );
+    assert_eq!(
+        parse_composer_command("/tmux attach"),
+        ComposerCommand::Unknown("/tmux attach".to_owned())
     );
     assert_eq!(
         parse_composer_command("!tmux new -A -s work"),
@@ -137,7 +144,7 @@ fn resume_on_running_session_is_handled_without_sending_agent_input() {
 }
 
 #[test]
-fn help_lists_shell_ssh_tmux_and_run_controls() {
+fn help_lists_local_shell_and_run_controls_without_remote_target_commands() {
     let mut tui = test_tui();
     tui.help_visible = true;
 
@@ -145,8 +152,8 @@ fn help_lists_shell_ssh_tmux_and_run_controls() {
 
     assert!(lines.iter().any(|line| line.contains("AgentCtrl commands")));
     assert!(lines.iter().any(|line| line.contains("/pause  /resume")));
-    assert!(lines.iter().any(|line| line.contains("/ssh <args>")));
-    assert!(lines.iter().any(|line| line.contains("/tmux <args>")));
+    assert!(!lines.iter().any(|line| line.contains("/ssh <args>")));
+    assert!(!lines.iter().any(|line| line.contains("/tmux <args>")));
 }
 
 #[test]

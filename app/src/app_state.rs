@@ -328,7 +328,7 @@ impl CliAgentResumeDescriptor {
 }
 
 /// The supervisor that was holding a pane's shell when the pane was saved.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHolder {
     /// The supervisor's pipe or socket name.
     pub channel: String,
@@ -348,6 +348,8 @@ pub struct TerminalPaneSnapshot {
     pub session_holder: Option<SessionHolder>,
     #[serde(default)]
     pub cli_agent_resume_descriptor: Option<CliAgentResumeDescriptor>,
+    #[serde(default)]
+    pub managed_session_job_id: Option<String>,
     pub cwd: Option<String>,
     pub shell_launch_data: Option<ShellLaunchData>,
     pub is_active: bool,

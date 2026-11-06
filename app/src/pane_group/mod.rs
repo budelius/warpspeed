@@ -74,7 +74,8 @@ use crate::app_state::CodePaneSnapShot;
 use crate::app_state::{
     self, AIFactPaneSnapshot, BranchSnapshot, CliAgentResumeDescriptor,
     EnvVarCollectionPaneSnapshot, LeafContents, LeafSnapshot, NotebookPaneSnapshot,
-    PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot, TerminalPaneSnapshot, WorkflowPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, SessionHolder, SettingsPaneSnapshot, TerminalPaneSnapshot,
+    WorkflowPaneSnapshot,
 };
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
@@ -835,6 +836,10 @@ pub struct NewTerminalOptions {
     /// a shell. The shell start is deferred until the pane has been told which
     /// session to claim, so no process is forked and then thrown away.
     pub attach_session_id: Option<TerminalSessionId>,
+    /// The supervisor that offers the session.
+    pub attach_session_holder: Option<SessionHolder>,
+    /// The agent running in the session, when known before attachment.
+    pub attach_session_agent: Option<HeldAgent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1866,6 +1871,7 @@ impl PaneGroup {
                     ctx,
                 );
                 pane_data.set_restored_shell_snapshot_fields(restored_shell_snapshot_fields);
+                pane_data.set_managed_session_job_id(terminal_snapshot.managed_session_job_id);
 
                 let terminal_pane_id = pane_data.terminal_pane_id();
                 let pane_id = terminal_pane_id.into();
@@ -2323,6 +2329,7 @@ impl PaneGroup {
                             persistent_session_id: None,
                             session_holder: None,
                             cli_agent_resume_descriptor: None,
+                            managed_session_job_id: None,
                             cwd: None,
                             is_active: visible_leaf_is_active_session,
                             is_read_only: false,
@@ -2361,6 +2368,27 @@ impl PaneGroup {
                 })
             }
         }
+    }
+
+    pub(crate) fn managed_session_job_id(&self, pane_id: PaneId) -> Option<&str> {
+        self.downcast_pane_by_id::<TerminalPane>(pane_id)?
+            .managed_session_job_id()
+    }
+
+    pub(crate) fn set_managed_session_job_id(
+        &mut self,
+        pane_id: PaneId,
+        job_id: Option<String>,
+    ) -> bool {
+        let Some(pane) = self
+            .pane_contents
+            .get_mut(&pane_id)
+            .and_then(|pane| pane.as_any_mut().downcast_mut::<TerminalPane>())
+        else {
+            return false;
+        };
+        pane.set_managed_session_job_id(job_id);
+        true
     }
 
     /// The agent a restored terminal pane has yet to resume, if it is one.
@@ -3564,6 +3592,8 @@ impl PaneGroup {
     ) -> (PaneData, InitialFocus) {
         let uuid = Uuid::new_v4();
         let attach_session_id = options.attach_session_id;
+        let attach_session_holder = options.attach_session_holder;
+        let attach_session_agent = options.attach_session_agent;
         let shell_start = if attach_session_id.is_some() {
             ShellStartPolicy::Deferred
         } else {
@@ -3588,6 +3618,9 @@ impl PaneGroup {
 
         if let Some(session_id) = attach_session_id {
             terminal_manager.update(ctx, |manager, ctx| {
+                if attach_session_holder.is_some() || attach_session_agent.is_some() {
+                    manager.restore_session_holder(attach_session_holder, attach_session_agent);
+                }
                 manager.attach_detached_session(session_id, ctx);
                 manager.ensure_shell_started(ctx);
             });

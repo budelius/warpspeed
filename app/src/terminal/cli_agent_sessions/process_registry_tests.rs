@@ -11,6 +11,8 @@ fn started_process(pid: u32, parent: u32, name: &str, start_time: u64) -> Proces
         pid,
         parent: Some(parent),
         name: name.to_owned(),
+        executable: None,
+        command: Vec::new(),
         start_time,
     }
 }

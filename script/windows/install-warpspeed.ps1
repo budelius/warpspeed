@@ -134,11 +134,14 @@ if (-not $SKIP_BUILD) {
     $previous_full_profile = $env:CARGO_FULL_PROFILE
     $previous_protoc = $env:PROTOC
     $previous_app_name = $env:WARP_APP_NAME
+    $previous_build_revision = $env:WARP_BUILD_REVISION
 
     try {
         $env:CARGO_TARGET_DIR = $STAGING_TARGET_DIR
         $env:CARGO_FULL_PROFILE = 'warpspeed-merge/release'
         $env:WARP_APP_NAME = 'WarpSpeed by STOZN'
+        # Cargo does not track Git refs, so incremental builds need an explicit revision stamp.
+        $env:WARP_BUILD_REVISION = "$revision$dirty"
         if (-not $env:PROTOC) {
             $protoc = Get-Command protoc -ErrorAction Stop
             $env:PROTOC = $protoc.Source
@@ -146,7 +149,7 @@ if (-not $SKIP_BUILD) {
 
         Push-Location $WORKSPACE_ROOT
         try {
-            cargo build -p warp --release --bin warpspeed --features tui
+            cargo build -p warp --release --bin warpspeed --features tui,crash_reporting
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to build warpspeed (exit code $LASTEXITCODE)"
             }
@@ -158,6 +161,7 @@ if (-not $SKIP_BUILD) {
         $env:CARGO_FULL_PROFILE = $previous_full_profile
         $env:PROTOC = $previous_protoc
         $env:WARP_APP_NAME = $previous_app_name
+        $env:WARP_BUILD_REVISION = $previous_build_revision
     }
 }
 

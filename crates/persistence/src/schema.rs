@@ -422,6 +422,7 @@ diesel::table! {
         persistent_session_id -> Nullable<Text>,
         cli_agent_resume_descriptor -> Nullable<Text>,
         session_holder -> Nullable<Text>,
+        managed_session_job_id -> Nullable<Text>,
     }
 }
 

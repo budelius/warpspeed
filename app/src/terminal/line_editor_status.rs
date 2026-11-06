@@ -80,7 +80,7 @@ impl LineEditorStatus {
 
         let is_active_session_zsh = active_session.shell().shell_type() == ShellType::Zsh;
         match event {
-            ModelEvent::Handler(AnsiHandlerEvent::Precmd) => {
+            ModelEvent::Handler(AnsiHandlerEvent::Precmd { .. }) => {
                 if is_active_session_zsh {
                     self.did_receive_zsh_precmd = true;
                 } else if !self.is_line_editor_active {

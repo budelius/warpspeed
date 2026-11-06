@@ -1,8 +1,9 @@
 {
-  "ai": "generic",
+  "ai": "copilot",
+  "ai_skills": true,
   "feature_numbering": "sequential",
-  "here": false,
-  "integration": "generic",
-  "script": "sh",
-  "speckit_version": "1.0.6"
+  "here": true,
+  "integration": "copilot",
+  "script": "py",
+  "speckit_version": "1.0.4"
 }

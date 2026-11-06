@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::protocol::Message;
+use crate::protocol::{Message, deserialize_bounded, serialize_bounded};
 use crate::{Client, ClientError};
 
 pub(crate) type ServiceId = String;
@@ -87,13 +87,8 @@ where
 {
     /// Sends the given request and returns a `Result` containing its response.
     async fn call(&self, request: S::Request) -> Result<S::Response, ClientError> {
-        let request_bytes = bincode::serialize(&request).expect("Failed to serialize request.");
-        self.client
-            .send_request::<S>(request_bytes)
-            .await
-            .map(|response_bytes| {
-                bincode::deserialize::<S::Response>(&response_bytes[..])
-                    .expect("Failed to deserialize response.")
-            })
+        let request_bytes = serialize_bounded(&request)?;
+        let response_bytes = self.client.send_request::<S>(request_bytes).await?;
+        deserialize_bounded::<S::Response>(&response_bytes).map_err(Into::into)
     }
 }

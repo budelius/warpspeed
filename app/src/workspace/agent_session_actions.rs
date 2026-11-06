@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 
 use warp_util::path::ShellFamily;
 
-use crate::app_state::CliAgentResumeDescriptor;
+use crate::app_state::{CliAgentResumeDescriptor, SessionHolder};
+use crate::terminal::agent_session_handoff::{HandoffSource, agent_ctrl_profile};
 use crate::terminal::agent_session_history::is_safe_session_id;
 use crate::terminal::agent_sessions_index::{AgentSessionRow, AgentSessionState};
 use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::shell::ShellType;
+use crate::terminal::terminal_manager::HeldAgent;
 use crate::workspace::PaneViewLocator;
 
 /// What a row's click does.
@@ -16,7 +18,15 @@ use crate::workspace::PaneViewLocator;
 pub enum AgentSessionAction {
     Focus(PaneViewLocator),
     Start(PaneViewLocator),
-    Attach(warp_core::SessionId),
+    Attach {
+        session_id: warp_core::SessionId,
+        holder: Option<SessionHolder>,
+        agent: Option<HeldAgent>,
+    },
+    Managed {
+        job_id: String,
+        target: Option<PaneViewLocator>,
+    },
     /// `target` is the pane to resume in, or to split beside when it is busy.
     Resume {
         agent: CLIAgent,
@@ -32,7 +42,8 @@ impl AgentSessionAction {
         match self {
             AgentSessionAction::Focus(_) => "Focus",
             AgentSessionAction::Start(_) => "Start",
-            AgentSessionAction::Attach(_) => "Attach",
+            AgentSessionAction::Attach { .. } => "Attach",
+            AgentSessionAction::Managed { .. } => "Open",
             AgentSessionAction::Resume { .. } => "Resume",
         }
     }
@@ -46,7 +57,26 @@ pub(crate) fn action_for(
     match &row.state {
         AgentSessionState::Running { locator } => Some(AgentSessionAction::Focus(*locator)),
         AgentSessionState::Pending { locator } => Some(AgentSessionAction::Start(*locator)),
-        AgentSessionState::Detached { session_id } => Some(AgentSessionAction::Attach(*session_id)),
+        AgentSessionState::Detached {
+            session_id,
+            instance_pid: None,
+            holder,
+        } => Some(AgentSessionAction::Attach {
+            session_id: *session_id,
+            holder: holder.clone(),
+            agent: row
+                .agent
+                .zip(row.session_id.clone())
+                .map(|(agent, session_id)| HeldAgent { agent, session_id }),
+        }),
+        AgentSessionState::RunningInOtherInstance { .. }
+        | AgentSessionState::Detached {
+            instance_pid: Some(_),
+            ..
+        }
+        | AgentSessionState::KnownProcess { .. }
+        | AgentSessionState::HeldByOtherBuild { .. }
+        | AgentSessionState::NoKnownPane { .. } => None,
         AgentSessionState::Past => {
             let agent = row.agent?;
             let session_id = row.session_id.clone().filter(|id| is_safe_session_id(id))?;
@@ -59,6 +89,22 @@ pub(crate) fn action_for(
             })
         }
     }
+}
+
+/// The recorded conversation a past row can start on AgentCtrl.
+pub(crate) fn agent_ctrl_handoff_source(row: &AgentSessionRow) -> Option<HandoffSource> {
+    if !matches!(row.state, AgentSessionState::Past) || row.cwd.as_os_str().is_empty() {
+        return None;
+    }
+    let agent = row.agent?;
+    agent_ctrl_profile(agent)?;
+    let session_id = row.session_id.clone().filter(|id| is_safe_session_id(id))?;
+    Some(HandoffSource {
+        agent,
+        session_id,
+        cwd: row.cwd.clone(),
+        transcript_path: None,
+    })
 }
 
 pub(crate) fn resume_descriptor(

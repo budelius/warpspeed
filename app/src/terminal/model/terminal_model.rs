@@ -1586,6 +1586,10 @@ impl TerminalModel {
         self.ignore_bootstrapping_messages = false;
         self.pending_session_info = None;
         self.lifecycle_coordinator.reset_unknown();
+
+        // The replacement can emit bytes before InitShell. The exited block's truncated grids
+        // are immutable and cannot receive that output, even though the model is writable again.
+        self.block_list.reinit_shell();
     }
 
     /// Clears the exit latch so a replaced shell's model is writable again.
@@ -2749,6 +2753,10 @@ impl TerminalModel {
         else {
             return;
         };
+        // Restoring the lifecycle advances past the replay block and exits the alternate screen.
+        // A running program may stay silent indefinitely, so keep its frame and terminal modes.
+        let replayed_screen =
+            (!input_editor_active).then(|| (self.alt_screen_active, self.active_grid().clone()));
         self.restore_bootstrap(&bootstrap);
         // The shell emitted its completion and `Precmd` hooks before the old
         // pane detached and will not emit another until it runs a command.
@@ -2778,6 +2786,17 @@ impl TerminalModel {
                 session_id: Some(bootstrap.hook_session_id),
             });
         }
+        if let Some((was_alt_screen_active, grid)) = replayed_screen {
+            if was_alt_screen_active {
+                self.enter_alt_screen(false);
+                *self.alt_screen.grid_handler_mut() = grid;
+            } else {
+                self.block_list
+                    .active_block_mut()
+                    .restore_attached_output(grid);
+            }
+        }
+        self.block_list.update_active_block_height();
     }
 
     pub fn needs_bracketed_paste(&mut self) -> bool {

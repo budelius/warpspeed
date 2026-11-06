@@ -190,6 +190,8 @@ fn every_message() -> Vec<Message> {
                 metadata: metadata(),
                 detached_for_seconds: 66,
                 attached: false,
+                shell_pid: 42,
+                session_uuid_hex: "a1b2c3".to_owned(),
             }],
         },
         Message::Ping,
@@ -198,6 +200,34 @@ fn every_message() -> Vec<Message> {
         },
         Message::ResponseReceived,
     ]
+}
+
+#[test]
+fn v6_compatibility_matches_the_original_builds_wire_fixture() {
+    let messages = every_message();
+    let mut encoded = (messages.len() as u64).to_le_bytes().to_vec();
+    for message in messages {
+        let message = match message {
+            Message::Pong { .. } => Message::Pong {
+                protocol_version: 6,
+            },
+            Message::ListSessionsResponse { sessions } => Message::ListSessionsResponse {
+                sessions: sessions
+                    .into_iter()
+                    .map(|session| SessionSummary {
+                        shell_pid: 0,
+                        session_uuid_hex: String::new(),
+                        ..session
+                    })
+                    .collect(),
+            },
+            message => message,
+        };
+        let payload = compatibility::encode(&message, 6).unwrap();
+        assert_eq!(compatibility::decode(&payload, 6).unwrap(), message);
+        encoded.extend(payload);
+    }
+    assert_eq!(hex::encode(encoded), include_str!("wire_v6.hex").trim());
 }
 
 /// The encoding is pinned, because the version in the channel name is the only
@@ -211,14 +241,14 @@ fn every_message() -> Vec<Message> {
 /// came back as `invalid u8 while decoding bool`.
 ///
 /// **If this test fails, the encoding changed. Bump `PROTOCOL_VERSION` in
-/// `message.rs` and update `wire_v6.hex`.** Do not update the golden bytes alone.
+/// `message.rs` and update `wire_v7.hex`.** Do not update the golden bytes alone.
 #[test]
 fn the_wire_encoding_is_what_this_protocol_version_promises() {
     let encoded = bincode::serialize(&every_message()).expect("every message should encode");
 
     assert_eq!(
         hex::encode(&encoded),
-        include_str!("wire_v6.hex").trim(),
+        include_str!("wire_v7.hex").trim(),
         "the supervisor wire encoding changed; see this test's documentation"
     );
 }

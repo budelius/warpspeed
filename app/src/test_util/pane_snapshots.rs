@@ -20,6 +20,7 @@ pub fn terminal_leaf_snapshot(
             persistent_session_id: None,
             session_holder: None,
             cli_agent_resume_descriptor: None,
+            managed_session_job_id: None,
             cwd,
             shell_launch_data,
             is_active: true,

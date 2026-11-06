@@ -65,21 +65,21 @@ fn hit_test_ignores_everything_when_no_button_is_on_screen() {
 #[test]
 fn non_client_mouse_messages_become_client_ones() {
     assert_eq!(
-        synthetic_message(WM_NCMOUSEMOVE, HTMAXBUTTON),
+        synthetic_message(WM_NCMOUSEMOVE, HTMAXBUTTON, false),
         Some(SyntheticMouseMessage {
             message: WM_MOUSEMOVE,
             wparam: 0,
         })
     );
     assert_eq!(
-        synthetic_message(WM_NCLBUTTONDOWN, HTMAXBUTTON),
+        synthetic_message(WM_NCLBUTTONDOWN, HTMAXBUTTON, false),
         Some(SyntheticMouseMessage {
             message: WM_LBUTTONDOWN,
             wparam: MK_LBUTTON.0 as usize,
         })
     );
     assert_eq!(
-        synthetic_message(WM_NCLBUTTONUP, HTMAXBUTTON),
+        synthetic_message(WM_NCLBUTTONUP, HTMAXBUTTON, true),
         Some(SyntheticMouseMessage {
             message: WM_LBUTTONUP,
             wparam: 0,
@@ -92,20 +92,23 @@ fn a_double_click_is_replayed_as_another_press() {
     // Without this the message reaches `DefWindowProc`, which runs its own caption-button
     // tracking loop and maximizes the window while the app-drawn button shows no feedback.
     assert_eq!(
-        synthetic_message(WM_NCLBUTTONDBLCLK, HTMAXBUTTON),
+        synthetic_message(WM_NCLBUTTONDBLCLK, HTMAXBUTTON, false),
         Some(SyntheticMouseMessage {
             message: WM_LBUTTONDOWN,
             wparam: MK_LBUTTON.0 as usize,
         })
     );
-    assert_eq!(synthetic_message(WM_NCLBUTTONDBLCLK, HTCAPTION), None);
+    assert_eq!(
+        synthetic_message(WM_NCLBUTTONDBLCLK, HTCAPTION, false),
+        None
+    );
 }
 
 #[test]
 fn leaving_the_non_client_area_ends_the_hover() {
     // WM_NCMOUSELEAVE carries no hit code, so it is translated regardless of wParam.
     assert_eq!(
-        synthetic_message(WM_NCMOUSELEAVE, 0),
+        synthetic_message(WM_NCMOUSELEAVE, 0, false),
         Some(SyntheticMouseMessage {
             message: WM_MOUSEMOVE,
             wparam: 0,
@@ -115,9 +118,18 @@ fn leaving_the_non_client_area_ends_the_hover() {
 
 #[test]
 fn messages_outside_the_button_are_not_translated() {
-    assert_eq!(synthetic_message(WM_NCMOUSEMOVE, HTCAPTION), None);
-    assert_eq!(synthetic_message(WM_NCLBUTTONDOWN, HTCAPTION), None);
-    assert_eq!(synthetic_message(WM_NCRBUTTONDOWN, HTMAXBUTTON), None);
+    assert_eq!(synthetic_message(WM_NCMOUSEMOVE, HTCAPTION, false), None);
+    assert_eq!(synthetic_message(WM_NCLBUTTONDOWN, HTCAPTION, false), None);
+    assert_eq!(
+        synthetic_message(WM_NCRBUTTONDOWN, HTMAXBUTTON, false),
+        None
+    );
+}
+
+#[test]
+fn non_client_moves_are_withheld_during_a_synthetic_press() {
+    assert_eq!(synthetic_message(WM_NCMOUSEMOVE, HTMAXBUTTON, true), None);
+    assert_eq!(synthetic_message(WM_NCMOUSELEAVE, 0, true), None);
 }
 
 #[test]

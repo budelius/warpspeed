@@ -144,13 +144,13 @@ pub fn shell_git_branch() -> ShellCommandGenerator {
 }
 
 pub fn shell_other_git_branches() -> ShellCommandGenerator {
-    const SH_COMMAND: &str = "git --no-optional-locks branch --no-color --sort=-committerdate; \
+    const SH_COMMAND: &str = "git --no-optional-locks branch --no-color --sort=-committerdate 2>/dev/null; \
         printf '\\036\\n'; \
-        git --no-optional-locks worktree list --porcelain";
+        git --no-optional-locks worktree list --porcelain 2>/dev/null";
     let pwsh_command = safe_git_powershell(
-        "git --no-optional-locks branch --no-color --sort=-committerdate; \
+        "git --no-optional-locks branch --no-color --sort=-committerdate 2>$null; \
         [char]30; \
-        git --no-optional-locks worktree list --porcelain",
+        git --no-optional-locks worktree list --porcelain 2>$null",
     );
 
     let command = ShellCommand::shell_specific([
@@ -231,7 +231,7 @@ pub fn shell_git_branch_status() -> ShellCommandGenerator {
 /// Used as a remote-session fallback when GitRepoStatusModel is unavailable.
 pub fn shell_git_line_changes() -> ShellCommandGenerator {
     const GIT_COMMAND: &str =
-        "GIT_OPTIONAL_LOCKS=0 git -c diff.autoRefreshIndex=false diff --shortstat HEAD";
+        "GIT_OPTIONAL_LOCKS=0 git -c diff.autoRefreshIndex=false diff --shortstat HEAD 2>/dev/null";
 
     let command = ShellCommand::shell_specific([
         (ShellType::Bash, GIT_COMMAND.to_string()),
@@ -239,18 +239,11 @@ pub fn shell_git_line_changes() -> ShellCommandGenerator {
         (ShellType::Fish, GIT_COMMAND.to_string()),
         (
             ShellType::PowerShell,
-            safe_git_powershell("git -c diff.autoRefreshIndex=false diff --shortstat HEAD"),
+            safe_git_powershell("git -c diff.autoRefreshIndex=false diff --shortstat HEAD 2>$null"),
         ),
     ]);
 
     ShellCommandGenerator::new(command, Some(vec!["git".to_owned()]))
-}
-
-pub fn kubernetes_current_context() -> ShellCommandGenerator {
-    ShellCommandGenerator::new(
-        ShellCommand::portable("kubectl config current-context"),
-        Some(vec!["kubectl".to_owned()]),
-    )
 }
 
 /// Generator function that shows the current svn "branch".

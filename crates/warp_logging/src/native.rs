@@ -358,6 +358,7 @@ pub fn init_for_crash_recovery_process() -> Result<()> {
         LogFrontend::Gui,
         None, /* log_destination */
         None, /* max_file_size_bytes — crash recovery uses its own short-lived log */
+        None, /* process_id_suffix */
     )
 }
 
@@ -370,6 +371,7 @@ pub fn init(config: LogConfig) -> Result<()> {
         config.frontend,
         config.log_destination,
         config.max_file_size_bytes,
+        config.process_id_suffix,
     )
 }
 
@@ -594,6 +596,7 @@ fn init_internal(
     frontend: LogFrontend,
     log_destination: Option<LogDestination>,
     max_file_size_bytes: Option<u64>,
+    process_id_suffix: Option<u32>,
 ) -> Result<()> {
     /// Returns an empty file named `warp.log` to log the current execution, and
     /// renames the previous execution's log to a temporary name.
@@ -676,12 +679,11 @@ fn init_internal(
     // from `cargo run`, which is the only reason the tty heuristic existed.
     let mirror_to_terminal = use_logfile && stdout_is_a_tty && !in_ci && !integration_test;
 
-    let state = LogState::new(
-        use_logfile,
-        init_log_directory()?,
-        ChannelState::logfile_name().into_owned(),
-        frontend,
-    );
+    let logfile_name = match process_id_suffix {
+        Some(process_id) => format!("{}.worker.{process_id}", ChannelState::logfile_name()),
+        None => ChannelState::logfile_name().into_owned(),
+    };
+    let state = LogState::new(use_logfile, init_log_directory()?, logfile_name, frontend);
     if use_logfile {
         let file = setup_log_files_for_current_execution(
             &state.log_directory,

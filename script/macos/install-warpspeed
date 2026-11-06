@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-destination="/Applications/warpseed.app"
+destination="/Applications/warpspeed-latest.app"
 source_bundle=""
 
 while (( $# )); do
@@ -33,7 +33,11 @@ if [[ "$destination" != /*.app || -L "$destination" ]]; then
   echo "Destination must be an absolute .app path, not a symlink." >&2
   exit 1
 fi
-if /bin/ps -axo comm= | grep -F -- "$destination/Contents/MacOS/" >/dev/null; then
+app_is_running() {
+  /bin/ps -axo command= | awk -v executable="$destination/Contents/MacOS/warp-oss" \
+    '$1 == executable && $2 != "--terminal-session-supervisor" { found = 1 } END { exit !found }'
+}
+if app_is_running; then
   echo "Quit $destination before installing; running sessions were left untouched." >&2
   exit 1
 fi
@@ -57,7 +61,7 @@ codesign --verify --deep --strict "$source_bundle"
 
 parent="$(dirname "$destination")"
 mkdir -p "$parent"
-staging="$(mktemp -d "$parent/.warpseed-install.XXXXXX")"
+staging="$(mktemp -d "$parent/.warpspeed-install.XXXXXX")"
 backup=""
 cleanup() {
   if [[ -n "$backup" && ! -e "$destination" && -d "$backup/previous.app" ]]; then
@@ -70,7 +74,7 @@ trap cleanup EXIT
 ditto "$source_bundle" "$staging/app.app"
 codesign --verify --deep --strict "$staging/app.app"
 # Recheck after the build/copy, since the user may have launched the app in the meantime.
-if /bin/ps -axo comm= | grep -F -- "$destination/Contents/MacOS/" >/dev/null; then
+if app_is_running; then
   echo "Quit $destination before installing; running sessions were left untouched." >&2
   exit 1
 fi
@@ -79,10 +83,11 @@ if [[ -L "$destination" || ( -e "$destination" && ! -d "$destination" ) ]]; then
   exit 1
 fi
 if [[ -d "$destination" ]]; then
-  backup="$(mktemp -d "$parent/.warpseed-backup.XXXXXX")"
+  backup="$(mktemp -d "$parent/.warpspeed-backup.XXXXXX")"
   mv "$destination" "$backup/previous.app"
 fi
 mv "$staging/app.app" "$destination"
 echo "Installed $destination"
 if [[ -n "$backup" ]]; then echo "Previous app: $backup/previous.app"; fi
-echo "Configuration directory: $HOME/.warp-oss"
+echo "Configuration directory preserved: $HOME/.warp-oss"
+echo "State directory preserved: $HOME/Library/Application Support/dev.warp.WarpOss"

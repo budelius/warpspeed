@@ -1,6 +1,7 @@
 use std::collections::HashSet;
-use std::io::{self, Write as _};
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::{fs, thread};
 
@@ -15,11 +16,18 @@ use serde_json::{Value, json};
 use warp_cli::managed_sessions::{ManagedEnvironment, ManagedSessionsArgs, ManagedSessionsCommand};
 use zitadel_auth::{RefreshRejected, ZitadelProfile};
 
+mod event_stream;
+mod native_terminal;
+mod preview_stream;
+pub use preview_stream::RunPreviewStream;
 #[cfg(feature = "tui")]
 mod tui;
 mod zitadel_auth;
 
-const STAGING_BASE_URL: &str = "https://dash-backend-dev.stozn.ai";
+const STAGING_BASE_URL: &str = "https://agents-dev.obachan.dev";
+/// Keep existing acceptance scripts working without allowing credentials to reach another origin.
+const BASE_URL_OVERRIDE_ENV: &str = "STOZN_BASE_URL";
+const BASE_URL_OVERRIDES: &[&str] = &[STAGING_BASE_URL];
 const STAGING_FLEET_ID: &str = "stoz3n-agent-ctrl-staging";
 const SUPPORTED_PROTOCOL: u32 = 1;
 const BOOKMARK_FORMAT: u32 = 1;
@@ -48,6 +56,16 @@ impl ManagedSessionDeepLink {
         };
         format!(
             "agent-ctrl open {} --environment {environment}",
+            self.job_id
+        )
+    }
+
+    pub fn takeover_cli_arguments(&self) -> String {
+        let environment = match self.environment {
+            ManagedEnvironment::Staging => "staging",
+        };
+        format!(
+            "agent-ctrl attach {} --takeover --environment {environment}",
             self.job_id
         )
     }
@@ -160,6 +178,10 @@ struct ManagedSessionBookmark {
     fleet_id: String,
     job_id: String,
     last_cursor: Option<String>,
+    #[serde(default)]
+    execution_generation: Option<String>,
+    #[serde(default)]
+    transport: Option<String>,
     display_name: Option<String>,
     agent_name: Option<String>,
     last_known_state: Option<String>,
@@ -167,7 +189,7 @@ struct ManagedSessionBookmark {
     last_opened_at: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SessionDescriptor {
     protocol_version: u32,
     environment: String,
@@ -178,6 +200,19 @@ struct SessionDescriptor {
     state: String,
     capabilities: Vec<String>,
     next_cursor: Option<String>,
+    #[serde(default)]
+    execution_generation: Option<String>,
+    #[serde(default)]
+    terminal: Option<NativeTerminalDescriptor>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NativeTerminalDescriptor {
+    availability: String,
+    #[serde(default)]
+    execution_generation: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -338,7 +373,8 @@ pub fn run(args: &ManagedSessionsArgs) -> Result<()> {
             job_id,
             environment,
             once,
-        } => attach(*environment, job_id, *once, args.json),
+            takeover,
+        } => attach(*environment, job_id, *once, *takeover, args.json),
         ManagedSessionsCommand::Input {
             job_id,
             text,
@@ -451,6 +487,9 @@ pub struct RunSummary {
     /// Whether the dashboard would accept a pause now; absent from dashboards that predate it.
     #[serde(default)]
     pub pause_allowed: Option<bool>,
+    /// Whether the dashboard can resume or restart this run; absent from older dashboards.
+    #[serde(default)]
+    pub resume_allowed: Option<bool>,
 }
 
 pub fn list_repositories(environment: ManagedEnvironment) -> Result<Vec<RepositoryInfo>> {
@@ -489,7 +528,41 @@ pub fn fetch_run_preview(
 }
 
 fn list_runs_with(profile: &EnvironmentProfile, token: &str) -> Result<Vec<RunSummary>> {
-    parse_items(fetch_runs_page(profile, token)?, "managed-run list")
+    let client = Client::builder().timeout(Duration::from_secs(25)).build()?;
+    let mut runs = Vec::new();
+    let mut cursor = None;
+    let mut cursors = HashSet::new();
+    let mut job_ids = HashSet::new();
+    loop {
+        let mut request = client
+            .get(format!("{}/api/agent-control/runs", profile.base_url))
+            .bearer_auth(token)
+            .header("X-Stozn-Client", "warpspeed")
+            .query(&[("limit", "100")]);
+        if let Some(cursor) = cursor.as_deref() {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let page: Value = send(profile, request)?
+            .json()
+            .context("invalid managed-run list response")?;
+        cursor = serde_json::from_value::<Option<String>>(
+            page.get("next_cursor").cloned().unwrap_or(Value::Null),
+        )
+        .context("invalid managed-run list cursor")?
+        .filter(|cursor| !cursor.is_empty());
+        let items: Vec<RunSummary> = parse_items(page, "managed-run list")?;
+        runs.extend(
+            items
+                .into_iter()
+                .filter(|run| job_ids.insert(run.job_id.clone())),
+        );
+        let Some(next) = &cursor else {
+            return Ok(runs);
+        };
+        if !cursors.insert(next.clone()) || cursors.len() >= 1_000 {
+            bail!("managed-run list pagination did not finish");
+        }
+    }
 }
 
 fn fetch_run_preview_with(
@@ -855,17 +928,24 @@ fn launch_request_with(
 }
 
 fn ui_session(environment: ManagedEnvironment, job_id: &str, json_output: bool) -> Result<()> {
+    if json_output {
+        return attach(environment, job_id, false, false, true);
+    }
+
+    match native_terminal::attach_if_available(environment, job_id, false)? {
+        native_terminal::NativeAttachOutcome::Attached => return Ok(()),
+        native_terminal::NativeAttachOutcome::Fallback(reason) => {
+            eprintln!("{reason}. Opening Event history / fallback.");
+        }
+    }
+
     #[cfg(feature = "tui")]
-    if !json_output && tui::can_run() {
+    if tui::can_run() {
         return tui::run(environment, job_id);
     }
 
-    if json_output {
-        return attach(environment, job_id, false, true);
-    }
-
     loop {
-        attach(environment, job_id, true, false)?;
+        attach(environment, job_id, true, false, false)?;
         let profile = profile(environment);
         let token = dashboard_token()?;
         let descriptor = fetch_descriptor(&Client::new(), profile, job_id, &token)?;
@@ -929,7 +1009,7 @@ fn paused_notice(job_id: &str) -> String {
 fn attach_banner(descriptor: &SessionDescriptor) -> String {
     let capabilities = descriptor.capabilities.join(",");
     let mut banner = format!(
-        "Attached to {} ({}, capabilities: {capabilities}). Closing this view does not stop the run.",
+        "Event history / fallback for {} ({}, capabilities: {capabilities}). Closing this view does not stop the run.",
         descriptor.display_name, descriptor.state
     );
     if is_paused_state(&descriptor.state) {
@@ -1138,15 +1218,15 @@ pub fn pause_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunCon
     pause_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
 }
 
-/// Asks the dashboard to resume a paused run on a node with a free slot. With every node full it
-/// fails with an error [`is_node_at_capacity`] recognizes.
+/// Asks the dashboard to resume a paused run or restart a recoverable interrupted run on a node
+/// with a free slot. With every node full it fails with an error [`is_node_at_capacity`] recognizes.
 pub fn resume_run(environment: ManagedEnvironment, job_id: &str) -> Result<RunControlOutcome> {
     validate_job_id(job_id)?;
     let token = dashboard_token()?;
     resume_run_with(profile(environment), &token, job_id).map(|result| run_control_outcome(&result))
 }
 
-/// Resumes a paused run and waits for the corresponding resumed event before returning.
+/// Resumes or restarts a recoverable run and waits for the corresponding resumed event.
 pub fn resume_run_and_wait(
     environment: ManagedEnvironment,
     job_id: &str,
@@ -1233,8 +1313,23 @@ fn attach(
     environment: ManagedEnvironment,
     job_id: &str,
     once: bool,
+    takeover: bool,
     json_output: bool,
 ) -> Result<()> {
+    if takeover
+        && (once || json_output || !io::stdin().is_terminal() || !io::stdout().is_terminal())
+    {
+        bail!("--takeover requires an interactive native-terminal attachment");
+    }
+    if !once && !json_output {
+        match native_terminal::attach_if_available(environment, job_id, takeover)? {
+            native_terminal::NativeAttachOutcome::Attached => return Ok(()),
+            native_terminal::NativeAttachOutcome::Fallback(reason) => {
+                eprintln!("{reason}. Opening Event history / fallback.");
+            }
+        }
+    }
+
     #[cfg(feature = "tui")]
     if !once && !json_output && tui::can_run() {
         return tui::run(environment, job_id);
@@ -1253,12 +1348,16 @@ fn attach(
     }
 
     let mut cursor = existing_cursor;
+    let mut feed = event_stream::EventFeed::new()?;
     let mut known_events = HashSet::new();
     loop {
         let wait_ms = if once { 0 } else { 15_000 };
         let token = dashboard_token()?;
-        let (page, history_gap) =
-            fetch_event_page(&client, profile, job_id, &token, cursor.as_deref(), wait_ms)?;
+        let (page, history_gap) = if once {
+            fetch_event_page(&client, profile, job_id, &token, cursor.as_deref(), wait_ms)?
+        } else {
+            feed.next(profile, job_id, &token, cursor.as_deref(), wait_ms)?
+        };
         if history_gap || page.gap {
             if json_output {
                 println!(
@@ -1326,6 +1425,19 @@ fn open_managed_session(
             fleet_id: descriptor.fleet_id.clone(),
             job_id: descriptor.job_id.clone(),
             last_cursor: existing_cursor.clone(),
+            execution_generation: descriptor.execution_generation.clone(),
+            transport: Some(
+                if descriptor
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "terminal")
+                {
+                    "native_ssh"
+                } else {
+                    "events"
+                }
+                .to_string(),
+            ),
             display_name: Some(descriptor.display_name.clone()),
             agent_name: Some(descriptor.agent_name.clone()),
             last_known_state: Some(descriptor.state.clone()),
@@ -1638,15 +1750,36 @@ struct EnvironmentProfile {
     zitadel: &'static ZitadelProfile,
 }
 
-fn profile(environment: ManagedEnvironment) -> &'static EnvironmentProfile {
-    static STAGING: EnvironmentProfile = EnvironmentProfile {
-        alias: "staging",
-        base_url: STAGING_BASE_URL,
-        fleet_id: STAGING_FLEET_ID,
-        zitadel: &STAGING_ZITADEL,
+fn staging_base_url(override_value: Option<&str>) -> &'static str {
+    let requested = override_value
+        .map(|value| value.trim().trim_end_matches('/'))
+        .filter(|value| !value.is_empty());
+    let Some(requested) = requested else {
+        return STAGING_BASE_URL;
     };
+    match BASE_URL_OVERRIDES
+        .iter()
+        .find(|allowed| **allowed == requested)
+    {
+        Some(allowed) => allowed,
+        None => {
+            log::warn!(
+                "{BASE_URL_OVERRIDE_ENV}={requested} is not an allowed managed-session origin; using {STAGING_BASE_URL}"
+            );
+            STAGING_BASE_URL
+        }
+    }
+}
+
+fn profile(environment: ManagedEnvironment) -> &'static EnvironmentProfile {
+    static STAGING: OnceLock<EnvironmentProfile> = OnceLock::new();
     match environment {
-        ManagedEnvironment::Staging => &STAGING,
+        ManagedEnvironment::Staging => STAGING.get_or_init(|| EnvironmentProfile {
+            alias: "staging",
+            base_url: staging_base_url(std::env::var(BASE_URL_OVERRIDE_ENV).ok().as_deref()),
+            fleet_id: STAGING_FLEET_ID,
+            zitadel: &STAGING_ZITADEL,
+        }),
     }
 }
 

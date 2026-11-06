@@ -167,7 +167,7 @@ use super::util::{
 };
 use super::{ActiveSession, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry, util};
 use crate::agent_ctrl::FleetPaneManager;
-use crate::agent_ctrl::fleet_model::FleetModel;
+use crate::agent_ctrl::fleet_model::{FleetModel, FleetModelEvent};
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::agent::CancellationReason;
@@ -238,8 +238,9 @@ use crate::ai_assistant::panel::{AIAssistantPanelEvent, AIAssistantPanelView};
 use crate::ai_assistant::{AI_ASSISTANT_FEATURE_NAME, AI_ASSISTANT_LOGO_COLOR, AskAIType};
 use crate::app_state::{
     CliAgentResumeDescriptor, LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot,
-    NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot,
-    TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SessionHolder,
+    SettingsPaneSnapshot, TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+    WorkflowPaneSnapshot,
 };
 use crate::appearance::{Appearance, AppearanceManager};
 use crate::auth::AuthStateProvider;
@@ -395,17 +396,19 @@ use crate::tab_configs::telemetry::{NewWorktreeConfigOpenSource, WorktreeBranchN
 use crate::tab_configs::{
     NewWorktreeModal, NewWorktreeModalEvent, TabConfigParamsModal, TabConfigParamsModalEvent,
 };
+use crate::terminal::agent_session_handoff::HandoffSource;
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 use crate::terminal::agent_session_handoff::{
-    AgentCtrlStartOffer, CutOver, HandoffSource, MoveStep, PreparedHandoff, UploadedSession,
-    agent_ctrl_profile, agent_exit_command, configured_repository, cut_over_decision,
-    move_failure_message, move_idempotency_key, move_progress_message,
-    prepare_handoff as prepare_agent_session_handoff, repo_url_for, select_remote,
-    session_changed_message, session_content_len, start_agent_failure_message,
-    start_agent_progress_message, start_agent_prompt, start_agent_unavailable_message,
-    stop_request_outcome,
+    AgentCtrlStartOffer, CutOver, MoveStep, PreparedHandoff, UploadedSession, agent_ctrl_profile,
+    agent_exit_command, configured_repository, cut_over_decision, move_failure_message,
+    move_idempotency_key, move_progress_message, prepare_handoff as prepare_agent_session_handoff,
+    repo_url_for, select_remote, session_changed_message, session_content_len,
+    start_agent_failure_message, start_agent_progress_message, start_agent_prompt,
+    start_agent_unavailable_message, stop_request_outcome,
 };
 use crate::terminal::agent_session_history::is_safe_session_id;
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+use crate::terminal::agent_session_history::{ResolvedPath, is_within_known};
 use crate::terminal::agent_session_history_model::{
     AgentSessionHistoryEvent, AgentSessionHistoryModel,
 };
@@ -431,6 +434,8 @@ use crate::terminal::ligature_settings::should_use_ligature_rendering;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::docker_sandbox::resolve_sbx_path_from_user_shell;
 #[cfg(feature = "local_tty")]
+use crate::terminal::local_tty::session_holder::{self, HolderVerdict};
+#[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::spawner::{PendingDetach, PtySpawner};
 use crate::terminal::model::blockgrid::BlockGrid;
 #[cfg(feature = "local_fs")]
@@ -449,6 +454,7 @@ use crate::terminal::settings::{SpacingMode, TerminalSettings};
 use crate::terminal::shared_session::SharedSessionActionSource;
 use crate::terminal::shell::ShellType;
 use crate::terminal::shell_start_policy::ShellStartPolicy;
+use crate::terminal::terminal_manager::HeldAgent;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel as HandoffAmbientAgentViewModel;
 use crate::terminal::view::ambient_agent::{AuthSecretFtuxView, AuthSecretFtuxViewEvent};
@@ -526,7 +532,9 @@ use crate::workflows::{
     WorkflowViewMode,
 };
 use crate::workspace::action::CommandSearchOptions;
-use crate::workspace::agent_sessions_view::{AgentSessionsView, AgentSessionsViewEvent};
+use crate::workspace::agent_sessions_view::{
+    AgentSessionsFocus, AgentSessionsView, AgentSessionsViewEvent,
+};
 use crate::workspace::bonus_grant_notification_model::BonusGrantNotificationEvent;
 #[cfg(target_os = "macos")]
 use crate::workspace::cli_install;
@@ -1184,17 +1192,22 @@ pub struct Workspace {
     /// them, opened by `ToggleAttachSessionMenu`; selecting an entry dispatches
     /// `AttachDetachedSession`.
     attach_session_menu_modal: ModalViewState<Modal<Menu<WorkspaceAction>>>,
-    /// The window's agent sessions by tab and pane, opened by `ShowAgentSessions`. Shown while
+    /// The full-window session library opened by `ShowAgentSessions`. Shown while
     /// `current_workspace_state.is_agent_sessions_modal_open`, so closing all modals closes it.
     agent_sessions_modal: ViewHandle<Modal<AgentSessionsView>>,
     /// The pane that opened the sessions browser, used when attaching an AgentCtrl run.
     agent_sessions_target: Option<PaneViewLocator>,
+    remote_agent_panes: Vec<PaneAgentInput>,
+    remote_detached_sessions: Vec<DetachedInput>,
+    refreshing_remote_agent_sessions: bool,
     /// The manager, target shell, and cwd for a restart/change-shell that is
     /// waiting on confirmation from `restart_shell_confirmation_modal`.
     pending_shell_restart: Option<PendingShellRestart>,
     /// Moves to AgentCtrl that have been confirmed and not yet finished, by terminal view.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
     agent_ctrl_moves: HashMap<EntityId, MoveStep>,
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    past_agent_ctrl_moves: HashSet<(CLIAgent, String)>,
     /// How the last finished move to AgentCtrl ended, by terminal view, so a caller polling a move
     /// it started can tell success from failure after the move has left `agent_ctrl_moves`.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -2304,15 +2317,15 @@ impl Workspace {
         let modal = ctx.add_typed_action_view(|ctx| {
             Modal::new(None, body, ctx)
                 .close_modal_button_disabled()
-                .with_dismiss_on_click()
+                .with_background_opacity(0)
                 .with_modal_style(UiComponentStyles {
-                    width: Some(1040.),
-                    height: Some(620.),
+                    width: Some(f32::INFINITY),
+                    height: Some(f32::INFINITY),
                     ..Default::default()
                 })
                 .with_body_style(UiComponentStyles {
                     padding: Some(Coords::uniform(0.)),
-                    height: Some(620.),
+                    height: Some(f32::INFINITY),
                     ..Default::default()
                 })
                 .with_header_style(UiComponentStyles {
@@ -3156,13 +3169,12 @@ impl Workspace {
         });
     }
 
-    /// Pushes the current settings-file error + banner-dismissal state into
-    /// the settings pane so its nav-rail footer ("Open settings file" button
-    /// or inline error alert) stays in sync with the workspace banner.
+    /// Mirrors the current settings-file error and banner-dismissal state into the settings pane's
+    /// nav-rail footer when the pane is available.
     fn sync_settings_error_state_into_settings_pane(&mut self, ctx: &mut ViewContext<Self>) {
         let error = self.settings_file_error.clone();
         let dismissed = self.settings_error_banner_dismissed;
-        self.settings_pane.update(ctx, |view, ctx| {
+        let _ = self.settings_pane.try_update(ctx, |view, ctx| {
             view.set_settings_error_state(error, dismissed, ctx);
         });
     }
@@ -3816,9 +3828,14 @@ impl Workspace {
             attach_session_menu_modal,
             agent_sessions_modal,
             agent_sessions_target: None,
+            remote_agent_panes: Vec::new(),
+            remote_detached_sessions: Vec::new(),
+            refreshing_remote_agent_sessions: false,
             pending_shell_restart: None,
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_moves: HashMap::new(),
+            #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+            past_agent_ctrl_moves: HashSet::new(),
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
             agent_ctrl_move_outcomes: HashMap::new(),
             #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -11288,8 +11305,11 @@ impl Workspace {
                 self.launch_config_save_modal.close();
                 ctx.notify();
             }
-            LaunchConfigModalEvent::SuccessfullySavedConfig(launch_config) => {
-                if self.launch_config_source.is_none() {
+            LaunchConfigModalEvent::SuccessfullySavedConfig {
+                launch_config,
+                created,
+            } => {
+                if *created && self.launch_config_source.is_none() {
                     self.launch_config_source = launch_config.window_source(0);
                 }
                 ctx.update_model(&WarpConfig::handle(ctx), move |warp_config, ctx| {
@@ -12426,16 +12446,9 @@ impl Workspace {
         self.current_workspace_state
             .is_launch_config_save_modal_open = true;
 
-        let window_snapshot = self.snapshot(ctx.window_id(), false, ctx);
-        // Rewriting the YAML this window came from is not part of session persistence, so it
-        // isn't gated on `PersistentLaunchConfigSessions`; the one step that is — writing the
-        // session alongside it — checks the flag itself in the modal.
-        let launch_config_source = self
-            .launch_config_source
-            .clone()
-            .filter(|source| !source.is_session_config());
+        let launch_config_source = self.launch_config_source.clone();
         self.launch_config_save_modal.view.update(ctx, |view, ctx| {
-            view.set_window_snapshot(window_snapshot, launch_config_source);
+            view.request_snapshot(ctx.window_id(), launch_config_source, ctx);
             view.reset_editor(ctx);
             ctx.notify();
         });
@@ -13247,6 +13260,18 @@ impl Workspace {
         if self.window_process_restart_in_progress {
             return;
         }
+        if !crate::app_services::permits_window_process_handoff() {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "Restart WarpSpeed to restart this window without creating another profile writer."
+                            .to_owned(),
+                    ),
+                    ctx,
+                );
+            });
+            return;
+        }
 
         let window_id = ctx.window_id();
         if UnsavedStateSummary::for_window(window_id, ctx).has_unsaved_code_changes() {
@@ -13395,7 +13420,7 @@ impl Workspace {
                 candidates
                     .into_iter()
                     .filter_map(|(pane_uuid, terminal_view_id)| {
-                        Self::resolve_agent_resume_command(terminal_view_id, ctx)
+                        Self::resolve_agent_resume_command(terminal_view_id, None, None, ctx)
                             .map(|command| AgentResumeCommand { pane_uuid, command })
                     }),
             );
@@ -13548,6 +13573,7 @@ impl Workspace {
     fn start_shell_restart(
         &mut self,
         target: Option<ShellLaunchData>,
+        restart_in_current_supervisor: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(manager) = self.focused_terminal_manager(ctx) else {
@@ -13570,6 +13596,15 @@ impl Workspace {
             return;
         }
 
+        if restart_in_current_supervisor && view.as_ref(ctx).connected_supervisor().is_none() {
+            self.toast_stack.update(ctx, |stack, ctx| {
+                stack.add_ephemeral_toast(DismissibleToast::error(
+                    "This pane is no longer connected to another supervisor. Reattach it before restarting.".to_owned(),
+                ), ctx);
+            });
+            return;
+        }
+
         let is_busy = manager
             .as_ref(ctx)
             .model()
@@ -13577,19 +13612,9 @@ impl Workspace {
             .block_list()
             .active_block()
             .is_active_and_long_running();
-        // A shell that died before bootstrapping never reported a directory, so fall back to the
-        // one the pane was started or restored in rather than the process's own.
-        let cwd = view
-            .as_ref(ctx)
-            .pwd_if_local(ctx)
-            .or_else(|| {
-                self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
-                    pane_group.terminal_working_directory(pane_group.focused_pane_id(ctx), ctx)
-                })
-            })
-            .map(PathBuf::from);
+        let cwd = self.focused_restart_cwd(&view, ctx);
 
-        if is_busy {
+        if is_busy || restart_in_current_supervisor {
             let running_command = manager
                 .as_ref(ctx)
                 .model()
@@ -13604,9 +13629,108 @@ impl Workspace {
                 cwd,
             });
             self.show_restart_shell_confirmation_modal(running_command, ctx);
+            if restart_in_current_supervisor {
+                self.restart_shell_confirmation_modal
+                    .view
+                    .update(ctx, |modal, ctx| {
+                        modal.body().update(ctx, |body, ctx| {
+                            body.set_supervisor_restart();
+                            ctx.notify();
+                        });
+                    });
+            }
         } else {
             Self::restart_shell_and_resume_agent(manager, view, target, cwd, ctx);
         }
+    }
+
+    /// The directory a restarted shell in the focused pane starts in. A shell that died before
+    /// bootstrapping never reported one, so this falls back to the directory the pane was started
+    /// or restored in rather than the process's own.
+    fn focused_restart_cwd(
+        &self,
+        view: &ViewHandle<TerminalView>,
+        ctx: &ViewContext<Self>,
+    ) -> Option<PathBuf> {
+        view.as_ref(ctx)
+            .pwd_if_local(ctx)
+            .or_else(|| {
+                self.active_tab_pane_group().read(ctx, |pane_group, ctx| {
+                    pane_group.terminal_working_directory(pane_group.focused_pane_id(ctx), ctx)
+                })
+            })
+            .map(PathBuf::from)
+    }
+
+    pub(crate) fn restart_in_current_supervisor_unattended(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<(), String> {
+        if self.pending_shell_restart.is_some() {
+            return Err("Another shell restart is awaiting confirmation".to_owned());
+        }
+        if !self.focus_terminal_view_locally(terminal_view_id, ctx) {
+            return Err(format!(
+                "No pane in this window has terminal view {terminal_view_id}"
+            ));
+        }
+        let Some(view) = self.focused_terminal_view(ctx) else {
+            return Err("The terminal view is no longer available".to_owned());
+        };
+        if view.as_ref(ctx).connected_supervisor().is_none() {
+            let Some(manager) = self.focused_terminal_manager(ctx) else {
+                return Err("The terminal session is no longer available".to_owned());
+            };
+            return manager
+                .update(ctx, |manager, ctx| manager.take_over_held_session(ctx))
+                .then_some(())
+                .ok_or_else(|| "The pane has no held session to take over".to_owned());
+        }
+        self.start_shell_restart(None, true, ctx);
+        if self.pending_shell_restart.is_none() {
+            return Err("The pane is not connected to another supervisor".to_owned());
+        }
+        self.handle_restart_shell_confirmation_modal_body_event(
+            &RestartShellConfirmationEvent::Confirm,
+            ctx,
+        );
+        Ok(())
+    }
+
+    /// Restarts a pane's shell under the current supervisor, whichever supervisor holds it now,
+    /// and parks its agent's resume command for the new shell. Skips the confirmation a busy
+    /// pane would get: the caller has already decided its running process may end.
+    ///
+    /// Returns the parked resume command, if the pane had a resumable agent.
+    pub(crate) fn restart_shell_unattended(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<Option<String>, String> {
+        if self.pending_shell_restart.is_some() {
+            return Err("Another shell restart is awaiting confirmation".to_owned());
+        }
+        if !self.focus_terminal_view_locally(terminal_view_id, ctx) {
+            return Err(format!(
+                "No pane in this window has terminal view {terminal_view_id}"
+            ));
+        }
+        let (Some(manager), Some(view)) = (
+            self.focused_terminal_manager(ctx),
+            self.focused_terminal_view(ctx),
+        ) else {
+            return Err("The terminal session is no longer available".to_owned());
+        };
+        if !manager.as_ref(ctx).supports_session_restart() {
+            return Err("This pane has no local session to restart".to_owned());
+        }
+        // Without an explicit target the restart falls back to the model's launch data, which a
+        // pane attached from another supervisor may not have, and then starts the default shell.
+        let target = view.as_ref(ctx).shell_launch_data_if_local(ctx);
+        let cwd = self.focused_restart_cwd(&view, ctx);
+        Self::restart_shell_and_resume_agent(manager, view, target, cwd, ctx)
+            .ok_or_else(|| "The pane's terminal manager declined the restart".to_owned())
     }
 
     /// Restarts `manager`'s session in place and, if the pane hosted a resumable Claude
@@ -13623,14 +13747,26 @@ impl Workspace {
     /// transcript-fork error) is logged and otherwise ignored: the shell still restarts with
     /// no banner, no warning, no extra confirmation. Getting the shell back matters more than
     /// getting the agent back.
+    ///
+    /// Returns `None` when the terminal manager declined the restart, and otherwise the resume
+    /// command parked for the new shell, if any.
     fn restart_shell_and_resume_agent(
         manager: ModelHandle<Box<dyn TerminalManager>>,
         terminal_view: ViewHandle<TerminalView>,
         target: Option<ShellLaunchData>,
         cwd: Option<PathBuf>,
         ctx: &mut ViewContext<Self>,
-    ) {
-        let resume_command = Self::resolve_agent_resume_command(terminal_view.id(), ctx);
+    ) -> Option<Option<String>> {
+        let attached_agent = terminal_view
+            .as_ref(ctx)
+            .connected_supervisor()
+            .and_then(|_| manager.as_ref(ctx).held_agent());
+        let resume_command = Self::resolve_agent_resume_command(
+            terminal_view.id(),
+            attached_agent,
+            cwd.as_deref(),
+            ctx,
+        );
 
         let restarted = manager.update(ctx, |manager, ctx| {
             manager.restart_session(target, cwd, ctx)
@@ -13645,7 +13781,7 @@ impl Workspace {
                 "The pane's terminal manager declined the restart; leaving its session, and \
                  any tracked CLI agent, alone"
             );
-            return;
+            return None;
         }
 
         // The restart killed the PTY, so the agent that owned this session is
@@ -13658,11 +13794,12 @@ impl Workspace {
         // session id lives nowhere else.
         Self::clear_tracked_agent_session(terminal_view.id(), ctx);
 
-        if let Some(command) = resume_command {
+        if let Some(command) = &resume_command {
             terminal_view.update(ctx, |terminal_view, ctx| {
-                terminal_view.set_pending_command_queue(vec![command], ctx);
+                terminal_view.set_pending_command_queue(vec![command.clone()], ctx);
             });
         }
+        Some(resume_command)
     }
 
     /// Drops the CLI agent session tracked against `terminal_view_id`, if any.
@@ -13675,30 +13812,53 @@ impl Workspace {
         });
     }
 
-    /// Looks up the tracked CLI agent session for `terminal_view_id` and returns the command that
-    /// reopens it. A Claude session's transcript is first forked at its last complete turn; a Pi
-    /// session is reopened as it stands. Returns `None` (logging why, except for the two
-    /// silent/expected cases) whenever resuming isn't possible:
-    /// - no tracked session, or a tracked session for an agent other than Claude or Pi
-    ///   (untracked/unsupported -- silent, by decision)
-    /// - no session id (untracked -- silent, by decision)
-    /// - no cwd on record for the session
-    /// - `fork_transcript_at_last_complete_turn` returns `Ok(None)` (nothing survived the trim)
-    /// - resolving the Claude config dir, or the fork itself, fails
+    /// Returns the command that reopens the pane's tracked agent, falling back to the restored
+    /// identity when the pane is attached to another supervisor. A Claude transcript is first
+    /// forked at its last complete turn; a Pi session is reopened as it stands.
     #[cfg(not(target_family = "wasm"))]
     fn resolve_agent_resume_command(
         terminal_view_id: EntityId,
+        attached_agent: Option<HeldAgent>,
+        attached_cwd: Option<&Path>,
         ctx: &AppContext,
     ) -> Option<String> {
-        let session = CLIAgentSessionsModel::as_ref(ctx).session(terminal_view_id)?;
-        match session.agent {
+        let sessions = CLIAgentSessionsModel::as_ref(ctx);
+        // Pi's plugin never reports a session id in its context, so the id recovered from the
+        // agent's history is the only one there is for it.
+        let tracked_session = sessions.session(terminal_view_id).map(|session| {
+            let attached = attached_agent
+                .as_ref()
+                .filter(|attached| attached.agent == session.agent);
+            (
+                session.agent,
+                sessions
+                    .session_id(terminal_view_id)
+                    .map(str::to_owned)
+                    .or_else(|| attached.map(|attached| attached.session_id.clone())),
+                session
+                    .session_context
+                    .cwd
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .or_else(|| attached_cwd.map(Path::to_path_buf)),
+            )
+        });
+        let (agent, session_id, cwd) = match tracked_session {
+            Some(session) => session,
+            None => {
+                let attached_agent = attached_agent?;
+                (
+                    attached_agent.agent,
+                    Some(attached_agent.session_id),
+                    attached_cwd.map(Path::to_path_buf),
+                )
+            }
+        };
+
+        match agent {
             crate::terminal::CLIAgent::Claude => {}
             crate::terminal::CLIAgent::Pi => {
-                return session
-                    .session_context
-                    .session_id
-                    .as_deref()
-                    .map(|session_id| format!("pi --session {session_id}"));
+                return session_id.map(|session_id| format!("pi --session {session_id}"));
             }
             crate::terminal::CLIAgent::Gemini
             | crate::terminal::CLIAgent::Codex
@@ -13718,9 +13878,8 @@ impl Workspace {
             | crate::terminal::CLIAgent::WarpTui
             | crate::terminal::CLIAgent::Unknown => return None,
         }
-        let session_context = session.session_context.clone();
 
-        let session_id = session_context.session_id?;
+        let session_id = session_id?;
         let uuid = match uuid::Uuid::parse_str(&session_id) {
             Ok(uuid) => uuid,
             Err(err) => {
@@ -13732,8 +13891,7 @@ impl Workspace {
             }
         };
 
-        let cwd = session_context.cwd.map(PathBuf::from)?;
-
+        let cwd = cwd?;
         let config_root = match claude_transcript::claude_config_dir() {
             Ok(dir) => dir,
             Err(err) => {
@@ -13760,9 +13918,12 @@ impl Workspace {
 
     #[cfg(target_family = "wasm")]
     fn resolve_agent_resume_command(
-        _terminal_view_id: EntityId,
-        _ctx: &AppContext,
+        terminal_view_id: EntityId,
+        attached_agent: Option<HeldAgent>,
+        attached_cwd: Option<&Path>,
+        ctx: &AppContext,
     ) -> Option<String> {
+        let _ = (terminal_view_id, attached_agent, attached_cwd, ctx);
         None
     }
 
@@ -14118,6 +14279,192 @@ impl Workspace {
                     false,
                     ctx,
                 ),
+            },
+        );
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn past_agent_ctrl_move_toast_id(source: &HandoffSource) -> String {
+        format!(
+            "past_agent_ctrl_move:{:?}:{}",
+            source.agent, source.session_id
+        )
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn show_past_agent_ctrl_move_toast(
+        &mut self,
+        source: &HandoffSource,
+        toast: DismissibleToast<WorkspaceAction>,
+        persistent: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let toast = toast.with_object_id(Self::past_agent_ctrl_move_toast_id(source));
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            if persistent {
+                toast_stack.add_persistent_toast(toast, ctx);
+            } else {
+                toast_stack.add_ephemeral_toast(toast, ctx);
+            }
+        });
+    }
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn ask_to_start_past_session_on_agent_ctrl(
+        &mut self,
+        source: HandoffSource,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let repo = source.cwd.clone();
+        let task_source = source.clone();
+        ctx.spawn(
+            async move { blocking::unblock(move || select_remote(&repo)).await },
+            move |workspace, remote, ctx| match remote {
+                Ok(remote) => {
+                    let toast = DismissibleToast::default(format!(
+                        "Start this recorded {} session on AgentCtrl staging? This pushes the current working tree, including untracked files, to the repo's {remote} remote as a handoff/… branch.",
+                        source.agent.display_name()
+                    ))
+                    .with_link(ToastLink::new("Start".to_owned()).with_onclick_action(
+                        WorkspaceAction::ConfirmStartPastSessionOnAgentCtrl {
+                            agent: source.agent,
+                            session_id: source.session_id.clone(),
+                            cwd: source.cwd.clone(),
+                        },
+                    ));
+                    workspace.show_past_agent_ctrl_move_toast(&source, toast, true, ctx);
+                }
+                Err(error) => workspace.show_past_agent_ctrl_move_toast(
+                    &task_source,
+                    DismissibleToast::error(format!(
+                        "This session cannot start on AgentCtrl: {error:#}"
+                    )),
+                    false,
+                    ctx,
+                ),
+            },
+        );
+    }
+
+    #[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+    fn start_past_session_on_agent_ctrl(&mut self, _: HandoffSource, _: &mut ViewContext<Self>) {}
+
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn start_past_session_on_agent_ctrl(
+        &mut self,
+        source: HandoffSource,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use managed_agent_sessions::{
+            ManagedSessionDeepLink, MovedSessionImport, import_moved_session, stop_run,
+            wait_until_resumed,
+        };
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        let key = (source.agent, source.session_id.clone());
+        if !self.past_agent_ctrl_moves.insert(key.clone()) {
+            return;
+        }
+        self.show_past_agent_ctrl_move_toast(
+            &source,
+            DismissibleToast::default(format!(
+                "Starting the recorded {} session on AgentCtrl…",
+                source.agent.display_name()
+            )),
+            true,
+            ctx,
+        );
+        let task_source = source.clone();
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    let home = dirs::home_dir().context("home directory is unavailable")?;
+                    let prepared = prepare_agent_session_handoff(
+                        &task_source,
+                        &home,
+                        chrono::Local::now(),
+                    )?;
+                    let pushed_branch = format!("{}/{}", prepared.remote, prepared.branch);
+                    let source_cwd = task_source.cwd.display().to_string();
+                    let job_id = import_moved_session(
+                        ManagedEnvironment::Staging,
+                        MovedSessionImport {
+                            agent_name: prepared.agent_name,
+                            session_id: &task_source.session_id,
+                            idempotency_key: move_idempotency_key(
+                                &task_source.session_id,
+                                &prepared.commit,
+                            ),
+                            session_file: prepared.session_file,
+                            repo_url: &prepared.repo_url,
+                            handoff_branch: &prepared.branch,
+                            source_cwd: &source_cwd,
+                        },
+                    )
+                    .with_context(|| {
+                        format!(
+                            "import failed; the handoff branch {pushed_branch} can be deleted"
+                        )
+                    })?;
+                    if let Err(error) = wait_until_resumed(
+                        ManagedEnvironment::Staging,
+                        &job_id,
+                        Duration::from_secs(120),
+                    ) {
+                        let stop = match stop_run(
+                            ManagedEnvironment::Staging,
+                            &job_id,
+                            false,
+                        ) {
+                            Ok(()) => format!("The run {job_id} was asked to stop."),
+                            Err(stop_error) => format!(
+                                "Stop it with: warpspeed agent-ctrl stop {job_id} ({stop_error:#})"
+                            ),
+                        };
+                        return Err(error.context(format!(
+                            "{job_id} did not resume. {stop} The handoff branch {pushed_branch} can be deleted."
+                        )));
+                    }
+                    Ok((job_id, pushed_branch))
+                })
+                .await
+            },
+            move |workspace, result, ctx| {
+                workspace.past_agent_ctrl_moves.remove(&key);
+                match result {
+                    Ok((job_id, _)) => {
+                        let arguments = ManagedSessionDeepLink {
+                            environment: ManagedEnvironment::Staging,
+                            job_id: job_id.clone(),
+                        }
+                        .cli_arguments();
+                        workspace.add_terminal_tab(false, ctx);
+                        workspace.execute_managed_session_command(&arguments, ctx);
+                        workspace.show_past_agent_ctrl_move_toast(
+                            &source,
+                            DismissibleToast::success(format!(
+                                "Started on AgentCtrl as {job_id}"
+                            )),
+                            false,
+                            ctx,
+                        );
+                    }
+                    Err(error) => {
+                        let reason = managed_agent_sessions::redact_url_credentials(&format!(
+                            "{error:#}"
+                        ));
+                        warp_core::safe_warn!(
+                            safe: ("Starting a recorded session on AgentCtrl failed"),
+                            full: ("Starting a recorded session on AgentCtrl failed: {reason}")
+                        );
+                        workspace.show_past_agent_ctrl_move_toast(
+                            &source,
+                            DismissibleToast::error(reason),
+                            true,
+                            ctx,
+                        );
+                    }
+                }
             },
         );
     }
@@ -14731,6 +15078,19 @@ impl Workspace {
         true
     }
 
+    #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+    fn movable_agent_sessions_in_repo(&self, repo: &Path, ctx: &AppContext) -> Vec<EntityId> {
+        let repo = ResolvedPath::new(repo);
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.pane_group.as_ref(ctx).terminal_views(ctx))
+            .filter_map(|view| {
+                let source = view.as_ref(ctx).agent_ctrl_move_source(None, ctx)?;
+                is_within_known(&source.cwd, None, &repo).then_some(view.id())
+            })
+            .collect()
+    }
+
     /// Looks up the pane's repository and AgentCtrl's configured repositories off the main
     /// thread, then asks which agent to start there.
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -14746,20 +15106,49 @@ impl Workspace {
             return;
         }
 
-        let Some(cwd) = self
+        let Some((cwd, repo)) = self
             .terminal_view_by_id(terminal_view_id, ctx)
-            .and_then(|view| view.as_ref(ctx).active_session_path_if_local(ctx))
+            .and_then(|view| {
+                let view = view.as_ref(ctx);
+                Some((
+                    view.active_session_path_if_local(ctx)?,
+                    view.current_local_repo_path()?.to_path_buf(),
+                ))
+            })
         else {
             self.show_agent_ctrl_start_toast(
                 terminal_view_id,
                 DismissibleToast::error(
-                    "This pane has no local directory to start an agent from.".to_owned(),
+                    "This pane has no local Git repository to start an agent from.".to_owned(),
                 ),
                 false,
                 ctx,
             );
             return;
         };
+
+        let movable = self.movable_agent_sessions_in_repo(&repo, ctx);
+        match movable.as_slice() {
+            [movable_view_id] => {
+                self.move_session_to_agent_ctrl_for_terminal_view(*movable_view_id, ctx);
+                return;
+            }
+            [] => {}
+            _ => {
+                self.show_agent_ctrl_start_toast(
+                    terminal_view_id,
+                    DismissibleToast::default(
+                        "Multiple local agent sessions are running in this repository. Open the \
+                         session you want and choose Move session to Obachan."
+                            .to_owned(),
+                    ),
+                    false,
+                    ctx,
+                );
+                return;
+            }
+        }
+
         ctx.spawn(
             async move {
                 blocking::unblock(move || {
@@ -15367,16 +15756,16 @@ impl Workspace {
             offered,
             "The supervisor is not holding an unattached session {session_id:?}"
         );
-        self.attach_detached_session(session_id, ctx);
+        self.attach_detached_session(session_id, None, None, ctx);
         Ok(())
     }
 
     /// What the agent-session rows are built from: this window's visible terminal panes, by tab
-    /// and then as laid out within the tab, and the sessions the supervisor holds with no pane
+    /// and then as laid out within the tab, and sessions compatible supervisors hold with no pane
     /// attached.
     ///
-    /// Asks the supervisor, a blocking round trip, so call it when a picker opens rather than
-    /// on every render.
+    /// Asks the current supervisor and those recorded by restored panes, using blocking round
+    /// trips, so call it when a picker opens rather than on every render.
     pub(crate) fn agent_session_inputs(
         &self,
         ctx: &AppContext,
@@ -15384,18 +15773,71 @@ impl Workspace {
         Vec<PaneAgentInput>,
         Result<Vec<DetachedInput>, detached_sessions::DetachedListError>,
     ) {
-        let detached = detached_sessions::list_checked(ctx).map(|sessions| {
-            sessions
-                .into_iter()
-                .map(|session| DetachedInput {
-                    session_id: session.session_id,
-                    title: session.title,
-                    cwd: session.cwd,
-                    detached_for_seconds: session.detached_for_seconds,
-                })
-                .collect()
-        });
-        (self.agent_pane_inputs(ctx), detached)
+        let mut holders = self.session_holders(ctx);
+        for (_, workspace) in WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .filter(|(window_id, _)| *window_id != self.window_id)
+        {
+            holders.extend(workspace.as_ref(ctx).session_holders(ctx));
+        }
+        let detached =
+            detached_sessions::list_checked_across_holders(&holders, ctx).map(|sessions| {
+                sessions
+                    .into_iter()
+                    .map(|session| DetachedInput {
+                        session_id: session.session_id,
+                        remote_instance_pid: None,
+                        title: session.title,
+                        cwd: session.cwd,
+                        detached_for_seconds: session.detached_for_seconds,
+                        session_uuid_hex: session.session_uuid_hex,
+                        holder: session.holder,
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let detached = match detached {
+            Ok(mut detached) => {
+                let mut session_ids = detached
+                    .iter()
+                    .map(|session| session.session_id)
+                    .collect::<HashSet<_>>();
+                detached.extend(
+                    self.remote_detached_sessions
+                        .iter()
+                        .filter(|session| session_ids.insert(session.session_id))
+                        .cloned(),
+                );
+                Ok(detached)
+            }
+            Err(_) if !self.remote_detached_sessions.is_empty() => {
+                Ok(self.remote_detached_sessions.clone())
+            }
+            Err(error) => Err(error),
+        };
+        let mut panes = self.agent_pane_inputs(ctx);
+        panes.extend(self.remote_agent_panes.clone());
+        (panes, detached)
+    }
+
+    fn session_holders(&self, ctx: &AppContext) -> Vec<SessionHolder> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| {
+                let pane_group = tab.pane_group.as_ref(ctx);
+                pane_group
+                    .terminal_pane_ids()
+                    .filter_map(|pane_id| pane_group.terminal_manager_for_pane_id(pane_id, ctx))
+                    .filter_map(|manager| {
+                        let manager = manager.as_ref(ctx);
+                        manager
+                            .withheld_restore()
+                            .and_then(|restore| restore.holder)
+                            .or_else(|| manager.session_holder())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     fn agent_pane_inputs(&self, ctx: &AppContext) -> Vec<PaneAgentInput> {
@@ -15409,7 +15851,13 @@ impl Workspace {
                 let Some(view) = pane_group.terminal_view_from_pane_id(pane_id, ctx) else {
                     continue;
                 };
-                let running =
+                let latest_user_prompt = agent_sessions
+                    .session(view.id())
+                    .and_then(|session| session.session_context.latest_user_prompt());
+                let pane_cwd = pane_group
+                    .terminal_working_directory(pane_id, ctx)
+                    .map(PathBuf::from);
+                let tracked_running =
                     agent_sessions
                         .session(view.id())
                         .map(|session| CliAgentResumeDescriptor {
@@ -15425,23 +15873,135 @@ impl Workspace {
                             title: session.session_context.display_title(),
                             captured_unix_seconds: None,
                         });
+                let (supervisor_session_id, session_holder, held_agent) = pane_group
+                    .terminal_manager_for_pane_id(pane_id, ctx)
+                    .map(|manager| {
+                        let manager = manager.as_ref(ctx);
+                        let withheld = manager.withheld_restore();
+                        let supervisor_session_id = withheld
+                            .as_ref()
+                            .and_then(|restore| restore.session_id)
+                            .or_else(|| manager.persistent_session_id());
+                        let session_holder = withheld
+                            .as_ref()
+                            .and_then(|restore| restore.holder.clone())
+                            .or_else(|| manager.session_holder());
+                        #[cfg(feature = "local_tty")]
+                        let session_holder = session_holder
+                            .filter(|holder| holder.channel != session_holder::current_channel());
+                        #[cfg(not(feature = "local_tty"))]
+                        let session_holder = None;
+                        let held_agent = withheld
+                            .and_then(|restore| restore.agent)
+                            .or_else(|| manager.held_agent());
+                        (supervisor_session_id, session_holder, held_agent)
+                    })
+                    .unwrap_or_default();
+                let running = tracked_running.or_else(|| {
+                    let connected_holder = view.as_ref(ctx).connected_supervisor()?;
+                    let session_holder = session_holder.as_ref()?;
+                    if connected_holder.channel != session_holder.channel {
+                        return None;
+                    }
+                    let held_agent = held_agent.as_ref()?;
+                    Some(CliAgentResumeDescriptor {
+                        agent: held_agent.agent,
+                        session_id: Some(held_agent.session_id.clone()),
+                        cwd: pane_cwd.clone().unwrap_or_default(),
+                        title: None,
+                        captured_unix_seconds: None,
+                    })
+                });
                 panes.push(PaneAgentInput {
-                    locator: PaneViewLocator {
+                    locator: Some(PaneViewLocator {
                         pane_group_id,
                         pane_id,
-                    },
+                    }),
+                    remote_instance_pid: None,
                     tab_index,
                     tab_title: tab_title.clone(),
                     pane_number: position + 1,
-                    cwd: pane_group
-                        .terminal_working_directory(pane_id, ctx)
-                        .map(PathBuf::from),
+                    cwd: pane_cwd,
+                    session_uuid_hex: pane_group.terminal_session_uuid(pane_id).map(hex::encode),
+                    supervisor_session_id,
+                    session_holder,
+                    held_agent,
+                    latest_user_prompt,
                     running,
                     pending: pane_group.pending_agent_resume(pane_id, ctx),
                 });
             }
         }
         panes
+    }
+
+    fn refresh_remote_agent_sessions(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.refreshing_remote_agent_sessions {
+            return;
+        }
+        self.refreshing_remote_agent_sessions = true;
+        ctx.spawn(
+            async move {
+                blocking::unblock(crate::agent_ctrl_fleet_cli::discover_agent_sessions).await
+            },
+            |workspace, discovered, ctx| {
+                workspace.refreshing_remote_agent_sessions = false;
+                workspace.remote_agent_panes = discovered
+                    .panes
+                    .into_iter()
+                    .filter_map(|(instance_pid, pane)| {
+                        if !pane.has_running_agent || pane.agent_not_resumed {
+                            return None;
+                        }
+                        let agent = pane
+                            .agent
+                            .as_deref()
+                            .and_then(crate::agent_ctrl_fleet_cli::agent_from_label)?;
+                        let cwd = PathBuf::from(
+                            pane.agent_cwd
+                                .as_deref()
+                                .filter(|cwd| !cwd.is_empty())
+                                .unwrap_or(&pane.working_directory),
+                        );
+                        Some(PaneAgentInput {
+                            locator: None,
+                            remote_instance_pid: Some(instance_pid),
+                            tab_index: pane.tab_index,
+                            tab_title: pane.title.clone(),
+                            pane_number: 1,
+                            cwd: Some(cwd.clone()).filter(|cwd| !cwd.as_os_str().is_empty()),
+                            session_uuid_hex: None,
+                            supervisor_session_id: None,
+                            session_holder: None,
+                            held_agent: None,
+                            latest_user_prompt: None,
+                            running: Some(CliAgentResumeDescriptor {
+                                agent,
+                                session_id: pane.agent_session_id,
+                                cwd,
+                                title: Some(pane.title).filter(|title| !title.is_empty()),
+                                captured_unix_seconds: None,
+                            }),
+                            pending: None,
+                        })
+                    })
+                    .collect();
+                workspace.remote_detached_sessions = discovered
+                    .detached
+                    .into_iter()
+                    .map(|(instance_pid, session)| DetachedInput {
+                        session_id: session.session_id.into(),
+                        remote_instance_pid: Some(instance_pid),
+                        title: session.title,
+                        cwd: PathBuf::from(session.working_directory),
+                        detached_for_seconds: session.detached_for_seconds,
+                        session_uuid_hex: session.session_uuid_hex,
+                        holder: None,
+                    })
+                    .collect();
+                workspace.update_agent_session_surfaces(ctx);
+            },
+        );
     }
 
     fn perform_agent_session_action(
@@ -15461,7 +16021,19 @@ impl Workspace {
                     });
                 self.start_agent_session(*locator, pending, ctx);
             }
-            AgentSessionAction::Attach(session_id) => self.attach_agent_session(*session_id, ctx),
+            AgentSessionAction::Attach {
+                session_id,
+                holder,
+                agent,
+            } => self.attach_agent_session(*session_id, holder.as_ref(), agent.as_ref(), ctx),
+            AgentSessionAction::Managed { job_id, target } => {
+                self.show_agent_sessions(*target, ctx);
+                self.agent_sessions_modal.update(ctx, |modal, ctx| {
+                    modal
+                        .body()
+                        .update(ctx, |view, ctx| view.open_managed(job_id, ctx));
+                });
+            }
             AgentSessionAction::Resume {
                 agent,
                 session_id,
@@ -15475,9 +16047,59 @@ impl Workspace {
     fn attach_agent_session(
         &mut self,
         session_id: warp_core::SessionId,
+        holder: Option<&SessionHolder>,
+        agent: Option<&HeldAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if let Err(error) = self.attach_session_by_id(session_id, ctx) {
+        let result = match holder {
+            Some(holder) => match session_holder::verdict(&holder.channel, session_id) {
+                HolderVerdict::HeldDetached => {
+                    #[cfg(windows)]
+                    let adopt_result = (|| {
+                        use warp_terminal::local_tty::windows::supervisor_client::WindowsTerminalSupervisorClient;
+
+                        let client = WindowsTerminalSupervisorClient::for_existing_pipe(
+                            holder.channel.clone(),
+                        )?;
+                        PtySpawner::handle(ctx).update(ctx, |spawner, _| {
+                            spawner.adopt_supervisor(session_id, Arc::new(client));
+                        });
+                        Ok::<(), anyhow::Error>(())
+                    })();
+                    #[cfg(not(windows))]
+                    let adopt_result = Ok::<(), anyhow::Error>(());
+                    adopt_result.map(|()| {
+                        self.attach_detached_session(
+                            session_id,
+                            Some(holder.clone()),
+                            agent.cloned(),
+                            ctx,
+                        );
+                    })
+                }
+                HolderVerdict::HeldAttached => Err(anyhow::anyhow!(
+                    "another window is already attached to the session"
+                )),
+                HolderVerdict::Unknown => Err(anyhow::anyhow!(
+                    "the holding supervisor no longer offers the session"
+                )),
+            },
+            None => {
+                let offered = detached_sessions::list(ctx)
+                    .into_iter()
+                    .any(|session| session.session_id == session_id);
+                if offered {
+                    let holder = agent.is_some().then(session_holder::current_holder);
+                    self.attach_detached_session(session_id, holder, agent.cloned(), ctx);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "the supervisor no longer offers the session"
+                    ))
+                }
+            }
+        };
+        if let Err(error) = result {
             self.show_agent_session_error(format!("Couldn't attach the session: {error:#}"), ctx);
         }
     }
@@ -15486,8 +16108,11 @@ impl Workspace {
     fn attach_agent_session(
         &mut self,
         session_id: warp_core::SessionId,
+        holder: Option<&SessionHolder>,
+        agent: Option<&HeldAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
+        let _ = (holder, agent);
         self.show_agent_session_error(
             format!("Couldn't attach the session {session_id:?}: not supported in this build"),
             ctx,
@@ -15682,7 +16307,7 @@ impl Workspace {
                         pane.running.is_none() && holds(pane.pending.as_ref())
                     }
                 })
-                .map(|pane| pane.locator)
+                .and_then(|pane| pane.locator)
         };
         let current_window = ctx.window_id();
         if let Some(locator) = find_in(self.agent_pane_inputs(ctx)) {
@@ -15825,11 +16450,15 @@ impl Workspace {
     fn attach_detached_session(
         &mut self,
         session_id: warp_core::SessionId,
+        holder: Option<SessionHolder>,
+        agent: Option<HeldAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
                 attach_session_id: Some(session_id),
+                attach_session_holder: holder,
+                attach_session_agent: agent,
                 ..Default::default()
             })),
             Arc::new(HashMap::new()),
@@ -17655,7 +18284,7 @@ impl Workspace {
         });
     }
 
-    fn open_command_palette(&mut self, ctx: &mut ViewContext<Self>) {
+    fn open_command_palette(&mut self, filter_to_actions: bool, ctx: &mut ViewContext<Self>) {
         self.tips_completed.update(ctx, |tips_completed, ctx| {
             mark_feature_used_and_write_to_user_defaults(
                 Tip::Action(TipAction::CommandPalette),
@@ -17667,6 +18296,9 @@ impl Workspace {
 
         self.palette.update(ctx, |view, ctx| {
             view.reset(ctx);
+            if filter_to_actions {
+                view.set_active_query_filter(QueryFilter::Actions, ctx);
+            }
         });
     }
 
@@ -17741,19 +18373,6 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Opens the palette on agent sessions, with `folder` as the initial query when given, once
-    /// the events already queued have run.
-    ///
-    /// Deferred because focusing a pane queues `PaneFocused`, whose handler closes every modal,
-    /// the palette included, so a palette opened right after a focus change would close again.
-    pub(crate) fn open_agent_sessions_palette(folder: Option<String>, ctx: &mut ViewContext<Self>) {
-        ctx.dispatch_typed_action_deferred(WorkspaceAction::OpenPalette {
-            mode: PaletteMode::AgentSessions,
-            source: PaletteSource::AgentSessionsWindow,
-            query: folder,
-        });
-    }
-
     fn agent_sessions_data_source(&self, app: &AppContext) -> ModelHandle<AgentSessionsDataSource> {
         self.palette
             .as_ref(app)
@@ -17761,6 +18380,47 @@ impl Workspace {
             .as_ref(app)
             .agent_sessions_data_source()
             .clone()
+    }
+
+    fn update_agent_session_surfaces(&mut self, ctx: &mut ViewContext<Self>) {
+        let (panes, detached) = self.agent_session_inputs(ctx);
+        let history = AgentSessionHistoryModel::as_ref(ctx);
+        let past = history.sessions().to_vec();
+        let scanned_agents = history.scanned_agents().to_vec();
+        let history_loaded = history.is_loaded();
+        if self.is_agent_sessions_modal_open() {
+            self.agent_sessions_modal.update(ctx, |modal, ctx| {
+                modal.body().update(ctx, |view, ctx| {
+                    view.refresh_inputs(
+                        panes.clone(),
+                        detached.clone(),
+                        &past,
+                        &scanned_agents,
+                        history_loaded,
+                        ctx,
+                    );
+                });
+            });
+        }
+        let source = self.agent_sessions_data_source(ctx);
+        if source.as_ref(ctx).is_loaded() {
+            let pane_group = self.active_tab_pane_group();
+            let focused = Some(PaneViewLocator {
+                pane_group_id: pane_group.id(),
+                pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+            });
+            source.update(ctx, |source, _| {
+                source.set_snapshot_with_scan(
+                    panes,
+                    detached.unwrap_or_default(),
+                    focused,
+                    &past,
+                    &scanned_agents,
+                );
+            });
+            self.palette
+                .update(ctx, |palette, ctx| palette.rerun_query(ctx));
+        }
     }
 
     /// Snapshots this window's agent sessions for the palette and refreshes past sessions in the
@@ -17777,14 +18437,35 @@ impl Workspace {
             pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
         };
         let (panes, detached) = self.agent_session_inputs(ctx);
+        let focused_folder = panes
+            .iter()
+            .find(|pane| pane.locator == Some(focused))
+            .and_then(|pane| pane.cwd.clone());
         // The palette has no place for an unreachable supervisor; it lists what it can.
         let detached = detached.unwrap_or_default();
-        let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
+        let history = AgentSessionHistoryModel::as_ref(ctx);
+        let past = history.sessions().to_vec();
+        let scanned_agents = history.scanned_agents().to_vec();
         self.agent_sessions_data_source(ctx)
             .update(ctx, |source, _| {
-                source.set_snapshot(panes, detached, Some(focused), &past);
+                source.set_snapshot_with_scan(
+                    panes,
+                    detached,
+                    Some(focused),
+                    &past,
+                    &scanned_agents,
+                );
             });
-        AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
+        self.refresh_palette_managed_sessions(ctx);
+        let view_id = self.palette.id();
+        FleetModel::handle(ctx).update(ctx, |model, ctx| model.attach_view(view_id, ctx));
+        AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history.refresh(ctx);
+            if let Some(folder) = focused_folder.as_deref() {
+                history.refresh_folder(folder, ctx);
+            }
+        });
+        self.refresh_remote_agent_sessions(ctx);
     }
 
     /// Subscribes on first use rather than in `new`, since some test setups build a workspace
@@ -17796,10 +18477,19 @@ impl Workspace {
                 &AgentSessionHistoryModel::handle(ctx),
                 |me, _, event, ctx| me.handle_agent_session_history_event(event, ctx),
             );
+            ctx.subscribe_to_model(&FleetModel::handle(ctx), |me, _, event, ctx| {
+                if matches!(event, FleetModelEvent::Updated)
+                    && me.agent_sessions_data_source(ctx).as_ref(ctx).is_loaded()
+                {
+                    me.refresh_palette_managed_sessions(ctx);
+                    me.palette
+                        .update(ctx, |palette, ctx| palette.rerun_query(ctx));
+                }
+            });
         }
     }
 
-    /// Opens the window's agent sessions with `focus`'s pane selected, the focused pane when
+    /// Opens the session library with `focus` as its resume target, or the focused pane when
     /// `None`. Asks the supervisor once, here, not per render.
     fn show_agent_sessions(&mut self, focus: Option<PaneViewLocator>, ctx: &mut ViewContext<Self>) {
         if self.is_shared_session_viewer_focused(ctx) {
@@ -17814,19 +18504,53 @@ impl Workspace {
             })
         });
         self.agent_sessions_target = focus;
+        let focus = focus.map(|locator| AgentSessionsFocus {
+            managed_job_id: self
+                .get_pane_group_view_with_id(locator.pane_group_id)
+                .and_then(|pane_group| {
+                    pane_group
+                        .as_ref(ctx)
+                        .managed_session_job_id(locator.pane_id)
+                        .map(str::to_owned)
+                }),
+            locator,
+        });
         let (panes, detached) = self.agent_session_inputs(ctx);
+        let focused_folder = focus.as_ref().and_then(|focus| {
+            panes
+                .iter()
+                .find(|pane| pane.locator == Some(focus.locator))
+                .and_then(|pane| pane.cwd.clone())
+        });
         let history = AgentSessionHistoryModel::as_ref(ctx);
-        let (past, history_loaded) = (history.sessions().to_vec(), history.is_loaded());
+        let (past, scanned_agents, history_loaded) = (
+            history.sessions().to_vec(),
+            history.scanned_agents().to_vec(),
+            history.is_loaded(),
+        );
         self.agent_sessions_modal.update(ctx, |modal, ctx| {
             modal.body().update(ctx, |view, ctx| {
-                view.set_inputs(panes, detached, &past, history_loaded, focus, ctx);
+                view.set_inputs_with_scan(
+                    panes,
+                    detached,
+                    (&past, &scanned_agents),
+                    history_loaded,
+                    focus,
+                    ctx,
+                );
             });
         });
         self.current_workspace_state.is_agent_sessions_modal_open = true;
         let view_id = self.agent_sessions_modal.as_ref(ctx).body().id();
         FleetModel::handle(ctx).update(ctx, |model, ctx| model.attach_view(view_id, ctx));
         ctx.focus(&self.agent_sessions_modal);
-        AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| history.refresh(ctx));
+        AgentSessionHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history.refresh(ctx);
+            if let Some(folder) = focused_folder.as_deref() {
+                history.refresh_folder(folder, ctx);
+            }
+        });
+        self.refresh_remote_agent_sessions(ctx);
         ctx.notify();
     }
 
@@ -17878,24 +18602,97 @@ impl Workspace {
                 self.close_agent_sessions_modal(ctx);
                 self.perform_agent_session_action(action, ctx);
             }
-            AgentSessionsViewEvent::ResumeInFolder { folder, target } => {
-                // Refocusing the active tab here would land after the palette opens and close it.
-                self.hide_agent_sessions_modal(ctx);
-                // The palette resumes into the focused pane, so that must be the clicked one.
-                self.focus_pane(*target, ctx);
-                Self::open_agent_sessions_palette(Some(folder.display().to_string()), ctx);
+            AgentSessionsViewEvent::EndProcess {
+                agent,
+                pid,
+                session_id,
+            } => {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let agent = *agent;
+                    let pid = *pid;
+                    let session_id = session_id.clone();
+                    let (sender, receiver) = futures::channel::oneshot::channel();
+                    ctx.background_executor()
+                        .spawn(async move {
+                            let result = crate::terminal::cli_agent_sessions::process_registry::terminate_pid(
+                                agent,
+                                pid,
+                                &session_id,
+                            );
+                            let _ = sender.send(result);
+                        })
+                        .detach();
+                    ctx.spawn(receiver, move |workspace, result, ctx| {
+                        let error = match result {
+                            Ok(Ok(true)) => None,
+                            Ok(Ok(false)) => {
+                                log::warn!("Agent process {pid} was no longer registered");
+                                Some(format!(
+                                    "Could not end process {pid}: it is no longer registered as this {} session.",
+                                    agent.display_name()
+                                ))
+                            }
+                            Ok(Err(error)) => {
+                                log::warn!("Failed to end agent process {pid}: {error:#}");
+                                Some(format!("Could not end process {pid}: {error:#}"))
+                            }
+                            Err(error) => {
+                                log::warn!("Agent process {pid} end task was cancelled: {error}");
+                                Some(format!("Could not end process {pid}: the task was cancelled"))
+                            }
+                        };
+                        if let Some(error) = error {
+                            workspace.agent_sessions_modal.update(ctx, |modal, ctx| {
+                                modal.body().update(ctx, |view, ctx| {
+                                    view.set_process_end_error(pid, error, ctx)
+                                });
+                            });
+                        }
+                        AgentSessionHistoryModel::handle(ctx)
+                            .update(ctx, |history, ctx| history.refresh(ctx));
+                    });
+                }
+                #[cfg(target_family = "wasm")]
+                let _ = (agent, pid, session_id);
+            }
+            AgentSessionsViewEvent::StartOnAgentCtrl(source) => {
+                self.close_agent_sessions_modal(ctx);
+                #[cfg(all(feature = "local_fs", feature = "local_tty"))]
+                self.ask_to_start_past_session_on_agent_ctrl(source.clone(), ctx);
             }
             AgentSessionsViewEvent::OpenManaged(job_id) if self.is_agent_sessions_modal_open() => {
                 self.open_managed_session_from_browser(job_id, ctx);
             }
-            AgentSessionsViewEvent::OpenManaged(_) => {}
+            AgentSessionsViewEvent::TakeOverManaged(job_id)
+                if self.is_agent_sessions_modal_open() =>
+            {
+                self.take_over_managed_session_from_browser(job_id, ctx);
+            }
+            AgentSessionsViewEvent::OpenManaged(_) | AgentSessionsViewEvent::TakeOverManaged(_) => {
+            }
             AgentSessionsViewEvent::Close => self.close_agent_sessions_modal(ctx),
         }
     }
 
-    fn clear_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+    fn refresh_palette_managed_sessions(&mut self, ctx: &mut ViewContext<Self>) {
+        let fleet = FleetModel::as_ref(ctx);
+        let runs = fleet.runs().to_vec();
+        let error = fleet.last_error().map(str::to_owned);
+        let loading = fleet.is_refreshing();
         self.agent_sessions_data_source(ctx)
-            .update(ctx, |source, _| source.clear());
+            .update(ctx, |source, _| {
+                source.set_managed_snapshot(runs, error, loading);
+            });
+    }
+
+    fn clear_agent_sessions_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        let source = self.agent_sessions_data_source(ctx);
+        if source.as_ref(ctx).is_loaded() {
+            let view_id = self.palette.id();
+            FleetModel::handle(ctx).update(ctx, |model, _| model.detach_view(view_id));
+        }
+        source.update(ctx, |source, _| source.clear());
     }
 
     fn handle_agent_session_history_event(
@@ -17905,19 +18702,23 @@ impl Workspace {
     ) {
         match event {
             AgentSessionHistoryEvent::Updated => {
-                let past = AgentSessionHistoryModel::as_ref(ctx).sessions().to_vec();
+                let history = AgentSessionHistoryModel::as_ref(ctx);
+                let past = history.sessions().to_vec();
+                let scanned_agents = history.scanned_agents().to_vec();
                 if self.is_agent_sessions_modal_open() {
                     self.agent_sessions_modal.update(ctx, |modal, ctx| {
-                        modal
-                            .body()
-                            .update(ctx, |view, ctx| view.refresh_past(&past, ctx));
+                        modal.body().update(ctx, |view, ctx| {
+                            view.refresh_snapshot(&past, &scanned_agents, ctx)
+                        });
                     });
                 }
                 let source = self.agent_sessions_data_source(ctx);
                 if !source.as_ref(ctx).is_loaded() {
                     return;
                 }
-                source.update(ctx, |source, _| source.refresh_past(&past));
+                source.update(ctx, |source, _| {
+                    source.refresh_snapshot(&past, &scanned_agents)
+                });
                 if self
                     .palette
                     .as_ref(ctx)
@@ -18152,7 +18953,9 @@ impl Workspace {
             self.current_workspace_state.is_palette_open = true;
         }
         match mode {
-            PaletteMode::Command => self.open_command_palette(ctx),
+            PaletteMode::Command => {
+                self.open_command_palette(!matches!(source, PaletteSource::TitleBarSearchBar), ctx)
+            }
             PaletteMode::Navigation => match source {
                 PaletteSource::CtrlTab {
                     shift_pressed_initially,
@@ -18773,17 +19576,38 @@ impl Workspace {
     }
 
     fn open_managed_session_from_browser(&mut self, job_id: &str, ctx: &mut ViewContext<Self>) {
+        self.open_managed_session_from_browser_with_takeover(job_id, false, ctx);
+    }
+
+    fn take_over_managed_session_from_browser(
+        &mut self,
+        job_id: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.open_managed_session_from_browser_with_takeover(job_id, true, ctx);
+    }
+
+    fn open_managed_session_from_browser_with_takeover(
+        &mut self,
+        job_id: &str,
+        takeover: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if let Err(error) = managed_agent_sessions::validate_job_id(job_id) {
             FleetModel::handle(ctx).update(ctx, |model, ctx| {
                 model.set_action_error(format!("Could not attach to the run: {error:#}"), ctx)
             });
             return;
         }
-        let arguments = managed_agent_sessions::ManagedSessionDeepLink {
+        let intent = managed_agent_sessions::ManagedSessionDeepLink {
             environment: warp_cli::managed_sessions::ManagedEnvironment::Staging,
             job_id: job_id.to_owned(),
-        }
-        .cli_arguments();
+        };
+        let arguments = if takeover {
+            intent.takeover_cli_arguments()
+        } else {
+            intent.cli_arguments()
+        };
         let target = self.agent_sessions_target.and_then(|target| {
             self.get_pane_group_view_with_id(target.pane_group_id)
                 .filter(|pane_group| {
@@ -18875,6 +19699,13 @@ impl Workspace {
                 model.set_action_error(format!("Could not attach to the run: {error}"), ctx)
             });
             return;
+        }
+        if let Some(locator) = locator
+            && let Some(pane_group) = self.get_pane_group_view_with_id(locator.pane_group_id)
+        {
+            pane_group.update(ctx, |pane_group, _| {
+                pane_group.set_managed_session_job_id(locator.pane_id, Some(job_id.to_owned()));
+            });
         }
         self.hide_agent_sessions_modal(ctx);
         if let Some(locator) = locator {
@@ -22075,7 +22906,7 @@ impl Workspace {
             // Assumption: at most one of the states will be active.
             // If none are, then we focus the terminal view instead.
             if self.current_workspace_state.is_palette_open {
-                self.open_command_palette(ctx);
+                self.open_command_palette(true, ctx);
             } else if self.current_workspace_state.is_theme_chooser_open {
                 self.focus_theme_chooser(ctx);
             } else if self.current_workspace_state.is_resource_center_open {
@@ -24401,7 +25232,7 @@ impl Workspace {
         let theme = appearance.theme();
         let text_color = theme.sub_text_color(theme.background());
 
-        Hoverable::new(
+        let search_bar = Hoverable::new(
             self.mouse_states.title_bar_search_bar.clone(),
             |mouse_state| {
                 let row = Flex::row()
@@ -24457,7 +25288,8 @@ impl Workspace {
                 query: None,
             });
         })
-        .finish()
+        .finish();
+        SavePosition::new(search_bar, "title_bar_search_bar").finish()
     }
 
     fn render_tab_bar_contents(
@@ -27688,16 +28520,31 @@ impl TypedActionView for Workspace {
             AddTabWithShell { shell, source } => {
                 self.add_tab_with_shell(shell.clone(), *source, ctx)
             }
-            RestartShell => self.start_shell_restart(None, ctx),
+            RestartShell => self.start_shell_restart(None, false, ctx),
             RestartShellForTerminalView { terminal_view_id } => {
                 if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
-                    self.start_shell_restart(None, ctx);
+                    self.start_shell_restart(None, false, ctx);
+                }
+            }
+            RestartInCurrentSupervisorForTerminalView { terminal_view_id } => {
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
+                    self.start_shell_restart(None, true, ctx);
                 }
             }
             ReattachShellForTerminalView { terminal_view_id } => {
                 if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
                     self.reattach_focused_shell(ctx);
                 }
+            }
+            AttachHeldSessionForTerminalView { terminal_view_id } => {
+                #[cfg(windows)]
+                if self.focus_terminal_view_locally(*terminal_view_id, ctx)
+                    && let Some(manager) = self.focused_terminal_manager(ctx)
+                {
+                    let _ = manager.update(ctx, |manager, ctx| manager.attach_held_session(ctx));
+                }
+                #[cfg(not(windows))]
+                let _ = terminal_view_id;
             }
             TakeOverHeldSessionForTerminalView { terminal_view_id } => {
                 if self.focus_terminal_view_locally(*terminal_view_id, ctx) {
@@ -27716,7 +28563,7 @@ impl TypedActionView for Workspace {
                     self.toggle_change_shell_menu(ctx);
                 }
             }
-            ChangeShell { shell } => self.start_shell_restart(Some(shell.clone()), ctx),
+            ChangeShell { shell } => self.start_shell_restart(Some(shell.clone()), false, ctx),
             DetachSession => self.detach_focused_session(ctx),
             DetachSessionForTerminalView { terminal_view_id } => {
                 self.detach_session_for_terminal_view(*terminal_view_id, ctx)
@@ -27728,6 +28575,19 @@ impl TypedActionView for Workspace {
             ConfirmMoveSessionToAgentCtrl { terminal_view_id } => {
                 self.confirm_move_session_to_agent_ctrl(*terminal_view_id, ctx)
             }
+            ConfirmStartPastSessionOnAgentCtrl {
+                agent,
+                session_id,
+                cwd,
+            } => self.start_past_session_on_agent_ctrl(
+                HandoffSource {
+                    agent: *agent,
+                    session_id: session_id.clone(),
+                    cwd: cwd.clone(),
+                    transcript_path: None,
+                },
+                ctx,
+            ),
             StartAgentOnAgentCtrl => self.start_agent_on_agent_ctrl_in_focused_pane(ctx),
             StartAgentOnAgentCtrlForTerminalView { terminal_view_id } => {
                 self.start_agent_on_agent_ctrl_for_terminal_view(*terminal_view_id, ctx)
@@ -27741,7 +28601,9 @@ impl TypedActionView for Workspace {
                 self.confirm_move_all_agent_sessions(folder, ctx)
             }
             ToggleAttachSessionMenu => self.toggle_attach_session_menu(ctx),
-            AttachDetachedSession { session_id } => self.attach_detached_session(*session_id, ctx),
+            AttachDetachedSession { session_id } => {
+                self.attach_detached_session(*session_id, None, None, ctx)
+            }
             AgentSession(action) => self.perform_agent_session_action(action, ctx),
             ShowAgentSessions { focus } => self.show_agent_sessions(*focus, ctx),
             ShowAgentSessionsForTerminalView { terminal_view_id } => {
@@ -30087,7 +30949,7 @@ impl View for Workspace {
                 .set
                 .insert("Workspace_PaneCanMoveSessionToAgentCtrl");
         }
-        if agent_ctrl_actions.can_start_agent {
+        if agent_ctrl_actions.can_start_agent && !agent_ctrl_actions.can_move_session {
             context.set.insert("Workspace_PaneCanStartAgentOnAgentCtrl");
         }
         if agent_ctrl_actions.can_move_all {
@@ -33455,3 +34317,7 @@ fn running_agent_session_ids() -> HashSet<String> {
 fn running_agent_session_ids() -> HashSet<String> {
     HashSet::new()
 }
+
+#[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+#[path = "palette_search_tests.rs"]
+mod palette_search_tests;

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use async_channel::Sender;
-#[cfg(unix)]
+#[cfg(any(unix, all(windows, feature = "local_tty")))]
 use warpui::AppContext;
 use warpui::{Entity, ViewContext};
 
@@ -97,6 +97,22 @@ where
     ) {
     }
 
+    #[cfg(all(feature = "local_tty", windows))]
+    fn can_replace_shell_for_held_attach(&self, ctx: &AppContext) -> bool {
+        let _ = ctx;
+        false
+    }
+
+    #[cfg(all(feature = "local_tty", windows))]
+    fn on_held_attach_started(&mut self, ctx: &mut ViewContext<Self>) {
+        let _ = ctx;
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_held_attach_failed(&mut self, error: String, ctx: &mut ViewContext<Self>) {
+        let _ = (error, ctx);
+    }
+
     /// Called when a take-over has started ending the held session.
     #[cfg(feature = "local_tty")]
     fn on_take_over_started(&mut self, _ctx: &mut ViewContext<Self>) {}
@@ -108,6 +124,16 @@ where
     /// Called just before a withheld restore command runs here.
     #[cfg(feature = "local_tty")]
     fn on_withheld_restore_resolved(&mut self, _ctx: &mut ViewContext<Self>) {}
+
+    /// Identifies the supervisor that owns the connected shell.
+    #[cfg(feature = "local_tty")]
+    fn on_supervisor_changed(
+        &mut self,
+        holder: Option<crate::app_state::SessionHolder>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let _ = (holder, ctx);
+    }
 
     /// Called when the active shell launch data is updated (e.g. shell indicator metadata).
     fn on_active_shell_launch_data_updated(

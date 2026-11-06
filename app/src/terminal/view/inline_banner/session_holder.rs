@@ -20,6 +20,7 @@ use crate::terminal::view::{InlineBannerId, TerminalAction};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionHolderBannerAction {
+    Attach,
     TakeOver,
     StartFresh,
 }
@@ -32,6 +33,8 @@ pub struct SessionHolderBannerState {
     restore: WithheldRestore,
     error: Option<String>,
     in_flight: bool,
+    attaching: bool,
+    attach_mouse_state: MouseStateHandle,
     take_over_mouse_state: MouseStateHandle,
     start_fresh_mouse_state: MouseStateHandle,
 }
@@ -44,6 +47,8 @@ impl SessionHolderBannerState {
             restore,
             error: None,
             in_flight: false,
+            attaching: false,
+            attach_mouse_state: Default::default(),
             take_over_mouse_state: Default::default(),
             start_fresh_mouse_state: Default::default(),
         }
@@ -51,6 +56,27 @@ impl SessionHolderBannerState {
 
     pub fn set_in_flight(&mut self) {
         self.in_flight = true;
+        self.attaching = false;
+        self.error = None;
+    }
+
+    #[cfg(windows)]
+    pub fn set_attaching(&mut self) {
+        self.in_flight = true;
+        self.attaching = true;
+        self.error = None;
+    }
+
+    pub fn set_attach_error(&mut self, error: String) {
+        self.attaching = true;
+        self.set_error(error);
+    }
+
+    pub fn offers_attach(&self) -> bool {
+        cfg!(windows)
+            && self.restore.verdict == HeldVerdict::Detached
+            && self.restore.holder.is_some()
+            && self.restore.session_id.is_some()
     }
 
     pub fn set_error(&mut self, error: String) {
@@ -92,25 +118,46 @@ impl SessionHolderBannerState {
 
     fn body(&self) -> String {
         if self.in_flight {
-            return "Ending the session there…".to_owned();
+            return if self.attaching {
+                "Connecting to the existing session…"
+            } else {
+                "Ending the session there…"
+            }
+            .to_owned();
         }
         if let Some(error) = &self.error {
-            return format!("Taking over failed: {error}");
+            return if self.attaching {
+                format!("Attaching failed: {error}")
+            } else {
+                format!("Taking over failed: {error}")
+            };
         }
         let command = &self.restore.command;
+        let restart = if command.is_empty() {
+            "leaves a fresh shell here".to_owned()
+        } else {
+            format!("runs `{command}` here")
+        };
         match self.restore.verdict {
-            HeldVerdict::Detached => format!(
-                "The agent and its shell are still alive in that build's session supervisor. Take \
-                 over ends them there and runs `{command}` here. Start fresh leaves this shell as \
-                 it is."
-            ),
+            HeldVerdict::Detached => {
+                let attach = if self.offers_attach() {
+                    "Attach reconnects without restarting them. "
+                } else {
+                    ""
+                };
+                format!(
+                    "The shell and its running processes are still alive in that build's supervisor. \
+                     {attach}Take over ends them there and {restart}. Start fresh leaves \
+                     this shell as it is."
+                )
+            }
             HeldVerdict::Attached => "A window in that build is attached to this session. Start \
                                       fresh leaves this shell as it is; use that window to \
                                       continue."
                 .to_owned(),
             HeldVerdict::HeldByUnknown => format!(
                 "The agent is still running in another Warp. Take over ends the agent there and \
-                 runs `{command}` here. Start fresh leaves this shell as it is."
+                 {restart}. Start fresh leaves this shell as it is."
             ),
         }
     }
@@ -137,12 +184,24 @@ pub fn render_session_holder_banner(
         variant,
     };
     let mut buttons = Vec::new();
+    if !state.in_flight && state.offers_attach() {
+        buttons.push(button(
+            "Attach",
+            SessionHolderBannerAction::Attach,
+            &state.attach_mouse_state,
+            InlineBannerTextButtonVariant::Primary,
+        ));
+    }
     if !state.in_flight && state.offers_take_over() {
         buttons.push(button(
             "Take over",
             SessionHolderBannerAction::TakeOver,
             &state.take_over_mouse_state,
-            InlineBannerTextButtonVariant::Primary,
+            if state.offers_attach() {
+                InlineBannerTextButtonVariant::Secondary
+            } else {
+                InlineBannerTextButtonVariant::Primary
+            },
         ));
     }
     if !state.in_flight {
@@ -174,3 +233,27 @@ pub fn render_session_holder_banner(
         },
     )
 }
+
+#[cfg(feature = "local_tty")]
+pub fn render_connected_supervisor_banner(
+    holder: &crate::app_state::SessionHolder,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    render_inline_block_list_banner(
+        InlineBannerStyle::LowPriority,
+        appearance,
+        InlineBannerContent {
+            title: format!("Connected to supervisor from build {}", holder.version),
+            content: Some(vec![Text::new(
+                "The original shell is still running. Use “Restart under current supervisor…” in the session menu to replace it.",
+                appearance.ui_font_family(),
+                appearance.ui_font_size(),
+            )]),
+            ..Default::default()
+        },
+    )
+}
+
+#[cfg(all(test, feature = "local_tty"))]
+#[path = "session_holder_tests.rs"]
+mod tests;

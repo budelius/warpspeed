@@ -1284,6 +1284,16 @@ impl Action {
 /// Handles all incoming urls. These urls are file urls, auth urls for login,
 /// and team urls for opening team settings.
 pub fn handle_incoming_uri(url: &Url, ctx: &mut AppContext) {
+    if ctx.has_singleton_model::<crate::window_process::manager::CoordinatorManager>() {
+        crate::window_process::manager::CoordinatorManager::handle(ctx).update(
+            ctx,
+            |manager, _| {
+                warp_errors::report_if_error!(manager.route_url(url.clone()));
+            },
+        );
+        return;
+    }
+
     safe_info!(
         safe: ("received url"),
         full: ("received url {:?}", &url)

@@ -23,7 +23,15 @@ fn table_with_detached_session(session_id: SessionId, before: &[u8], at: u64) ->
     screen.feed(before);
 
     let mut table = SessionTable::new();
-    table.detach(session_id, screen.snapshot(), metadata(), at, listener());
+    table.detach(
+        session_id,
+        screen.snapshot(),
+        metadata(),
+        at,
+        4242,
+        "a1b2c3".to_owned(),
+        listener(),
+    );
     table
 }
 
@@ -176,6 +184,8 @@ fn list_reports_how_long_a_session_has_been_detached() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].detached_for_seconds, 60);
     assert_eq!(listed[0].metadata.shell, "bash");
+    assert_eq!(listed[0].shell_pid, 4242);
+    assert_eq!(listed[0].session_uuid_hex, "a1b2c3");
 }
 
 /// The picker offers what can actually be attached. A session another client
@@ -200,7 +210,15 @@ fn list_is_ordered_stably_by_session() {
     for id in [3u64, 1, 2] {
         let session_id = SessionId::from(id);
         let screen = HeadlessScreen::new(20, 4, listener());
-        table.detach(session_id, screen.snapshot(), metadata(), 0, listener());
+        table.detach(
+            session_id,
+            screen.snapshot(),
+            metadata(),
+            0,
+            0,
+            String::new(),
+            listener(),
+        );
     }
 
     let ids: Vec<u64> = table
@@ -220,7 +238,15 @@ fn reaping_drops_only_sessions_past_the_age_limit() {
 
     let mut table = table_with_detached_session(old, b"old", 0);
     let screen = HeadlessScreen::new(20, 4, listener());
-    table.detach(recent, screen.snapshot(), metadata(), 500, listener());
+    table.detach(
+        recent,
+        screen.snapshot(),
+        metadata(),
+        500,
+        0,
+        String::new(),
+        listener(),
+    );
 
     let reaped = table.reap_older_than(600, 300);
 

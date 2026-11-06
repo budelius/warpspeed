@@ -21,6 +21,9 @@ mod transfer_view_tests;
 #[path = "ref_count_tests.rs"]
 mod ref_count_tests;
 
+#[path = "try_update_view_tests.rs"]
+mod try_update_view_tests;
+
 #[test]
 fn test_subscribe_and_emit_from_model() {
     #[derive(Default)]
@@ -2853,5 +2856,36 @@ fn test_view_subscribe_then_unsubscribe_to_model_inside_callback_drops_new_subsc
                 "The new subscription should be removed when subscribe-then-unsubscribe happens in a callback."
             );
         });
+    });
+}
+
+#[test]
+#[should_panic(expected = "process top-level window limit exceeded")]
+fn process_window_limit_rejects_a_second_window() {
+    #[derive(Default)]
+    struct View;
+
+    impl Entity for View {
+        type Event = ();
+    }
+
+    impl super::View for View {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            Empty::new().finish()
+        }
+
+        fn ui_name() -> &'static str {
+            "WindowLimitedView"
+        }
+    }
+
+    impl TypedActionView for View {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        app.update(|ctx| ctx.set_window_count_limit(Some(1)));
+        app.add_window(WindowStyle::NotStealFocus, |_| View);
+        app.add_window(WindowStyle::NotStealFocus, |_| View);
     });
 }

@@ -1,12 +1,12 @@
 //! Arguments for the `sessions` subcommand, the terminal-session control
 //! surface.
 //!
-//! Two different processes answer these subcommands, and which one it is
-//! decides what the subcommand can do.
+//! Which process answers a subcommand decides what it can do.
 //!
 //! [`SessionsCommand::List`] and [`SessionsCommand::Kill`] talk to the
 //! *supervisor*: the daemon that owns detached shells and outlives the app.
-//! They work with no Warp window open at all.
+//! [`SessionsCommand::Agents`] reads the agents' process registries directly.
+//! All three work with no Warp window open.
 //!
 //! Everything else talks to a *running Warp instance*, because the work is the
 //! app's to do. Detaching reads the pane's screen and closes it; attaching
@@ -58,6 +58,14 @@ pub struct SessionArg {
     pub session_id: u64,
 }
 
+/// A terminal view id, as `sessions panes` prints it.
+#[derive(Debug, Clone, Args)]
+pub struct TerminalViewArg {
+    /// The id of the terminal view to act on.
+    #[arg(long = "terminal-view", value_name = "ID")]
+    pub terminal_view_id: u64,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum SessionsCommand {
     /// List the sessions the supervisor is holding.
@@ -72,6 +80,9 @@ pub enum SessionsCommand {
     /// first thing worth knowing when a detach has failed.
     Supervisor,
 
+    /// List every registered local agent process and where its terminal is.
+    Agents,
+
     /// List the running Warp instances that accept these commands.
     Instances,
 
@@ -79,6 +90,12 @@ pub enum SessionsCommand {
     ///
     /// The session id in each row is what `detach` takes.
     Panes {
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// List every window of a running Warp instance.
+    Windows {
         #[command(flatten)]
         instance: InstanceArg,
     },
@@ -118,6 +135,48 @@ pub enum SessionsCommand {
     Open {
         /// The saved session's name, as `stored` lists it. Case does not matter.
         name: String,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// Replace a pane's shell from an older supervisor and resume its attached agent.
+    ///
+    /// This ends the original shell and any process still running in it. Use it only after
+    /// deciding that the old process may be terminated.
+    RestartInCurrentSupervisor {
+        #[command(flatten)]
+        terminal_view: TerminalViewArg,
+
+        #[command(flatten)]
+        instance: InstanceArg,
+    },
+
+    /// Replace a pane's shell with a new one and resume the agent it was running.
+    ///
+    /// Works on any pane, whichever supervisor holds its shell, and asks no confirmation: the
+    /// original shell and everything still running in it end. Picks up a newly installed agent
+    /// version, since the agent starts again from its recorded session.
+    #[command(group(
+        clap::ArgGroup::new("target").required(true).args(["terminal_view_id", "all_agents"])
+    ))]
+    Restart {
+        /// The id of the terminal view to restart, as `panes` prints it.
+        #[arg(long = "terminal-view", value_name = "ID")]
+        terminal_view_id: Option<u64>,
+
+        /// Restart every pane that is running an agent, one after another.
+        #[arg(long)]
+        all_agents: bool,
+
+        /// A terminal view to leave alone under `--all-agents`, such as the one running this
+        /// command. Repeatable.
+        #[arg(
+            long = "except-view",
+            value_name = "ID",
+            conflicts_with = "terminal_view_id"
+        )]
+        except_views: Vec<u64>,
 
         #[command(flatten)]
         instance: InstanceArg,

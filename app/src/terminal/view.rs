@@ -100,7 +100,9 @@ use inline_banner::{
 };
 pub use inline_banner::{NotificationsDiscoveryBannerAction, NotificationsErrorBannerAction};
 #[cfg(feature = "local_tty")]
-use inline_banner::{SessionHolderBannerState, render_session_holder_banner};
+use inline_banner::{
+    SessionHolderBannerState, render_connected_supervisor_banner, render_session_holder_banner,
+};
 use instant::Instant;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -290,6 +292,7 @@ use crate::ai::predict::prompt_suggestions::{
 };
 use crate::ai_assistant::{ASK_AI_ASSISTANT_TEXT, AskAIType};
 use crate::antivirus::AntivirusInfo;
+use crate::app_state::SessionHolder;
 use crate::appearance::{Appearance, AppearanceEvent};
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::auth_state::AuthState;
@@ -322,6 +325,7 @@ use crate::code_review::git_repo_model::{GitRepoModels, GitRepoStatusModel, GitS
 use crate::code_review::github_repo_model::GitHubRepoModel;
 use crate::code_review::telemetry_event::CodeReviewPaneEntrypoint;
 use crate::context_chips::ContextChipKind;
+use crate::context_chips::current_prompt::GitRepositoryContext;
 use crate::context_chips::prompt::{Prompt, PromptSelection};
 use crate::context_chips::prompt_type::PromptType;
 use crate::drive::CloudObjectTypeAndId;
@@ -1029,6 +1033,7 @@ pub enum InlineBannerType {
     ShellProcessTerminated,
     ShellDetached,
     SessionHolder,
+    ConnectedSupervisor,
     OpenInWarp,
     VimMode,
     CodebaseIndexSpeedbump,
@@ -1057,6 +1062,7 @@ impl InlineBannerType {
             | Self::ShellProcessTerminated
             | Self::ShellDetached
             | Self::SessionHolder
+            | Self::ConnectedSupervisor
             | Self::OpenInWarp
             | Self::VimMode => false,
         }
@@ -1115,6 +1121,8 @@ struct InlineBannersState {
 
     #[cfg(feature = "local_tty")]
     session_holder_banner: Option<SessionHolderBannerState>,
+    #[cfg(feature = "local_tty")]
+    connected_supervisor_banner: Option<InlineBannerId>,
 }
 
 impl InlineBannersState {
@@ -2517,6 +2525,10 @@ pub struct TerminalView {
     #[cfg(feature = "local_tty")]
     withheld_restore: Option<WithheldRestore>,
     #[cfg(feature = "local_tty")]
+    connected_supervisor: Option<SessionHolder>,
+    #[cfg(feature = "local_tty")]
+    held_attach_error: Option<String>,
+    #[cfg(feature = "local_tty")]
     agent_session_refresh_scheduled: bool,
     /// Whether this view's agent session was found under its shell rather than seen starting,
     /// which makes it this view's to forget once the agent exits.
@@ -3058,6 +3070,10 @@ enum BlockMetadataUpdateSource {
     /// the CWD actually changed, and never run block-completion callbacks
     /// (the block hasn't completed).
     Osc7,
+}
+
+fn should_refresh_prompt_after_block_completion(block_type: &BlockType) -> bool {
+    !matches!(block_type, BlockType::InBandCommand | BlockType::Restored)
 }
 
 impl TerminalView {
@@ -4465,6 +4481,10 @@ impl TerminalView {
             #[cfg(feature = "local_tty")]
             withheld_restore: None,
             #[cfg(feature = "local_tty")]
+            connected_supervisor: None,
+            #[cfg(feature = "local_tty")]
+            held_attach_error: None,
+            #[cfg(feature = "local_tty")]
             agent_session_refresh_scheduled: false,
             #[cfg(feature = "local_tty")]
             agent_session_discovered: false,
@@ -5205,10 +5225,39 @@ impl TerminalView {
         ctx.unsubscribe_to_model(&handle);
     }
 
+    fn set_prompt_git_repository_context(
+        &mut self,
+        repository_context: GitRepositoryContext,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.current_prompt.update(ctx, |prompt_type, ctx| {
+            if let PromptType::Dynamic { prompt } = prompt_type {
+                prompt.update(ctx, |current_prompt, ctx| {
+                    current_prompt.set_git_repository_context(repository_context, ctx);
+                });
+            }
+        });
+    }
+
+    fn set_prompt_git_repository_context_without_refresh(
+        &mut self,
+        repository_context: GitRepositoryContext,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.current_prompt.update(ctx, |prompt_type, ctx| {
+            if let PromptType::Dynamic { prompt } = prompt_type {
+                prompt.update(ctx, |current_prompt, _| {
+                    current_prompt.set_git_repository_context_without_refresh(repository_context);
+                });
+            }
+        });
+    }
+
     /// Fully clear the per-repo git status handle, including the input's repo
     /// path. Use this when navigating out of a git repository.
     fn clear_git_repo_status(&mut self, ctx: &mut ViewContext<Self>) {
         self.clear_git_repo_status_subscription(ctx);
+        self.set_prompt_git_repository_context(GitRepositoryContext::NotRepository, ctx);
         self.input.update(ctx, |input, ctx| {
             input.update_repo_path(None, ctx);
         });
@@ -11772,6 +11821,15 @@ impl TerminalView {
                     });
                     if let Some(session_type) = session_type {
                         let is_local = matches!(session_type, RepoDetectionSessionType::Local);
+                        let working_directory_changed = prev_block_metadata
+                            .current_working_directory()
+                            != block_metadata.current_working_directory();
+                        if is_local && working_directory_changed {
+                            self.set_prompt_git_repository_context_without_refresh(
+                                GitRepositoryContext::Unknown,
+                                ctx,
+                            );
+                        }
 
                         // For local sessions, convert the shell-native CWD
                         // (e.g. "/c/Users/..." for Git Bash/MSYS2) to a
@@ -11859,6 +11917,10 @@ impl TerminalView {
                                         me.clear_git_repo_status_subscription(ctx);
                                         me.update_git_status_subscription(ctx);
                                     }
+                                    me.set_prompt_git_repository_context(
+                                        GitRepositoryContext::Attached,
+                                        ctx,
+                                    );
                                 }
                                 Some(LocalOrRemotePath::Local(repo_path)) => {
                                     #[cfg(feature = "local_fs")]
@@ -11923,6 +11985,10 @@ impl TerminalView {
                                         me.start_lsp_server_in_active_pwd(ctx);
 
                                         me.update_repo_banner_state(repo_path.clone(), ctx);
+                                        me.set_prompt_git_repository_context(
+                                            GitRepositoryContext::Attached,
+                                            ctx,
+                                        );
                                     }
                                     #[cfg(not(feature = "local_fs"))]
                                     let _ = repo_path;
@@ -12050,6 +12116,9 @@ impl TerminalView {
                     // `TerminalPane` turns into `close_pane`.
                     return;
                 }
+
+                #[cfg(feature = "local_tty")]
+                self.on_supervisor_changed(None, ctx);
 
                 if matches!(reason, ExitReason::PtyDetached) {
                     // The shell is still running in the supervisor, so nothing it was doing has
@@ -12662,7 +12731,7 @@ impl TerminalView {
                 // that the shell has been bootstrapped. Since we're in the BlockCompleted
                 // event, that also implies we would have received the first precmd
                 // so we know that the active block has valid metadata.
-                if !matches!(block_type, BlockType::InBandCommand)
+                if should_refresh_prompt_after_block_completion(block_type)
                     && self
                         .model
                         .lock()
@@ -13941,6 +14010,9 @@ impl TerminalView {
         if let Some(restore) = self.withheld_restore.take() {
             self.insert_session_holder_banner(restore, ctx);
         }
+
+        #[cfg(feature = "local_tty")]
+        self.update_connected_supervisor_banner(ctx);
 
         if self.should_display_vim_banner(&session, ctx) {
             self.insert_vim_mode_banner(ctx);
@@ -16545,8 +16617,11 @@ impl TerminalView {
     ) {
         self.remove_session_holder_banner();
         let banner_id = self.inline_banners_state.next_banner_id();
-        self.inline_banners_state.session_holder_banner =
-            Some(SessionHolderBannerState::new(banner_id, restore));
+        let mut banner = SessionHolderBannerState::new(banner_id, restore);
+        if let Some(error) = self.held_attach_error.take() {
+            banner.set_attach_error(error);
+        }
+        self.inline_banners_state.session_holder_banner = Some(banner);
         let active_block_index = self.model.lock().block_list().active_block_index();
         self.model
             .lock()
@@ -16568,6 +16643,35 @@ impl TerminalView {
             .block_list_mut()
             .remove_inline_banner(banner.id);
         true
+    }
+
+    pub(crate) fn connected_supervisor(&self) -> Option<&SessionHolder> {
+        #[cfg(feature = "local_tty")]
+        {
+            self.connected_supervisor.as_ref()
+        }
+        #[cfg(not(feature = "local_tty"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn update_connected_supervisor_banner(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(id) = self.inline_banners_state.connected_supervisor_banner.take() {
+            self.model.lock().block_list_mut().remove_inline_banner(id);
+        }
+        if self.connected_supervisor.is_some() && self.is_login_shell_bootstrapped {
+            let id = self.inline_banners_state.next_banner_id();
+            let mut model = self.model.lock();
+            let index = model.block_list().active_block_index();
+            model.block_list_mut().insert_inline_banner_after_block(
+                index,
+                InlineBannerItem::new(id, InlineBannerType::ConnectedSupervisor),
+            );
+            self.inline_banners_state.connected_supervisor_banner = Some(id);
+        }
+        ctx.notify();
     }
 
     pub fn has_pending_command_or_awaiting_completion(&self, ctx: &AppContext) -> bool {
@@ -17002,8 +17106,14 @@ impl TerminalView {
             )
         };
 
-        let is_cli_agent_paste =
-            !should_paste_in_input && !middle_click && self.has_active_cli_agent_session(ctx);
+        let cli_agent = if !should_paste_in_input && !middle_click {
+            CLIAgentSessionsModel::as_ref(ctx)
+                .session(self.view_id)
+                .map(|session| session.agent)
+        } else {
+            None
+        };
+        let is_cli_agent_paste = cli_agent.is_some();
 
         // If we're pasting into a CLI coding agent (e.g. Claude Code) that has its own native
         // handling for pasted file paths and images, skip shell-escaping and let the agent
@@ -17057,11 +17167,12 @@ impl TerminalView {
                 .replace_all(copied.as_str(), "\r")
                 .to_string();
 
-            if needs_bracketed_paste {
-                // If bracketed paste is enabled in the current grid, then we should surround any
-                // paste operation with `\x1b[200~` and `\x1b[201~` so that the application knows
-                // the text came from paste, rather than from direct user input.
-                // See https://cirw.in/blog/bracketed-paste for more info on bracketed paste
+            let is_multiline = copied.contains('\n') || copied.contains('\r');
+            let force_bracketed_paste =
+                is_multiline && matches!(cli_agent, Some(CLIAgent::Pi | CLIAgent::OhMyPi));
+            if needs_bracketed_paste || force_bracketed_paste {
+                // An attached Pi session can lose the mode sequence that originally enabled
+                // bracketed paste, but Pi still needs the markers to preserve embedded newlines.
                 copied = format!("{BRACKETED_PASTE_PREFIX}{copied}{BRACKETED_PASTE_SUFFIX}");
             }
             self.write_user_bytes_to_pty(copied.into_bytes(), ctx);
@@ -17171,6 +17282,8 @@ impl TerminalView {
         menu_source: &BlockListMenuSource,
         ctx: &mut ViewContext<Self>,
     ) -> Vec<MenuItem<TerminalAction>> {
+        // AgentCtrl eligibility takes the terminal model lock itself.
+        let agent_ctrl_actions = self.agent_ctrl_pane_actions(ctx);
         let model = self.model.lock();
 
         let mut items = match (
@@ -17784,13 +17897,13 @@ impl TerminalView {
             // text-selection contexts (`Regular*TextRightClick` /
             // `RichContentTextRightClick`) because those menus are scoped to
             // actions on the selected text.
-            let include_clear = matches!(
+            let include_session_actions = matches!(
                 menu_source,
                 BlockListMenuSource::RegularBlockRightClick { .. }
                     | BlockListMenuSource::RichContentBlockRightClick { .. }
                     | BlockListMenuSource::OutsideBlockRightClick { .. }
             );
-            let clear_menu_item = include_clear
+            let clear_menu_item = include_session_actions
                 .then(|| self.clear_buffer_menu_item(&model, ctx))
                 .flatten();
             if let Some(clear_menu_item) = clear_menu_item {
@@ -17798,6 +17911,17 @@ impl TerminalView {
                     items.push(MenuItem::Separator);
                 }
                 items.push(clear_menu_item);
+            }
+
+            if include_session_actions {
+                let session_items =
+                    self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+                if !session_items.is_empty() {
+                    if !items.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.extend(session_items);
+                }
             }
 
             let current_shell = model.shell_launch_state().available_shell();
@@ -18087,6 +18211,7 @@ impl TerminalView {
         &self,
         ctx: &mut ViewContext<Self>,
     ) -> Vec<MenuItem<TerminalAction>> {
+        let agent_ctrl_actions = self.agent_ctrl_pane_actions(ctx);
         let model = self.model.lock();
         let mut items = Vec::new();
 
@@ -18223,6 +18348,13 @@ impl TerminalView {
             );
         }
         // Section 5: All Pane related
+        if selected_input_text.is_empty() {
+            let session_items = self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+            if !session_items.is_empty() {
+                items.push(MenuItem::Separator);
+                items.extend(session_items);
+            }
+        }
         let current_shell = model.shell_launch_state().available_shell();
         let pane_context_menu_items = self.pane_context_menu_items(current_shell, ctx);
         if !pane_context_menu_items.is_empty() {
@@ -18354,6 +18486,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) -> Vec<MenuItem<TerminalAction>> {
         let mut menu_items = Vec::new();
+        let agent_ctrl_actions = self.agent_ctrl_pane_actions(ctx);
         let model = self.model.lock();
 
         let semantic_selection = SemanticSelection::as_ref(ctx);
@@ -18395,6 +18528,13 @@ impl TerminalView {
                 false,
                 has_session_link,
             ));
+        }
+        let session_items = self.session_context_menu_items(&model, agent_ctrl_actions, ctx);
+        if !session_items.is_empty() {
+            if !menu_items.is_empty() {
+                menu_items.push(MenuItem::Separator);
+            }
+            menu_items.extend(session_items);
         }
         let current_shell = model.shell_launch_state().available_shell();
         let mut pane_context_menu_items = self.pane_context_menu_items(current_shell, ctx);
@@ -24724,6 +24864,13 @@ impl TerminalView {
         if let Some(state) = &self.inline_banners_state.session_holder_banner {
             inline_banners.insert(state.id, render_session_holder_banner(state, appearance));
         }
+        #[cfg(feature = "local_tty")]
+        if let (Some(id), Some(holder)) = (
+            self.inline_banners_state.connected_supervisor_banner,
+            &self.connected_supervisor,
+        ) {
+            inline_banners.insert(id, render_connected_supervisor_banner(holder, appearance));
+        }
 
         if (FeatureFlag::CreatingSharedSessions.is_enabled()
             && ContextFlag::CreateSharedSession.is_enabled())
@@ -27108,6 +27255,40 @@ impl TerminalSurface for TerminalView {
         }
     }
 
+    #[cfg(all(feature = "local_tty", windows))]
+    fn can_replace_shell_for_held_attach(&self, ctx: &AppContext) -> bool {
+        let busy = {
+            let model = self.model.lock();
+            let block = model.block_list().active_block();
+            model.is_read_only() || block.is_executing() || block.is_active_and_long_running()
+        };
+        self.is_login_shell_bootstrapped
+            && !busy
+            && !self.has_pending_command_or_awaiting_completion(ctx)
+            && self.input.as_ref(ctx).editor().as_ref(ctx).is_empty(ctx)
+            && CLIAgentSessionsModel::as_ref(ctx)
+                .session(self.view_id)
+                .is_none()
+    }
+
+    #[cfg(all(feature = "local_tty", windows))]
+    fn on_held_attach_started(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.set_attaching();
+            ctx.notify();
+        }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_held_attach_failed(&mut self, error: String, ctx: &mut ViewContext<Self>) {
+        if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
+            banner.set_attach_error(error);
+        } else {
+            self.held_attach_error = Some(error);
+        }
+        ctx.notify();
+    }
+
     #[cfg(feature = "local_tty")]
     fn on_take_over_started(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(banner) = &mut self.inline_banners_state.session_holder_banner {
@@ -27127,9 +27308,25 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn on_withheld_restore_resolved(&mut self, ctx: &mut ViewContext<Self>) {
         self.withheld_restore = None;
+        self.held_attach_error = None;
         if self.remove_session_holder_banner() {
             ctx.notify();
         }
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn on_supervisor_changed(
+        &mut self,
+        holder: Option<SessionHolder>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.connected_supervisor = holder.filter(|holder| {
+            holder.channel != crate::terminal::local_tty::session_holder::current_channel()
+        });
+        self.update_connected_supervisor_banner(ctx);
+        self.pane_configuration.update(ctx, |config, ctx| {
+            config.refresh_pane_header_overflow_menu_items(ctx);
+        });
     }
 
     fn on_active_shell_launch_data_updated(
@@ -27155,6 +27352,7 @@ impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn on_session_restart_started(&mut self, ctx: &mut ViewContext<Self>) {
         self.begin_restart();
+        self.on_supervisor_changed(None, ctx);
 
         // A restarted shell must not retain either banner representation from the process it
         // replaced. Remove each banner from both its view state and block-list entry; clearing
@@ -27585,6 +27783,7 @@ impl TypedActionView for TerminalView {
             | AltMouseAction(_)
             | ToggleMaximizePane
             | RestartShell
+            | RestartInCurrentSupervisor
             | ReattachShell
             | SessionHolderBanner(_)
             | ChangeShell
@@ -27923,10 +28122,24 @@ impl TypedActionView for TerminalView {
                     terminal_view_id: self.view_id,
                 });
             }
+            RestartInCurrentSupervisor => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
+            }
             ReattachShell => {
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::ReattachShellForTerminalView {
                     terminal_view_id: self.view_id,
                 });
+            }
+            SessionHolderBanner(SessionHolderBannerAction::Attach) => {
+                ctx.dispatch_typed_action_deferred(
+                    WorkspaceAction::AttachHeldSessionForTerminalView {
+                        terminal_view_id: self.view_id,
+                    },
+                );
             }
             SessionHolderBanner(SessionHolderBannerAction::TakeOver) => {
                 ctx.dispatch_typed_action_deferred(
@@ -30086,3 +30299,7 @@ fn agent_view_back_button_label(
 #[cfg(test)]
 #[path = "view_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "local_fs", feature = "local_tty"))]
+#[path = "view/session_menu_tests.rs"]
+mod session_menu_tests;

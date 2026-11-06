@@ -148,6 +148,9 @@ pub enum FeatureFlag {
     /// up front: opening a launch configuration and restoring a saved session.
     LazyShellStartup,
 
+    /// Runs each WarpSpeed window in an isolated worker behind one profile coordinator.
+    WindowProcessIsolation,
+
     /// Enables writing to long-running commands in shared sessions.
     SharedSessionWriteToLongRunningCommands,
 

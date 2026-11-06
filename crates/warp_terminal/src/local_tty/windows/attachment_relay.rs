@@ -4,8 +4,8 @@ use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result, bail};
 use windows::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_IO_PENDING, HANDLE, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_IO_PENDING, ERROR_NOT_FOUND,
+    ERROR_OPERATION_ABORTED, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -110,10 +110,8 @@ fn read_with_timeout(
     if pending {
         match unsafe { WaitForSingleObject(event, timeout_ms) } {
             WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => {
-                cancel_and_wait(handle, &overlapped);
-                return Ok(0);
-            }
+            // The read can complete after the wait times out but before cancellation reaches it.
+            WAIT_TIMEOUT => return finish_timed_out_read(handle, &overlapped),
             other => bail!("Waiting for attachment relay read failed: {other:?}"),
         }
     }
@@ -164,6 +162,20 @@ fn write_unless_stopped(
         bail!("Attachment relay wrote {written} of {} bytes", bytes.len());
     }
     Ok(())
+}
+
+fn finish_timed_out_read(handle: HANDLE, overlapped: &OVERLAPPED) -> Result<usize> {
+    if let Err(error) = unsafe { CancelIoEx(handle, Some(overlapped)) }
+        && error.code() != ERROR_NOT_FOUND.to_hresult()
+    {
+        return Err(error).context("Failed to cancel timed-out attachment relay read");
+    }
+    let mut transferred = 0;
+    match unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, true) } {
+        Ok(()) => Ok(transferred as usize),
+        Err(error) if error.code() == ERROR_OPERATION_ABORTED.to_hresult() => Ok(0),
+        Err(error) => Err(error).context("Failed to finish timed-out attachment relay read"),
+    }
 }
 
 fn cancel_and_wait(handle: HANDLE, overlapped: &OVERLAPPED) {

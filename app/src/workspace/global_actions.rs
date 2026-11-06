@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use ::settings::ToggleableSetting;
+#[cfg(feature = "local_fs")]
+use anyhow::Context;
 use warp_core::execution_mode::AppExecutionMode;
 use warp_errors::report_error;
 use warp_graphql::mutations::create_anonymous_user::AnonymousUserType;
@@ -139,13 +141,16 @@ fn toggle_focus_reporting(_: &(), ctx: &mut AppContext) {
 }
 
 fn save_app(_: &(), ctx: &mut AppContext) {
-    if !AppExecutionMode::as_ref(ctx).can_save_session() {
+    if !AppExecutionMode::as_ref(ctx).can_save_session()
+        || ctx.has_singleton_model::<crate::window_process::manager::CoordinatorManager>()
+    {
         return;
     }
 
-    let save_app_state = *GeneralSettings::as_ref(ctx).restore_session && may_save_shared_session();
+    let restore_session = *GeneralSettings::as_ref(ctx).restore_session;
+    let save_app_state = restore_session && may_save_shared_session();
     let save_launch_config_sessions = FeatureFlag::PersistentLaunchConfigSessions.is_enabled();
-    if !save_app_state && !save_launch_config_sessions {
+    if !restore_session && !save_launch_config_sessions {
         return;
     }
 
@@ -161,6 +166,23 @@ fn save_app(_: &(), ctx: &mut AppContext) {
         return;
     }
 
+    if save_app_state
+        && ctx.has_singleton_model::<crate::window_process::worker::WorkerConnection>()
+    {
+        let app_state = get_app_state(ctx);
+        if let [window] = app_state.windows.as_slice() {
+            crate::window_process::worker::WorkerConnection::handle(ctx).update(
+                ctx,
+                |connection, ctx| {
+                    warp_errors::report_if_error!(connection.save_window(window, ctx));
+                },
+            );
+        } else {
+            report_error!("Isolated window worker cannot persist multiple windows");
+        }
+        return;
+    }
+
     let Some(model_event_sender) = GlobalResourceHandlesProvider::as_ref(ctx)
         .get()
         .model_event_sender
@@ -171,6 +193,14 @@ fn save_app(_: &(), ctx: &mut AppContext) {
 
     // Only compute the app state if we're definitely going to use it.
     let app_state = get_app_state(ctx);
+    #[cfg(feature = "local_fs")]
+    if restore_session && crate::session_recovery::is_ready() {
+        warp_errors::report_if_error!(
+            model_event_sender
+                .send(ModelEvent::RecoverySnapshot(app_state.clone()))
+                .context("Failed to queue session recovery checkpoint")
+        );
+    }
     if save_launch_config_sessions {
         let windows = app_state
             .windows

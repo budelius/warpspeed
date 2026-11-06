@@ -145,6 +145,7 @@ fn git_shell_runtime_policy() -> ChipRuntimePolicy {
             ChipFingerprintInput::InvalidatingCommandCount,
         ],
     )
+    .with_suppress_on_failure()
     .with_invalidate_on_commands(["git"])
 }
 
@@ -344,12 +345,10 @@ impl ContextChipKind {
                 |_| None,
                 RefreshConfig::OnDemandOnly,
             )),
-            Self::KubernetesContext => Some(ContextChip::shell_builtin(
-                "Kubernetes Context",
-                builtins::kubernetes_current_context(),
-                None,
-                RefreshConfig::OnDemandOnly,
-            )),
+            // Keep the variant deserializable for existing prompt settings, but never construct
+            // the chip: restoring many panes caused overlapping kubectl probes and abandoned
+            // processes that kept the UI in a render loop.
+            Self::KubernetesContext => None,
             Self::SvnBranch => Some(ContextChip::shell_builtin(
                 "Svn Branch",
                 builtins::svn_branch_context(),
@@ -589,7 +588,6 @@ pub fn available_chips() -> Vec<ContextChipKind> {
         ContextChipKind::VirtualEnvironment,
         ContextChipKind::CondaEnvironment,
         ContextChipKind::NodeVersion,
-        ContextChipKind::KubernetesContext,
         ContextChipKind::SvnBranch,
         ContextChipKind::SvnDirtyItems,
     ]);

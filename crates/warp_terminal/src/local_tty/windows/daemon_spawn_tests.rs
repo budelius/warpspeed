@@ -7,7 +7,13 @@ use super::*;
 fn exits_immediately() -> (PathBuf, Vec<String>) {
     (
         PathBuf::from("cmd.exe"),
-        vec!["/c".to_owned(), "exit".to_owned()],
+        // User shell startup hooks are unrelated to supervisor creation.
+        vec![
+            "/d".to_owned(),
+            "/c".to_owned(),
+            "exit".to_owned(),
+            "0".to_owned(),
+        ],
     )
 }
 
@@ -25,7 +31,10 @@ fn a_supervisor_starts_even_when_the_job_forbids_breakaway() {
     assert!(daemon.id() > 0, "a spawned process must have a pid");
 
     let status = daemon.child.wait().expect("should be able to wait");
-    assert!(status.success(), "the child should have exited cleanly");
+    assert!(
+        status.success(),
+        "the child should have exited cleanly: {status:?}"
+    );
 }
 
 /// The discriminating test for the fallback, and the guard against it being

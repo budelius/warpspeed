@@ -5,9 +5,9 @@
 //! `warp` upstream. Messages that suggest a command work it out at run time from
 //! [`crate::remote_control::program_name`] rather than guessing.
 //!
-//! The subcommands split by who can answer them. Listing and killing reach the
-//! supervisor directly and work with no window open. Detaching, attaching and
-//! quitting are the app's to do, and go to a running instance over the
+//! The subcommands split by who can answer them. Listing or killing detached shells reaches the
+//! supervisor directly, while listing agents reads their process registries. Both work with no
+//! window open. Detaching, attaching and quitting go to a running instance over the
 //! [`crate::remote_control`] channel.
 //!
 //! Output is a plain table by default and JSON under `--json`. Both are
@@ -28,8 +28,10 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
     match &args.command {
         SessionsCommand::List => list_sessions(json),
         SessionsCommand::Supervisor => supervisor_status(json),
+        SessionsCommand::Agents => list_agents(json),
         SessionsCommand::Instances => list_instances(json),
         SessionsCommand::Panes { instance } => list_panes(instance.pid, json),
+        SessionsCommand::Windows { instance } => list_windows(instance.pid, json),
         SessionsCommand::Detach { session, instance } => act(
             instance.pid,
             Request::DetachSession {
@@ -52,6 +54,32 @@ pub(crate) fn run(args: &SessionsArgs) -> Result<()> {
             Request::OpenStoredSession { name: name.clone() },
             json,
             &format!("Opened saved session {name}"),
+        ),
+        SessionsCommand::Restart {
+            terminal_view_id,
+            all_agents,
+            except_views,
+            instance,
+        } => restart(
+            instance.pid,
+            *terminal_view_id,
+            *all_agents,
+            except_views,
+            json,
+        ),
+        SessionsCommand::RestartInCurrentSupervisor {
+            terminal_view,
+            instance,
+        } => act(
+            instance.pid,
+            Request::RestartSessionInCurrentSupervisor {
+                terminal_view_id: terminal_view.terminal_view_id,
+            },
+            json,
+            &format!(
+                "Restarted terminal view {} under the current supervisor",
+                terminal_view.terminal_view_id
+            ),
         ),
     }
 }
@@ -200,6 +228,131 @@ struct SessionRow {
     title: String,
     detached_for_seconds: u64,
     attached: bool,
+    shell_pid: u32,
+    session_uuid_hex: String,
+}
+
+#[derive(Serialize)]
+struct AgentRow {
+    agent: String,
+    session_id: String,
+    pid: u32,
+    started_at_unix_seconds: u64,
+    last_active_unix_seconds: Option<u64>,
+    state: String,
+    build: Option<String>,
+    saved_session: Option<String>,
+    saved_tab: Option<String>,
+    working_directory: Option<String>,
+    last_prompt: Option<String>,
+    process_count: usize,
+}
+
+fn list_agents(json: bool) -> Result<()> {
+    use crate::terminal::cli_agent_sessions::agent_process_scan::{Placement, scan};
+
+    let history = crate::terminal::agent_session_history::find_all_resumable()
+        .into_iter()
+        .map(|session| {
+            let last_active_unix_seconds = session
+                .modified
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs());
+            (
+                (session.agent, session.session_id),
+                (session.last_prompt, last_active_unix_seconds),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let rows = scan()
+        .into_iter()
+        .map(|process| {
+            let (last_prompt, last_active_unix_seconds) = history
+                .get(&(process.agent, process.session_id.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let (state, build, saved_in) = match process.placement {
+                Placement::Known => ("known".to_owned(), None, None),
+                Placement::HeldByOtherBuild {
+                    build, saved_in, ..
+                } => ("held_by_other_build".to_owned(), Some(build), saved_in),
+                Placement::NoKnownPane { saved_in } => ("no_known_pane".to_owned(), None, saved_in),
+            };
+            AgentRow {
+                agent: process.agent.display_name().to_owned(),
+                session_id: process.session_id,
+                pid: process.pid,
+                started_at_unix_seconds: process.started_at_unix_seconds,
+                last_active_unix_seconds,
+                state,
+                build,
+                saved_session: saved_in.as_ref().map(|saved| saved.session_name.clone()),
+                saved_tab: saved_in.map(|saved| saved.tab_title),
+                working_directory: process.cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+                last_prompt,
+                process_count: process.process_count,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No registered local agent processes are running.");
+        return Ok(());
+    }
+    println!(
+        "{:<12}  {:<8}  {:<24}  {:<12}  NAME",
+        "AGENT", "PID", "STATE", "SESSION"
+    );
+    for row in rows {
+        let name = row
+            .last_prompt
+            .as_deref()
+            .or(row.working_directory.as_deref())
+            .unwrap_or(&row.session_id);
+        let duplicate = if row.process_count > 1 {
+            format!(" ({} processes claim this session)", row.process_count)
+        } else {
+            String::new()
+        };
+        println!(
+            "{:<12}  {:<8}  {:<24}  {:<12}  {}{}",
+            truncate(&row.agent, 12),
+            row.pid,
+            truncate(&row.state, 24),
+            truncate(&row.session_id, 12),
+            name,
+            duplicate,
+        );
+        let saved_in = match (&row.saved_session, &row.saved_tab) {
+            (Some(session), Some(tab)) => Some(format!("saved in {session} / {tab}")),
+            (Some(session), None) => Some(format!("saved in {session}")),
+            (None, Some(tab)) => Some(format!("saved in {tab}")),
+            (None, None) => None,
+        };
+        let details = [
+            row.build.as_deref().map(|build| format!("build {build}")),
+            saved_in,
+            row.working_directory
+                .as_deref()
+                .map(|cwd| format!("cwd {cwd}")),
+            (row.started_at_unix_seconds > 0)
+                .then(|| format!("started {}", row.started_at_unix_seconds)),
+            row.last_active_unix_seconds
+                .map(|last_active| format!("last active {last_active}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if !details.is_empty() {
+            println!("{:<62}{}", "", details.join(" · "));
+        }
+    }
+    Ok(())
 }
 
 fn list_sessions(json: bool) -> Result<()> {
@@ -213,6 +366,8 @@ fn list_sessions(json: bool) -> Result<()> {
             title: session.metadata.title,
             detached_for_seconds: session.detached_for_seconds,
             attached: session.attached,
+            shell_pid: session.shell_pid,
+            session_uuid_hex: session.session_uuid_hex,
         })
         .collect();
 
@@ -329,6 +484,37 @@ fn list_instances(json: bool) -> Result<()> {
     println!("{:<8}  BUILD", "PID");
     for row in rows {
         println!("{:<8}  {}", row.pid, row.version);
+    }
+    Ok(())
+}
+
+fn list_windows(pid: Option<u32>, json: bool) -> Result<()> {
+    let instance = client::select_instance(pid)?;
+    let windows = match instance.call(Request::ListWindows)? {
+        Response::Windows { windows } => windows,
+        other => bail!(unexpected(other)),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&windows)?);
+        return Ok(());
+    }
+    if windows.is_empty() {
+        println!("This Warp instance has no windows.");
+        return Ok(());
+    }
+    println!(
+        "{:<8}  {:<8}  {:<9}  WORKSPACE",
+        "INDEX", "WINDOW", "ACTIVE"
+    );
+    for window in windows {
+        println!(
+            "{:<8}  {:<8}  {:<9}  {}",
+            window.index + 1,
+            window.window_id,
+            if window.is_active { "yes" } else { "no" },
+            if window.has_workspace { "yes" } else { "no" },
+        );
     }
     Ok(())
 }
@@ -497,6 +683,145 @@ fn act(pid: Option<u32>, request: Request, json: bool, done: &str) -> Result<()>
         Response::Done => report_done(json, done),
         Response::Failed { error } => bail!(error),
         other => bail!(unexpected(other)),
+    }
+}
+
+/// How long a restarted pane gets for its resumed agent to report in before the restart is
+/// called a failure.
+const AGENT_RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// What happened to one pane under `sessions restart`.
+#[derive(Serialize)]
+struct RestartReport {
+    terminal_view_id: u64,
+    agent: Option<String>,
+    agent_session_id: Option<String>,
+    resume_command: Option<String>,
+    /// Whether the resumed agent was seen running in the pane again.
+    agent_running: bool,
+}
+
+/// Restarts one pane, or every pane running an agent, and checks that each resumed agent comes
+/// back before moving to the next.
+///
+/// Stops at the first pane whose agent does not come back: every later restart would end another
+/// agent the same way, and the panes not yet reached keep theirs.
+fn restart(
+    pid: Option<u32>,
+    terminal_view_id: Option<u64>,
+    all_agents: bool,
+    except_views: &[u64],
+    json: bool,
+) -> Result<()> {
+    let instance = client::select_instance(pid)?;
+    let panes = match instance.call(Request::ListPanes)? {
+        Response::Panes { panes } => panes,
+        Response::Failed { error } => bail!(error),
+        other => bail!(unexpected(other)),
+    };
+    let targets: Vec<PaneSummary> = if all_agents {
+        panes
+            .into_iter()
+            .filter(|pane| pane.has_running_agent)
+            .filter(|pane| {
+                pane.terminal_view_id
+                    .is_some_and(|id| !except_views.contains(&id))
+            })
+            .collect()
+    } else {
+        let id = terminal_view_id.context("Name a --terminal-view or pass --all-agents")?;
+        let pane = panes
+            .into_iter()
+            .find(|pane| pane.terminal_view_id == Some(id))
+            .with_context(|| format!("No pane in this instance has terminal view {id}"))?;
+        vec![pane]
+    };
+
+    let mut reports = Vec::new();
+    let mut failure = None;
+    for pane in targets {
+        let Some(id) = pane.terminal_view_id else {
+            continue;
+        };
+        let resume_command = match instance.call(Request::RestartSession {
+            terminal_view_id: id,
+        })? {
+            Response::Restarted { resume_command } => resume_command,
+            Response::Failed { error } => {
+                failure = Some(format!("Restarting terminal view {id} failed: {error}"));
+                break;
+            }
+            other => bail!(unexpected(other)),
+        };
+        let agent_running =
+            resume_command.is_some() && wait_for_agent(&instance, id, AGENT_RESUME_TIMEOUT);
+        let report = RestartReport {
+            terminal_view_id: id,
+            agent: pane.agent,
+            agent_session_id: pane.agent_session_id,
+            resume_command,
+            agent_running,
+        };
+        if !json {
+            println!("{}", describe_restart(&report));
+        }
+        let lost_agent = report.agent.is_some() && !report.agent_running;
+        reports.push(report);
+        if lost_agent {
+            failure = Some(format!(
+                "The agent in terminal view {id} did not come back; stopped before restarting                  any other pane"
+            ));
+            break;
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+    }
+    match failure {
+        Some(error) => bail!(error),
+        None => Ok(()),
+    }
+}
+
+/// Polls the instance until the pane reports a running agent again, or `timeout` passes.
+fn wait_for_agent(
+    instance: &client::Instance,
+    terminal_view_id: u64,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = instant::Instant::now() + timeout;
+    loop {
+        let running = matches!(
+            instance.call(Request::ListPanes),
+            Ok(Response::Panes { panes })
+                if panes.iter().any(|pane| {
+                    pane.terminal_view_id == Some(terminal_view_id) && pane.has_running_agent
+                })
+        );
+        if running {
+            return true;
+        }
+        if instant::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+fn describe_restart(report: &RestartReport) -> String {
+    let id = report.terminal_view_id;
+    match (&report.resume_command, report.agent_running) {
+        (Some(command), true) => format!("Restarted terminal view {id}; resumed `{command}`"),
+        (Some(command), false) => {
+            format!("Restarted terminal view {id}; `{command}` did not report back")
+        }
+        (None, _) => match &report.agent {
+            Some(agent) => {
+                format!("Restarted terminal view {id}; its {agent} session could not be resumed")
+            }
+            None => format!("Restarted terminal view {id}; it had no agent to resume"),
+        },
     }
 }
 

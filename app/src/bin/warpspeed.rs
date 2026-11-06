@@ -13,9 +13,9 @@
 //   * the AppId varies with elevation and with WARPSPEED_PROFILE, so an elevated instance uses a
 //     separate database from a normal one instead of contending for the same SQLite files.
 //
-// Multiple instances run concurrently because `SingleInstanceManager` is gated behind the
-// `release_bundle` cargo feature, which this build does not enable. Instances sharing one AppId
-// still share one database; use WARPSPEED_PROFILE to separate them.
+// GUI ownership is scoped to the AppId even without `release_bundle`: a second launch forwards
+// to the primary process before profile state is opened. Use WARPSPEED_PROFILE to run intentionally
+// isolated GUI profiles side by side.
 //
 // This is the fork's entry point: `cargo run -p warp --bin warpspeed`. It is the only binary
 // in the tree that both builds without warpdotdev SSH access and runs with dogfood flags on,
@@ -23,8 +23,11 @@
 #![cfg_attr(feature = "release_bundle", windows_subsystem = "windows")]
 
 use anyhow::Result;
+use sha2::{Digest as _, Sha256};
 use warp_core::channel::{Channel, ChannelConfig, ChannelState, OzConfig, WarpServerConfig};
 use warp_core::{AppId, features};
+
+const MAX_PROFILE_NAME_CHARS: usize = 48;
 
 /// Whether this process is running with an elevated token.
 ///
@@ -70,24 +73,74 @@ fn is_elevated() -> bool {
 
 /// Picks the application name, which is what separates data directories.
 ///
-/// * `WARPSPEED_PROFILE=foo` -> `WarpSpeed-foo`, for running isolated instances side by side.
+/// * `WARPSPEED_PROFILE=foo` -> `WarpSpeed-foo-<stable hash>`, for running isolated instances side
+///   by side without collisions after sanitization or filesystem case folding.
 /// * elevated, no profile set -> `WarpSpeedAdmin`, so an admin instance never shares a database
 ///   with a normal one. Sharing would mean two processes on one SQLite file, and files written
 ///   by the elevated process that the normal one may not be able to rewrite.
 /// * otherwise -> `WarpSpeed`.
-fn application_name() -> String {
-    match std::env::var("WARPSPEED_PROFILE") {
-        Ok(profile) if !profile.trim().is_empty() => {
-            let profile: String = profile
-                .trim()
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .collect();
-            format!("WarpSpeed-{profile}")
-        }
-        _ if is_elevated() => "WarpSpeedAdmin".to_owned(),
-        _ => "WarpSpeed".to_owned(),
+fn application_name_for(profile: Option<&str>, elevated: bool) -> String {
+    let profile = profile.unwrap_or_default();
+    let sanitized = profile
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
+        })
+        .take(MAX_PROFILE_NAME_CHARS)
+        .collect::<String>();
+    let profile = if profile.is_empty() {
+        String::new()
+    } else {
+        let digest = Sha256::digest(profile.as_bytes());
+        let hash = hex::encode(&digest[..16]);
+        let sanitized = if sanitized.is_empty() {
+            "profile"
+        } else {
+            &sanitized
+        };
+        format!("{sanitized}-{hash}")
+    };
+    if !profile.is_empty() {
+        format!("WarpSpeed-{profile}")
+    } else if elevated {
+        "WarpSpeedAdmin".to_owned()
+    } else {
+        "WarpSpeed".to_owned()
     }
+}
+
+fn application_name() -> String {
+    application_name_for(
+        std::env::var("WARPSPEED_PROFILE").ok().as_deref(),
+        is_elevated(),
+    )
+}
+
+#[cfg(feature = "crash_reporting")]
+fn configure_ojiichan() {
+    use warp_core::channel::CrashReportingConfig;
+
+    let dsn = std::env::var("WARPSPEED_OJIICHAN_DSN")
+        .or_else(|_| std::env::var("OJIICHAN_SENTRY_DSN"))
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(warp_core::paths::config_local_dir().join("ojiichan-dsn.txt"))
+                .ok()
+        });
+    let Some(dsn) = dsn else {
+        return;
+    };
+    let dsn = dsn.trim();
+    if dsn.is_empty() {
+        return;
+    }
+    if dsn.parse::<sentry::types::Dsn>().is_err() {
+        eprintln!("WarpSpeed: invalid Ojiichan DSN; crash reporting disabled");
+        return;
+    }
+    ChannelState::set_crash_reporting_config(CrashReportingConfig {
+        sentry_url: dsn.to_owned().into(),
+    });
 }
 
 fn main() -> Result<()> {
@@ -121,6 +174,12 @@ fn main() -> Result<()> {
     .with_additional_features(features::PREVIEW_FLAGS);
 
     ChannelState::set(state);
+    #[cfg(feature = "crash_reporting")]
+    configure_ojiichan();
 
     warp::run()
 }
+
+#[cfg(test)]
+#[path = "warpspeed_tests.rs"]
+mod tests;

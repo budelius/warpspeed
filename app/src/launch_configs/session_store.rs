@@ -1,6 +1,5 @@
-#[cfg(feature = "local_fs")]
-use std::collections::HashSet;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "local_fs")]
@@ -10,7 +9,11 @@ use std::time::SystemTime;
 #[cfg(feature = "local_fs")]
 use anyhow::bail;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "local_fs")]
+use instant::Instant;
+use serde::de::{SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_bytes_repr::ByteFmtSerializer;
 use sha2::{Digest, Sha256};
 
 use crate::ai::blocklist::SerializedBlockListItem;
@@ -22,15 +25,26 @@ use crate::app_state::{
 };
 use crate::launch_configs::launch_config::LaunchConfigWindowSource;
 use crate::terminal::CLIAgent;
+use crate::terminal::model::block::{
+    MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES, MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES, SerializedBlock,
+};
 
-const SESSION_FORMAT_VERSION: u32 = 1;
+const LEGACY_SESSION_FORMAT_VERSION: u32 = 1;
+const SESSION_FORMAT_VERSION: u32 = 2;
 const CATALOG_FORMAT_VERSION: u32 = 1;
+const MAX_PANE_STYLIZED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WINDOW_STYLIZED_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RESTORED_BLOCKS_PER_PANE: usize = 2_048;
+const MAX_RESTORED_BLOCKS_PER_WINDOW: usize = 4_096;
+const MAX_STORED_PANE_BLOCK_LISTS: usize = 256;
+const MAX_CHECKPOINT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const CATALOG_FILE_NAME: &str = "stored-sessions.json";
 const HISTORY_DIRECTORY_NAME: &str = "history";
 
 #[derive(Serialize, Deserialize)]
 struct StoredPaneBlocks {
     uuid: Vec<u8>,
+    #[serde(deserialize_with = "deserialize_pane_blocks")]
     blocks: Vec<SerializedBlockListItem>,
 }
 
@@ -41,7 +55,7 @@ struct StoredWindowSession {
     #[serde(default)]
     profile: Option<String>,
     window: WindowSnapshot,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_window_block_lists")]
     block_lists: Vec<StoredPaneBlocks>,
     #[serde(default)]
     saved_at_unix_seconds: i64,
@@ -50,6 +64,277 @@ struct StoredWindowSession {
 pub(crate) struct RestoredWindowSession {
     pub window: WindowSnapshot,
     pub block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+}
+
+#[derive(Default)]
+struct CheckpointBudgetStats {
+    original_output_bytes: usize,
+    retained_output_bytes: usize,
+    truncated_blocks: usize,
+}
+
+fn command_block(item: &SerializedBlockListItem) -> &SerializedBlock {
+    match item {
+        SerializedBlockListItem::Command { block } => block,
+    }
+}
+
+fn command_block_mut(item: &mut SerializedBlockListItem) -> &mut SerializedBlock {
+    match item {
+        SerializedBlockListItem::Command { block } => block,
+    }
+}
+
+fn output_requires_indicator(block: &SerializedBlock) -> bool {
+    !block.stylized_output.is_empty() || block.stylized_output_truncated
+}
+
+fn enforce_block_list_output_budget(blocks: &mut [SerializedBlockListItem], max_bytes: usize) {
+    let mut remaining = max_bytes;
+    let mut remaining_indicators = blocks
+        .iter()
+        .filter(|item| output_requires_indicator(command_block(item)))
+        .count();
+    for item in blocks.iter_mut().rev() {
+        let block = command_block_mut(item);
+        block.enforce_command_budget();
+        let requires_indicator = output_requires_indicator(block);
+        remaining_indicators = remaining_indicators.saturating_sub(usize::from(requires_indicator));
+        let reserved = remaining_indicators.saturating_mul(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES);
+        let mut block_budget = remaining
+            .saturating_sub(reserved)
+            .min(MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES);
+        if requires_indicator {
+            block_budget = block_budget.max(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES.min(remaining));
+        }
+        block.enforce_output_budget(block_budget);
+        remaining = remaining.saturating_sub(block.stylized_output.len());
+    }
+}
+
+struct PaneBlocksVisitor;
+
+impl<'de> Visitor<'de> for PaneBlocksVisitor {
+    type Value = Vec<SerializedBlockListItem>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a sequence of serialized terminal blocks")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut blocks = VecDeque::new();
+        let mut retained_bytes = 0usize;
+        let mut oldest_output_index = 0usize;
+        while let Some(mut item) = sequence.next_element()? {
+            let block = command_block_mut(&mut item);
+            block.enforce_command_budget();
+            block.enforce_output_budget(MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES);
+            retained_bytes = retained_bytes.saturating_add(block.stylized_output.len());
+            blocks.push_back(item);
+
+            if blocks.len() > MAX_RESTORED_BLOCKS_PER_PANE
+                && let Some(removed) = blocks.pop_front()
+            {
+                let SerializedBlockListItem::Command { block } = removed;
+                retained_bytes = retained_bytes.saturating_sub(block.stylized_output.len());
+                oldest_output_index = oldest_output_index.saturating_sub(1);
+            }
+
+            while retained_bytes > MAX_PANE_STYLIZED_OUTPUT_BYTES
+                && oldest_output_index < blocks.len()
+            {
+                let block = command_block_mut(&mut blocks[oldest_output_index]);
+                let previous_len = block.stylized_output.len();
+                let minimum_len = usize::from(output_requires_indicator(block))
+                    * MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES;
+                if previous_len <= minimum_len {
+                    oldest_output_index += 1;
+                    continue;
+                }
+                let overflow = retained_bytes - MAX_PANE_STYLIZED_OUTPUT_BYTES;
+                let block_budget = previous_len.saturating_sub(overflow).max(minimum_len);
+                block.enforce_output_budget(block_budget);
+                retained_bytes = retained_bytes
+                    .saturating_sub(previous_len)
+                    .saturating_add(block.stylized_output.len());
+                if block.stylized_output.len() >= previous_len
+                    || retained_bytes > MAX_PANE_STYLIZED_OUTPUT_BYTES
+                {
+                    oldest_output_index += 1;
+                }
+            }
+        }
+        Ok(blocks.into())
+    }
+}
+
+fn deserialize_pane_blocks<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SerializedBlockListItem>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_seq(PaneBlocksVisitor)
+}
+
+struct WindowBlockListsVisitor;
+
+impl<'de> Visitor<'de> for WindowBlockListsVisitor {
+    type Value = Vec<StoredPaneBlocks>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a sequence of stored terminal pane blocks")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut block_lists = Vec::new();
+        while let Some(pane) = sequence.next_element()? {
+            block_lists.push(pane);
+            enforce_checkpoint_budgets(&mut block_lists);
+        }
+        Ok(block_lists)
+    }
+}
+
+fn deserialize_window_block_lists<'de, D>(
+    deserializer: D,
+) -> Result<Vec<StoredPaneBlocks>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_seq(WindowBlockListsVisitor)
+}
+
+fn enforce_checkpoint_budgets(block_lists: &mut Vec<StoredPaneBlocks>) -> CheckpointBudgetStats {
+    for pane in block_lists.iter_mut() {
+        if pane.blocks.len() > MAX_RESTORED_BLOCKS_PER_PANE {
+            pane.blocks
+                .drain(..pane.blocks.len() - MAX_RESTORED_BLOCKS_PER_PANE);
+        }
+    }
+
+    if block_lists.len() > MAX_STORED_PANE_BLOCK_LISTS {
+        block_lists.sort_by_key(|pane| {
+            std::cmp::Reverse(
+                pane.blocks
+                    .iter()
+                    .filter_map(SerializedBlockListItem::start_ts)
+                    .max(),
+            )
+        });
+        block_lists.truncate(MAX_STORED_PANE_BLOCK_LISTS);
+    }
+
+    let block_count = block_lists
+        .iter()
+        .map(|pane| pane.blocks.len())
+        .sum::<usize>();
+    if block_count > MAX_RESTORED_BLOCKS_PER_WINDOW {
+        let mut locations = block_lists
+            .iter()
+            .enumerate()
+            .flat_map(|(pane_index, pane)| {
+                pane.blocks
+                    .iter()
+                    .enumerate()
+                    .map(move |(block_index, item)| (pane_index, block_index, item.start_ts()))
+            })
+            .collect::<Vec<_>>();
+        locations.sort_by_key(|(pane_index, block_index, timestamp)| {
+            std::cmp::Reverse((*timestamp, *pane_index, *block_index))
+        });
+        let retained = locations
+            .into_iter()
+            .take(MAX_RESTORED_BLOCKS_PER_WINDOW)
+            .map(|(pane_index, block_index, _)| (pane_index, block_index))
+            .collect::<HashSet<_>>();
+        for (pane_index, pane) in block_lists.iter_mut().enumerate() {
+            let mut block_index = 0usize;
+            pane.blocks.retain(|_| {
+                let keep = retained.contains(&(pane_index, block_index));
+                block_index += 1;
+                keep
+            });
+        }
+    }
+
+    for pane in block_lists.iter_mut() {
+        enforce_block_list_output_budget(&mut pane.blocks, MAX_PANE_STYLIZED_OUTPUT_BYTES);
+    }
+
+    let retained_after_pane_limits = block_lists
+        .iter()
+        .flat_map(|pane| &pane.blocks)
+        .map(|item| match item {
+            SerializedBlockListItem::Command { block } => block.stylized_output.len(),
+        })
+        .sum::<usize>();
+    if retained_after_pane_limits > MAX_WINDOW_STYLIZED_OUTPUT_BYTES {
+        let mut locations = block_lists
+            .iter()
+            .enumerate()
+            .flat_map(|(pane_index, pane)| {
+                pane.blocks
+                    .iter()
+                    .enumerate()
+                    .map(move |(block_index, item)| {
+                        (
+                            pane_index,
+                            block_index,
+                            item.start_ts()
+                                .map(|timestamp| timestamp.timestamp_millis()),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        locations.sort_by_key(|(_, _, timestamp)| std::cmp::Reverse(*timestamp));
+
+        let mut remaining = MAX_WINDOW_STYLIZED_OUTPUT_BYTES;
+        let mut remaining_indicators = locations
+            .iter()
+            .filter(|(pane_index, block_index, _)| {
+                output_requires_indicator(command_block(
+                    &block_lists[*pane_index].blocks[*block_index],
+                ))
+            })
+            .count();
+        for (pane_index, block_index, _) in locations {
+            let block = command_block_mut(&mut block_lists[pane_index].blocks[block_index]);
+            let requires_indicator = output_requires_indicator(block);
+            remaining_indicators =
+                remaining_indicators.saturating_sub(usize::from(requires_indicator));
+            let reserved = remaining_indicators.saturating_mul(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES);
+            let mut block_budget = remaining.saturating_sub(reserved);
+            if requires_indicator {
+                block_budget = block_budget.max(MIN_VISIBLE_TRUNCATED_OUTPUT_BYTES.min(remaining));
+            }
+            block.enforce_output_budget(block_budget);
+            remaining = remaining.saturating_sub(block.stylized_output.len());
+        }
+    }
+
+    block_lists.iter().flat_map(|pane| &pane.blocks).fold(
+        CheckpointBudgetStats::default(),
+        |mut stats, item| {
+            let SerializedBlockListItem::Command { block } = item;
+            stats.original_output_bytes = stats.original_output_bytes.saturating_add(
+                block
+                    .stylized_output_original_bytes
+                    .unwrap_or(block.stylized_output.len()),
+            );
+            stats.retained_output_bytes = stats
+                .retained_output_bytes
+                .saturating_add(block.stylized_output.len());
+            stats.truncated_blocks += usize::from(block.stylized_output_truncated);
+            stats
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,8 +703,129 @@ fn window_summary(
     })
 }
 
+#[cfg(all(feature = "local_fs", windows))]
+fn persist_temp_file(mut temp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    use std::thread;
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+    };
+
+    // Windows replacement fails while any short-lived reader denies delete sharing.
+    let mut retry_delays = [10, 20, 40, 80, 160].into_iter();
+    loop {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let tempfile::PersistError { error, file } = error;
+                let retryable = matches!(
+                    error.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_ACCESS_DENIED.0 as i32
+                            || code == ERROR_SHARING_VIOLATION.0 as i32
+                            || code == ERROR_LOCK_VIOLATION.0 as i32
+                );
+                if !retryable {
+                    return Err(error);
+                }
+                let Some(delay_ms) = retry_delays.next() else {
+                    return Err(error);
+                };
+                temp = file;
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "local_fs", not(windows)))]
+fn persist_temp_file(temp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    temp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
 #[cfg(feature = "local_fs")]
-fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
+fn deserialize_checkpoint(reader: impl std::io::Read) -> Result<StoredWindowSession> {
+    let mut stored =
+        StoredWindowSession::deserialize(&mut serde_json::Deserializer::from_reader(reader))?;
+    if !matches!(
+        stored.version,
+        LEGACY_SESSION_FORMAT_VERSION | SESSION_FORMAT_VERSION
+    ) {
+        bail!(
+            "Unsupported launch config session version {}",
+            stored.version
+        );
+    }
+    enforce_checkpoint_budgets(&mut stored.block_lists);
+    Ok(stored)
+}
+
+#[cfg(all(feature = "local_fs", unix))]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("Stored session path has no parent directory")?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(all(feature = "local_fs", not(unix)))]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    path.parent()
+        .context("Stored session path has no parent directory")?;
+    Ok(())
+}
+
+#[cfg(feature = "local_fs")]
+fn write_checkpoint_atomically(path: &Path, value: &StoredWindowSession) -> Result<()> {
+    write_checkpoint_atomically_before_replace(path, value, || Ok(()))
+}
+
+#[cfg(feature = "local_fs")]
+fn write_checkpoint_atomically_before_replace(
+    path: &Path,
+    value: &StoredWindowSession,
+    before_replace: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use std::io::{BufReader, BufWriter, Write};
+
+    let parent = path
+        .parent()
+        .context("Stored session path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create stored session directory {parent:?}"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("Failed to create temporary session file in {parent:?}"))?;
+    {
+        let mut writer = BufWriter::new(temp.as_file_mut());
+        let mut serializer = serde_json::Serializer::new(&mut writer);
+        let config = base64::engine::GeneralPurposeConfig::new();
+        let serializer =
+            ByteFmtSerializer::base64(&mut serializer, base64::alphabet::STANDARD, config);
+        value.serialize(serializer)?;
+        writer.flush()?;
+    }
+    temp.as_file().sync_all()?;
+    let checkpoint_bytes = temp.as_file().metadata()?.len();
+    if checkpoint_bytes > MAX_CHECKPOINT_FILE_BYTES {
+        bail!(
+            "New checkpoint is {checkpoint_bytes} bytes, exceeding the {MAX_CHECKPOINT_FILE_BYTES}-byte limit"
+        );
+    }
+    let validated = deserialize_checkpoint(BufReader::new(temp.reopen()?))?;
+    if validated.version != SESSION_FORMAT_VERSION {
+        bail!("New checkpoint did not validate as version {SESSION_FORMAT_VERSION}");
+    }
+    before_replace()?;
+    persist_temp_file(temp, path)
+        .with_context(|| format!("Failed to replace stored session at {path:?}"))?;
+    sync_parent_directory(path)?;
+    Ok(())
+}
+
+#[cfg(feature = "local_fs")]
+pub(crate) fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
     use std::io::{BufWriter, Write};
 
     let parent = path
@@ -435,9 +841,9 @@ fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
         writer.flush()?;
     }
     temp.as_file().sync_all()?;
-    temp.persist(path)
-        .map_err(|error| error.error)
+    persist_temp_file(temp, path)
         .with_context(|| format!("Failed to replace stored session at {path:?}"))?;
+    sync_parent_directory(path)?;
     Ok(())
 }
 
@@ -450,19 +856,27 @@ fn save_to_dir(
     preserve_existing_blocks: bool,
     saved_at_unix_seconds: i64,
 ) -> Result<StoredWindowSummary> {
+    let checkpoint_started = Instant::now();
     let mut window = window.clone();
     window.launch_config_source = Some(source.clone());
     let pane_uuids = terminal_pane_uuids(&window);
     let path = session_path(dir, source);
-    let stored_blocks = if preserve_existing_blocks {
-        std::fs::File::open(&path)
-            .ok()
-            .and_then(|file| {
-                serde_json::from_reader::<_, StoredWindowSession>(std::io::BufReader::new(file))
-                    .ok()
-            })
-            .map(|stored| stored.block_lists)
-            .unwrap_or_default()
+    let mut stored_blocks: Vec<StoredPaneBlocks> = if preserve_existing_blocks {
+        let stored_blocks = match read_stored_window(&path) {
+            Ok(mut stored) => {
+                migrate_legacy_checkpoint(&path, &mut stored)?;
+                stored.block_lists
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+        stored_blocks
             .into_iter()
             .filter(|pane| pane_uuids.contains(&pane.uuid))
             .collect()
@@ -476,6 +890,13 @@ fn save_to_dir(
             })
             .collect()
     };
+    let budget_stats = enforce_checkpoint_budgets(&mut stored_blocks);
+    log::debug!(
+        "Stored session output budget original_bytes={} retained_bytes={} truncated_blocks={}",
+        budget_stats.original_output_bytes,
+        budget_stats.retained_output_bytes,
+        budget_stats.truncated_blocks
+    );
     let stored = StoredWindowSession {
         version: SESSION_FORMAT_VERSION,
         source: source.clone(),
@@ -489,7 +910,15 @@ fn save_to_dir(
         saved_at_unix_seconds,
     };
 
-    write_json_atomically(&path, &stored)?;
+    write_checkpoint_atomically(&path, &stored)?;
+    log::debug!(
+        "Stored session checkpoint file_bytes={} duration_ms={} truncated_blocks={}",
+        std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+        checkpoint_started.elapsed().as_millis(),
+        budget_stats.truncated_blocks
+    );
     window_summary(dir, &path, &stored, None)
 }
 
@@ -506,18 +935,195 @@ fn save_to_dir(
 }
 
 #[cfg(feature = "local_fs")]
-fn read_stored_window(path: &Path) -> Result<StoredWindowSession> {
+fn read_checkpoint_file(path: &Path) -> Result<StoredWindowSession> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open launch config session at {path:?}"))?;
-    let stored: StoredWindowSession = serde_json::from_reader(std::io::BufReader::new(file))
-        .with_context(|| format!("Failed to parse launch config session at {path:?}"))?;
-    if stored.version != SESSION_FORMAT_VERSION {
+    let checkpoint_bytes = file.metadata()?.len();
+    if checkpoint_bytes > MAX_CHECKPOINT_FILE_BYTES {
         bail!(
-            "Unsupported launch config session version {} at {path:?}",
-            stored.version
+            "Launch config session is {checkpoint_bytes} bytes, exceeding the {MAX_CHECKPOINT_FILE_BYTES}-byte limit"
         );
     }
+    deserialize_checkpoint(std::io::BufReader::new(file))
+        .with_context(|| format!("Failed to parse launch config session at {path:?}"))
+}
+
+#[cfg(feature = "local_fs")]
+fn read_stored_window(path: &Path) -> Result<StoredWindowSession> {
+    match read_checkpoint_file(path) {
+        Ok(stored) => Ok(stored),
+        Err(active_error) => {
+            let backup_path = legacy_backup_path(path);
+            if !backup_path.is_file() {
+                return Err(active_error);
+            }
+            let stored = validate_legacy_backup(&backup_path).with_context(|| {
+                format!("Active checkpoint {path:?} is unreadable and its legacy backup is invalid")
+            })?;
+            warp_core::safe_warn!(
+                safe: ("Recovering an unreadable terminal session from its legacy backup"),
+                full: (
+                    "Recovering unreadable terminal session at {path:?} from {backup_path:?}: {active_error:#}"
+                )
+            );
+            Ok(stored)
+        }
+    }
+}
+
+#[cfg(feature = "local_fs")]
+fn legacy_backup_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session.json".to_owned());
+    path.with_file_name(format!("{file_name}.v1.bak"))
+}
+
+#[cfg(feature = "local_fs")]
+fn legacy_backup_checksum_path(backup_path: &Path) -> PathBuf {
+    let mut path = backup_path.as_os_str().to_os_string();
+    path.push(".sha256");
+    path.into()
+}
+
+#[cfg(feature = "local_fs")]
+fn file_sha256(path: &Path) -> Result<String> {
+    use std::io::{BufReader, Read};
+
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(feature = "local_fs")]
+fn write_checksum_atomically(path: &Path, checksum: &str) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .context("Stored session checksum path has no parent directory")?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    writeln!(temp, "{checksum}")?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    sync_parent_directory(path)?;
+    Ok(())
+}
+
+#[cfg(feature = "local_fs")]
+fn validate_legacy_backup(backup_path: &Path) -> Result<StoredWindowSession> {
+    let stored = read_checkpoint_file(backup_path)?;
+    if stored.version != LEGACY_SESSION_FORMAT_VERSION {
+        bail!("Legacy rollback checkpoint is not version 1");
+    }
+    let actual_checksum = file_sha256(backup_path)?;
+    let checksum_path = legacy_backup_checksum_path(backup_path);
+    if checksum_path.exists() {
+        let expected_checksum = std::fs::read_to_string(&checksum_path)?;
+        if expected_checksum.trim() != actual_checksum {
+            bail!("Legacy rollback checkpoint checksum does not match");
+        }
+    } else {
+        write_checksum_atomically(&checksum_path, &actual_checksum)?;
+    }
     Ok(stored)
+}
+
+#[cfg(feature = "local_fs")]
+fn ensure_legacy_backup(path: &Path) -> Result<PathBuf> {
+    use std::io::{BufReader, BufWriter, Read, Write};
+
+    let backup_path = legacy_backup_path(path);
+    if backup_path.exists() {
+        validate_legacy_backup(&backup_path)?;
+        return Ok(backup_path);
+    }
+
+    let parent = path
+        .parent()
+        .context("Stored session path has no parent directory")?;
+    let mut backup = tempfile::NamedTempFile::new_in(parent)?;
+    let mut source = BufReader::new(std::fs::File::open(path)?);
+    let mut hasher = Sha256::new();
+    {
+        let mut writer = BufWriter::new(backup.as_file_mut());
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            writer.write_all(&buffer[..read])?;
+        }
+        writer.flush()?;
+    }
+    backup.as_file().sync_all()?;
+    let checksum = hex::encode(hasher.finalize());
+    backup
+        .persist_noclobber(&backup_path)
+        .map_err(|error| error.error)?;
+    sync_parent_directory(&backup_path)?;
+    write_checksum_atomically(&legacy_backup_checksum_path(&backup_path), &checksum)?;
+    Ok(backup_path)
+}
+
+#[cfg(feature = "local_fs")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MigrationBoundary {
+    RollbackPrepared,
+    TemporaryValidated,
+    ActiveReplaced,
+}
+
+#[cfg(feature = "local_fs")]
+fn migrate_legacy_checkpoint(path: &Path, stored: &mut StoredWindowSession) -> Result<()> {
+    migrate_legacy_checkpoint_with_hook(path, stored, |_| Ok(()))
+}
+
+#[cfg(feature = "local_fs")]
+fn migrate_legacy_checkpoint_with_hook(
+    path: &Path,
+    stored: &mut StoredWindowSession,
+    mut boundary_hook: impl FnMut(MigrationBoundary) -> Result<()>,
+) -> Result<()> {
+    if stored.version != LEGACY_SESSION_FORMAT_VERSION {
+        return Ok(());
+    }
+
+    let migration_started = Instant::now();
+    let source_bytes = std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    ensure_legacy_backup(path)?;
+    boundary_hook(MigrationBoundary::RollbackPrepared)?;
+
+    stored.version = SESSION_FORMAT_VERSION;
+    if let Err(error) = write_checkpoint_atomically_before_replace(path, stored, || {
+        boundary_hook(MigrationBoundary::TemporaryValidated)
+    }) {
+        stored.version = LEGACY_SESSION_FORMAT_VERSION;
+        return Err(error).context("Failed to migrate stored terminal session");
+    }
+    boundary_hook(MigrationBoundary::ActiveReplaced)?;
+    log::info!(
+        "Migrated stored terminal session source_bytes={} destination_bytes={} duration_ms={} rollback_retained=true",
+        source_bytes,
+        std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+        migration_started.elapsed().as_millis()
+    );
+    Ok(())
 }
 
 #[cfg(feature = "local_fs")]
@@ -660,7 +1266,10 @@ fn archive_window(
     let source_path = dir.join(&summary.checkpoint_path);
     let stored = read_stored_window(&source_path)?;
     let archive_path = history_path(dir, &stored.source, history_id);
-    write_json_atomically(&archive_path, &stored)?;
+    let mut stored = stored;
+    stored.version = SESSION_FORMAT_VERSION;
+    enforce_checkpoint_budgets(&mut stored.block_lists);
+    write_checkpoint_atomically(&archive_path, &stored)?;
     window_summary(dir, &archive_path, &stored, Some(history_id.to_owned()))
 }
 
@@ -880,11 +1489,31 @@ fn is_safe_relative_path(path: &Path) -> bool {
 
 #[cfg(feature = "local_fs")]
 fn load_from_path(path: &Path, source: &LaunchConfigWindowSource) -> Result<RestoredWindowSession> {
+    let restoration_started = Instant::now();
     let mut stored = read_stored_window(path)?;
     if !sources_match(&stored.source, source) {
         bail!("Session config snapshot source does not match {path:?}");
     }
+    if let Err(error) = migrate_legacy_checkpoint(path, &mut stored) {
+        warp_core::safe_warn!(
+            safe: ("Restoring a legacy terminal session without migrating it"),
+            full: ("Restoring legacy terminal session at {path:?} without migration: {error:#}")
+        );
+    }
     identify_agent_sessions(&mut stored.window, stored.saved_at_unix_seconds);
+    let restored_block_count = stored
+        .block_lists
+        .iter()
+        .map(|pane| pane.blocks.len())
+        .sum::<usize>();
+    log::debug!(
+        "Loaded stored terminal session file_bytes={} block_count={} duration_ms={}",
+        std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+        restored_block_count,
+        restoration_started.elapsed().as_millis()
+    );
     Ok(RestoredWindowSession {
         window: stored.window,
         block_lists: Arc::new(
@@ -1074,7 +1703,8 @@ fn clone_checkpoints_in_dir(
         stored.saved_at_unix_seconds = saved_at_unix_seconds;
 
         let path = session_path(dir, &to_window);
-        write_json_atomically(&path, &stored)?;
+        stored.version = SESSION_FORMAT_VERSION;
+        write_checkpoint_atomically(&path, &stored)?;
         summaries.push(window_summary(dir, &path, &stored, None)?);
         sources.push(to_window);
     }

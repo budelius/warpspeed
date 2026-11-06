@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use warpui::AppContext;
 
-use super::protocol::{PaneSummary, Request, Response, StoredSessionInfo};
+use super::protocol::{
+    DetachedSessionSummary, PaneSummary, Request, Response, StoredSessionInfo, WindowSummary,
+};
 
 /// Carries out one request.
 pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
@@ -19,6 +21,8 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
             version: super::build_identity(),
         },
         Request::ListPanes => list_panes(ctx),
+        Request::ListWindows => list_windows(ctx),
+        Request::ListDetachedSessions => list_detached_sessions(ctx),
         Request::DetachSession { session_id } => detach(session_id.into(), ctx),
         Request::AttachSession { session_id } => attach(session_id.into(), ctx),
         Request::ListStoredSessions => list_stored_sessions(),
@@ -29,6 +33,10 @@ pub(super) fn handle(request: Request, ctx: &mut AppContext) -> Response {
             cwd,
         } => move_session_to_agent_ctrl(terminal_view_id, cwd.map(PathBuf::from), ctx),
         Request::MoveStatus { terminal_view_id } => move_status(terminal_view_id, ctx),
+        Request::RestartSessionInCurrentSupervisor { terminal_view_id } => {
+            restart_session_in_current_supervisor(terminal_view_id, ctx)
+        }
+        Request::RestartSession { terminal_view_id } => restart_session(terminal_view_id, ctx),
         #[cfg(feature = "local_tty")]
         Request::CliAgentEvent {
             token,
@@ -121,6 +129,51 @@ fn list_panes(ctx: &mut AppContext) -> Response {
 fn list_panes(_ctx: &mut AppContext) -> Response {
     Response::Failed {
         error: "This build has no local terminals".to_owned(),
+    }
+}
+
+fn list_windows(ctx: &mut AppContext) -> Response {
+    use std::collections::HashSet;
+
+    use warpui::SingletonEntity;
+
+    let active_window = ctx.windows().active_window();
+    let workspace_windows = crate::workspace::WorkspaceRegistry::as_ref(ctx)
+        .all_workspaces(ctx)
+        .into_iter()
+        .map(|(window_id, _)| window_id)
+        .collect::<HashSet<_>>();
+    let windows = ctx
+        .window_ids()
+        .enumerate()
+        .map(|(index, window_id)| WindowSummary {
+            window_id: window_id.to_string(),
+            index: index as u32,
+            is_active: active_window == Some(window_id),
+            has_workspace: workspace_windows.contains(&window_id),
+        })
+        .collect();
+    Response::Windows { windows }
+}
+
+fn list_detached_sessions(ctx: &mut AppContext) -> Response {
+    match crate::terminal::detached_sessions::list_checked(ctx) {
+        Ok(sessions) => Response::DetachedSessions {
+            sessions: sessions
+                .into_iter()
+                .map(|session| DetachedSessionSummary {
+                    session_id: session.session_id.as_u64(),
+                    title: session.title,
+                    working_directory: session.cwd.to_string_lossy().into_owned(),
+                    detached_for_seconds: session.detached_for_seconds,
+                    shell_pid: session.shell_pid,
+                    session_uuid_hex: session.session_uuid_hex,
+                })
+                .collect(),
+        },
+        Err(error) => Response::Failed {
+            error: format!("{error:?}"),
+        },
     }
 }
 
@@ -256,6 +309,56 @@ fn move_session_to_agent_ctrl(
 fn move_session_to_agent_ctrl(_: u64, _: Option<PathBuf>, _: &mut AppContext) -> Response {
     Response::Failed {
         error: "This build cannot move sessions to AgentCtrl".to_owned(),
+    }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn restart_session_in_current_supervisor(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+    let held = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
+        workspace_holding_terminal_view(view_id, ctx).map(|workspace| (view_id, workspace))
+    });
+    let Some((view_id, workspace)) = held else {
+        return Response::Failed {
+            error: format!("No pane in this instance has terminal view {terminal_view_id}"),
+        };
+    };
+    match workspace.update(ctx, |workspace, ctx| {
+        workspace.restart_in_current_supervisor_unattended(view_id, ctx)
+    }) {
+        Ok(()) => Response::Done,
+        Err(error) => Response::Failed { error },
+    }
+}
+
+#[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+fn restart_session_in_current_supervisor(_: u64, _: &mut AppContext) -> Response {
+    Response::Failed {
+        error: "This build has no local terminals".to_owned(),
+    }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn restart_session(terminal_view_id: u64, ctx: &mut AppContext) -> Response {
+    let held = terminal_view_entity_id(terminal_view_id).and_then(|view_id| {
+        workspace_holding_terminal_view(view_id, ctx).map(|workspace| (view_id, workspace))
+    });
+    let Some((view_id, workspace)) = held else {
+        return Response::Failed {
+            error: format!("No pane in this instance has terminal view {terminal_view_id}"),
+        };
+    };
+    match workspace.update(ctx, |workspace, ctx| {
+        workspace.restart_shell_unattended(view_id, ctx)
+    }) {
+        Ok(resume_command) => Response::Restarted { resume_command },
+        Err(error) => Response::Failed { error },
+    }
+}
+
+#[cfg(not(all(feature = "local_fs", feature = "local_tty")))]
+fn restart_session(_: u64, _: &mut AppContext) -> Response {
+    Response::Failed {
+        error: "This build has no local terminals".to_owned(),
     }
 }
 

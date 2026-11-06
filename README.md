@@ -44,7 +44,9 @@ File-backed session configs compose reusable tab configs into one persistent, la
 
 Use the graphical **Sign in with STOZN** flow. WarpSpeed opens a one-time dashboard approval page, shows a confirmation code that must match the page, and stores the resulting expiring desktop credential in its own state directory (DPAPI-protected for the current OS user on Windows); no Warp account or prior `stozn auth` command is required. `STOZN_TOKEN` and the legacy `~/.stozn.json` remain non-graphical migration fallbacks.
 
-Create or select the task in the STOZN Dashboard, choose the configured agent there, and start the managed session. After AgentCtrl accepts the launch, the dashboard opens a strict `warpspeed://agent-ctrl/attach?...` deep link. WarpSpeed validates the compiled staging environment, fleet, and job ID, then opens only that session's normalized event viewer with bounded `send`, `close`, `stop`, and `detach` controls. WarpSpeed deliberately has no duplicate task picker or task-creation UI.
+Create or select the task in the STOZN Dashboard, choose the configured agent there, and start the managed session. After AgentCtrl accepts the launch, the dashboard opens a strict `warpspeed://agent-ctrl/attach?...` deep link. WarpSpeed validates the compiled staging environment, fleet, and job ID. An eligible Pi run opens Pi's actual remote full-screen terminal through the same authenticated, one-use terminal gateway as the STOZN Dashboard; other states and backends open the clearly labelled Event history / fallback viewer. WarpSpeed deliberately has no duplicate task picker or task-creation UI.
+
+WarpSpeed connects to AgentCtrl through its authenticated public API; callers cannot provide an arbitrary API or SSH target.
 
 The lower-level CLI remains available for automation and recovery:
 
@@ -63,11 +65,23 @@ warpspeed agent-ctrl archive <job-id> --yes  # `remove` is an alias
 
 Only terminal runs can be archived; stop a live or paused run first. Archiving removes the run from default managed-session lists while retaining its server-side events and command audit.
 
-`open` and a following `attach` use a full-screen conversation UI when stdin and stdout are connected to a terminal. Type a follow-up and press Enter, scroll with the arrow or page keys, close agent input with Ctrl-D, request a stop with Ctrl-X, and detach without stopping the run with Esc or Ctrl-C. Type `/help` or press F1 for run-control and local-shell commands. `/shell` or Ctrl-O opens an interactive local shell; `!<command>`, `/ssh`, and `/tmux` suspend the UI and run against the local terminal, returning to AgentCtrl when the program exits. Use `//` to send an agent message that begins with `/`. Use `attach --once`, `--json`, or redirected input/output for the line-oriented interface.
+For an eligible native Pi run, use Pi's own keybindings and commands, including `/models`. Press `Ctrl-]` to detach without stopping Pi; `tmux` keeps the same process and screen alive for a later `open` or `attach`. A normal second writer is rejected. `attach --takeover` is the explicit audited choice to detach the prior writer and take control. The native screen is unredacted and travels only through the active authenticated gateway connection; the gateway does not retain its input or output. Do not paste or capture it into logs or tickets.
 
-Every new managed session requires a dashboard-validated STOZN task. The dashboard endpoint, environment, and fleet identity are compiled/operator-owned; callers cannot supply controller URLs or runtime overrides. Local bookmarks contain only safe identifiers, labels, cursors, state, and timestamps. Closing `attach` never stops the Kubernetes process.
+When a native terminal is starting, paused, finished, unsupported, or lost, WarpSpeed explains the state and opens Event history / fallback. That viewer supports bounded lifecycle controls and local `/shell`, but it no longer accepts arbitrary `/ssh` or `/tmux` target commands. `attach --once`, `--json`, and redirected input/output remain event-only recovery paths. If the full-screen launcher fails, retry from a real terminal with `warpspeed agent-ctrl attach <job-id> --environment staging`. WarpSpeed uses the public terminal gateway so the workstation does not need a private route to the worker pod; direct private SSH remains only as a compatibility fallback for deployments without the gateway endpoint.
+
+Every new managed session requires a dashboard-validated STOZN task. The dashboard endpoint, environment, fleet identity, SSH host/user/port, forced command, and tmux target are operator-owned; callers cannot supply controller URLs or runtime/SSH overrides. Local bookmarks contain only safe identifiers, labels, cursors, generation, transport kind, state, and timestamps. Closing an attachment never stops the Kubernetes process. `tmux` survives client disconnects, not worker-pod or node loss; pause/resume deliberately creates a new execution generation.
 
 ## Recovering CLI agent sessions
+
+On Windows, a restored pane held by an older build offers **Attach** to reconnect without restarting
+its shell or agent. The old supervisor must use a compatible protocol and have no window attached.
+**Take over** still ends the old session and resumes here; **Start fresh** leaves it running there.
+
+Both **Pane menu → Sessions…** and **Command Palette → Sessions: search** list local sessions and
+all non-archived AgentCtrl runs available to your staging account, across repositories and nodes.
+Search by repository, agent, branch, node, or job ID (or use `AgentCtrl` to show remote runs).
+Running sessions attach in the originating pane, paused sessions resume before attaching, and
+finished sessions open their transcript. A busy pane is preserved by opening a split beside it.
 
 A pane that was running a CLI agent records which agent it was, in which shell and directory, and the session ID it reported. Restoring the window -- including on a fresh boot -- puts the resume command back in that pane's input, ready to run: `claude --resume <id>`, `codex resume <id>`, `vibe --resume <id>` and `pi --session <id>`. Other agents are recorded but not resumed, because their CLIs cannot be told to open a session by ID.
 

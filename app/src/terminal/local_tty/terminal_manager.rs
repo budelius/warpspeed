@@ -28,9 +28,7 @@ use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, Vie
 
 use super::event_loop::EventLoop;
 use super::shell::{ShellStarter, ShellStarterSource, ShellStarterSourceOrWslName};
-#[cfg(unix)]
-use super::spawner::PtySpawner;
-use super::spawner::{PtySpawnHooks, PtySpawnMode};
+use super::spawner::{PtySpawnHooks, PtySpawnMode, PtySpawner};
 #[cfg(unix)]
 use super::terminal_attributes::TerminalAttributesPoller;
 use super::{mio_channel, recorder};
@@ -175,8 +173,9 @@ pub struct TerminalManager<S> {
     pub(super) held_agent: Option<HeldAgent>,
     /// A resume command the guard withheld because the holder still has the session.
     pub(super) withheld_restore: Option<WithheldRestore>,
-    /// Whether a take-over is ending the held session, so a second click does not start another.
-    take_over_in_flight: bool,
+    pub(super) pending_held_attach: Option<WithheldRestore>,
+    /// Prevents overlapping attach and take-over requests.
+    held_session_operation_in_flight: bool,
     /// Test-only: replaces the work of ending a held session.
     #[cfg(test)]
     take_over_hook: Option<TakeOverHook>,
@@ -364,8 +363,15 @@ where
         self.0.session_holder.clone()
     }
 
+    fn held_agent(&self) -> Option<HeldAgent> {
+        self.0.held_agent.clone()
+    }
+
     fn withheld_restore(&self) -> Option<WithheldRestore> {
-        self.0.withheld_restore.clone()
+        self.0
+            .withheld_restore
+            .clone()
+            .or_else(|| self.0.pending_held_attach.clone())
     }
 
     fn restore_persistent_session(
@@ -399,6 +405,14 @@ where
     fn restore_session_holder(&mut self, holder: Option<SessionHolder>, agent: Option<HeldAgent>) {
         self.0.session_holder = holder;
         self.0.held_agent = agent;
+    }
+
+    #[cfg(windows)]
+    fn attach_held_session(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool {
+        self.0.attach_held_session_inner(ctx)
     }
 
     fn take_over_held_session(
@@ -773,7 +787,8 @@ impl<S> TerminalManager<S> {
             session_holder: None,
             held_agent: None,
             withheld_restore: None,
-            take_over_in_flight: false,
+            pending_held_attach: None,
+            held_session_operation_in_flight: false,
             #[cfg(test)]
             take_over_hook: None,
             #[cfg(test)]
@@ -1035,13 +1050,13 @@ impl<S> TerminalManager<S> {
         S: TerminalSurface,
         <S as Entity>::Event: PtyIntentEvent,
     {
-        if self.take_over_in_flight {
+        if self.held_session_operation_in_flight {
             return true;
         }
         let Some(restore) = self.withheld_restore.clone() else {
             return false;
         };
-        self.take_over_in_flight = true;
+        self.held_session_operation_in_flight = true;
         self.view
             .update(ctx, |view, ctx| view.on_take_over_started(ctx));
         let generation = self.session_generation;
@@ -1072,7 +1087,7 @@ impl<S> TerminalManager<S> {
                 {
                     terminal_manager.take_over_answers += 1;
                 }
-                terminal_manager.take_over_in_flight = false;
+                terminal_manager.held_session_operation_in_flight = false;
                 if terminal_manager.session_generation != generation {
                     // The holder's session is gone, so its prompt has nothing left to offer, but
                     // the command belonged to the session this pane has since replaced.
@@ -1091,7 +1106,9 @@ impl<S> TerminalManager<S> {
                         if let Some(restore) = terminal_manager.withheld_restore.take() {
                             terminal_manager.view.update(ctx, |view, ctx| {
                                 view.on_withheld_restore_resolved(ctx);
-                                view.set_pending_restore_command(restore.command, ctx);
+                                if !restore.command.is_empty() {
+                                    view.set_pending_restore_command(restore.command, ctx);
+                                }
                             });
                         }
                         return;
@@ -1106,6 +1123,97 @@ impl<S> TerminalManager<S> {
                 });
             },
         );
+        true
+    }
+
+    #[cfg(windows)]
+    pub(super) fn attach_held_session_inner(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) -> bool
+    where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        use warp_terminal::local_tty::windows::supervisor_client::WindowsTerminalSupervisorClient;
+
+        if self.held_session_operation_in_flight {
+            return true;
+        }
+        let Some(restore) = self.withheld_restore.clone() else {
+            return false;
+        };
+        let (Some(holder), Some(session_id), HeldVerdict::Detached) =
+            (&restore.holder, restore.session_id, restore.verdict)
+        else {
+            return false;
+        };
+        if !self.view.as_ref(ctx).can_replace_shell_for_held_attach(ctx) {
+            self.view.update(ctx, |view, ctx| {
+                view.on_held_attach_failed(
+                    "This pane is busy or contains input. Finish or clear it before attaching."
+                        .to_owned(),
+                    ctx,
+                )
+            });
+            return true;
+        }
+        self.held_session_operation_in_flight = true;
+        self.view
+            .update(ctx, |view, ctx| view.on_held_attach_started(ctx));
+        let generation = self.session_generation;
+        let channel = holder.channel.clone();
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        ctx.background_executor()
+            .spawn(async move {
+                let result = WindowsTerminalSupervisorClient::for_existing_pipe(channel).and_then(
+                    |client| {
+                        client.check_detached(session_id)?;
+                        Ok(Arc::new(client))
+                    },
+                );
+                let _ = sender.send(result);
+            })
+            .detach();
+        ctx.spawn(receiver, move |manager: &mut Box<dyn TerminalManagerTrait>, result, ctx| {
+            let Some(manager) = manager.as_mut().as_any_mut().downcast_mut::<Self>() else {
+                return;
+            };
+            if manager.session_generation != generation {
+                return;
+            }
+            manager.held_session_operation_in_flight = false;
+            if manager.withheld_restore.as_ref() != Some(&restore) {
+                return;
+            }
+            let result = result
+                .map_err(|_| anyhow::anyhow!("The attach request was cancelled"))
+                .and_then(|result| result);
+            match result {
+                Ok(client) => {
+                    if !manager.view.as_ref(ctx).can_replace_shell_for_held_attach(ctx) {
+                        manager.view.update(ctx, |view, ctx| view.on_held_attach_failed(
+                            "This pane became busy while connecting. Its shell was left running.".to_owned(),
+                            ctx,
+                        ));
+                        return;
+                    }
+                    PtySpawner::handle(ctx).update(ctx, |spawner, _| {
+                        spawner.adopt_supervisor(session_id, client);
+                    });
+                    manager.restart_session_inner(None, None, Some(session_id), ctx);
+                    manager.cli_agent_resume_command = None;
+                    manager.session_holder = restore.holder.clone();
+                    manager.repaint_screen_on_attach = true;
+                    manager.pending_held_attach = Some(restore);
+                }
+                Err(error) => {
+                    manager.view.update(ctx, |view, ctx| {
+                        view.on_held_attach_failed(format!("{error:#}"), ctx);
+                    });
+                }
+            }
+        });
         true
     }
 
@@ -1263,7 +1371,8 @@ impl<S> TerminalManager<S> {
         //    it correct. Nothing can run in between: `join` blocks the main
         //    thread, so no spawned callback is dispatched during step 2.
         self.session_generation = self.session_generation.wrapping_add(1);
-        self.take_over_in_flight = false;
+        self.held_session_operation_in_flight = false;
+        self.pending_held_attach = None;
         // A withheld command was for the replaced session; left in place, its prompt would offer to
         // take over or resume into a shell that never asked for it.
         if self.withheld_restore.take().is_some() {
@@ -1581,12 +1690,37 @@ fn on_shell_determined<S: TerminalSurface>(
     // Consumed by this attach: a later restart of the same pane replaces the
     // session rather than taking one over, and must not repaint.
     let include_snapshot = std::mem::take(&mut manager.repaint_screen_on_attach);
-    let attached = manager.persistent_session_id.and_then(|session_id| {
+    let held = manager.held_elsewhere();
+    #[cfg(windows)]
+    let include_snapshot = if let Some((Some(holder), HeldVerdict::Detached)) = &held
+        && let Some(session_id) = manager.persistent_session_id
+    {
+        use warp_terminal::local_tty::windows::supervisor_client::WindowsTerminalSupervisorClient;
+        if let Ok(client) =
+            WindowsTerminalSupervisorClient::for_existing_pipe(holder.channel.clone())
+        {
+            PtySpawner::handle(ctx).update(ctx, |spawner, _| {
+                spawner.adopt_supervisor(session_id, Arc::new(client));
+            });
+        }
+        true
+    } else {
+        include_snapshot
+    };
+    let mut attach_error = None;
+    let attachable_session_id = manager.persistent_session_id.filter(|_| {
+        !matches!(
+            held,
+            Some((_, HeldVerdict::Attached | HeldVerdict::HeldByUnknown))
+        )
+    });
+    let attached = attachable_session_id.and_then(|session_id| {
         let size = manager.model().lock().block_list().size().to_owned();
         match Pty::attach(session_id, &size, include_snapshot, ctx) {
             Ok(attached) => attached,
             Err(error) => {
                 log::warn!("Failed to reattach terminal session: {error:#}");
+                attach_error = Some(format!("{error:#}"));
                 None
             }
         }
@@ -1674,33 +1808,35 @@ fn on_shell_determined<S: TerminalSurface>(
 
     if reattached {
         manager.cli_agent_resume_command = None;
-    } else if let Some(command) = manager.cli_agent_resume_command.take() {
-        let held = manager
-            .held_elsewhere()
-            .map(|(holder, verdict)| WithheldRestore {
-                command: command.clone(),
-                holder,
-                session_id: manager.persistent_session_id,
-                agent: manager.held_agent.clone(),
-                verdict,
-            });
-        match held {
-            Some(restore) => {
-                log::info!(
-                    "Withholding the resume command: session {:?} is still held ({:?}) by {:?}",
-                    restore.session_id.map(|session_id| session_id.as_u64()),
-                    restore.verdict,
-                    restore.holder
-                );
-                manager.withheld_restore = Some(restore.clone());
-                manager
-                    .view
-                    .update(ctx, |view, ctx| view.withhold_restore_command(restore, ctx));
+        manager.pending_held_attach = None;
+    } else if let Some(restore) = manager.pending_held_attach.take() {
+        manager.withheld_restore = Some(restore.clone());
+        manager.view.update(ctx, |view, ctx| {
+            view.withhold_restore_command(restore, ctx);
+            view.on_held_attach_failed(
+                attach_error.unwrap_or_else(|| "The old session could not be attached".to_owned()),
+                ctx,
+            );
+        });
+    } else if let Some((holder, verdict)) = held {
+        let restore = WithheldRestore {
+            command: manager.cli_agent_resume_command.take().unwrap_or_default(),
+            holder,
+            session_id: manager.persistent_session_id,
+            agent: manager.held_agent.clone(),
+            verdict,
+        };
+        manager.withheld_restore = Some(restore.clone());
+        manager.view.update(ctx, |view, ctx| {
+            view.withhold_restore_command(restore, ctx);
+            if let Some(error) = attach_error {
+                view.on_held_attach_failed(error, ctx);
             }
-            None => manager.view.update(ctx, |view, ctx| {
-                view.set_pending_restore_command(command, ctx);
-            }),
-        }
+        });
+    } else if let Some(command) = manager.cli_agent_resume_command.take() {
+        manager.view.update(ctx, |view, ctx| {
+            view.set_pending_restore_command(command, ctx);
+        });
     }
 
     let active_session_id = pty.persistent_session_id().unwrap_or(generated_session_id);
@@ -1712,7 +1848,24 @@ fn on_shell_determined<S: TerminalSurface>(
         });
     }
     manager.persistent_session_id = pty.persistent_session_id();
-    manager.session_holder = Some(session_holder::current_holder());
+    #[cfg(windows)]
+    let adopted_holder = reattached
+        .then(|| PtySpawner::as_ref(ctx).adopted_supervisor_channel(active_session_id))
+        .flatten()
+        .map(|channel| {
+            manager
+                .session_holder
+                .clone()
+                .filter(|holder| holder.channel == channel)
+                .unwrap_or_else(|| SessionHolder {
+                    channel,
+                    version: "unknown".to_owned(),
+                    pid: std::process::id(),
+                })
+        });
+    #[cfg(not(windows))]
+    let adopted_holder = None;
+    manager.session_holder = Some(adopted_holder.unwrap_or_else(session_holder::current_holder));
     manager
         .model()
         .lock()
@@ -1741,6 +1894,7 @@ fn on_shell_determined<S: TerminalSurface>(
     }
 
     manager.view.update(ctx, |surface, ctx| {
+        surface.on_supervisor_changed(manager.session_holder.clone(), ctx);
         surface.on_shell_pid_determined(pid, ctx);
         surface.on_shell_determined(ctx);
         surface.on_active_shell_launch_data_updated(Some(shell_launch_data), ctx);

@@ -1,3 +1,4 @@
+pub(crate) mod agent_process_scan;
 pub mod event;
 pub mod listener;
 #[cfg(not(target_family = "wasm"))]
@@ -501,7 +502,7 @@ impl CLIAgentSessionsModel {
                 terminal_view_id,
                 agent,
             });
-            ctx.dispatch_global_action("workspace:save_app", &());
+            ctx.dispatch_global_action("workspace:save_app", ());
         });
     }
 

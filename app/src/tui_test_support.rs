@@ -206,7 +206,7 @@ pub fn add_tui_history_test_models(
         ctx.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
     let (precmd_tx, precmd_rx) = async_channel::bounded(1);
     ctx.subscribe_to_model(&model_events, move |_, event, _| {
-        if matches!(event, ModelEvent::Handler(AnsiHandlerEvent::Precmd)) {
+        if matches!(event, ModelEvent::Handler(AnsiHandlerEvent::Precmd { .. })) {
             let _ = precmd_tx.try_send(());
         }
     });

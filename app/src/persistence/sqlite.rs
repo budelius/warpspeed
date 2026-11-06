@@ -65,7 +65,7 @@ use super::model::{
 };
 use super::{
     BlockCompleted, FinishedCommandMetadata, ModelEvent, PersistedData, PersistedDataScope,
-    PersistenceScope, StartedCommandMetadata, WriterHandles, schema,
+    PersistenceAccess, PersistenceScope, StartedCommandMetadata, WriterHandles, schema,
 };
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -133,25 +133,37 @@ pub fn initialize(
     ctx: &mut AppContext,
     scope: PersistenceScope,
     data_scope: PersistedDataScope,
+    access: PersistenceAccess,
 ) -> (Option<Box<PersistedData>>, Option<WriterHandles>) {
     unsafe {
         // Set up logging before any SQLite calls.
         init_logging();
     }
     let database_path = database_file_path_for_scope(&scope);
-    match init_db(&scope) {
+    let connection = match access {
+        PersistenceAccess::ReadWrite => init_db(&scope),
+        PersistenceAccess::ReadOnly => database_path
+            .to_str()
+            .ok_or_else(|| anyhow!("Failed to convert db path to a string"))
+            .and_then(establish_ro_connection),
+    };
+    match connection {
         Ok(mut conn) => {
             let mut persisted_data = read_persisted_data(&mut conn, ctx, data_scope);
 
-            let writer_handles = match start_writer(conn, database_path.clone()) {
-                Ok(writer_handles) => Some(writer_handles),
-                Err(err) => {
-                    send_telemetry_from_app_ctx!(
-                        TelemetryEvent::DatabaseWriteError(err.to_string()),
-                        ctx
-                    );
-                    report_db_error("starting writer", err, &database_path);
-                    None
+            let writer_handles = if access == PersistenceAccess::ReadOnly {
+                None
+            } else {
+                match start_writer(conn, database_path.clone()) {
+                    Ok(writer_handles) => Some(writer_handles),
+                    Err(err) => {
+                        send_telemetry_from_app_ctx!(
+                            TelemetryEvent::DatabaseWriteError(err.to_string()),
+                            ctx
+                        );
+                        report_db_error("starting writer", err, &database_path);
+                        None
+                    }
                 }
             };
 
@@ -227,13 +239,15 @@ fn establish_connection(database_url: &str, read_only: bool) -> Result<SqliteCon
     // The auto-checkpoint interval is lowered from the default of 1000 because all writes
     // already run in a background thread and can afford to checkpoint slightly more often.
     // At the default value, the WAL can grow larger than a typical database (for our usage).
-    conn.batch_execute(
-        r#"
-        PRAGMA journal_mode=WAL;
-        PRAGMA wal_autocheckpoint=500;
-    "#,
-    )
-    .context("Failed to enable WAL")?;
+    if !read_only {
+        conn.batch_execute(
+            r#"
+            PRAGMA journal_mode=WAL;
+            PRAGMA wal_autocheckpoint=500;
+        "#,
+        )
+        .context("Failed to enable WAL")?;
+    }
 
     Ok(conn)
 }
@@ -625,6 +639,15 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                             log::info!("Shutting down SQLite writer thread");
                             return;
                         }
+                        #[cfg(feature = "local_fs")]
+                        ModelEvent::RecoverySnapshot(state) => {
+                            if !paused {
+                                warp_errors::report_if_error!(
+                                    crate::session_recovery::save(&state)
+                                        .context("Failed to save session recovery checkpoint")
+                                );
+                            }
+                        }
                         ModelEvent::SaveLaunchConfigWindowSessions {
                             windows,
                             include_blocks,
@@ -692,6 +715,10 @@ fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> a
         | ModelEvent::Terminate
         | ModelEvent::SaveLaunchConfigWindowSessions { .. } => {
             panic!("Unhandled control-flow event {event:?}");
+        }
+        #[cfg(feature = "local_fs")]
+        ModelEvent::RecoverySnapshot(_) => {
+            unreachable!("Recovery snapshots are handled outside SQLite")
         }
         ModelEvent::SaveBlock(BlockCompleted {
             pane_id,
@@ -968,6 +995,10 @@ fn deduplicate_events(events: Vec<ModelEvent>) -> Vec<ModelEvent> {
     let last_snapshot_index = events
         .iter()
         .rposition(|event| matches!(event, ModelEvent::Snapshot(_)));
+    #[cfg(feature = "local_fs")]
+    let last_recovery_snapshot_index = events
+        .iter()
+        .rposition(|event| matches!(event, ModelEvent::RecoverySnapshot(_)));
     let last_launch_config_sessions_index = events.iter().rposition(|event| {
         matches!(
             event,
@@ -983,6 +1014,8 @@ fn deduplicate_events(events: Vec<ModelEvent>) -> Vec<ModelEvent> {
         .enumerate()
         .filter_map(|(index, event)| match event {
             ModelEvent::Snapshot(_) if Some(index) != last_snapshot_index => None,
+            #[cfg(feature = "local_fs")]
+            ModelEvent::RecoverySnapshot(_) if Some(index) != last_recovery_snapshot_index => None,
             ModelEvent::SaveLaunchConfigWindowSessions {
                 include_blocks: false,
                 ..
@@ -1397,6 +1430,7 @@ fn save_pane_state(
                             None
                         }
                     }),
+                managed_session_job_id: terminal_snapshot.managed_session_job_id.clone(),
             };
 
             diesel::insert_into(schema::terminal_panes::dsl::terminal_panes)
@@ -2409,6 +2443,7 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                                     None
                                 }
                             }),
+                        managed_session_job_id: terminal_pane.managed_session_job_id,
                         cwd: terminal_pane.cwd,
                         is_active: terminal_pane.is_active,
                         is_read_only: false,

@@ -9,7 +9,9 @@ use settings::Setting as _;
 use warp::cmd_or_ctrl_shift;
 use warp::features::FeatureFlag;
 use warp::integration_testing::clipboard::assert_clipboard_contains_string;
-use warp::integration_testing::command_palette::assert_command_palette_is_closed;
+use warp::integration_testing::command_palette::{
+    assert_command_palette_is_closed, assert_command_palette_is_open,
+};
 use warp::integration_testing::pane_group::assert_focused_pane_index;
 use warp::integration_testing::step::new_step_with_default_assertions;
 use warp::integration_testing::terminal::util::{
@@ -31,6 +33,7 @@ use warp::integration_testing::window::{
 use warp::integration_testing::workspace::{
     assert_focused_tab_index, assert_tab_count, press_native_modal_button,
 };
+use warp::search::QueryFilter;
 use warp::search::command_palette::mixer::CommandPaletteItemAction;
 use warp::settings::PaneSettings;
 use warp::terminal::shell::ShellType;
@@ -547,6 +550,71 @@ fn assert_total_tab_count(
 
 fn drag_tabs_feature_enabled() -> bool {
     cfg!(feature = "drag_tabs_to_windows")
+}
+
+pub fn test_title_bar_search_finds_terminal_sessions() -> Builder {
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(execute_command_for_single_terminal_in_tab(
+            0,
+            "echo palette-session-sentinel".to_string(),
+            ExpectedExitStatus::Success,
+            "palette-session-sentinel".to_string(),
+        ))
+        .with_step(
+            TestStep::new("Open search from the title bar")
+                .with_click_on_saved_position("title_bar_search_bar")
+                .add_named_assertion("Search palette opens", assert_command_palette_is_open()),
+        )
+        .with_step(
+            TestStep::new("Find a terminal session without selecting a filter")
+                .with_typed_characters(&["palette-session-sentinel"])
+                .add_named_assertion("Search returns the terminal session", |app, window_id| {
+                    command_palette_view(app, window_id).read(app, |palette, ctx| {
+                        async_assert!(
+                            palette.active_query_filter(ctx).is_none()
+                                && palette.search_results(ctx).any(|result| {
+                                    matches!(
+                                        result.accept_result(),
+                                        CommandPaletteItemAction::NavigateToSession { .. }
+                                    ) && result
+                                        .accessibility_label()
+                                        .contains("palette-session-sentinel")
+                                }),
+                            "Title-bar search should include matching sessions, not only commands"
+                        )
+                    })
+                }),
+        )
+        .with_step(
+            TestStep::new("Navigate to the matching terminal")
+                .with_keystrokes(&["enter"])
+                .add_named_assertion("Search palette closes", assert_command_palette_is_closed())
+                .add_named_assertion(
+                    "Terminal editor regains focus",
+                    assert_focused_editor_in_tab(0),
+                ),
+        )
+}
+
+pub fn test_command_palette_opens_with_actions() -> Builder {
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            TestStep::new("Open the Command Palette")
+                .with_keystrokes(&[cmd_or_ctrl_shift("p")])
+                .add_named_assertion("Command Palette lists actions", |app, window_id| {
+                    command_palette_view(app, window_id).read(app, |palette, ctx| {
+                        let action_count = palette.search_results(ctx).count();
+                        async_assert!(
+                            palette.active_query_filter(ctx) == Some(QueryFilter::Actions)
+                                && action_count >= 100,
+                            "Expected the Actions filter and a populated action list, found filter {:?} and {action_count} results",
+                            palette.active_query_filter(ctx)
+                        )
+                    })
+                }),
+        )
 }
 
 pub fn test_cycle_active_tab_color_with_keybinding() -> Builder {

@@ -44,6 +44,42 @@ fn a_busy_unsupervised_pane_is_not_reported_as_surviving() {
 }
 
 #[test]
+fn an_agent_row_json_exposes_process_identity_and_provenance() {
+    let row = AgentRow {
+        agent: "Pi".to_owned(),
+        session_id: "session-1".to_owned(),
+        pid: 42,
+        started_at_unix_seconds: 100,
+        last_active_unix_seconds: Some(200),
+        state: "held_by_other_build".to_owned(),
+        build: Some("old-build".to_owned()),
+        saved_session: Some("Saved session".to_owned()),
+        saved_tab: Some("Tab 1".to_owned()),
+        working_directory: Some("/work/repo".to_owned()),
+        last_prompt: Some("Fix the bug".to_owned()),
+        process_count: 2,
+    };
+
+    assert_eq!(
+        serde_json::to_value(row).unwrap(),
+        serde_json::json!({
+            "agent": "Pi",
+            "session_id": "session-1",
+            "pid": 42,
+            "started_at_unix_seconds": 100,
+            "last_active_unix_seconds": 200,
+            "state": "held_by_other_build",
+            "build": "old-build",
+            "saved_session": "Saved session",
+            "saved_tab": "Tab 1",
+            "working_directory": "/work/repo",
+            "last_prompt": "Fix the bug",
+            "process_count": 2,
+        })
+    );
+}
+
+#[test]
 fn a_short_value_is_left_alone() {
     assert_eq!(truncate("bash", 10), "bash");
     assert_eq!(truncate("exactlyten", 10), "exactlyten");

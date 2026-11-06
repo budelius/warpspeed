@@ -30,7 +30,10 @@ use windows::Win32::System::Pipes::{
 use windows::core::PCWSTR;
 
 use super::pipe_security::PipeSecurity;
-use crate::local_tty::supervisor::framing::{read_message, write_message};
+use crate::local_tty::supervisor::compatibility::supports_protocol;
+use crate::local_tty::supervisor::framing::{
+    read_message_for_protocol, write_message_for_protocol,
+};
 use crate::local_tty::supervisor::message::{Message, PROTOCOL_VERSION};
 use crate::local_tty::supervisor::transport::Transport;
 
@@ -41,6 +44,25 @@ const MAX_PIPE_INSTANCES: u32 = 16;
 /// is the only large one, and framing handles a partial read.
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 
+/// Validates a saved local supervisor channel and returns its supported wire version.
+pub fn existing_pipe_protocol(name: &str) -> Result<u32> {
+    let invalid = || {
+        anyhow::anyhow!("The saved supervisor channel is invalid or uses an incompatible protocol")
+    };
+    let (version, suffix) = name
+        .strip_prefix(r"\\.\pipe\warp-terminal-supervisor-v")
+        .and_then(|rest| rest.split_once('-'))
+        .ok_or_else(invalid)?;
+    let version = version.parse::<u32>().map_err(|_| invalid())?;
+    if !supports_protocol(version)
+        || suffix.len() != 16
+        || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid());
+    }
+    Ok(version)
+}
+
 /// The pipe every client of this supervisor connects to.
 ///
 /// The name is derived from the state directory, so two Warp installations with
@@ -48,8 +70,8 @@ const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 /// so a v2 client never reaches a v1 supervisor.
 ///
 /// It is also derived from this executable's path. Each installed build lives in its own
-/// directory and starts its supervisor from its own executable, so every build gets a supervisor
-/// of the same build and a window never talks to one built from different code.
+/// directory and starts its own supervisor. Attaching a saved session may explicitly select an
+/// older compatible channel; spawning a new shell always uses this build's channel.
 pub fn supervisor_pipe_name() -> String {
     let executable = std::env::current_exe().unwrap_or_default();
     supervisor_pipe_name_for(&warp_core::paths::state_dir(), &executable)
@@ -191,6 +213,7 @@ impl PipeListener {
 
         Ok(PipeTransport {
             handle,
+            protocol_version: PROTOCOL_VERSION,
             pending: Vec::new(),
         })
     }
@@ -207,6 +230,7 @@ impl Drop for PipeListener {
 /// One end of a connected supervisor pipe.
 pub struct PipeTransport {
     handle: HANDLE,
+    protocol_version: u32,
 
     /// Bytes received but not yet forming a whole message.
     pending: Vec<u8>,
@@ -232,6 +256,7 @@ impl PipeTransport {
 
         Ok(Self {
             handle,
+            protocol_version: existing_pipe_protocol(name).unwrap_or(PROTOCOL_VERSION),
             pending: Vec::new(),
         })
     }
@@ -270,6 +295,11 @@ impl PipeTransport {
                 )
             };
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_protocol_for_test(&mut self, version: u32) {
+        self.protocol_version = version;
     }
 
     /// Returns the process ID connected to the client side of an accepted pipe.
@@ -326,7 +356,7 @@ impl PipeTransport {
 impl Transport for PipeTransport {
     fn send(&mut self, message: &Message) -> Result<()> {
         let mut framed = Vec::new();
-        write_message(&mut framed, message)?;
+        write_message_for_protocol(&mut framed, message, self.protocol_version)?;
 
         let mut written_total = 0usize;
         while written_total < framed.len() {
@@ -354,7 +384,7 @@ impl Transport for PipeTransport {
         self.drain_available()?;
 
         let mut cursor = std::io::Cursor::new(&self.pending[..]);
-        let message = read_message(&mut cursor)?;
+        let message = read_message_for_protocol(&mut cursor, self.protocol_version)?;
 
         // Consume only what decoded, so a message still arriving stays buffered
         // rather than having its front thrown away.

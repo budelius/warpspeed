@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use warpui::{App, EntityId};
 
-use super::score_row;
+use super::{row_title, score_row, text_has_exact_words};
 use crate::pane_group::PaneId;
 use crate::search::QueryFilter;
 use crate::search::command_palette::CommandPaletteMixer;
@@ -32,16 +32,27 @@ fn row(title: Option<&str>, cwd: &str, state: AgentSessionState) -> AgentSession
         agent: Some(CLIAgent::Claude),
         session_id: Some("3f2a9c1e-7b44-4d0e-9a51-0c8e2b6d1f77".into()),
         title: title.map(str::to_owned),
+        last_prompt: None,
         cwd: cwd.into(),
         canonical_cwd: None,
         last_used: None,
         preview: Vec::new(),
+        process_count: 0,
+        supervisor: None,
         state,
     }
 }
 
 fn past_row(title: &str, cwd: &str) -> AgentSessionRow {
     row(Some(title), cwd, AgentSessionState::Past)
+}
+
+#[test]
+fn the_last_prompt_outranks_a_generated_title() {
+    let mut row = past_row("generated title", "/work/other");
+    row.last_prompt = Some("Fix the reboot path".into());
+
+    assert_eq!(row_title(&row), "Fix the reboot path");
 }
 
 #[test]
@@ -75,6 +86,24 @@ fn score_row_is_none_without_a_match() {
 }
 
 #[test]
+fn exact_full_words_rank_above_partial_matches() {
+    let exact = past_row("help me choose", "/work/other");
+    let partial = past_row("memo cleanup", "/work/other");
+
+    assert!(score_row(&exact, "me") > score_row(&partial, "me"));
+    assert!(text_has_exact_words("help me choose", "me"));
+    assert!(!text_has_exact_words("memo cleanup", "me"));
+}
+
+#[test]
+fn quoted_queries_match_full_words() {
+    let row = past_row("help me choose", "/work/other");
+
+    assert!(score_row(&row, "\"me\"").is_some());
+    assert!(text_has_exact_words("help me choose", "\"me\""));
+}
+
+#[test]
 fn rows_fall_into_this_pane_running_elsewhere_detached_and_past() {
     let focused = locator(0);
     let focused_folder = ResolvedPath::new(Path::new("/work/here"));
@@ -101,6 +130,8 @@ fn rows_fall_into_this_pane_running_elsewhere_detached_and_past() {
         "/work/here",
         AgentSessionState::Detached {
             session_id: warp_core::SessionId::from(7),
+            instance_pid: None,
+            holder: None,
         },
     );
     let past_here = past_row("a", "/work/here/crate");
@@ -167,11 +198,17 @@ fn section_titles() {
 
 fn pane(index: usize, cwd: &str) -> PaneAgentInput {
     PaneAgentInput {
-        locator: locator(index),
+        locator: Some(locator(index)),
+        remote_instance_pid: None,
         tab_index: index,
         tab_title: format!("tab {index}"),
         pane_number: 1,
         cwd: Some(PathBuf::from(cwd)),
+        session_uuid_hex: None,
+        supervisor_session_id: None,
+        session_holder: None,
+        held_agent: None,
+        latest_user_prompt: None,
         running: None,
         pending: None,
     }
@@ -184,6 +221,7 @@ fn past_session(id: &str, title: &str, cwd: &str) -> PastAgentSession {
         cwd: cwd.into(),
         canonical_cwd: None,
         title: Some(title.into()),
+        last_prompt: None,
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
         preview: Vec::new(),
     }
@@ -225,7 +263,7 @@ fn run_agents_query(
 #[test]
 fn mixer_returns_agent_sessions_under_the_agents_filter() {
     let here = pane(0, "/work/here");
-    let focused = here.locator;
+    let focused = here.locator.unwrap();
     run_agents_query(
         (
             vec![here],
@@ -395,10 +433,16 @@ fn a_pending_row_reads_as_pending_not_running() {
         RowMatch::default(),
     );
 
-    assert_eq!(start.trailing_text(), "○ pending · Start");
-    assert_eq!(focus.trailing_text(), "● running · Focus");
+    assert_eq!(
+        start.trailing_text(),
+        "Local · Claude Code · ○ pending · Start"
+    );
+    assert_eq!(
+        focus.trailing_text(),
+        "Local · Claude Code · ● running · Focus"
+    );
     assert_eq!(
         AgentSessionSearchItem::new(past_row("a", "/x"), None, RowMatch::default()).trailing_text(),
-        ""
+        "Local · Claude Code"
     );
 }

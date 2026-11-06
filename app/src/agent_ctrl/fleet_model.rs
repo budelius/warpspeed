@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use managed_agent_sessions::{
-    RepositoryInfo, RunPreview, RunSummary, is_paused_state, normalize_repo_url,
+    RepositoryInfo, RunPreview, RunPreviewStream, RunSummary, is_paused_state, normalize_repo_url,
 };
 use warp_cli::managed_sessions::ManagedEnvironment;
 use warpui::{Entity, EntityId, ModelContext, SingletonEntity};
@@ -39,11 +39,14 @@ pub struct FleetBackend {
     /// Starts a run of an AgentCtrl profile (first argument) on a repository URL (second),
     /// returning its job id.
     pub start: fn(&str, &str) -> anyhow::Result<String>,
+    /// Starts a new run from an existing run's branch.
+    pub restart: fn(&str, &str, &str) -> anyhow::Result<String>,
     pub stop: fn(&str) -> anyhow::Result<()>,
     pub pause: fn(&str) -> anyhow::Result<()>,
     pub resume: fn(&str) -> anyhow::Result<()>,
     pub resume_for_attach: fn(&str) -> anyhow::Result<()>,
     pub preview: fn(&str) -> anyhow::Result<RunPreview>,
+    pub stream_preview: Option<fn(&str) -> anyhow::Result<RunPreviewStream>>,
 }
 
 impl FleetBackend {
@@ -64,6 +67,15 @@ impl FleetBackend {
                     None,
                 )
             },
+            restart: |profile, repo_url, branch| {
+                managed_agent_sessions::start_run_on_repo(
+                    ManagedEnvironment::Staging,
+                    profile,
+                    repo_url,
+                    Some(branch),
+                    None,
+                )
+            },
             stop: |job_id| {
                 managed_agent_sessions::stop_run(ManagedEnvironment::Staging, job_id, false)
             },
@@ -80,6 +92,9 @@ impl FleetBackend {
                     Duration::from_secs(60),
                 )
             },
+            stream_preview: Some(|job_id| {
+                RunPreviewStream::new(ManagedEnvironment::Staging, job_id)
+            }),
             preview: |job_id| {
                 managed_agent_sessions::fetch_run_preview(ManagedEnvironment::Staging, job_id, 12)
             },
@@ -104,6 +119,8 @@ pub struct FleetRow {
     pub node_name: Option<String>,
     /// Whether the dashboard reports that the run can be paused now.
     pub pause_allowed: bool,
+    /// Whether the dashboard can resume or restart this run.
+    pub resume_allowed: bool,
     pub branch: Option<String>,
     /// The branch's page on the repository's web UI, for hosts whose layout is known.
     pub branch_url: Option<String>,
@@ -125,7 +142,7 @@ impl FleetRow {
     }
 
     pub fn can_resume(&self) -> bool {
-        self.is_paused()
+        self.is_paused() || (self.state == "interrupted" && self.resume_allowed)
     }
 
     fn display_rank(&self) -> u8 {
@@ -142,7 +159,15 @@ impl FleetRow {
 pub enum FleetModelEvent {
     Updated,
     PreviewUpdated,
-    ResumeForAttachSucceeded { job_id: String, requester: EntityId },
+    ResumeForAttachSucceeded {
+        job_id: String,
+        requester: EntityId,
+    },
+    RestartForAttachSucceeded {
+        source_job_id: String,
+        job_id: String,
+        requester: EntityId,
+    },
 }
 
 pub struct FleetModel {
@@ -160,6 +185,9 @@ pub struct FleetModel {
     refresh_again: bool,
     previews: HashMap<String, Result<RunPreview, String>>,
     previewing: HashSet<String>,
+    preview_selections: HashMap<EntityId, String>,
+    preview_streams: HashMap<String, u64>,
+    preview_generation: u64,
     attached_views: HashSet<EntityId>,
     /// Whether a refresh timer is pending, so re-attaching within an interval does not start a
     /// second polling chain.
@@ -182,6 +210,9 @@ impl FleetModel {
             refresh_again: false,
             previews: HashMap::new(),
             previewing: HashSet::new(),
+            preview_selections: HashMap::new(),
+            preview_streams: HashMap::new(),
+            preview_generation: 0,
             attached_views: HashSet::new(),
             refresh_scheduled: false,
         }
@@ -247,6 +278,119 @@ impl FleetModel {
     /// then closed), so detaching a detached view changes nothing.
     pub fn detach_view(&mut self, view_id: EntityId) {
         self.attached_views.remove(&view_id);
+        self.preview_selections.remove(&view_id);
+        self.prune_preview_streams();
+    }
+
+    fn prune_preview_streams(&mut self) {
+        self.preview_streams.retain(|job_id, _| {
+            let selected = self.preview_selections.values().any(|job| job == job_id);
+            if !selected {
+                self.previewing.remove(job_id);
+            }
+            selected
+        });
+    }
+
+    pub fn select_preview(
+        &mut self,
+        view_id: EntityId,
+        job_id: Option<String>,
+        force: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.preview_selections.remove(&view_id);
+        if !self.attached_views.contains(&view_id) {
+            self.prune_preview_streams();
+            return;
+        }
+        if let Some(job_id) = &job_id {
+            self.preview_selections.insert(view_id, job_id.clone());
+        }
+        self.prune_preview_streams();
+        let Some(job_id) = job_id else {
+            return;
+        };
+        let Some(open) = self.backend.stream_preview else {
+            self.request_preview(job_id, force, ctx);
+            return;
+        };
+        if self.preview_streams.contains_key(&job_id) && !force {
+            return;
+        }
+        let finished = self
+            .runs
+            .iter()
+            .find(|run| run.job_id == job_id)
+            .is_some_and(|run| is_finished_state(&run.state));
+        if !force
+            && finished
+            && self
+                .previews
+                .get(&job_id)
+                .is_some_and(|preview| preview.as_ref().is_ok_and(|preview| preview.terminal))
+        {
+            return;
+        }
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
+        self.preview_streams.insert(job_id.clone(), generation);
+        self.previewing.insert(job_id.clone());
+        ctx.emit(FleetModelEvent::PreviewUpdated);
+        let requested_job = job_id.clone();
+        ctx.spawn(
+            async move { blocking::unblock(move || open(&requested_job)).await },
+            move |me, stream, ctx| {
+                if me.preview_streams.get(&job_id) != Some(&generation) {
+                    return;
+                }
+                match stream {
+                    Ok(stream) => me.read_preview_stream(job_id, generation, stream, ctx),
+                    Err(error) => {
+                        me.previewing.remove(&job_id);
+                        me.preview_streams.remove(&job_id);
+                        me.previews
+                            .insert(job_id, Err(format!("Could not load transcript: {error:#}")));
+                        ctx.emit(FleetModelEvent::PreviewUpdated);
+                    }
+                }
+            },
+        );
+    }
+
+    fn read_preview_stream(
+        &mut self,
+        job_id: String,
+        generation: u64,
+        mut stream: RunPreviewStream,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        ctx.spawn(
+            async move {
+                blocking::unblock(move || {
+                    let result = stream.read_next();
+                    (stream, result)
+                })
+                .await
+            },
+            move |me, (stream, result), ctx| {
+                if me.preview_streams.get(&job_id) != Some(&generation) {
+                    return;
+                }
+                me.previewing.remove(&job_id);
+                let follow = result.as_ref().is_ok_and(|preview| !preview.terminal);
+                me.previews.insert(
+                    job_id.clone(),
+                    result.map_err(|error| format!("Could not load transcript: {error:#}")),
+                );
+                ctx.emit(FleetModelEvent::PreviewUpdated);
+                if follow {
+                    me.read_preview_stream(job_id, generation, stream, ctx);
+                } else {
+                    me.preview_streams.remove(&job_id);
+                }
+            },
+        );
     }
 
     pub fn request_preview(&mut self, job_id: String, force: bool, ctx: &mut ModelContext<Self>) {
@@ -328,6 +472,38 @@ impl FleetModel {
                 if let Err(error) = result {
                     me.action_error = Some(start_failure_message(&error));
                     ctx.emit(FleetModelEvent::Updated);
+                }
+                me.refresh(ctx);
+            },
+        );
+    }
+
+    /// Starts a new run on the repository and branch from `source_job_id`, then tells only the
+    /// requesting view to attach to the new job.
+    pub fn restart_for_attach(
+        &mut self,
+        source_job_id: String,
+        profile: String,
+        repo_url: String,
+        branch: String,
+        requester: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.action_error = None;
+        let restart = self.backend.restart;
+        ctx.spawn(
+            async move { blocking::unblock(move || restart(&profile, &repo_url, &branch)).await },
+            move |me, result, ctx| {
+                match result {
+                    Ok(job_id) => ctx.emit(FleetModelEvent::RestartForAttachSucceeded {
+                        source_job_id,
+                        job_id,
+                        requester,
+                    }),
+                    Err(error) => {
+                        me.action_error = Some(start_failure_message(&error));
+                        ctx.emit(FleetModelEvent::Updated);
+                    }
                 }
                 me.refresh(ctx);
             },
@@ -521,6 +697,7 @@ fn fleet_row(run: &RunSummary, repo_url: Option<&str>) -> FleetRow {
         agent: run.agent_name.clone(),
         node_name: run.node_name.clone(),
         pause_allowed: run.pause_allowed.unwrap_or(false),
+        resume_allowed: run.resume_allowed.unwrap_or(false),
         branch: run.branch.clone(),
         branch_url: repo_url
             .zip(run.branch.as_deref())

@@ -61,8 +61,8 @@ use crate::{
     EntityIdSet, Event, GetSingletonModelHandle, ModelAsRef, ModelContext, ModelHandle,
     NextNewWindowsHasThisWindowsBoundsUponClose, Presenter, ReadModel, ReadView, Scene,
     SingletonEntity, SpawnedFuture, TaskId, TypedActionView, UpdateModel, UpdateView, View,
-    ViewAsRef, ViewContext, ViewHandle, WindowId, WindowInvalidation, ZoomFactor, assets,
-    rendering,
+    ViewAsRef, ViewContext, ViewHandle, ViewUpdateError, WindowId, WindowInvalidation, ZoomFactor,
+    assets, rendering,
 };
 
 #[cfg(feature = "tui")]
@@ -483,6 +483,18 @@ impl UpdateView for App {
     {
         self.as_mut().update_view(handle, update)
     }
+
+    fn try_update_view<T, F, S>(
+        &mut self,
+        handle: &ViewHandle<T>,
+        update: F,
+    ) -> Result<S, ViewUpdateError>
+    where
+        T: Entity,
+        F: FnOnce(&mut T, &mut ViewContext<T>) -> S,
+    {
+        self.as_mut().try_update_view(handle, update)
+    }
 }
 
 impl ReadView for App {
@@ -602,6 +614,7 @@ pub struct AppContext {
     /// when layout moves the active cursor.
     last_observed_active_cursor_positions: FxHashMap<WindowId, Option<CursorInfo>>,
     pub(super) windows: FxHashMap<WindowId, Window>,
+    window_count_limit: Option<usize>,
     pub(super) ref_counts: Arc<Mutex<RefCounts>>,
     pub(super) platform_delegate: Box<dyn platform::Delegate>,
 
@@ -784,6 +797,7 @@ impl AppContext {
             models: Default::default(),
             singleton_models: Default::default(),
             windows: Default::default(),
+            window_count_limit: None,
             ref_counts: Arc::new(Mutex::new(RefCounts::default())),
             last_frame_position_cache: Default::default(),
             last_observed_active_cursor_positions: Default::default(),
@@ -864,6 +878,18 @@ impl AppContext {
         }
 
         ctx
+    }
+
+    /// Limits the number of simultaneously open top-level windows in this process.
+    ///
+    /// Attempts to exceed the limit terminate the initiating operation before a platform window is
+    /// created.
+    pub fn set_window_count_limit(&mut self, limit: Option<usize>) {
+        assert!(
+            limit.is_none_or(|limit| self.windows.len() <= limit),
+            "the current window count exceeds the new process window limit"
+        );
+        self.window_count_limit = limit;
     }
 
     /// Registers a provider that creates an [`AssetSource`] for a given URL.
@@ -2447,6 +2473,11 @@ impl AppContext {
         T: View + TypedActionView,
         F: FnOnce(&mut ViewContext<T>) -> T,
     {
+        assert!(
+            self.window_count_limit
+                .is_none_or(|limit| self.windows.len() < limit),
+            "process top-level window limit exceeded"
+        );
         let (window_id, _root_view_id) =
             self.insert_window_internal(None, add_window_options, |window_id, ctx| {
                 ctx.windows.insert(window_id, Window::default());
@@ -3518,6 +3549,11 @@ impl AppContext {
     ) -> bool {
         self.handle_window_event(event, window_id, presenter)
             .handled
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn simulate_window_closed(&mut self, window_id: WindowId) {
+        let _ = self.handle_window_closed(window_id);
     }
 
     fn handle_window_event(
@@ -4620,16 +4656,20 @@ impl AppContext {
     /// Removes the view with the given ID so that an update closure can run against it.
     ///
     /// This bookkeeping is not generic, so it is compiled once instead of being duplicated into
-    /// every instantiation of [`UpdateView::update_view`].
-    fn take_view_for_update(&mut self, window_id: WindowId, view_id: EntityId) -> StoredView {
-        self.pending_flushes += 1;
+    /// every instantiation of [`UpdateView`].
+    fn take_view_for_update(
+        &mut self,
+        window_id: WindowId,
+        view_id: EntityId,
+    ) -> Result<StoredView, ViewUpdateError> {
         let Some(window) = self.windows.get_mut(&window_id) else {
-            panic!("Window does not exist");
+            return Err(ViewUpdateError::WindowClosed);
         };
         let Some(view) = window.views.remove(&view_id) else {
-            panic!("Circular view update");
+            return Err(ViewUpdateError::CircularUpdate);
         };
-        view
+        self.pending_flushes += 1;
+        Ok(view)
     }
 
     /// Restores a view removed by [`Self::take_view_for_update`] and flushes pending effects.
@@ -4682,12 +4722,28 @@ impl UpdateView for AppContext {
         T: Entity,
         F: FnOnce(&mut T, &mut ViewContext<T>) -> S,
     {
+        match self.try_update_view(handle, update) {
+            Ok(result) => result,
+            Err(ViewUpdateError::WindowClosed) => panic!("Window does not exist"),
+            Err(ViewUpdateError::CircularUpdate) => panic!("Circular view update"),
+        }
+    }
+
+    fn try_update_view<T, F, S>(
+        &mut self,
+        handle: &ViewHandle<T>,
+        update: F,
+    ) -> Result<S, ViewUpdateError>
+    where
+        T: Entity,
+        F: FnOnce(&mut T, &mut ViewContext<T>) -> S,
+    {
         let window_id = handle.window_id(self);
-        let mut view = self.take_view_for_update(window_id, handle.id());
+        let mut view = self.take_view_for_update(window_id, handle.id())?;
         let mut ctx = ViewContext::new(self, window_id, handle.id());
         let result = update(downcast_view_mut(&mut view), &mut ctx);
         self.finish_view_update(window_id, handle.id(), view);
-        result
+        Ok(result)
     }
 }
 

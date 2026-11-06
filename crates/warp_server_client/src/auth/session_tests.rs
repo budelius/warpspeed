@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use futures::executor::block_on;
+use warp_errors::AnyhowErrorExt as _;
 use warp_server_auth::auth_state::AuthState;
 use warp_server_auth::credentials::{AuthToken, Credentials, LoginToken};
 use warp_server_auth::user::FirebaseAuthTokens;
 
-use super::AuthSession;
+use super::{AuthSession, AuthSessionError};
 
 fn session_with_state(
     auth_state: Arc<AuthState>,
@@ -25,6 +26,20 @@ fn device_authorization_uses_warp_agent_cli_client() {
     let client = AuthSession::create_oauth_client();
 
     assert_eq!(client.client_id().as_str(), "warp-agent-cli");
+}
+
+#[test]
+fn missing_credentials_are_non_actionable() {
+    let auth_state = Arc::new(AuthState::new_logged_out_for_test());
+    let (session, _) = session_with_state(auth_state);
+
+    let error = block_on(session.get_or_refresh_access_token()).unwrap_err();
+
+    assert!(matches!(
+        error.downcast_ref::<AuthSessionError>(),
+        Some(AuthSessionError::MissingCredentials)
+    ));
+    assert!(!error.is_actionable());
 }
 
 #[test]

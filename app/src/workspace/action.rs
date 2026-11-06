@@ -280,8 +280,16 @@ pub enum WorkspaceAction {
     RestartShellForTerminalView {
         terminal_view_id: EntityId,
     },
+    /// Replaces the connected shell under this build's supervisor, after confirmation.
+    RestartInCurrentSupervisorForTerminalView {
+        terminal_view_id: EntityId,
+    },
     /// Attaches a pane again, in place, to the supervised shell it lost the connection to.
     ReattachShellForTerminalView {
+        terminal_view_id: EntityId,
+    },
+    /// Reconnects to a restored pane's old supervisor without restarting its shell.
+    AttachHeldSessionForTerminalView {
         terminal_view_id: EntityId,
     },
     /// Ends a restored pane's session in the supervisor that still holds it, then resumes here.
@@ -310,8 +318,14 @@ pub enum WorkspaceAction {
     ConfirmMoveSessionToAgentCtrl {
         terminal_view_id: EntityId,
     },
-    /// Offers to start a fresh AgentCtrl run on staging in the repository of the focused pane's
-    /// directory. Nothing starts until `ConfirmStartAgentOnAgentCtrl` picks the agent.
+    /// Starts a recorded session that no pane currently holds on AgentCtrl staging.
+    ConfirmStartPastSessionOnAgentCtrl {
+        agent: CLIAgent,
+        session_id: String,
+        cwd: PathBuf,
+    },
+    /// Migrates the repository's only movable local session, or offers a fresh AgentCtrl run when
+    /// none exists. Nothing fresh starts until `ConfirmStartAgentOnAgentCtrl` picks the agent.
     StartAgentOnAgentCtrl,
     StartAgentOnAgentCtrlForTerminalView {
         terminal_view_id: EntityId,
@@ -340,7 +354,7 @@ pub enum WorkspaceAction {
     },
     /// Focuses, starts, attaches or resumes the agent session a picker row stands for.
     AgentSession(AgentSessionAction),
-    /// Opens the window's agent sessions by tab and pane, with `focus`'s pane selected.
+    /// Opens the full-window session library, using `focus` as the resume target.
     ShowAgentSessions {
         focus: Option<PaneViewLocator>,
     },
@@ -1127,6 +1141,7 @@ impl WorkspaceAction {
             | MoveSessionToAgentCtrl
             | MoveSessionToAgentCtrlForTerminalView { .. }
             | ConfirmMoveSessionToAgentCtrl { .. }
+            | ConfirmStartPastSessionOnAgentCtrl { .. }
             | StartAgentOnAgentCtrl
             | StartAgentOnAgentCtrlForTerminalView { .. }
             | ConfirmStartAgentOnAgentCtrl { .. }
@@ -1183,7 +1198,9 @@ impl WorkspaceAction {
             // do not change persisted state.
             | RestartShell
             | RestartShellForTerminalView { .. }
+            | RestartInCurrentSupervisorForTerminalView { .. }
             | ReattachShellForTerminalView { .. }
+            | AttachHeldSessionForTerminalView { .. }
             | TakeOverHeldSessionForTerminalView { .. }
             | StartFreshForTerminalView { .. }
             | ToggleAttachSessionMenu

@@ -47,23 +47,35 @@ impl AgentSessionSearchItem {
     /// running.
     fn state_hint(&self) -> Option<&'static str> {
         match self.row.state {
-            AgentSessionState::Running { .. } | AgentSessionState::Pending { .. } => {
-                Some(self.row.state.label())
-            }
+            AgentSessionState::Running { .. }
+            | AgentSessionState::RunningInOtherInstance { .. }
+            | AgentSessionState::Pending { .. }
+            | AgentSessionState::KnownProcess { .. }
+            | AgentSessionState::HeldByOtherBuild { .. }
+            | AgentSessionState::NoKnownPane { .. } => Some(self.row.state.label()),
             AgentSessionState::Detached { .. } | AgentSessionState::Past => None,
         }
     }
 
     pub(super) fn trailing_text(&self) -> String {
+        let identity = self.row.agent.map_or_else(
+            || "Local · Shell".to_owned(),
+            |agent| format!("Local · {}", agent.display_name()),
+        );
         let last_used = self
             .row
             .last_used
             .map(|last_used| format_approx_duration_from_now(DateTime::<Local>::from(last_used)));
-        [last_used.as_deref(), self.state_hint(), self.action_hint()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ")
+        [
+            Some(identity.as_str()),
+            last_used.as_deref(),
+            self.state_hint(),
+            self.action_hint(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
     }
 }
 

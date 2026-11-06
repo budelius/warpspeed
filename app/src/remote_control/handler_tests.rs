@@ -103,6 +103,24 @@ fn listed_pane(terminal_view_id: EntityId, app: &mut App) -> PaneSummary {
 }
 
 #[test]
+fn list_windows_includes_the_workspace_window() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let workspace_window = app.read(|ctx| workspace.window_id(ctx));
+
+        let Response::Windows { windows } = app.update(|ctx| handle(Request::ListWindows, ctx))
+        else {
+            panic!("expected windows");
+        };
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_id, workspace_window.to_string());
+        assert!(windows[0].has_workspace);
+    });
+}
+
+#[test]
 fn list_panes_reports_the_agent_session_of_each_pane() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
@@ -207,9 +225,9 @@ fn move_session_starts_a_move_for_a_qualifying_pane() {
 }
 
 /// A pane whose shell reports no directory -- a restored pane, or one whose directory is gone --
-/// still moves when the caller recovered the agent's directory from its hooks or its history.
+/// still moves using the agent's hook-reported directory.
 #[test]
-fn move_session_uses_the_callers_directory_when_the_pane_has_none() {
+fn move_session_uses_the_agents_directory_when_the_pane_has_none() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
         let agent_cwd = TempDir::new().unwrap();
@@ -229,25 +247,11 @@ fn move_session_uses_the_callers_directory_when_the_pane_has_none() {
             ""
         );
 
-        let without_cwd = app.update(|ctx| {
-            handle(
-                Request::MoveSessionToAgentCtrl {
-                    terminal_view_id: terminal_view_id.as_u64(),
-                    cwd: None,
-                },
-                ctx,
-            )
-        });
-        assert!(
-            matches!(without_cwd, Response::Failed { .. }),
-            "{without_cwd:?}"
-        );
-
         let (response, step) = app.update(|ctx| {
             let response = handle(
                 Request::MoveSessionToAgentCtrl {
                     terminal_view_id: terminal_view_id.as_u64(),
-                    cwd: Some(agent_cwd_text.clone()),
+                    cwd: None,
                 },
                 ctx,
             );

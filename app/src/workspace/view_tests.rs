@@ -23,6 +23,8 @@ use warpui::{AddSingletonModel, App, ViewHandle};
 use watcher::HomeDirectoryWatcher;
 
 use super::*;
+use crate::agent_ctrl::FleetPaneManager;
+use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
 use crate::ai::AIRequestUsageModel;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent_conversations_model::AgentConversationsModel;
@@ -72,9 +74,12 @@ use crate::settings::PrivacySettings;
 use crate::settings::cloud_preferences_syncer::CloudPreferencesSyncer;
 use crate::settings_view::DisplayCount;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
+use crate::stozn_auth::StoznAuthManager;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::system::SystemStats;
 use crate::tab_configs::tab_config::{TabConfigPaneNode, TabConfigPaneType};
+#[cfg(feature = "local_tty")]
+use crate::terminal::TerminalSurface;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
@@ -105,6 +110,7 @@ pub(crate) fn initialize_app(app: &mut App) {
     // Add the necessary singleton models to the App
     app.add_singleton_model(|_ctx| ServerApiProvider::new_for_test());
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+    app.add_singleton_model(|_| StoznAuthManager::new_for_test());
     app.add_singleton_model(AppTelemetryContextProvider::new_context_provider);
     app.add_singleton_model(AuthManager::new_for_test);
     app.add_singleton_model(|_ctx| PtySpawner::new_for_test());
@@ -266,6 +272,7 @@ pub(crate) fn initialize_app(app: &mut App) {
 }
 
 pub(crate) fn mock_workspace(app: &mut App) -> ViewHandle<Workspace> {
+    register_fleet_test_models(app);
     let global_resource_handles = GlobalResourceHandles::mock(app);
     let active_window_id = app.read(|ctx| ctx.windows().active_window());
     let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
@@ -339,6 +346,7 @@ fn restored_workspace(
     app: &mut App,
     window_snapshot: crate::app_state::WindowSnapshot,
 ) -> ViewHandle<Workspace> {
+    register_fleet_test_models(app);
     let global_resource_handles = GlobalResourceHandles::mock(app);
     let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
         Workspace::new(
@@ -359,6 +367,7 @@ fn restored_workspace(
 fn launch_config_source_is_preserved_in_window_snapshots() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
+        register_fleet_test_models(&mut app);
         let source = LaunchConfigWindowSource {
             path: std::path::PathBuf::from("/home/warp/.warp/launch_configurations/devops.yaml"),
             document_index: 0,
@@ -389,10 +398,97 @@ fn launch_config_source_is_preserved_in_window_snapshots() {
     });
 }
 
+#[test]
+fn save_picker_preselects_the_current_session_configuration() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let source = LaunchConfigWindowSource {
+            path: "session_configurations/IWAKAN.toml".into(),
+            document_index: 7,
+            window_index: 0,
+            config_name: "IWAKAN".into(),
+        };
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.launch_config_source = Some(source.clone());
+            workspace.open_launch_config_save_modal(ctx);
+        });
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(
+                workspace
+                    .launch_config_save_modal
+                    .view
+                    .as_ref(ctx)
+                    .selected_target(),
+                Some(&source)
+            );
+            assert_eq!(workspace.launch_config_source(), Some(&source));
+        });
+    });
+}
+
+#[test]
+fn save_picker_preselects_the_exact_launch_configuration_window() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let source = LaunchConfigWindowSource {
+            path: "launch_configurations/workspaces.yaml".into(),
+            document_index: 2,
+            window_index: 3,
+            config_name: "IWAKAN".into(),
+        };
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.launch_config_source = Some(source.clone());
+            workspace.open_launch_config_save_modal(ctx);
+        });
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(
+                workspace
+                    .launch_config_save_modal
+                    .view
+                    .as_ref(ctx)
+                    .selected_target(),
+                Some(&source)
+            );
+        });
+    });
+}
+
+#[test]
+fn save_picker_does_not_acquire_ownership_of_an_updated_configuration() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let mut config =
+            crate::launch_configs::launch_config::make_mock_single_window_launch_config();
+        config.source = Some(crate::launch_configs::launch_config::LaunchConfigSource {
+            path: "session_configurations/other.toml".into(),
+            document_index: 3,
+        });
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_launch_config_save_modal_event(
+                &LaunchConfigModalEvent::SuccessfullySavedConfig {
+                    launch_config: config.clone(),
+                    created: false,
+                },
+                ctx,
+            );
+            assert_eq!(workspace.launch_config_source(), None);
+            assert!(
+                WarpConfig::as_ref(ctx)
+                    .launch_and_session_configs()
+                    .any(|loaded| loaded == &config)
+            );
+        });
+    });
+}
+
 fn transferred_tab_workspace(
     app: &mut App,
     vertical_tabs_panel_open: bool,
 ) -> ViewHandle<Workspace> {
+    register_fleet_test_models(app);
     let global_resource_handles = GlobalResourceHandles::mock(app);
     let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
         Workspace::new(
@@ -1241,6 +1337,7 @@ impl Drop for TabConfigCleanupGuard {
 fn mock_workspace_with_shared_session(app: &mut App) -> ViewHandle<Workspace> {
     use crate::terminal::shared_session::manager::Manager;
 
+    register_fleet_test_models(app);
     // Create the workspace as a session-sharing sharer.
     let global_resource_handles = GlobalResourceHandles::mock(app);
     let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
@@ -1289,6 +1386,7 @@ fn mock_workspace_with_shared_session(app: &mut App) -> ViewHandle<Workspace> {
 
 // Creates a workspace as a viewer of a shared session.
 pub(crate) fn mock_workspace_viewing_shared_session(app: &mut App) -> ViewHandle<Workspace> {
+    register_fleet_test_models(app);
     // Create the workspace as a session-sharing sharer.
     let global_resource_handles = GlobalResourceHandles::mock(app);
 
@@ -2763,7 +2861,7 @@ fn test_tab_context_menu_share_session_items() {
     let _guard = FeatureFlag::CreatingSharedSessions.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let workspace = mock_workspace(&mut app);
         let shared_pane_id = setup_session_sharing_test(&workspace, &mut app);
 
@@ -4108,7 +4206,7 @@ fn test_vertical_tabs_context_menu_does_not_show_hover_only_tab_bar() {
     let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
 
@@ -4137,7 +4235,7 @@ fn test_standard_tab_context_menu_shows_hover_only_tab_bar() {
     let _full_screen_zen_mode_guard = FeatureFlag::FullScreenZenMode.override_enabled(true);
 
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
 
@@ -5321,6 +5419,7 @@ fn process_handoff_restore_keeps_every_shell_parked_until_release() {
     let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_app(&mut app);
+        register_fleet_test_models(&mut app);
         let global_resource_handles = GlobalResourceHandles::mock(&mut app);
         let snapshot = window_snapshot_with_tabs(3, 1);
         let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
@@ -5429,7 +5528,7 @@ fn restart_window_in_new_process_is_available_to_the_command_palette() {
 #[test]
 fn restart_and_change_shell_appear_in_pane_context_menus() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
 
         let workspace = mock_workspace(&mut app);
         let (tab_items, pane_header_items, terminal_view_id) =
@@ -5495,6 +5594,263 @@ fn restart_and_change_shell_appear_in_pane_context_menus() {
 /// The restart confirmation exists to protect work in progress. A freshly
 /// created pane has nothing running in it, so `RestartShell` must restart
 /// immediately without prompting.
+#[cfg(feature = "local_tty")]
+#[test]
+fn supervisor_restart_requires_confirmation_even_for_an_idle_shell_and_can_be_cancelled() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let session = manager.as_ref(ctx).persistent_session_id();
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(
+                    Some(crate::app_state::SessionHolder {
+                        channel: "older-supervisor".to_owned(),
+                        version: "older-build".to_owned(),
+                        pid: 42,
+                    }),
+                    ctx,
+                );
+            });
+            workspace.handle_action(
+                &WorkspaceAction::RestartInCurrentSupervisorForTerminalView {
+                    terminal_view_id: view.id(),
+                },
+                ctx,
+            );
+            assert!(workspace.restart_shell_confirmation_modal.is_open());
+            assert!(workspace.pending_shell_restart.is_some());
+            assert_eq!(manager.as_ref(ctx).persistent_session_id(), session);
+            workspace.handle_restart_shell_confirmation_modal_body_event(
+                &RestartShellConfirmationEvent::Cancel,
+                ctx,
+            );
+            assert!(!workspace.restart_shell_confirmation_modal.is_open());
+            assert!(workspace.pending_shell_restart.is_none());
+            assert_eq!(manager.as_ref(ctx).persistent_session_id(), session);
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn unattended_supervisor_restart_resumes_the_attached_pi_agent() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let holder = crate::app_state::SessionHolder {
+                channel: "older-supervisor".to_owned(),
+                version: "older-build".to_owned(),
+                pid: 42,
+            };
+            manager.update(ctx, |manager, _| {
+                manager.restore_session_holder(
+                    Some(holder.clone()),
+                    Some(crate::terminal::terminal_manager::HeldAgent {
+                        agent: crate::terminal::CLIAgent::Pi,
+                        session_id: "attached-pi-session".to_owned(),
+                    }),
+                );
+            });
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(Some(holder), ctx);
+            });
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(view.id())
+                    .is_none()
+            );
+
+            assert_eq!(
+                workspace.restart_in_current_supervisor_unattended(view.id(), ctx),
+                Ok(())
+            );
+            assert!(!workspace.restart_shell_confirmation_modal.is_open());
+            view
+        });
+
+        let buffer_text = terminal_view.read(&app, |terminal_view, ctx| {
+            terminal_view
+                .input()
+                .read(ctx, |input, ctx| input.buffer_text(ctx))
+        });
+        assert_eq!(buffer_text, "pi --session attached-pi-session");
+    });
+}
+
+fn tracked_pi_session(
+    session_id: Option<&str>,
+) -> crate::terminal::cli_agent_sessions::CLIAgentSession {
+    crate::terminal::cli_agent_sessions::CLIAgentSession {
+        agent: crate::terminal::CLIAgent::Pi,
+        status: crate::terminal::cli_agent_sessions::CLIAgentSessionStatus::InProgress,
+        session_context: crate::terminal::cli_agent_sessions::CLIAgentSessionContext {
+            session_id: session_id.map(str::to_owned),
+            ..Default::default()
+        },
+        input_state: crate::terminal::cli_agent_sessions::CLIAgentInputState::Closed,
+        should_auto_toggle_input: false,
+        listener: None,
+        plugin_version: None,
+        remote_host: None,
+        draft_text: None,
+        custom_command_prefix: None,
+        received_rich_notification: false,
+    }
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn supervisor_restart_resumes_a_tracked_pi_session_without_a_reported_id() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let holder = crate::app_state::SessionHolder {
+                channel: "older-supervisor".to_owned(),
+                version: "older-build".to_owned(),
+                pid: 42,
+            };
+            manager.update(ctx, |manager, _| {
+                manager.restore_session_holder(
+                    Some(holder.clone()),
+                    Some(crate::terminal::terminal_manager::HeldAgent {
+                        agent: crate::terminal::CLIAgent::Pi,
+                        session_id: "attached-pi-session".to_owned(),
+                    }),
+                );
+            });
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(Some(holder), ctx);
+            });
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(view.id(), tracked_pi_session(None), ctx);
+            });
+
+            assert_eq!(
+                workspace.restart_in_current_supervisor_unattended(view.id(), ctx),
+                Ok(())
+            );
+            view
+        });
+
+        let buffer_text = terminal_view.read(&app, |terminal_view, ctx| {
+            terminal_view
+                .input()
+                .read(ctx, |input, ctx| input.buffer_text(ctx))
+        });
+        assert_eq!(buffer_text, "pi --session attached-pi-session");
+    });
+}
+
+#[test]
+fn unattended_restart_resumes_the_pi_agent_of_a_pane_in_this_supervisor() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(view.id(), tracked_pi_session(Some("local-pi-session")), ctx);
+            });
+
+            assert_eq!(
+                workspace.restart_shell_unattended(view.id(), ctx),
+                Ok(Some("pi --session local-pi-session".to_owned()))
+            );
+            assert!(!workspace.restart_shell_confirmation_modal.is_open());
+            assert!(workspace.pending_shell_restart.is_none());
+            view
+        });
+
+        let buffer_text = terminal_view.read(&app, |terminal_view, ctx| {
+            terminal_view
+                .input()
+                .read(ctx, |input, ctx| input.buffer_text(ctx))
+        });
+        assert_eq!(buffer_text, "pi --session local-pi-session");
+    });
+}
+
+#[test]
+fn unattended_restart_rejects_an_unknown_terminal_view() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let other_workspace = mock_workspace(&mut app);
+        let foreign_view = other_workspace.update(&mut app, |workspace, ctx| {
+            workspace.focused_terminal_view(ctx).unwrap().id()
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                workspace
+                    .restart_shell_unattended(foreign_view, ctx)
+                    .is_err()
+            );
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn attached_agent_from_another_supervisor_appears_in_sessions() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            let manager = workspace.focused_terminal_manager(ctx).unwrap();
+            let holder = crate::app_state::SessionHolder {
+                channel: "older-supervisor".to_owned(),
+                version: "older-build".to_owned(),
+                pid: 42,
+            };
+            manager.update(ctx, |manager, _| {
+                manager.restore_session_holder(
+                    Some(holder.clone()),
+                    Some(crate::terminal::terminal_manager::HeldAgent {
+                        agent: crate::terminal::CLIAgent::Pi,
+                        session_id: "attached-pi-session".to_owned(),
+                    }),
+                );
+            });
+            view.update(ctx, |view, ctx| {
+                view.on_supervisor_changed(Some(holder), ctx);
+            });
+
+            let panes = workspace.agent_pane_inputs(ctx);
+            let rows = crate::terminal::agent_sessions_index::build_rows(&panes, &[], &[]);
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].agent, Some(crate::terminal::CLIAgent::Pi));
+            assert_eq!(rows[0].session_id.as_deref(), Some("attached-pi-session"));
+            assert_eq!(
+                rows[0]
+                    .supervisor
+                    .as_ref()
+                    .map(|holder| holder.version.as_str()),
+                Some("older-build")
+            );
+            assert!(matches!(
+                rows[0].state,
+                crate::terminal::agent_sessions_index::AgentSessionState::Running { .. }
+            ));
+        });
+    });
+}
+
 #[test]
 fn restart_shell_does_not_prompt() {
     App::test((), |mut app| async move {
@@ -6593,7 +6949,7 @@ fn change_shell_picker_opens_and_renders_for_a_targeted_terminal_view() {
 #[test]
 fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_view() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let _shell_selector = FeatureFlag::ShellSelector.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);
@@ -6633,7 +6989,7 @@ fn change_shell_from_the_pane_header_overflow_menu_does_not_reenter_the_pane_vie
 #[test]
 fn terminal_pane_header_button_maximizes_and_restores_the_pane() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app_for_move_session(&mut app);
         let _header = FeatureFlag::ContextWindowUsageV2.override_enabled(true);
 
         let workspace = mock_workspace(&mut app);
@@ -6821,30 +7177,28 @@ fn selecting_a_shell_restarts_the_session_before_closing_the_picker() {
     });
 }
 
-/// `initialize_app` plus the STOZN auth singleton the workspace reads, which `initialize_app`
-/// does not register yet.
 fn initialize_app_with_stozn(app: &mut App) {
     initialize_app(app);
-    if !app.read(|ctx| ctx.has_singleton_model::<crate::stozn_auth::StoznAuthManager>()) {
-        app.add_singleton_model(|_| crate::stozn_auth::StoznAuthManager::new());
-    }
 }
 
 pub(crate) fn initialize_app_for_move_session(app: &mut App) {
-    use crate::agent_ctrl::FleetPaneManager;
-    use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
-
     initialize_app_with_stozn(app);
+    register_fleet_test_models(app);
+}
+
+fn register_fleet_test_models(app: &mut App) {
     if !app.read(|ctx| ctx.has_singleton_model::<FleetModel>()) {
         app.add_singleton_model(|_| {
             FleetModel::with_backend(FleetBackend {
                 list: list_no_runs,
                 start: start_nothing,
+                restart: restart_nothing,
                 stop: stop_nothing,
                 pause: pause_nothing,
                 resume: resume_nothing,
                 resume_for_attach: resume_nothing,
                 preview: preview_nothing,
+                stream_preview: None,
             })
         });
     }
@@ -6898,7 +7252,7 @@ fn move_session_is_offered(workspace: &ViewHandle<Workspace>, app: &mut App) -> 
             .pane_header_overflow_menu_items(ctx);
         let labelled = items.iter().any(|item| {
             item.fields()
-                .is_some_and(|fields| fields.label() == "Move session to AgentCtrl")
+                .is_some_and(|fields| fields.label() == "Move session to Obachan")
         });
         let mapped = items.iter().any(|item| {
             matches!(
@@ -7077,13 +7431,13 @@ fn move_session_is_not_offered_for_unsupported_remote_or_unidentified_sessions()
 }
 
 #[test]
-fn move_session_is_not_offered_without_a_local_shell_directory() {
+fn move_session_uses_the_agents_directory_when_the_shell_has_none() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
         let cwd = TempDir::new().unwrap();
         let workspace = mock_workspace(&mut app);
 
-        workspace.update(&mut app, |workspace, ctx| {
+        let terminal_view_id = workspace.update(&mut app, |workspace, ctx| {
             let terminal_view = workspace
                 .focused_terminal_view(ctx)
                 .expect("mock workspace has a focused terminal pane");
@@ -7095,9 +7449,17 @@ fn move_session_is_not_offered_without_a_local_shell_directory() {
                 cwd.path(),
                 ctx,
             );
+            terminal_view.id()
         });
 
-        assert!(!move_session_is_offered(&workspace, &mut app));
+        assert!(move_session_is_offered(&workspace, &mut app));
+        let source = app.read(|ctx| {
+            workspace
+                .as_ref(ctx)
+                .agent_ctrl_move_source(terminal_view_id, None, ctx)
+                .expect("the agent-reported directory makes the session movable")
+        });
+        assert_eq!(source.cwd, cwd.path());
     });
 }
 
@@ -7487,7 +7849,7 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
     });
 }
 
-/// Whether the focused pane offers starting an agent on AgentCtrl, in its header menu and through
+/// Whether the focused pane enables starting an agent on AgentCtrl, in its header menu and through
 /// the keymap flag the palette binding is predicated on. Both must always agree.
 fn start_agent_on_agent_ctrl_is_offered(workspace: &ViewHandle<Workspace>, app: &mut App) -> bool {
     let in_menu = workspace.update(app, |workspace, ctx| {
@@ -7499,13 +7861,14 @@ fn start_agent_on_agent_ctrl_is_offered(workspace: &ViewHandle<Workspace>, app: 
             .pane_header_overflow_menu_items(ctx);
         let labelled = items.iter().any(|item| {
             item.fields()
-                .is_some_and(|fields| fields.label() == "Start agent on AgentCtrl in this repo")
+                .is_some_and(|fields| fields.label() == "Start in Obachan" && !fields.is_disabled())
         });
-        let mapped = items.iter().any(|item| {
-            matches!(
-                item.fields().and_then(|fields| fields.on_select_action()),
-                Some(crate::terminal::view::TerminalAction::StartAgentOnAgentCtrl)
-            )
+        let mapped = items.iter().filter_map(|item| item.fields()).any(|fields| {
+            !fields.is_disabled()
+                && matches!(
+                    fields.on_select_action(),
+                    Some(crate::terminal::view::TerminalAction::StartAgentOnAgentCtrl)
+                )
         });
         assert_eq!(labelled, mapped, "the menu label and its action must agree");
         labelled
@@ -7586,6 +7949,25 @@ fn start_agent_on_agent_ctrl_is_offered_only_for_a_local_repo_pane() {
             });
         });
         assert!(start_agent_on_agent_ctrl_is_offered(&workspace, &mut app));
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let terminal_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            seed_agent_session(
+                terminal_view.id(),
+                crate::terminal::CLIAgent::Pi,
+                Some(MOVE_SESSION_ID),
+                None,
+                repo.path(),
+                ctx,
+            );
+        });
+        assert!(move_session_is_offered(&workspace, &mut app));
+        assert!(
+            !start_agent_on_agent_ctrl_is_offered(&workspace, &mut app),
+            "a movable local session must offer migration instead of a fresh agent chooser"
+        );
     });
 }
 
@@ -7616,7 +7998,7 @@ fn start_agent_on_agent_ctrl_binding_is_registered_for_the_palette() {
                 editable
                     .description
                     .in_context(warpui::keymap::DescriptionContext::Default)
-                    .eq_ignore_ascii_case("Start agent on AgentCtrl in this repo")
+                    .eq_ignore_ascii_case("Start in Obachan")
             );
             let context = |flags: &[&'static str]| warpui::keymap::Context {
                 set: flags.iter().copied().collect(),
@@ -7656,6 +8038,80 @@ fn configured_warp_repository() -> managed_agent_sessions::RepositoryInfo {
         reachable: true,
         error: None,
     }
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn start_in_obachan_migrates_the_only_running_session_in_the_repo() {
+    App::test((), |mut app| async move {
+        initialize_app_for_move_session(&mut app);
+        let repo = TempDir::new().unwrap();
+        init_repo_with_gitea_remote(repo.path());
+        let workspace = mock_workspace(&mut app);
+
+        let (agent_view_id, start_view_id) = workspace.update(&mut app, |workspace, ctx| {
+            let agent_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("mock workspace has a focused terminal pane");
+            let pane_group = workspace.active_tab_pane_group().clone();
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.add_terminal_pane(Direction::Right, None, ctx);
+            });
+            let start_view = workspace
+                .focused_terminal_view(ctx)
+                .expect("the new split is focused");
+            for view in [&agent_view, &start_view] {
+                view.update(ctx, |view, ctx| {
+                    view.set_active_local_session_for_test(repo.path(), ctx);
+                    view.set_current_repo_path_for_test(Some(repo.path()));
+                });
+            }
+            seed_agent_session(
+                agent_view.id(),
+                crate::terminal::CLIAgent::Pi,
+                Some(MOVE_SESSION_ID),
+                None,
+                repo.path(),
+                ctx,
+            );
+            (agent_view.id(), start_view.id())
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.start_agent_on_agent_ctrl_for_terminal_view(start_view_id, ctx)
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(15) => workspace_toast_texts(&workspace, &mut app)
+                .iter()
+                .any(|toast| toast.starts_with("Move this Pi session to AgentCtrl staging?")),
+            "{:?}",
+            workspace_toast_texts(&workspace, &mut app)
+        );
+        assert!(
+            !workspace_toast_texts(&workspace, &mut app)
+                .iter()
+                .any(|toast| toast.starts_with("Start which agent"))
+        );
+        let move_targets = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .toast_stack
+                    .as_ref(ctx)
+                    .toast_links()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(_, action)| match action {
+                        Some(WorkspaceAction::ConfirmMoveSessionToAgentCtrl {
+                            terminal_view_id,
+                        }) => Some(*terminal_view_id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(move_targets, [agent_view_id]);
+    });
 }
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -8086,8 +8542,31 @@ fn list_no_runs() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapsho
     Ok(Default::default())
 }
 
+fn list_associated_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    Ok(crate::agent_ctrl::fleet_model::FleetSnapshot {
+        runs: vec![managed_agent_sessions::RunSummary {
+            job_id: "job-associated".to_owned(),
+            state: "running".to_owned(),
+            agent_name: "staging-claude-interactive-rw".to_owned(),
+            repo_url: Some("https://gitlab.com/acme/warp.git".to_owned()),
+            branch: Some("feat/sessions".to_owned()),
+            interactive: true,
+            last_activity_at: None,
+            node_name: None,
+            paused_at: None,
+            pause_allowed: Some(true),
+            resume_allowed: None,
+        }],
+        repos: Vec::new(),
+    })
+}
+
 fn start_nothing(_: &str, _: &str) -> anyhow::Result<String> {
     anyhow::bail!("tests never start a run")
+}
+
+fn restart_nothing(_: &str, _: &str, _: &str) -> anyhow::Result<String> {
+    anyhow::bail!("tests never restart a run")
 }
 
 fn stop_nothing(_: &str) -> anyhow::Result<()> {
@@ -8109,6 +8588,34 @@ fn preview_nothing(_: &str) -> anyhow::Result<managed_agent_sessions::RunPreview
 /// Registers the fleet singletons with a backend that never reaches the dashboard.
 fn initialize_app_for_fleet(app: &mut App) {
     initialize_app_for_move_session(app);
+}
+
+fn initialize_app_for_associated_run(app: &mut App) {
+    initialize_app_for_run_list(app, list_associated_run);
+}
+
+fn initialize_app_for_run_list(
+    app: &mut App,
+    list: fn() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot>,
+) {
+    use crate::agent_ctrl::FleetPaneManager;
+    use crate::agent_ctrl::fleet_model::{FleetBackend, FleetModel};
+
+    initialize_app_with_stozn(app);
+    app.add_singleton_model(|_| {
+        FleetModel::with_backend(FleetBackend {
+            list,
+            start: start_nothing,
+            restart: restart_nothing,
+            stop: stop_nothing,
+            pause: pause_nothing,
+            resume: resume_nothing,
+            resume_for_attach: resume_nothing,
+            preview: preview_nothing,
+            stream_preview: None,
+        })
+    });
+    app.add_singleton_model(|_| FleetPaneManager::default());
 }
 
 fn fleet_pane_ids(workspace: &ViewHandle<Workspace>, app: &mut App) -> Vec<PaneId> {
@@ -8374,6 +8881,221 @@ fn agent_session_resume_runs_in_an_idle_shell() {
     });
 }
 
+fn open_remote_session_palette(
+    workspace: &ViewHandle<Workspace>,
+    app: &mut App,
+) -> PaneViewLocator {
+    app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
+    app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
+    workspace.update(app, |workspace, ctx| {
+        let pane_group = workspace.active_tab_pane_group();
+        let target = PaneViewLocator {
+            pane_group_id: pane_group.id(),
+            pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+        };
+        workspace.handle_action(
+            &WorkspaceAction::OpenPalette {
+                mode: PaletteMode::AgentSessions,
+                source: PaletteSource::Keybinding,
+                query: None,
+            },
+            ctx,
+        );
+        workspace.palette.update(ctx, |palette, ctx| {
+            palette.insert_query_text("job-associated", ctx)
+        });
+        target
+    })
+}
+
+fn choose_remote_palette_result(workspace: &ViewHandle<Workspace>, app: &mut App) {
+    let palette = workspace.read(app, |workspace, _| workspace.palette.clone());
+    let action = palette.read(app, |palette, ctx| {
+        palette.selected_search_result(ctx).unwrap().accept_result()
+    });
+    assert!(matches!(
+        action,
+        crate::search::command_palette::mixer::CommandPaletteItemAction::AgentSession {
+            action: AgentSessionAction::Managed { .. }
+        }
+    ));
+    palette.update(app, |palette, ctx| {
+        palette.handle_action(
+            &crate::search::command_palette::view::Action::ResultClicked { action },
+            ctx,
+        );
+    });
+}
+
+#[test]
+fn remote_palette_fetches_runs_and_attaches_to_the_originating_idle_pane() {
+    App::test((), |mut app| async move {
+        initialize_app_for_associated_run(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let target = open_remote_session_palette(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => selected_palette_label(&workspace, &mut app)
+                .is_some_and(|label| label.starts_with("AgentCtrl session:")),
+            "remote run did not reach the palette"
+        );
+        workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group();
+            pane_group
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .unwrap()
+                .update(ctx, |view, _| {
+                    view.set_login_shell_bootstrapped_for_test();
+                });
+            workspace.add_terminal_tab(false, ctx);
+        });
+        choose_remote_palette_result(&workspace, &mut app);
+        workspace.read(&app, |workspace, ctx| {
+            assert!(!workspace.current_workspace_state.is_palette_open);
+            assert!(!workspace.is_agent_sessions_modal_open());
+            let pane_group = workspace
+                .get_pane_group_view_with_id(target.pane_group_id)
+                .unwrap()
+                .as_ref(ctx);
+            assert_eq!(
+                pane_group.managed_session_job_id(target.pane_id),
+                Some("job-associated")
+            );
+            assert_eq!(pane_group.pane_ids().count(), 1);
+            assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 0);
+        });
+    });
+}
+
+fn list_finished_remote_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    let mut snapshot = list_associated_run()?;
+    snapshot.runs[0].state = "completed".to_owned();
+    Ok(snapshot)
+}
+
+#[test]
+fn remote_palette_opens_finished_transcripts_without_starting_a_command() {
+    App::test((), |mut app| async move {
+        initialize_app_for_run_list(&mut app, list_finished_remote_run);
+        let workspace = mock_workspace(&mut app);
+        let target = open_remote_session_palette(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => selected_palette_label(&workspace, &mut app)
+                .is_some_and(|label| label.starts_with("AgentCtrl session:")),
+            "finished run did not reach the palette"
+        );
+        choose_remote_palette_result(&workspace, &mut app);
+        workspace.read(&app, |workspace, ctx| {
+            assert!(workspace.is_agent_sessions_modal_open());
+            assert!(!workspace.current_workspace_state.is_palette_open);
+            let view = workspace
+                .agent_sessions_modal
+                .as_ref(ctx)
+                .body()
+                .as_ref(ctx);
+            assert_eq!(view.selected_managed_job_id(), Some("job-associated"));
+            assert_eq!(workspace.agent_sessions_target, Some(target));
+        });
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_agent_sessions_modal(ctx)
+        });
+        app.read(|ctx| assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 0));
+    });
+}
+
+fn list_paused_remote_run() -> anyhow::Result<crate::agent_ctrl::fleet_model::FleetSnapshot> {
+    let mut snapshot = list_associated_run()?;
+    snapshot.runs[0].state = "paused".to_owned();
+    Ok(snapshot)
+}
+
+#[test]
+fn remote_palette_resume_failure_keeps_the_browser_open() {
+    App::test((), |mut app| async move {
+        initialize_app_for_run_list(&mut app, list_paused_remote_run);
+        let workspace = mock_workspace(&mut app);
+        let target = open_remote_session_palette(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => selected_palette_label(&workspace, &mut app)
+                .is_some_and(|label| label.starts_with("AgentCtrl session:")),
+            "paused run did not reach the palette"
+        );
+        choose_remote_palette_result(&workspace, &mut app);
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => app.read(|ctx| FleetModel::as_ref(ctx).action_error().is_some()),
+            "resume failure was not surfaced"
+        );
+        workspace.read(&app, |workspace, ctx| {
+            assert!(workspace.is_agent_sessions_modal_open());
+            assert_eq!(workspace.agent_sessions_target, Some(target));
+            assert_eq!(
+                workspace
+                    .agent_sessions_modal
+                    .as_ref(ctx)
+                    .body()
+                    .as_ref(ctx)
+                    .selected_managed_job_id(),
+                Some("job-associated")
+            );
+        });
+        assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+    });
+}
+
+#[test]
+fn remote_palette_stops_polling_when_dismissed() {
+    App::test((), |mut app| async move {
+        initialize_app_for_associated_run(&mut app);
+        let workspace = mock_workspace(&mut app);
+        open_remote_session_palette(&workspace, &mut app);
+        app.read(|ctx| assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 1));
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_palette(true, None, ctx)
+        });
+        app.read(|ctx| assert_eq!(FleetModel::as_ref(ctx).attached_view_count(), 0));
+    });
+}
+
+#[test]
+fn associated_managed_session_is_selected_when_the_browser_opens() {
+    App::test((), |mut app| async move {
+        initialize_app_for_associated_run(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let (target, sessions_view) =
+            workspace.update(&mut app, |workspace, ctx| {
+                let pane_group = workspace.active_tab_pane_group();
+                let target = PaneViewLocator {
+                    pane_group_id: pane_group.id(),
+                    pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+                };
+                pane_group.update(ctx, |pane_group, _| {
+                    assert!(pane_group.set_managed_session_job_id(
+                        target.pane_id,
+                        Some("job-associated".to_owned()),
+                    ));
+                });
+                workspace.show_agent_sessions(Some(target), ctx);
+                (
+                    target,
+                    workspace.agent_sessions_modal.as_ref(ctx).body().clone(),
+                )
+            });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(5) => sessions_view
+                .read(&app, |view, _| view.selected_managed_job_id().map(str::to_owned))
+                .as_deref()
+                == Some("job-associated"),
+            "associated run was not selected"
+        );
+        assert_eq!(
+            workspace.read(&app, |workspace, _| workspace.agent_sessions_target),
+            Some(target)
+        );
+    });
+}
+
 #[test]
 fn managed_session_attach_reuses_the_requesting_idle_pane() {
     App::test((), |mut app| async move {
@@ -8403,8 +9125,21 @@ fn managed_session_attach_reuses_the_requesting_idle_pane() {
 
         assert_eq!(active_tab_pane_count(&workspace, &mut app), 1);
         assert!(pending_command_in(&workspace, target.pane_id, &mut app));
-        workspace.read(&app, |workspace, _| {
-            assert!(!workspace.is_agent_sessions_modal_open())
+        workspace.read(&app, |workspace, ctx| {
+            assert!(!workspace.is_agent_sessions_modal_open());
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            assert_eq!(
+                pane_group.managed_session_job_id(target.pane_id),
+                Some("job-test")
+            );
+            let PaneNodeSnapshot::Leaf(LeafSnapshot {
+                contents: LeafContents::Terminal(snapshot),
+                ..
+            }) = pane_group.snapshot(ctx)
+            else {
+                panic!("expected one terminal pane");
+            };
+            assert_eq!(snapshot.managed_session_job_id.as_deref(), Some("job-test"));
         });
     });
 }
@@ -8448,6 +9183,14 @@ fn managed_session_attach_splits_instead_of_overwriting_a_busy_pane() {
             )
         });
         assert!(pending_command_in(&workspace, new_pane, &mut app));
+        workspace.read(&app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            assert_eq!(pane_group.managed_session_job_id(target.pane_id), None);
+            assert_eq!(
+                pane_group.managed_session_job_id(new_pane),
+                Some("job-test")
+            );
+        });
     });
 }
 
@@ -8468,6 +9211,9 @@ fn managed_session_attach_failure_keeps_the_browser_open_with_an_error() {
                     .action_error()
                     .is_some()
             );
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            let pane_id = pane_group.focused_pane_id(ctx);
+            assert_eq!(pane_group.managed_session_job_id(pane_id), None);
         });
     });
 }
@@ -8490,6 +9236,7 @@ fn managed_session_attach_falls_back_to_a_new_tab_when_the_target_disappeared() 
             assert_eq!(workspace.tabs.len(), 2);
             let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
             let pane_id = pane_group.focused_pane_id(ctx);
+            assert_eq!(pane_group.managed_session_job_id(pane_id), Some("job-test"));
             assert!(
                 pane_group
                     .terminal_view_from_pane_id(pane_id, ctx)
@@ -8669,52 +9416,59 @@ fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
 }
 
 #[test]
-fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
+fn activating_a_past_session_opens_it_directly_without_the_palette() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
-        // Opening the palette reads these, which `initialize_app` leaves out.
-        app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
-        app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
         let workspace = mock_workspace(&mut app);
-
+        let session_id = uuid::Uuid::new_v4().to_string();
         let target = workspace.update(&mut app, |workspace, ctx| {
             let pane_group = workspace.active_tab_pane_group();
             let target = PaneViewLocator {
                 pane_group_id: pane_group.id(),
                 pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
             };
-            pane_group.update(ctx, |pane_group, ctx| {
-                pane_group.add_terminal_pane(Direction::Right, None, ctx);
-            });
             workspace.add_terminal_tab(false, ctx);
             target
         });
+        let past = crate::terminal::agent_session_history::PastAgentSession {
+            agent: crate::terminal::CLIAgent::Claude,
+            session_id: session_id.clone(),
+            cwd: std::env::temp_dir(),
+            canonical_cwd: None,
+            title: Some("available session".to_owned()),
+            last_prompt: None,
+            modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+            preview: Vec::new(),
+        };
 
         let sessions_view = workspace.update(&mut app, |workspace, ctx| {
-            let first_tab = workspace.tabs[0].pane_group.clone();
-            assert_ne!(
-                first_tab.as_ref(ctx).focused_pane_id(ctx),
-                target.pane_id,
-                "the clicked pane is not the one focused in its tab"
-            );
             workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
             workspace.agent_sessions_modal.as_ref(ctx).body().clone()
         });
         sessions_view.update(&mut app, |view, ctx| {
             view.set_inputs(
                 vec![crate::terminal::agent_sessions_index::PaneAgentInput {
-                    locator: target,
+                    locator: Some(target),
+                    remote_instance_pid: None,
                     tab_index: 0,
                     tab_title: "tab".to_owned(),
                     pane_number: 1,
                     cwd: Some(std::env::temp_dir()),
+                    session_uuid_hex: None,
+                    supervisor_session_id: None,
+                    session_holder: None,
+                    held_agent: None,
+                    latest_user_prompt: None,
                     running: None,
                     pending: None,
                 }],
                 Ok(Vec::new()),
-                &[],
+                &[past],
                 true,
-                Some(target),
+                Some(AgentSessionsFocus {
+                    locator: target,
+                    managed_job_id: None,
+                }),
                 ctx,
             );
         });
@@ -8724,28 +9478,22 @@ fn resume_in_folder_opens_the_palette_on_the_clicked_pane() {
                 window_id,
                 sessions_view.id(),
                 &crate::workspace::agent_sessions_view::AgentSessionsViewAction::Activate(
-                    crate::workspace::agent_sessions_view::RowKey::Pane(target),
+                    crate::workspace::agent_sessions_view::RowKey::Local {
+                        agent: Some(crate::terminal::CLIAgent::Claude),
+                        session_id: Some(session_id),
+                        pane: None,
+                        detached_session: None,
+                        remote_instance_pid: None,
+                        process_pid: None,
+                    },
                 ),
             );
         });
 
-        workspace.update(&mut app, |workspace, ctx| {
+        workspace.read(&app, |workspace, _| {
             assert!(!workspace.is_agent_sessions_modal_open());
+            assert!(!workspace.current_workspace_state.is_palette_open);
             assert_eq!(workspace.active_tab_index(), 0);
-            assert_eq!(
-                workspace
-                    .active_tab_pane_group()
-                    .as_ref(ctx)
-                    .focused_pane_id(ctx),
-                target.pane_id
-            );
-            assert!(workspace.current_workspace_state.is_palette_open);
-            assert!(
-                workspace
-                    .palette
-                    .as_ref(ctx)
-                    .is_mode_enabled(PaletteMode::AgentSessions, ctx)
-            );
         });
     });
 }
@@ -8777,7 +9525,10 @@ fn agent_session_inputs_lists_a_tabs_visible_panes_as_laid_out() {
 
         let (panes, _) = workspace.read(&app, |workspace, ctx| workspace.agent_session_inputs(ctx));
 
-        let listed: Vec<PaneId> = panes.iter().map(|pane| pane.locator.pane_id).collect();
+        let listed: Vec<PaneId> = panes
+            .iter()
+            .filter_map(|pane| pane.locator.map(|locator| locator.pane_id))
+            .collect();
         assert_eq!(listed, expected, "left to right, the hidden pane left out");
         assert!(!listed.contains(&hidden));
         let numbers: Vec<usize> = panes.iter().map(|pane| pane.pane_number).collect();
@@ -8796,6 +9547,7 @@ fn past_conversation(
         cwd: PathBuf::from("Z:/somewhere/else"),
         canonical_cwd: None,
         title: Some(title.to_owned()),
+        last_prompt: None,
         modified: std::time::SystemTime::UNIX_EPOCH
             + std::time::Duration::from_secs(1_000_000 - age_secs),
         preview: Vec::new(),
@@ -9194,11 +9946,13 @@ fn fleet_row_pause_and_resume_reach_agent_ctrl() {
             FleetModel::with_backend(FleetBackend {
                 list: list_no_runs,
                 start: start_nothing,
+                restart: restart_nothing,
                 stop: stop_nothing,
                 pause: pause_recording,
                 resume: resume_recording,
                 resume_for_attach: resume_recording,
                 preview: preview_nothing,
+                stream_preview: None,
             })
         });
         app.add_singleton_model(|_| FleetPaneManager::default());

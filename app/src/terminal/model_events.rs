@@ -175,20 +175,21 @@ impl ModelEventDispatcher {
                 self.active_session_id = session_id;
 
                 // Update the active session's environment variables
-                if let Some(session_id) = session_id {
+                let environment_updated = session_id.is_some() && !handled_after_inband;
+                if let Some(session_id) = session_id.filter(|_| !handled_after_inband) {
                     // We set the environment variables here, which triggers the prompt to refresh
                     // as certain chips depend on environment variables. We specifically want to
                     // avoid triggering prompt refreshes for in-band commands because otherwise we'll
                     // create a loop if updating the prompt involves running an in-band command.
                     // This is similar to how we handle ModelEvent::AfterBlockCompleted in terminal_view.rs
-                    if !handled_after_inband {
-                        self.sessions.update(ctx, |sessions, ctx| {
-                            sessions.set_env_vars_for_session(session_id, env_vars, ctx)
-                        });
-                    }
+                    self.sessions.update(ctx, |sessions, ctx| {
+                        sessions.set_env_vars_for_session(session_id, env_vars, ctx)
+                    });
                 }
 
-                ModelEvent::Handler(AnsiHandlerEvent::Precmd)
+                ModelEvent::Handler(AnsiHandlerEvent::Precmd {
+                    environment_updated,
+                })
             }
             Event::Handler(HandlerEvent::Preexec) => ModelEvent::Handler(AnsiHandlerEvent::Preexec),
             Event::Handler(HandlerEvent::CommandFinished { command_type }) => match command_type {
@@ -513,7 +514,9 @@ pub enum AnsiHandlerEvent {
         session_id: SessionId,
         is_subshell: bool,
     },
-    Precmd,
+    Precmd {
+        environment_updated: bool,
+    },
     Preexec,
     UserCommandFinished,
     InBandCommandFinished,

@@ -3524,3 +3524,31 @@ fn managed_agent_move_session_parses() {
             .is_err()
     );
 }
+
+#[test]
+fn sessions_restart_needs_exactly_one_target() {
+    let parse = |arguments: &[&str]| {
+        Args::try_parse_from(["warpspeed", "sessions", "restart"].iter().chain(arguments))
+    };
+    assert!(parse(&[]).is_err());
+    assert!(parse(&["--terminal-view", "7", "--all-agents"]).is_err());
+    assert!(parse(&["--terminal-view", "7", "--except-view", "8"]).is_err());
+
+    let args = parse(&["--all-agents", "--except-view", "8", "--except-view", "9"]).unwrap();
+    let Some(Command::Sessions(sessions)) = args.command() else {
+        panic!("expected a sessions command");
+    };
+    let sessions::SessionsCommand::Restart {
+        terminal_view_id,
+        all_agents,
+        except_views,
+        ..
+    } = &sessions.command
+    else {
+        panic!("expected sessions restart");
+    };
+    assert_eq!(*terminal_view_id, None);
+    assert!(*all_agents);
+    assert_eq!(except_views, &[8, 9]);
+    assert!(parse(&["--terminal-view", "7"]).is_ok());
+}

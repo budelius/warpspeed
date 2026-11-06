@@ -1,4 +1,4 @@
-//! The supervisor wire protocol, version 2.
+//! The supervisor wire protocol, version 7.
 //!
 //! Data only: nothing here performs I/O, so the same messages travel over a
 //! Unix socket, a Windows named pipe, or a network tunnel.
@@ -10,8 +10,8 @@ use super::transport::Endpoint;
 use crate::local_tty::screen::ScreenSnapshot;
 use crate::shell::ShellLaunchData;
 
-/// The protocol version, carried in the socket and pipe name so a client never
-/// speaks one version of this protocol to a supervisor speaking another.
+/// The protocol version, carried in the socket and pipe name so clients can select the matching
+/// wire encoding. Older versions require an explicit adapter in [`super::compatibility`].
 ///
 /// ## Bump this whenever anything below changes shape
 ///
@@ -34,7 +34,8 @@ use crate::shell::ShellLaunchData;
 // discard replay when the receiving pane has different dimensions.
 // v6 carries whether the detached shell was waiting at its prompt, allowing
 // the adopting pane to reactivate its editor without sourcing bootstrap again.
-pub const PROTOCOL_VERSION: u32 = 6;
+// v7 identifies the detached shell process and pane UUID so clients can name its agent exactly.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// A message in either direction between a client and the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +266,12 @@ pub struct SessionSummary {
     /// `true` while another client holds this session. Such a session is listed
     /// but cannot be attached, because a second client would read the same PTY.
     pub attached: bool,
+
+    /// The pid of the shell the supervisor spawned for this session.
+    pub shell_pid: u32,
+
+    /// `WARP_TERMINAL_SESSION_UUID` as hex, or empty when the spawn did not provide one.
+    pub session_uuid_hex: String,
 }
 
 impl SessionMetadata {

@@ -4195,10 +4195,12 @@ impl AIConversation {
                 .map(|e| (e.working_directory.clone(), Some(e.start_time)))
                 .unwrap_or((fallback_pwd.clone(), None));
 
-            let serialized_block = SerializedBlock {
+            let mut serialized_block = SerializedBlock {
                 id: BlockId::new(),
                 stylized_command: Self::to_stylized_bytes(&command_block.command),
                 stylized_output: Self::to_stylized_bytes(&command_block.output),
+                stylized_output_original_bytes: None,
+                stylized_output_truncated: false,
                 pwd,
                 git_head: None,
                 git_branch_name: None,
@@ -4222,6 +4224,10 @@ impl AIConversation {
                     AgentViewVisibility::new_from_conversation(self.id).into(),
                 ),
             };
+            serialized_block.enforce_command_budget();
+            serialized_block.enforce_output_budget(
+                crate::terminal::model::block::MAX_SERIALIZED_STYLIZED_OUTPUT_BYTES,
+            );
             serialized_blocks.push(SerializedBlockListItem::Command {
                 block: Box::new(serialized_block),
             });

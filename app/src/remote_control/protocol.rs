@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Adding a variant at the end of an enum is safe for bincode only in one
 /// direction, and the two ends here can be either older or newer than one
 /// another, so treat any change as a bump.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A request from the `sessions` command to a running window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +24,9 @@ pub enum Request {
 
     /// Every terminal pane this instance has open.
     ListPanes,
+
+    /// Every unattached terminal session held by this instance's supervisor.
+    ListDetachedSessions,
 
     /// Hands one pane's session to the supervisor and closes the pane.
     DetachSession { session_id: u64 },
@@ -77,6 +80,16 @@ pub enum Request {
         /// fields do not survive bincode.
         notification: String,
     },
+
+    /// Every window this instance has open, including windows without terminal panes.
+    ListWindows,
+
+    /// Replaces a pane's shell from another supervisor and resumes its recorded agent.
+    RestartSessionInCurrentSupervisor { terminal_view_id: u64 },
+
+    /// Replaces any pane's shell with a new one under this instance's supervisor and resumes the
+    /// agent it was running, without asking for confirmation.
+    RestartSession { terminal_view_id: u64 },
 }
 
 /// The largest [`Request::CliAgentEvent`] notification an instance accepts, in bytes.
@@ -120,6 +133,11 @@ pub enum Response {
     /// The answer to [`Request::ListPanes`].
     Panes { panes: Vec<PaneSummary> },
 
+    /// The answer to [`Request::ListDetachedSessions`].
+    DetachedSessions {
+        sessions: Vec<DetachedSessionSummary>,
+    },
+
     /// The answer to [`Request::ListStoredSessions`].
     StoredSessions { sessions: Vec<StoredSessionInfo> },
 
@@ -145,6 +163,24 @@ pub enum Response {
         /// The handoff branch as `<remote>/<branch>`, once it has been pushed.
         pushed_branch: Option<String>,
     },
+
+    /// The answer to [`Request::ListWindows`].
+    Windows { windows: Vec<WindowSummary> },
+
+    /// The answer to [`Request::RestartSession`].
+    Restarted {
+        /// The command parked to resume the pane's agent, `None` when there was none to resume.
+        resume_command: Option<String>,
+    },
+}
+
+/// One window of a running instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSummary {
+    pub window_id: String,
+    pub index: u32,
+    pub is_active: bool,
+    pub has_workspace: bool,
 }
 
 /// One terminal pane of a running instance.
@@ -206,6 +242,17 @@ pub struct PaneSummary {
     /// tab: [`Self::agent`] and [`Self::agent_session_id`] are then the saved ones, and nothing is
     /// running to move.
     pub agent_not_resumed: bool,
+}
+
+/// One terminal session an instance's supervisor holds without an attached pane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetachedSessionSummary {
+    pub session_id: u64,
+    pub title: String,
+    pub working_directory: String,
+    pub detached_for_seconds: u64,
+    pub shell_pid: u32,
+    pub session_uuid_hex: String,
 }
 
 /// One saved session that can be reopened.

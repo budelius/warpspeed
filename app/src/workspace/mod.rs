@@ -410,7 +410,7 @@ pub fn init(app: &mut AppContext) {
         app.register_fixed_bindings([FixedBinding::custom(
             CustomAction::SaveCurrentConfig,
             WorkspaceAction::OpenLaunchConfigSaveModal,
-            "Save or update launch configuration",
+            "Save or update session or launch configuration",
             id!("Workspace"),
         )]);
     }
@@ -1033,7 +1033,7 @@ pub fn init(app: &mut AppContext) {
     // as `Workspace_PaneCanDetachSession`.
     app.register_editable_bindings([EditableBinding::new(
         "workspace:move_session_to_agent_ctrl",
-        "Move session to AgentCtrl",
+        "Move session to Obachan",
         WorkspaceAction::MoveSessionToAgentCtrl,
     )
     .with_group(bindings::BindingGroup::Terminal.as_str())
@@ -1047,10 +1047,11 @@ pub fn init(app: &mut AppContext) {
     .with_group(bindings::BindingGroup::Terminal.as_str())
     .with_context_predicate(id!("Workspace"))]);
 
-    // Offered only on local panes inside a git work tree, whose repository the run starts in.
+    // Offered on a local repository pane when it can migrate another pane's sole movable session
+    // or start a fresh run.
     app.register_editable_bindings([EditableBinding::new(
         "workspace:start_agent_on_agent_ctrl",
-        "Start agent on AgentCtrl in this repo",
+        "Start in Obachan",
         WorkspaceAction::StartAgentOnAgentCtrl,
     )
     .with_group(bindings::BindingGroup::Terminal.as_str())
@@ -1274,7 +1275,7 @@ pub fn init(app: &mut AppContext) {
         .with_custom_action(CustomAction::FilesPalette),
         EditableBinding::new(
             "workspace:open_launch_config_save_modal",
-            "Save or update launch configuration",
+            "Save or update session or launch configuration",
             WorkspaceAction::OpenLaunchConfigSaveModal,
         )
         .with_context_predicate(id!("Workspace"))
@@ -1305,7 +1306,7 @@ pub fn init(app: &mut AppContext) {
         .with_enabled(|| cfg!(feature = "local_tty")),
         EditableBinding::new(
             "workspace:show_agent_sessions",
-            "Sessions: show window",
+            "Sessions: show library",
             WorkspaceAction::ShowAgentSessions { focus: None },
         )
         .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))

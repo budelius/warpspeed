@@ -3637,6 +3637,10 @@ fn launch(
                         recovered
                     })
                 }
+                // An empty isolated-worker payload means "create one new window". It must not
+                // inherit the coordinator's persisted AppState and accidentally restore one or
+                // more old windows before creating that window.
+                (None, None) if isolated_worker => None,
                 (None, None) if should_skip_restore || starts_empty => None,
                 (None, None) => app_state,
             };

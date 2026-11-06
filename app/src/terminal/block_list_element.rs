@@ -3196,6 +3196,18 @@ impl Element for BlockListElement {
         }
 
         let mut model = self.model.lock();
+
+        // Inline banner view state is authoritative. Reconcile stale block-list metadata before
+        // constructing a viewport so a missing element cannot reserve height and warn every frame.
+        // This uses the model guard already held by layout; it never attempts a nested lock.
+        let rendered_banner_ids = self.inline_banners.keys().copied().collect();
+        let repaired_banner_ids = model
+            .block_list_mut()
+            .remove_inline_banners_without_elements(&rendered_banner_ids);
+        if !repaired_banner_ids.is_empty() {
+            log::warn!("Repaired stale inline banner metadata for IDs: {repaired_banner_ids:?}");
+        }
+
         let cell_size = Vector2F::new(
             self.size_info.cell_width_px().as_f32(),
             self.size_info.cell_height_px().as_f32(),
@@ -3475,24 +3487,25 @@ impl Element for BlockListElement {
                 }
                 BlockHeightItem::InlineBanner { banner, .. } => {
                     let banner_id = banner.id;
-                    if let Some(banner_element) = self.inline_banners.get_mut(&banner_id) {
-                        // Use the item's height() method which accounts for is_hidden
-                        let item_height = viewport_item.block_height_item.height();
-                        let height_px = item_height.as_f64() * cell_size.y() as f64;
-                        banner_element.layout(
-                            SizeConstraint::strict(vec2f(constraint.max.x(), height_px as f32)),
-                            ctx,
-                            app,
-                        );
-                        visible_items.push(VisibleItem::Banner {
-                            index: viewport_item.entry_index,
-                            height_px: height_px as f32,
-                            banner_id,
-                        });
-                        visible_height_px += height_px;
-                    } else {
-                        log::warn!("Missing banner element for ID: {banner_id}");
-                    }
+                    let Some(banner_element) = self.inline_banners.get_mut(&banner_id) else {
+                        // Missing entries were removed before the viewport was built.
+                        debug_assert!(false, "viewport retained repaired banner ID {banner_id}");
+                        continue;
+                    };
+                    // Use the item's height() method which accounts for is_hidden
+                    let item_height = viewport_item.block_height_item.height();
+                    let height_px = item_height.as_f64() * cell_size.y() as f64;
+                    banner_element.layout(
+                        SizeConstraint::strict(vec2f(constraint.max.x(), height_px as f32)),
+                        ctx,
+                        app,
+                    );
+                    visible_items.push(VisibleItem::Banner {
+                        index: viewport_item.entry_index,
+                        height_px: height_px as f32,
+                        banner_id,
+                    });
+                    visible_height_px += height_px;
                 }
                 BlockHeightItem::SubshellSeparator { separator_id, .. } => {
                     let Some(separator) = self.subshell_separators.get_mut(&separator_id) else {

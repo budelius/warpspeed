@@ -26,6 +26,7 @@ pub(crate) type ResizeCallback = Box<dyn Fn(&dyn WindowContext, &mut AppContext)
 pub(crate) type StandardActionCallback = Box<dyn Fn(StandardAction, &mut AppContext)>;
 pub(crate) type ActiveCursorPositionCallback = Box<dyn Fn(&mut AppContext) -> Option<CursorInfo>>;
 pub(crate) type MoveCallback = Box<dyn Fn(RectF, &mut AppContext)>;
+pub(crate) type OcclusionCallback = Box<dyn Fn(bool, &mut AppContext)>;
 pub(crate) type FrameCallback = Box<dyn Fn(&mut AppContext)>;
 pub(crate) type BuildSceneCallback = Box<dyn Fn(&dyn WindowContext, &mut AppContext) -> Rc<Scene>>;
 
@@ -46,6 +47,8 @@ pub struct WindowCallbacks {
     pub draw_frame_error_callback: FrameCallback,
     /// Notifies the UI framework that the window moved.
     pub move_callback: MoveCallback,
+    /// Notifies the UI framework that the window became occluded or exposed.
+    pub occlusion_callback: OcclusionCallback,
     /// Returns the current location of the text editing cursor, if an
     /// editable text field is focused.
     pub active_cursor_position_callback: ActiveCursorPositionCallback,
@@ -86,6 +89,10 @@ impl<'a> WindowCallbackDispatcher<'a> {
 
     pub fn window_moved(&mut self, bounds: RectF) {
         (self.callbacks.move_callback)(bounds, &mut self.ctx)
+    }
+
+    pub fn window_occluded(&mut self, is_occluded: bool) {
+        (self.callbacks.occlusion_callback)(is_occluded, &mut self.ctx)
     }
 
     pub fn build_scene(&mut self, window: &dyn WindowContext) -> Rc<Scene> {

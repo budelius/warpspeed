@@ -1078,6 +1078,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::PeriodicHandoffCheckpoints,
     FeatureFlag::CtrlCCancelsThirdPartyHarness,
     FeatureFlag::LazyShellStartup,
+    FeatureFlag::WindowProcessIsolation,
     FeatureFlag::WarpingModelName,
 ];
 

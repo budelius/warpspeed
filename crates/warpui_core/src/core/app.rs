@@ -7,6 +7,7 @@ use std::pin::pin;
 use std::rc::{self, Rc};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -64,6 +65,9 @@ use crate::{
     ViewAsRef, ViewContext, ViewHandle, ViewUpdateError, WindowId, WindowInvalidation, ZoomFactor,
     assets, rendering,
 };
+
+/// Maximum native redraw admission rate for a visible window that does not have OS focus.
+const BACKGROUND_REDRAW_INTERVAL: Duration = Duration::from_millis(200);
 
 #[cfg(feature = "tui")]
 mod tui;
@@ -645,6 +649,11 @@ pub struct AppContext {
     pub(super) pending_unsubscribes: Option<PendingUnsubscribes>,
     window_invalidations: HashMap<WindowId, WindowInvalidation>,
     invalidation_callbacks: HashMap<WindowId, Box<InvalidationCallback>>,
+    /// Windows the platform reports as fully occluded or minimized. Model and PTY work continues,
+    /// but visual invalidations remain coalesced until the window is exposed again.
+    occluded_windows: HashSet<WindowId>,
+    /// Last admitted native redraw for each visible, unfocused window.
+    background_redraw_at: HashMap<WindowId, Instant>,
     disabled_key_bindings_windows: HashSet<WindowId>,
     window_bounds: HashMap<WindowId, Option<RectF>>,
     next_window_bounds_map: HashMap<WindowId, NextNewWindowsHasThisWindowsBoundsUponClose>,
@@ -819,6 +828,8 @@ impl AppContext {
             pending_unsubscribes: None,
             window_invalidations: Default::default(),
             invalidation_callbacks: Default::default(),
+            occluded_windows: Default::default(),
+            background_redraw_at: Default::default(),
             window_bounds: Default::default(),
             window_last_mouse_moved_event: Default::default(),
             foreground: foreground.clone(),
@@ -2652,7 +2663,9 @@ impl AppContext {
                 ctx.window_bounds
                     .insert(window_id, Some(RectF::new(origin, size)));
 
-                window.request_redraw();
+                if !ctx.is_window_occluded(window_id) {
+                    window.request_redraw();
+                }
 
                 // On Linux and Windows, we don't have a direct way to react to
                 // window fullscreen state changes, so instead we're using a
@@ -2675,6 +2688,9 @@ impl AppContext {
             move_callback: Box::new(move |bound, ctx| {
                 ctx.window_bounds.insert(window_id, Some(bound));
                 ctx.report_active_cursor_position_update();
+            }),
+            occlusion_callback: Box::new(move |is_occluded, ctx| {
+                ctx.handle_window_occlusion(window_id, is_occluded);
             }),
             active_cursor_position_callback: Box::new(move |ctx| {
                 ctx.active_cursor_position(window_id)
@@ -2785,6 +2801,10 @@ impl AppContext {
         self.drop_window_presentation(window_id);
         self.invalidation_callbacks.remove(&window_id);
         self.window_invalidations.remove(&window_id);
+        self.occluded_windows.remove(&window_id);
+        self.background_redraw_at.remove(&window_id);
+        self.repaint_tasks
+            .retain(|_, task| task.window_id != window_id);
         self.last_observed_active_cursor_positions
             .remove(&window_id);
         self.view_parents.remove(&window_id);
@@ -3532,7 +3552,22 @@ impl AppContext {
             .unique()
             .cloned()
             .collect_vec();
+        if invalidated_window_ids.is_empty() {
+            return;
+        }
+        let active_window_id = self.windows().active_window();
+        let now = Instant::now();
         for window_id in invalidated_window_ids {
+            if self.is_window_occluded(window_id) {
+                continue;
+            }
+            if !self.is_unit_test
+                && let Some(repaint_at) =
+                    self.defer_unfocused_redraw_until(window_id, active_window_id, now)
+            {
+                self.manage_delayed_repaint_timers(window_id, repaint_at);
+                continue;
+            }
             if let Some(mut callback) = self.invalidation_callbacks.remove(&window_id) {
                 callback(window_id, self);
                 self.invalidation_callbacks.insert(window_id, callback);
@@ -3617,8 +3652,67 @@ impl AppContext {
         }
     }
 
+    /// Returns the next eligible redraw time for an unfocused window, or `None` when a redraw
+    /// should be admitted now. Focused windows are never capped.
+    pub(crate) fn defer_unfocused_redraw_until(
+        &mut self,
+        window_id: WindowId,
+        active_window_id: Option<WindowId>,
+        now: Instant,
+    ) -> Option<Instant> {
+        if active_window_id == Some(window_id) {
+            return None;
+        }
+
+        if let Some(last_redraw_at) = self.background_redraw_at.get(&window_id).copied() {
+            let next_redraw_at = last_redraw_at + BACKGROUND_REDRAW_INTERVAL;
+            if now < next_redraw_at {
+                return Some(next_redraw_at);
+            }
+        }
+        self.background_redraw_at.insert(window_id, now);
+        None
+    }
+
+    /// Records whether a platform window is fully occluded. Occlusion only gates visual work:
+    /// model updates, terminal reads, and background tasks continue normally.
+    pub(crate) fn handle_window_occlusion(&mut self, window_id: WindowId, is_occluded: bool) {
+        if is_occluded {
+            if !self.occluded_windows.insert(window_id) {
+                return;
+            }
+            // Delayed visual work is latest-state-only. Dropping these tasks cancels their timers;
+            // the underlying model/asset state is read again by the catch-up frame on exposure.
+            self.repaint_tasks
+                .retain(|_, task| task.window_id != window_id);
+        } else if self.occluded_windows.remove(&window_id)
+            && let Some(window) = self.windows().platform_window(window_id)
+        {
+            // Request one catch-up frame. Any number of hidden invalidations are represented by
+            // the current model state rather than replayed as intermediate frames.
+            window.request_redraw();
+        }
+    }
+
+    /// Returns whether native redraw admission is currently suppressed for a window.
+    pub fn is_window_occluded(&self, window_id: WindowId) -> bool {
+        self.occluded_windows.contains(&window_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn repaint_task_count_for_window(&self, window_id: WindowId) -> usize {
+        self.repaint_tasks
+            .values()
+            .filter(|task| task.window_id == window_id)
+            .count()
+    }
+
     /// Schedules an asynchronous task for each delayed notify. Removes any existing notify jobs that've been cancelled.
     pub fn manage_delayed_repaint_timers(&mut self, window_id: WindowId, repaint_at: Instant) {
+        if self.is_window_occluded(window_id) {
+            return;
+        }
+
         // Avoid creating new timers if a timer with a closer repaint time for
         // the same window already exists.
         if self.repaint_tasks.iter().any(|(_, task)| {
@@ -3665,6 +3759,10 @@ impl AppContext {
         window_id: WindowId,
         pending_assets: HashSet<AssetHandle>,
     ) {
+        if self.is_window_occluded(window_id) {
+            return;
+        }
+
         pending_assets.into_iter().for_each(|pending_asset| {
             // Avoid creating new repaint tasks if this (window, asset) pairing already has a future.
             if self.repaint_tasks.iter().any(|(_, task)| {

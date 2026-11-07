@@ -105,6 +105,22 @@ fn add_window_with_cloud_mode_terminal(app: &mut App) -> ViewHandle<TerminalView
 }
 
 #[test]
+fn windows_powershell_uses_a_cold_start_appropriate_bootstrap_timeout() {
+    assert_eq!(
+        login_shell_bootstrap_timeout_for_display_name("Windows PowerShell"),
+        Duration::from_secs(15)
+    );
+    assert_eq!(
+        login_shell_bootstrap_timeout_for_display_name("PowerShell Core"),
+        Duration::from_secs(7)
+    );
+    assert_eq!(
+        login_shell_bootstrap_timeout_for_display_name("bash"),
+        Duration::from_secs(7)
+    );
+}
+
+#[test]
 fn updating_active_shell_launch_data_requests_an_app_state_save() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);

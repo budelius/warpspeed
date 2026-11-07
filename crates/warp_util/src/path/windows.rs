@@ -54,7 +54,9 @@ fn find_powershell_7_path() -> Option<PathBuf> {
         return resolved_executable;
     }
 
-    log::warn!("Failed to find pwsh.exe on system");
+    // PowerShell 7 is optional on Windows. Windows PowerShell 5.1 remains a supported fallback,
+    // so the absence of `pwsh.exe` is discovery information rather than a launch failure.
+    log::debug!("PowerShell 7 (pwsh.exe) is not installed; checking Windows PowerShell");
     None
 }
 

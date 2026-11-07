@@ -477,6 +477,13 @@ pub struct TerminalModel {
     /// The shell type of the login shell for this session.
     shell_launch_state: ShellLaunchState,
 
+    /// Whether shell creation is intentionally parked until this pane's tab becomes visible.
+    ///
+    /// A deferred pane used to remain in `DeterminingShell`, which made the UI claim that the
+    /// shell was "Starting" even though no start had been attempted. Keeping the policy explicit
+    /// lets rendering distinguish parked work from a slow or failed launch.
+    shell_start_deferred: bool,
+
     /// Whether or not to respect secrets that are obfuscated, respecting the Safe Mode/Secret Redaction setting.
     obfuscate_secrets: ObfuscateSecrets,
 
@@ -1135,6 +1142,7 @@ impl TerminalModel {
             handled_exit: false,
             env_var_collection_name: None,
             shell_launch_state: shell_state,
+            shell_start_deferred: false,
             obfuscate_secrets,
             shared_session_status,
             shared_session_source: None,
@@ -1741,6 +1749,16 @@ impl TerminalModel {
 
     pub fn shell_launch_state(&self) -> &ShellLaunchState {
         &self.shell_launch_state
+    }
+
+    /// Marks whether this pane is deliberately waiting for visible-tab activation before it
+    /// creates a PTY. Shell selection still happens eagerly so it can be persisted and displayed.
+    pub fn set_shell_start_deferred(&mut self, deferred: bool) {
+        self.shell_start_deferred = deferred;
+    }
+
+    pub fn is_shell_start_deferred(&self) -> bool {
+        self.shell_start_deferred
     }
 
     pub fn pending_subshell_session(&self) -> Option<&SubshellInitializationInfo> {

@@ -492,6 +492,15 @@ pub fn init(app: &mut AppContext) {
     ]);
 }
 
+#[derive(Clone, Default)]
+struct RowMouseStates {
+    row: MouseStateHandle,
+    list_action: MouseStateHandle,
+    preview_action: MouseStateHandle,
+    agent_ctrl_action: MouseStateHandle,
+    takeover_action: MouseStateHandle,
+}
+
 /// A full-window library of local and AgentCtrl sessions, with filtering and transcript preview.
 pub struct AgentSessionsView {
     query_editor: ViewHandle<EditorView>,
@@ -509,10 +518,7 @@ pub struct AgentSessionsView {
     history_loaded: bool,
     view_rows: Arc<Vec<ViewRow>>,
     /// Made when a row first appears and kept across renders and rebuilds.
-    row_states: HashMap<RowKey, MouseStateHandle>,
-    button_states: HashMap<RowKey, MouseStateHandle>,
-    agent_ctrl_button_states: HashMap<RowKey, MouseStateHandle>,
-    takeover_button_states: HashMap<RowKey, MouseStateHandle>,
+    row_mouse_states: HashMap<RowKey, RowMouseStates>,
     filter_states: HashMap<SessionFilter, MouseStateHandle>,
     close_state: MouseStateHandle,
     selected_index: Option<usize>,
@@ -596,10 +602,7 @@ impl AgentSessionsView {
             built_query: String::new(),
             history_loaded: false,
             view_rows: Arc::new(Vec::new()),
-            row_states: HashMap::new(),
-            button_states: HashMap::new(),
-            agent_ctrl_button_states: HashMap::new(),
-            takeover_button_states: HashMap::new(),
+            row_mouse_states: HashMap::new(),
             filter_states,
             close_state: MouseStateHandle::default(),
             selected_index: None,
@@ -844,13 +847,7 @@ impl AgentSessionsView {
         }
         rows.extend(past);
         for row in &rows {
-            let key = row.key();
-            self.row_states.entry(key.clone()).or_default();
-            self.button_states.entry(key.clone()).or_default();
-            self.agent_ctrl_button_states
-                .entry(key.clone())
-                .or_default();
-            self.takeover_button_states.entry(key).or_default();
+            self.row_mouse_states.entry(row.key()).or_default();
         }
         self.view_rows = Arc::new(rows);
         let preferred_index = self
@@ -1157,8 +1154,7 @@ impl AgentSessionsView {
     fn render_list(&self, app: &AppContext) -> Box<dyn Element> {
         let theme = Appearance::as_ref(app).theme();
         let view_rows = self.view_rows.clone();
-        let row_states = self.row_states.clone();
-        let button_states = self.button_states.clone();
+        let row_mouse_states = self.row_mouse_states.clone();
         let selected_index = self.selected_index;
         let pending_process_end = self.pending_process_end;
         let list = UniformList::new(
@@ -1169,14 +1165,13 @@ impl AgentSessionsView {
                     .filter_map(|index| {
                         let row = view_rows.get(index)?;
                         let key = row.key();
-                        let row_state = row_states.get(&key)?.clone();
-                        let button_state = button_states.get(&key)?.clone();
+                        let mouse_states = row_mouse_states.get(&key)?;
                         Some(render_row(
                             row,
                             key,
                             selected_index == Some(index),
-                            row_state,
-                            button_state,
+                            mouse_states.row.clone(),
+                            mouse_states.list_action.clone(),
                             pending_process_end,
                             app,
                         ))
@@ -1452,7 +1447,10 @@ impl AgentSessionsView {
         let mut actions = Flex::row().with_spacing(8.);
         let mut has_action = false;
         if let Some((_, label)) = preview_action(row, self.pending_process_end)
-            && let Some(state) = self.button_states.get(&key).cloned()
+            && let Some(state) = self
+                .row_mouse_states
+                .get(&key)
+                .map(|states| states.preview_action.clone())
         {
             has_action = true;
             let action_key = key.clone();
@@ -1470,7 +1468,10 @@ impl AgentSessionsView {
             );
         }
         if matches!(row, ViewRow::Local { row, .. } if agent_ctrl_handoff_source(row).is_some())
-            && let Some(state) = self.agent_ctrl_button_states.get(&key).cloned()
+            && let Some(state) = self
+                .row_mouse_states
+                .get(&key)
+                .map(|states| states.agent_ctrl_action.clone())
         {
             has_action = true;
             let action_key = key.clone();
@@ -1488,7 +1489,10 @@ impl AgentSessionsView {
             );
         }
         if matches!(row, ViewRow::Managed { run, .. } if managed_can_take_over(run))
-            && let Some(state) = self.takeover_button_states.get(&key).cloned()
+            && let Some(state) = self
+                .row_mouse_states
+                .get(&key)
+                .map(|states| states.takeover_action.clone())
         {
             has_action = true;
             actions.add_child(

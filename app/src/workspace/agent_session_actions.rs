@@ -42,7 +42,8 @@ impl AgentSessionAction {
         match self {
             AgentSessionAction::Focus(_) => "Focus",
             AgentSessionAction::Start(_) => "Start",
-            AgentSessionAction::Attach { .. } => "Attach",
+            AgentSessionAction::Attach { agent: Some(_), .. } => "Attach",
+            AgentSessionAction::Attach { agent: None, .. } => "Attach shell",
             AgentSessionAction::Managed { .. } => "Open",
             AgentSessionAction::Resume { .. } => "Resume",
         }

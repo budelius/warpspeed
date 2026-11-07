@@ -932,17 +932,20 @@ fn ui_session(environment: ManagedEnvironment, job_id: &str, json_output: bool) 
         return attach(environment, job_id, false, false, true);
     }
 
-    match native_terminal::attach_if_available(environment, job_id, false)? {
+    let fallback_reason = match native_terminal::attach_if_available(environment, job_id, false)? {
         native_terminal::NativeAttachOutcome::Attached => return Ok(()),
         native_terminal::NativeAttachOutcome::Fallback(reason) => {
             eprintln!("{reason}. Opening Event history / fallback.");
+            reason
         }
-    }
+    };
 
     #[cfg(feature = "tui")]
     if tui::can_run() {
-        return tui::run(environment, job_id);
+        return tui::run(environment, job_id, fallback_reason);
     }
+    #[cfg(not(feature = "tui"))]
+    let _ = fallback_reason;
 
     loop {
         attach(environment, job_id, true, false, false)?;
@@ -1321,19 +1324,26 @@ fn attach(
     {
         bail!("--takeover requires an interactive native-terminal attachment");
     }
-    if !once && !json_output {
+    let fallback_reason = if !once && !json_output {
         match native_terminal::attach_if_available(environment, job_id, takeover)? {
             native_terminal::NativeAttachOutcome::Attached => return Ok(()),
             native_terminal::NativeAttachOutcome::Fallback(reason) => {
                 eprintln!("{reason}. Opening Event history / fallback.");
+                Some(reason)
             }
         }
-    }
+    } else {
+        None
+    };
 
     #[cfg(feature = "tui")]
-    if !once && !json_output && tui::can_run() {
-        return tui::run(environment, job_id);
+    if tui::can_run()
+        && let Some(reason) = fallback_reason
+    {
+        return tui::run(environment, job_id, reason);
     }
+    #[cfg(not(feature = "tui"))]
+    let _ = fallback_reason;
 
     let OpenedManagedSession {
         profile,

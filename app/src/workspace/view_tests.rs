@@ -7879,7 +7879,7 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
 #[test]
-fn move_session_without_saved_history_starts_fresh_and_attaches() {
+fn move_session_without_saved_history_keeps_the_local_agent() {
     App::test((), |mut app| async move {
         const MISSING_SESSION_ID: &str = "ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb";
 
@@ -7918,34 +7918,33 @@ fn move_session_without_saved_history_starts_fresh_and_attaches() {
         });
 
         assert_eventually_within!(
-            std::time::Duration::from_secs(15) => agent_ctrl_move_step(
-                &workspace,
-                terminal_view_id,
-                &mut app,
-            ) == Some(MoveStep::CuttingOver {
+            std::time::Duration::from_secs(15) => workspace.read(&app, |workspace, _| {
+                workspace.agent_ctrl_move_step(terminal_view_id)
+            }) == Some(MoveStep::Done {
                 job_id: "job-fresh".to_owned(),
                 pushed_branch: None,
             }),
             "{:?}",
-            agent_ctrl_move_step(&workspace, terminal_view_id, &mut app)
+            workspace.read(&app, |workspace, _| workspace.agent_ctrl_move_step(terminal_view_id))
         );
         assert!(
-            pty_writes
+            !pty_writes
                 .borrow()
                 .iter()
                 .any(|write| String::from_utf8_lossy(write).contains("/quit")),
             "{:?}",
             pty_writes.borrow()
         );
-
-        workspace.update(&mut app, |_, ctx| {
-            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
-                model.remove_session(terminal_view_id, ctx)
-            });
-        });
-
+        assert_eq!(
+            app.read(|ctx| CLIAgentSessionsModel::as_ref(ctx)
+                .session_id(terminal_view_id)
+                .map(str::to_owned)),
+            Some(MISSING_SESSION_ID.to_owned())
+        );
+        let fresh_view = focused_terminal_view_for_move(&workspace, &mut app);
+        assert_ne!(fresh_view.id(), terminal_view_id);
         let buffer = app.read(|ctx| {
-            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+            fresh_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
         });
         assert!(
             buffer.ends_with(" agent-ctrl open job-fresh --environment staging"),
@@ -7953,7 +7952,7 @@ fn move_session_without_saved_history_starts_fresh_and_attaches() {
         );
         assert!(
             workspace_toast_texts(&workspace, &mut app)
-                .contains(&"Started a fresh AgentCtrl session as job-fresh".to_owned())
+                .contains(&"AgentCtrl accepted fresh run job-fresh; the local agent remains open. The run is not a copy of its conversation.".to_owned())
         );
     });
 }
@@ -8970,6 +8969,19 @@ fn agent_session_resume_splits_beside_a_shell_not_yet_at_its_prompt() {
         });
         assert!(pending_command_in(&workspace, new_pane, &mut app));
         assert!(!pending_command_in(&workspace, target.pane_id, &mut app));
+        let command = workspace.read(&app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .terminal_view_from_pane_id(new_pane, ctx)
+                .expect("terminal pane")
+                .read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            command.starts_with("cd ") || command.starts_with("Set-Location "),
+            "the resume must select its recorded directory: {command}"
+        );
+        assert!(command.contains("claude --resume"), "{command}");
     });
 }
 

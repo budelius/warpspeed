@@ -311,11 +311,29 @@ pub(crate) fn build_rows_with_scanned(
             rows.push(live_row(pane, descriptor, history_for(descriptor), state));
         } else if let Some(descriptor) = &pane.pending {
             let key = key_of(descriptor);
+            let held_by_detached = key.as_ref().is_some_and(|key| {
+                detached.iter().any(|input| {
+                    pane_holds_detached(pane, input)
+                        && !input.session_uuid_hex.is_empty()
+                        && scanned.iter().any(|process| {
+                            process.warp_session_uuid.as_deref()
+                                == Some(input.session_uuid_hex.as_str())
+                                && (process.agent, &process.session_id) == (key.0, &key.1)
+                        })
+                })
+            });
+            if held_by_detached || key.as_ref().is_some_and(|key| live_keys.contains(key)) {
+                continue;
+            }
+            let history = history_for(descriptor);
             if detached
                 .iter()
                 .any(|input| pane_holds_detached(pane, input))
-                || key.as_ref().is_some_and(|key| live_keys.contains(key))
             {
+                if let Some(history) = history {
+                    live_keys.extend(key);
+                    rows.push(past_row(history, AgentSessionState::Past));
+                }
                 continue;
             }
             live_keys.extend(key);
@@ -325,7 +343,7 @@ pub(crate) fn build_rows_with_scanned(
             rows.push(live_row(
                 pane,
                 descriptor,
-                history_for(descriptor),
+                history,
                 AgentSessionState::Pending { locator },
             ));
         }
@@ -339,10 +357,22 @@ pub(crate) fn build_rows_with_scanned(
             holder: input.holder.clone(),
         };
         let pane = panes.iter().find(|pane| pane_holds_detached(pane, input));
+        let identified = (!input.session_uuid_hex.is_empty())
+            .then(|| {
+                scanned.iter().find(|process| {
+                    process.warp_session_uuid.as_deref() == Some(input.session_uuid_hex.as_str())
+                })
+            })
+            .flatten();
         let pane_descriptor = pane.and_then(|pane| {
             pane.pending
                 .clone()
                 .or_else(|| held_descriptor(pane))
+                .filter(|descriptor| {
+                    identified.is_some_and(|process| {
+                        key_of(descriptor) == Some((process.agent, process.session_id.clone()))
+                    })
+                })
                 .map(|descriptor| (pane, descriptor))
         });
         if pane_descriptor
@@ -352,13 +382,6 @@ pub(crate) fn build_rows_with_scanned(
         {
             continue;
         }
-        let identified = (!input.session_uuid_hex.is_empty())
-            .then(|| {
-                scanned.iter().find(|process| {
-                    process.warp_session_uuid.as_deref() == Some(input.session_uuid_hex.as_str())
-                })
-            })
-            .flatten();
         let row = match (pane_descriptor, identified) {
             (Some((pane, descriptor)), _) => {
                 if let Some(key) = key_of(&descriptor) {

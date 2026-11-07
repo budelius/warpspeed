@@ -2022,6 +2022,10 @@ impl TerminalManagerTrait for TerminalManager<TerminalView> {
         self.is_shell_deferred()
     }
 
+    fn is_shell_start_outstanding(&self) -> bool {
+        self.is_shell_start_outstanding_inner()
+    }
+
     fn deferred_shell_startup_directory(&self) -> Option<PathBuf> {
         self.parked_shell_startup_directory()
     }

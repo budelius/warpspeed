@@ -10797,6 +10797,55 @@ fn a_detached_shell_shows_the_reattach_banner_and_keeps_the_pane_open() {
     });
 }
 
+/// A restart parks the agent's resume command in the input while the replaced shell's last block
+/// is still on its way to the view. That block's completion must not wipe the command: the pending
+/// flag would stay set over an empty buffer, and the new shell would run nothing once it was ready.
+#[test]
+fn pending_command_survives_the_completion_of_the_block_it_replaces() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, ctx| {
+            view.set_pending_command("pi --session 01a14edb", ctx);
+            view.model.lock().exit_for_restart();
+
+            view.input.update(ctx, |input, ctx| {
+                use crate::terminal::event::{BlockCompletedEvent, BlockType, UserBlockCompleted};
+                use crate::terminal::model::block::{BlockId, SerializedBlock};
+                use crate::terminal::model::terminal_model::BlockIndex;
+
+                input.handle_block_completed_event(
+                    BlockCompletedEvent {
+                        block_type: BlockType::User(UserBlockCompleted::new_for_test(
+                            BlockIndex::zero(),
+                            Arc::new(SerializedBlock::new_for_test(b"pi".to_vec(), vec![])),
+                            "pi".to_owned(),
+                            "pi".to_owned(),
+                            String::new(),
+                            String::new(),
+                            false,
+                            None,
+                            0,
+                            0,
+                        )),
+                        num_secrets_obfuscated: 0,
+                        block_index: BlockIndex::zero(),
+                        block_id: BlockId::new(),
+                        session_id: None,
+                        restored_block_was_local: None,
+                    },
+                    ctx,
+                );
+            });
+
+            view.input.read(ctx, |input, ctx| {
+                assert!(input.has_pending_command());
+                assert_eq!(input.buffer_text(ctx), "pi --session 01a14edb");
+            });
+        });
+    });
+}
+
 /// A pending command refused because the session's history was not registered yet must run
 /// once it is; nothing else would retry it at an idle prompt.
 #[test]

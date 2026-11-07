@@ -5893,11 +5893,23 @@ fn supervisor_restart_resumes_a_tracked_pi_session_without_a_reported_id() {
     });
 }
 
+async fn wait_for_focused_shell_start(workspace: &ViewHandle<Workspace>, app: &mut App) {
+    let manager = workspace.update(app, |workspace, ctx| {
+        workspace.focused_terminal_manager(ctx).unwrap()
+    });
+    assert_eventually_within!(
+        std::time::Duration::from_secs(10) =>
+            manager.read(app, |manager, _| !manager.is_shell_start_outstanding()),
+        "the focused pane's shell start should resolve"
+    );
+}
+
 #[test]
 fn unattended_restart_resumes_the_pi_agent_of_a_pane_in_this_supervisor() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let workspace = mock_workspace(&mut app);
+        wait_for_focused_shell_start(&workspace, &mut app).await;
 
         let terminal_view = workspace.update(&mut app, |workspace, ctx| {
             let view = workspace.focused_terminal_view(ctx).unwrap();
@@ -5907,7 +5919,9 @@ fn unattended_restart_resumes_the_pi_agent_of_a_pane_in_this_supervisor() {
 
             assert_eq!(
                 workspace.restart_shell_unattended(view.id(), ctx),
-                Ok(Some("pi --session local-pi-session".to_owned()))
+                Ok(UnattendedRestart::Restarted {
+                    resume_command: Some("pi --session local-pi-session".to_owned()),
+                })
             );
             assert!(!workspace.restart_shell_confirmation_modal.is_open());
             assert!(workspace.pending_shell_restart.is_none());
@@ -5920,6 +5934,70 @@ fn unattended_restart_resumes_the_pi_agent_of_a_pane_in_this_supervisor() {
                 .read(ctx, |input, ctx| input.buffer_text(ctx))
         });
         assert_eq!(buffer_text, "pi --session local-pi-session");
+    });
+}
+
+/// The shell behind a pane that has not attached is out of reach, so replacing it would leave the
+/// old agent running next to the resumed one. The pane stays as it is until it has attached.
+#[test]
+fn unattended_restart_waits_for_a_pane_that_has_not_attached() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let terminal_view = workspace.update(&mut app, |workspace, ctx| {
+            // A new pane's shell start is still resolving, as an unattached pane's is once it has
+            // been opened.
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(view.id(), tracked_pi_session(Some("local-pi-session")), ctx);
+            });
+
+            assert_eq!(
+                workspace.restart_shell_unattended(view.id(), ctx),
+                Ok(UnattendedRestart::ShellStarting)
+            );
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(view.id())
+                    .is_some(),
+                "the agent is still running and must stay tracked"
+            );
+            view
+        });
+
+        let buffer_text = terminal_view.read(&app, |terminal_view, ctx| {
+            terminal_view
+                .input()
+                .read(ctx, |input, ctx| input.buffer_text(ctx))
+        });
+        assert_eq!(buffer_text, "", "no resume command may be parked");
+    });
+}
+
+/// Restarting cannot bring back an agent with no session to resume, so an unattended restart must
+/// not end it. Nobody is watching to notice it has gone.
+#[test]
+fn unattended_restart_leaves_an_agent_it_cannot_resume_running() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        wait_for_focused_shell_start(&workspace, &mut app).await;
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let view = workspace.focused_terminal_view(ctx).unwrap();
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.set_session(view.id(), tracked_pi_session(None), ctx);
+            });
+
+            assert!(workspace.restart_shell_unattended(view.id(), ctx).is_err());
+            assert!(
+                CLIAgentSessionsModel::as_ref(ctx)
+                    .session(view.id())
+                    .is_some(),
+                "the agent must still be tracked: its shell was not touched"
+            );
+        });
     });
 }
 

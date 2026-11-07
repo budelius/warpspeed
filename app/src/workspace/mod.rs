@@ -65,7 +65,7 @@ pub fn panel_header_corner_radius() -> warpui::elements::CornerRadius {
 
 pub use one_time_modal_model::OneTimeModalModel;
 pub use registry::WorkspaceRegistry;
-pub(crate) use terminal_panes::TerminalPaneInfo;
+pub(crate) use terminal_panes::{TerminalPaneInfo, UnattendedRestart};
 pub use toast_stack::{ToastStack, ToastStackEvent};
 
 use crate::workspace::view::{

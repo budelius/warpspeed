@@ -686,9 +686,34 @@ fn act(pid: Option<u32>, request: Request, json: bool, done: &str) -> Result<()>
     }
 }
 
-/// How long a restarted pane gets for its resumed agent to report in before the restart is
-/// called a failure.
-const AGENT_RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// How long each stage of a resume gets before it is called a failure.
+#[derive(Clone, Copy)]
+struct ResumeTimeouts {
+    /// For the shell to come up. A loaded machine has taken over a minute to bootstrap a shell,
+    /// and nothing can run until it has.
+    shell: std::time::Duration,
+    /// For the shell to take the parked command, which it may refuse for a while after
+    /// bootstrapping.
+    command: std::time::Duration,
+    /// For the agent to report in once its command is running.
+    agent: std::time::Duration,
+}
+
+const RESUME_TIMEOUTS: ResumeTimeouts = ResumeTimeouts {
+    shell: std::time::Duration::from_secs(180),
+    command: std::time::Duration::from_secs(45),
+    agent: std::time::Duration::from_secs(45),
+};
+
+/// How far a pane's agent got on its way back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ResumeProgress {
+    ShellNotReady,
+    CommandNotRun,
+    AgentSilent,
+    AgentRunning,
+}
 
 /// What happened to one pane under `sessions restart`.
 #[derive(Serialize)]
@@ -697,8 +722,14 @@ struct RestartReport {
     agent: Option<String>,
     agent_session_id: Option<String>,
     resume_command: Option<String>,
-    /// Whether the resumed agent was seen running in the pane again.
-    agent_running: bool,
+    /// How far the resumed agent got, when there was one to resume.
+    resume_progress: Option<ResumeProgress>,
+}
+
+/// Whether `sessions restart --all-agents` should restart a pane. An agent pane that has not
+/// attached yet counts: its old agent is still running, in the shell the pane will attach to.
+fn is_agent_pane(pane: &PaneSummary) -> bool {
+    pane.has_running_agent || (pane.agent.is_some() && !pane.shell_ready)
 }
 
 /// Restarts one pane, or every pane running an agent, and checks that each resumed agent comes
@@ -722,7 +753,7 @@ fn restart(
     let targets: Vec<PaneSummary> = if all_agents {
         panes
             .into_iter()
-            .filter(|pane| pane.has_running_agent)
+            .filter(is_agent_pane)
             .filter(|pane| {
                 pane.terminal_view_id
                     .is_some_and(|id| !except_views.contains(&id))
@@ -743,33 +774,33 @@ fn restart(
         let Some(id) = pane.terminal_view_id else {
             continue;
         };
-        let resume_command = match instance.call(Request::RestartSession {
-            terminal_view_id: id,
-        })? {
-            Response::Restarted { resume_command } => resume_command,
-            Response::Failed { error } => {
-                failure = Some(format!("Restarting terminal view {id} failed: {error}"));
+        let expects_agent = pane.agent.is_some();
+        let resume_command = match restart_attached_pane(&instance, id, expects_agent) {
+            Ok(resume_command) => resume_command,
+            Err(error) => {
+                failure = Some(format!("{error:#}"));
                 break;
             }
-            other => bail!(unexpected(other)),
         };
-        let agent_running =
-            resume_command.is_some() && wait_for_agent(&instance, id, AGENT_RESUME_TIMEOUT);
+        let resume_progress = resume_command
+            .as_ref()
+            .map(|_| wait_for_resume(|| pane_state(&instance, id), RESUME_TIMEOUTS));
         let report = RestartReport {
             terminal_view_id: id,
             agent: pane.agent,
             agent_session_id: pane.agent_session_id,
             resume_command,
-            agent_running,
+            resume_progress,
         };
         if !json {
             println!("{}", describe_restart(&report));
         }
-        let lost_agent = report.agent.is_some() && !report.agent_running;
+        let lost_agent = expects_agent && resume_progress != Some(ResumeProgress::AgentRunning);
         reports.push(report);
         if lost_agent {
             failure = Some(format!(
-                "The agent in terminal view {id} did not come back; stopped before restarting                  any other pane"
+                "The agent in terminal view {id} did not come back; stopped before restarting \
+                 any other pane"
             ));
             break;
         }
@@ -784,22 +815,85 @@ fn restart(
     }
 }
 
-/// Polls the instance until the pane reports a running agent again, or `timeout` passes.
-fn wait_for_agent(
+/// Restarts a pane and returns the resume command parked for its new shell.
+///
+/// The instance will not restart a pane that has not attached, since the shell it would replace
+/// is out of its reach until then. It starts the attach instead, and the restart is repeated once
+/// the pane's own agent has shown up, so that the shell that ends is the one running that agent.
+fn restart_attached_pane(
     instance: &client::Instance,
     terminal_view_id: u64,
+    expects_agent: bool,
+) -> Result<Option<String>> {
+    if let Some(resume_command) = request_restart(instance, terminal_view_id)? {
+        return Ok(resume_command);
+    }
+
+    let mut state = || pane_state(instance, terminal_view_id);
+    let attached = if expects_agent {
+        wait_for_resume(&mut state, RESUME_TIMEOUTS) == ResumeProgress::AgentRunning
+    } else {
+        poll_pane(&mut state, RESUME_TIMEOUTS.shell, |pane| pane.shell_ready)
+    };
+    if !attached {
+        bail!("Terminal view {terminal_view_id} did not finish attaching; nothing was restarted");
+    }
+    request_restart(instance, terminal_view_id)?.with_context(|| {
+        format!("Terminal view {terminal_view_id} is still attaching; nothing was restarted")
+    })
+}
+
+/// Asks the instance to restart a pane. `None` means the pane's shell is still attaching and
+/// nothing was restarted.
+fn request_restart(
+    instance: &client::Instance,
+    terminal_view_id: u64,
+) -> Result<Option<Option<String>>> {
+    match instance.call(Request::RestartSession { terminal_view_id })? {
+        Response::Restarted { resume_command } => Ok(Some(resume_command)),
+        Response::ShellStarting => Ok(None),
+        Response::Failed { error } => {
+            bail!("Restarting terminal view {terminal_view_id} failed: {error}")
+        }
+        other => bail!(unexpected(other)),
+    }
+}
+
+fn pane_state(instance: &client::Instance, terminal_view_id: u64) -> Option<PaneSummary> {
+    match instance.call(Request::ListPanes) {
+        Ok(Response::Panes { panes }) => panes
+            .into_iter()
+            .find(|pane| pane.terminal_view_id == Some(terminal_view_id)),
+        _ => None,
+    }
+}
+
+/// Follows a pane's agent through each stage of coming back, and reports the stage it got to.
+fn wait_for_resume(
+    mut state: impl FnMut() -> Option<PaneSummary>,
+    timeouts: ResumeTimeouts,
+) -> ResumeProgress {
+    if !poll_pane(&mut state, timeouts.shell, |pane| pane.shell_ready) {
+        return ResumeProgress::ShellNotReady;
+    }
+    if !poll_pane(&mut state, timeouts.command, |pane| !pane.command_parked) {
+        return ResumeProgress::CommandNotRun;
+    }
+    if !poll_pane(&mut state, timeouts.agent, |pane| pane.has_running_agent) {
+        return ResumeProgress::AgentSilent;
+    }
+    ResumeProgress::AgentRunning
+}
+
+/// Polls a pane until it satisfies `ready`, or `timeout` passes.
+fn poll_pane(
+    state: &mut impl FnMut() -> Option<PaneSummary>,
     timeout: std::time::Duration,
+    ready: impl Fn(&PaneSummary) -> bool,
 ) -> bool {
     let deadline = instant::Instant::now() + timeout;
     loop {
-        let running = matches!(
-            instance.call(Request::ListPanes),
-            Ok(Response::Panes { panes })
-                if panes.iter().any(|pane| {
-                    pane.terminal_view_id == Some(terminal_view_id) && pane.has_running_agent
-                })
-        );
-        if running {
+        if state().is_some_and(|pane| ready(&pane)) {
             return true;
         }
         if instant::Instant::now() >= deadline {
@@ -811,17 +905,29 @@ fn wait_for_agent(
 
 fn describe_restart(report: &RestartReport) -> String {
     let id = report.terminal_view_id;
-    match (&report.resume_command, report.agent_running) {
-        (Some(command), true) => format!("Restarted terminal view {id}; resumed `{command}`"),
-        (Some(command), false) => {
-            format!("Restarted terminal view {id}; `{command}` did not report back")
-        }
-        (None, _) => match &report.agent {
+    let Some(command) = &report.resume_command else {
+        return match &report.agent {
             Some(agent) => {
                 format!("Restarted terminal view {id}; its {agent} session could not be resumed")
             }
             None => format!("Restarted terminal view {id}; it had no agent to resume"),
-        },
+        };
+    };
+    match report.resume_progress {
+        Some(ResumeProgress::AgentRunning) => {
+            format!("Restarted terminal view {id}; resumed `{command}`")
+        }
+        Some(ResumeProgress::ShellNotReady) | None => format!(
+            "Restarted terminal view {id}; its shell is not ready yet, and `{command}` is parked \
+             until it is"
+        ),
+        Some(ResumeProgress::CommandNotRun) => format!(
+            "Restarted terminal view {id}; its shell has not run `{command}`, which is still in \
+             the pane's input"
+        ),
+        Some(ResumeProgress::AgentSilent) => {
+            format!("Restarted terminal view {id}; `{command}` did not report back")
+        }
     }
 }
 

@@ -23,7 +23,7 @@
 - Stage explicit paths only (`git add <path> …`); never `git add -A`, `git add .` or `git commit -a`. Other sessions edit these trees.
 - Push targets: agent-ctrl, dashboard, obachan, obachan-config, passiv → `origin` (Gitea). WarpSpeed → `gitea` and `gitlab`, never `origin` (upstream warpdotdev).
 - Never run `find /` in Git Bash on this machine; bound every search to a named directory or use Grep/Glob.
-- Staging cluster access: `kubectl --context admin@obachan-staging --server https://10.10.1.5:6443 --tls-server-name 10.96.0.1 …` (the kubeconfig's own server address and `staging-gateway` are dead; never edit the shared kubeconfig).
+- Staging cluster access: `kubectl --context admin@obachan-staging --server https://100.64.0.2:6443 --tls-server-name 10.96.0.1 …` (the kubeconfig's own server address and `staging-gateway` are dead; never edit the shared kubeconfig).
 
 ---
 
@@ -62,7 +62,9 @@ If `origin/dev` of agent-ctrl moved past a3cde04, the `file:line` references bel
 - Task-linked launches (`task_id`) are rejected by the API with 422 `task_launch_unsupported`; they stay on the dashboard.
 - The dashboard allows live input for `agentctrl_api` runs (Task 12a).
 - Rate limiting: the API's per-user limit is the real limit; APISIX's bearer route only carries a coarse flood guard
-  (3000 requests / 60 s on one shared bucket), because APISIX sees Caddy's address as the client.
+  (3000 requests / 60 s per observed Caddy pod address, not one shared bucket), because APISIX sees
+  Caddy's address as the client. Staging has six Caddy pods, so traffic distributed across them can
+  consume six separate buckets; this guard is not a cluster-wide or per-user quota.
 
 ## Order and dependencies
 
@@ -8249,7 +8251,7 @@ BEARER_FLOOD_GUARD_COUNT = 3000
 def build_app_bearer_rate_limit_plugin(cfg: object) -> dict[str, Any]:
     """Coarse flood guard for bearer-only app routes; the upstream enforces per-user limits.
 
-    APISIX sees Caddy's address as `remote_addr`, so every caller shares this bucket.
+    APISIX sees each Caddy pod's address as `remote_addr`, so callers share a bucket per Caddy pod.
     """
     return {
         **build_rate_limit_plugin(cfg),
@@ -8582,7 +8584,11 @@ $OBACHAN apps routes register --spec deploy/k8s/agentctrl-api.obachan.app.toml -
 curl -s -o /dev/null -w '%{http_code}\n' https://agents-dev.obachan.dev/api/agent-control/overview
 ```
 
-Expected: register succeeds (the API reconciles the Certificate and Caddy route on PUT); after the certificate issues, the curl prints `401` (APISIX denies a missing bearer). A `404`/`502` from Caddy means the route or certificate is not live yet; re-check with `$OBACHAN apps routes list --env staging`.
+Expected: the first register creates the Certificate. For a new host, wait for certificate issuance,
+then repeat the same `apps routes register` command so Caddy installs the now-available certificate
+and route. Only then should curl print `401` (APISIX denies a missing bearer). A `404`/`502` from
+Caddy means the route or certificate is not live yet; re-check with
+`$OBACHAN apps routes list --env staging`.
 
 - [ ] **Step 7: WarpSpeed build from dev**
 

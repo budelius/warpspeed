@@ -1305,7 +1305,7 @@ pub fn init(app: &mut AppContext) {
         .with_enabled(|| cfg!(feature = "local_tty")),
         EditableBinding::new(
             "workspace:show_agent_sessions",
-            "Sessions: show window",
+            "Sessions: show library",
             WorkspaceAction::ShowAgentSessions { focus: None },
         )
         .with_context_predicate(id!("Workspace") & !id!("Workspace_ViewOnlySharedSession"))

@@ -8432,7 +8432,14 @@ fn open_remote_session_palette(
             pane_group_id: pane_group.id(),
             pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
         };
-        workspace.open_agent_sessions_palette(target, ctx);
+        workspace.handle_action(
+            &WorkspaceAction::OpenPalette {
+                mode: PaletteMode::AgentSessions,
+                source: PaletteSource::Keybinding,
+                query: None,
+            },
+            ctx,
+        );
         workspace.palette.update(ctx, |palette, ctx| {
             palette.insert_query_text("job-associated", ctx)
         });
@@ -8948,40 +8955,32 @@ fn show_agent_sessions_opens_the_window_view_on_the_asked_pane() {
 }
 
 #[test]
-fn choosing_from_agent_sessions_opens_the_unfiltered_palette_on_the_clicked_pane() {
+fn activating_a_past_session_opens_it_directly_without_the_palette() {
     App::test((), |mut app| async move {
         initialize_app_for_move_session(&mut app);
-        // Opening the palette reads these, which `initialize_app` leaves out.
-        app.add_singleton_model(crate::settings::import::model::ImportedConfigModel::new);
-        app.add_singleton_model(|_| crate::search::command_palette::SelectedItems::new());
         let workspace = mock_workspace(&mut app);
-        AgentSessionHistoryModel::handle(&app).update(&mut app, |history, ctx| {
-            history.set_sessions_for_test(
-                vec![past_conversation("elsewhere", "available session", 10)],
-                ctx,
-            )
-        });
-
+        let session_id = uuid::Uuid::new_v4().to_string();
         let target = workspace.update(&mut app, |workspace, ctx| {
             let pane_group = workspace.active_tab_pane_group();
             let target = PaneViewLocator {
                 pane_group_id: pane_group.id(),
                 pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
             };
-            pane_group.update(ctx, |pane_group, ctx| {
-                pane_group.add_terminal_pane(Direction::Right, None, ctx);
-            });
             workspace.add_terminal_tab(false, ctx);
             target
         });
+        let past = crate::terminal::agent_session_history::PastAgentSession {
+            agent: crate::terminal::CLIAgent::Claude,
+            session_id: session_id.clone(),
+            cwd: std::env::temp_dir(),
+            canonical_cwd: None,
+            title: Some("available session".to_owned()),
+            last_prompt: None,
+            modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+            preview: Vec::new(),
+        };
 
         let sessions_view = workspace.update(&mut app, |workspace, ctx| {
-            let first_tab = workspace.tabs[0].pane_group.clone();
-            assert_ne!(
-                first_tab.as_ref(ctx).focused_pane_id(ctx),
-                target.pane_id,
-                "the clicked pane is not the one focused in its tab"
-            );
             workspace.handle_action(&WorkspaceAction::ShowAgentSessions { focus: None }, ctx);
             workspace.agent_sessions_modal.as_ref(ctx).body().clone()
         });
@@ -8999,7 +8998,7 @@ fn choosing_from_agent_sessions_opens_the_unfiltered_palette_on_the_clicked_pane
                     pending: None,
                 }],
                 Ok(Vec::new()),
-                &[],
+                &[past],
                 true,
                 Some(AgentSessionsFocus {
                     locator: target,
@@ -9014,36 +9013,21 @@ fn choosing_from_agent_sessions_opens_the_unfiltered_palette_on_the_clicked_pane
                 window_id,
                 sessions_view.id(),
                 &crate::workspace::agent_sessions_view::AgentSessionsViewAction::Activate(
-                    crate::workspace::agent_sessions_view::RowKey::Pane(target),
+                    crate::workspace::agent_sessions_view::RowKey::Local {
+                        agent: Some(crate::terminal::CLIAgent::Claude),
+                        session_id: Some(session_id),
+                        pane: None,
+                        detached_session: None,
+                        process_pid: None,
+                    },
                 ),
             );
         });
 
-        workspace.update(&mut app, |workspace, ctx| {
+        workspace.read(&app, |workspace, _| {
             assert!(!workspace.is_agent_sessions_modal_open());
-            assert!(workspace.current_workspace_state.is_palette_open);
-            let palette = workspace.palette.as_ref(ctx);
-            assert!(palette.is_mode_enabled(PaletteMode::AgentSessions, ctx));
-            assert_eq!(palette.search_bar.as_ref(ctx).query(ctx), "");
-            workspace.palette.update(ctx, |palette, ctx| {
-                palette.insert_query_text("available session", ctx)
-            });
-        });
-        workspace.update(&mut app, |workspace, ctx| {
-            let result = workspace
-                .palette
-                .as_ref(ctx)
-                .selected_search_result(ctx)
-                .expect("sessions outside the pane folder remain available to choose");
-            assert!(matches!(
-                result.accept_result(),
-                crate::search::command_palette::mixer::CommandPaletteItemAction::AgentSession {
-                    action: AgentSessionAction::Resume {
-                        target: Some(actual),
-                        ..
-                    }
-                } if actual == target
-            ));
+            assert!(!workspace.current_workspace_state.is_palette_open);
+            assert_eq!(workspace.active_tab_index(), 0);
         });
     });
 }

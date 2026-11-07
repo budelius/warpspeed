@@ -235,20 +235,52 @@ pub fn render_session_holder_banner(
 }
 
 #[cfg(feature = "local_tty")]
+pub struct ConnectedSupervisorBannerState {
+    pub id: InlineBannerId,
+    restart_mouse_state: MouseStateHandle,
+}
+
+#[cfg(feature = "local_tty")]
+impl ConnectedSupervisorBannerState {
+    pub fn new(id: InlineBannerId) -> Self {
+        Self {
+            id,
+            restart_mouse_state: Default::default(),
+        }
+    }
+}
+
+#[cfg(feature = "local_tty")]
 pub fn render_connected_supervisor_banner(
+    state: &ConnectedSupervisorBannerState,
     holder: &crate::app_state::SessionHolder,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
+    let text_color = appearance.theme().active_ui_text_color().into_solid();
     render_inline_block_list_banner(
         InlineBannerStyle::LowPriority,
         appearance,
         InlineBannerContent {
             title: format!("Connected to supervisor from build {}", holder.version),
             content: Some(vec![Text::new(
-                "The original shell is still running. Use “Restart under current supervisor…” in the session menu to replace it.",
+                "The original shell is still running. Restart it under this build’s supervisor to take over.",
                 appearance.ui_font_family(),
                 appearance.ui_font_size(),
             )]),
+            buttons: vec![InlineBannerTextButton {
+                text: "Restart & take over…".to_owned(),
+                text_color,
+                button_state: InlineBannerButtonState {
+                    on_click_event: TerminalAction::RestartInCurrentSupervisor,
+                    mouse_state_handle: state.restart_mouse_state.clone(),
+                },
+                font: InlineBannerTextButtonFont {
+                    weight: Some(Weight::Bold),
+                    ..Default::default()
+                },
+                position_id: None,
+                variant: InlineBannerTextButtonVariant::Primary,
+            }],
             ..Default::default()
         },
     )

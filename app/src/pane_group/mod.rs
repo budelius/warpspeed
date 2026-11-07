@@ -1871,7 +1871,7 @@ impl PaneGroup {
                     ctx,
                 );
                 pane_data.set_restored_shell_snapshot_fields(restored_shell_snapshot_fields);
-                pane_data.set_managed_session_job_id(terminal_snapshot.managed_session_job_id);
+                pane_data.set_managed_session_job_id(terminal_snapshot.managed_session_job_id, ctx);
 
                 let terminal_pane_id = pane_data.terminal_pane_id();
                 let pane_id = terminal_pane_id.into();
@@ -2379,6 +2379,7 @@ impl PaneGroup {
         &mut self,
         pane_id: PaneId,
         job_id: Option<String>,
+        ctx: &mut ViewContext<Self>,
     ) -> bool {
         let Some(pane) = self
             .pane_contents
@@ -2387,7 +2388,7 @@ impl PaneGroup {
         else {
             return false;
         };
-        pane.set_managed_session_job_id(job_id);
+        pane.set_managed_session_job_id(job_id, ctx);
         true
     }
 

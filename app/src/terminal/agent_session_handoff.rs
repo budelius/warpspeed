@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -19,7 +20,26 @@ use crate::terminal::CLIAgent;
 
 const MAX_SESSION_ID_CHARS: usize = 128;
 const BRANCH_ID_CHARS: usize = 8;
-const PREFERRED_REMOTES: [&str; 3] = ["gitea", "origin", "gitlab"];
+const PREFERRED_REMOTES: [&str; 3] = ["gitea", "gitlab", "origin"];
+
+#[derive(Debug)]
+struct MissingSessionFile(String);
+
+impl fmt::Display for MissingSessionFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MissingSessionFile {}
+
+fn missing_session_file(message: String) -> anyhow::Error {
+    MissingSessionFile(message).into()
+}
+
+pub(crate) fn is_missing_session_file(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MissingSessionFile>().is_some()
+}
 
 /// A local agent session the user asked to move into a managed run.
 #[derive(Clone, Debug)]
@@ -250,12 +270,14 @@ pub(crate) fn session_file_path(
                 .join("projects")
                 .join(claude_project_slug(cwd))
                 .join(format!("{session_id}.jsonl"));
-            ensure!(
-                path.is_file(),
-                "no claude session file at {}",
-                path.display()
-            );
-            Ok(path)
+            if path.is_file() {
+                Ok(path)
+            } else {
+                Err(missing_session_file(format!(
+                    "no claude session file at {}",
+                    path.display()
+                )))
+            }
         }
         CLIAgent::Pi => {
             let dir = roots.pi_session_dir.clone().unwrap_or_else(|| {
@@ -264,30 +286,34 @@ pub(crate) fn session_file_path(
                     .join("sessions")
                     .join(pi_session_dir_name(cwd))
             });
-            file_in_dir_ending_with(&dir, &format!("_{session_id}.jsonl"))
-                .ok_or_else(|| anyhow!("no pi session file for {session_id} in {}", dir.display()))
+            file_in_dir_ending_with(&dir, &format!("_{session_id}.jsonl")).ok_or_else(|| {
+                missing_session_file(format!(
+                    "no pi session file for {session_id} in {}",
+                    dir.display()
+                ))
+            })
         }
         CLIAgent::Codex => {
             let sessions = roots.codex_home.join("sessions");
             file_under_ending_with(&sessions, &format!("-{session_id}.jsonl")).ok_or_else(|| {
-                anyhow!(
+                missing_session_file(format!(
                     "no codex session file for {session_id} under {}",
                     sessions.display()
-                )
+                ))
             })
         }
         CLIAgent::Kimi => kimi_session_dir(&roots.kimi_home, session_id).ok_or_else(|| {
-            anyhow!(
+            missing_session_file(format!(
                 "no kimi session {session_id} under {}",
                 roots.kimi_home.join("sessions").display()
-            )
+            ))
         }),
         CLIAgent::DeepSeekHarness => {
             dsh_session_file(&roots.dsh_home, session_id).ok_or_else(|| {
-                anyhow!(
+                missing_session_file(format!(
                     "no dsh session file for {session_id} under {}",
                     roots.dsh_home.join("sessions").display()
-                )
+                ))
             })
         }
         CLIAgent::Gemini
@@ -471,7 +497,7 @@ pub(crate) fn create_handoff_commit(repo: &Path, session_id: &str) -> Result<Str
     )
 }
 
-/// The remote a handoff branch is pushed to: `gitea`, `origin`, or `gitlab`, in that order.
+/// The remote a handoff branch is pushed to: `gitea`, `gitlab`, or `origin`, in that order.
 pub(crate) fn select_remote(repo: &Path) -> Result<String> {
     let remotes = git(repo, ["remote"], &[])?;
     PREFERRED_REMOTES
@@ -696,14 +722,15 @@ pub(crate) enum MoveStep {
     WaitingForResume {
         job_id: String,
     },
-    /// `pushed_branch` is the handoff branch as `<remote>/<branch>`, here and in `Done`.
+    /// `pushed_branch` is the handoff branch as `<remote>/<branch>`, here and in `Done`. It is
+    /// absent when a missing local session file required starting a fresh run.
     CuttingOver {
         job_id: String,
-        pushed_branch: String,
+        pushed_branch: Option<String>,
     },
     Done {
         job_id: String,
-        pushed_branch: String,
+        pushed_branch: Option<String>,
     },
     Failed {
         reason: String,

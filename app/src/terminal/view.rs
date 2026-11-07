@@ -98,11 +98,12 @@ use inline_banner::{
     render_open_in_warp_banner, render_shell_detached_banner,
     render_shell_process_terminated_banner, render_vim_mode_banner,
 };
-pub use inline_banner::{NotificationsDiscoveryBannerAction, NotificationsErrorBannerAction};
 #[cfg(feature = "local_tty")]
 use inline_banner::{
-    SessionHolderBannerState, render_connected_supervisor_banner, render_session_holder_banner,
+    ConnectedSupervisorBannerState, SessionHolderBannerState, render_connected_supervisor_banner,
+    render_session_holder_banner,
 };
+pub use inline_banner::{NotificationsDiscoveryBannerAction, NotificationsErrorBannerAction};
 use instant::Instant;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -1122,7 +1123,7 @@ struct InlineBannersState {
     #[cfg(feature = "local_tty")]
     session_holder_banner: Option<SessionHolderBannerState>,
     #[cfg(feature = "local_tty")]
-    connected_supervisor_banner: Option<InlineBannerId>,
+    connected_supervisor_banner: Option<ConnectedSupervisorBannerState>,
 }
 
 impl InlineBannersState {
@@ -2539,6 +2540,7 @@ pub struct TerminalView {
     /// What this pane's shell was given as `WARP_AGENT_EVENT_TOKEN`.
     #[cfg(feature = "local_tty")]
     agent_event_token: Option<String>,
+    managed_session_job_id: Option<String>,
 
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
@@ -4492,6 +4494,7 @@ impl TerminalView {
             terminal_session_uuid_hex: None,
             #[cfg(feature = "local_tty")]
             agent_event_token: None,
+            managed_session_job_id: None,
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
             is_focused_and_active: true,
@@ -16658,8 +16661,11 @@ impl TerminalView {
 
     #[cfg(feature = "local_tty")]
     fn update_connected_supervisor_banner(&mut self, ctx: &mut ViewContext<Self>) {
-        if let Some(id) = self.inline_banners_state.connected_supervisor_banner.take() {
-            self.model.lock().block_list_mut().remove_inline_banner(id);
+        if let Some(state) = self.inline_banners_state.connected_supervisor_banner.take() {
+            self.model
+                .lock()
+                .block_list_mut()
+                .remove_inline_banner(state.id);
         }
         if self.connected_supervisor.is_some() && self.is_login_shell_bootstrapped {
             let id = self.inline_banners_state.next_banner_id();
@@ -16669,7 +16675,8 @@ impl TerminalView {
                 index,
                 InlineBannerItem::new(id, InlineBannerType::ConnectedSupervisor),
             );
-            self.inline_banners_state.connected_supervisor_banner = Some(id);
+            self.inline_banners_state.connected_supervisor_banner =
+                Some(ConnectedSupervisorBannerState::new(id));
         }
         ctx.notify();
     }
@@ -24865,11 +24872,14 @@ impl TerminalView {
             inline_banners.insert(state.id, render_session_holder_banner(state, appearance));
         }
         #[cfg(feature = "local_tty")]
-        if let (Some(id), Some(holder)) = (
-            self.inline_banners_state.connected_supervisor_banner,
+        if let (Some(state), Some(holder)) = (
+            &self.inline_banners_state.connected_supervisor_banner,
             &self.connected_supervisor,
         ) {
-            inline_banners.insert(id, render_connected_supervisor_banner(holder, appearance));
+            inline_banners.insert(
+                state.id,
+                render_connected_supervisor_banner(state, holder, appearance),
+            );
         }
 
         if (FeatureFlag::CreatingSharedSessions.is_enabled()

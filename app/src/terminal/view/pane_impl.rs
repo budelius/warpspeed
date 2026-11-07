@@ -741,6 +741,10 @@ impl TerminalView {
         })
     }
 
+    pub(crate) fn set_managed_session_job_id(&mut self, job_id: Option<String>) {
+        self.managed_session_job_id = job_id;
+    }
+
     /// Which AgentCtrl actions this pane offers.
     ///
     /// Reads the shell's directory once for all of them, because that checks the directory still
@@ -757,6 +761,7 @@ impl TerminalView {
             can_start_agent: repo.is_some(),
             can_move_all: repo.and_then(std::path::Path::parent).is_some(),
             can_move_session: self.agent_ctrl_move_source_in(move_path, ctx).is_some(),
+            has_managed_session: self.managed_session_job_id.is_some(),
         }
     }
 
@@ -797,7 +802,7 @@ impl TerminalView {
                     .into_item(),
             );
             items.push(
-                MenuItemFields::new("Restart under current supervisor…")
+                MenuItemFields::new("Restart & take over…")
                     .with_on_select_action(TerminalAction::RestartInCurrentSupervisor)
                     .into_item(),
             );
@@ -824,8 +829,13 @@ impl TerminalView {
         }
         // Every agent-session action works on local shells and agents.
         if !model.shared_session_status().is_viewer() && cfg!(feature = "local_tty") {
+            let label = if agent_ctrl_actions.has_managed_session {
+                "Resume in Obachan…"
+            } else {
+                "Sessions…"
+            };
             items.push(
-                MenuItemFields::new("Sessions…")
+                MenuItemFields::new(label)
                     .with_on_select_action(TerminalAction::ShowAgentSessions)
                     .into_item(),
             );
@@ -859,6 +869,8 @@ pub(crate) struct AgentCtrlPaneActions {
     pub(crate) can_start_agent: bool,
     /// The agent sessions in the folder holding its repository can be moved.
     pub(crate) can_move_all: bool,
+    /// This pane was previously associated with an AgentCtrl run.
+    pub(crate) has_managed_session: bool,
 }
 
 impl BackingView for TerminalView {

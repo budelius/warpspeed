@@ -172,6 +172,7 @@ fn pi_session_path_matches_id_in_project_dir() {
         &roots,
     )
     .unwrap_err();
+    assert!(is_missing_session_file(&missing));
     assert!(
         format!("{missing:#}").contains("no pi session file"),
         "{missing:#}"
@@ -445,7 +446,7 @@ fn move_session_failure_during_cut_over_asks_to_close_the_agent_manually() {
     let message = move_failure_message(
         &MoveStep::CuttingOver {
             job_id: "job-1".to_owned(),
-            pushed_branch: "gitea/handoff/x".to_owned(),
+            pushed_branch: Some("gitea/handoff/x".to_owned()),
         },
         "timed out",
         Some("gitea/handoff/x"),
@@ -757,6 +758,10 @@ fn repo_url_for_prefers_gitea_and_strips_userinfo() {
     );
     git(
         repo,
+        &["remote", "add", "gitlab", "https://gitlab.com/acme/app.git"],
+    );
+    git(
+        repo,
         &[
             "remote",
             "add",
@@ -791,6 +796,29 @@ fn repo_url_for_falls_back_to_origin() {
         (
             "origin".to_owned(),
             "git@github.com:acme/app.git".to_owned()
+        )
+    );
+}
+
+#[test]
+fn repo_url_for_prefers_gitlab_over_origin() {
+    let repo = TempDir::new().unwrap();
+    let repo = repo.path();
+    init_repo(repo);
+    git(
+        repo,
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
+    git(
+        repo,
+        &["remote", "add", "gitlab", "https://gitlab.com/acme/app.git"],
+    );
+
+    assert_eq!(
+        repo_url_for(repo).unwrap(),
+        (
+            "gitlab".to_owned(),
+            "https://gitlab.com/acme/app.git".to_owned()
         )
     );
 }

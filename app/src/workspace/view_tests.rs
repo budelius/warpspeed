@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
 use ai::project_context::model::ProjectContextModel;
@@ -2030,6 +2030,122 @@ fn test_workspace_sessions_retrieves_panes() {
     });
 }
 
+#[test]
+fn moving_a_tab_into_the_active_tab_preserves_all_of_its_panes() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (target_pane_group_id, expected_pane_ids) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.tabs[0].pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.handle_action(&PaneGroupAction::Add(Direction::Right), ctx);
+                });
+                let mut expected_pane_ids =
+                    workspace.tabs[0].pane_group.read(ctx, |pane_group, _| {
+                        pane_group.pane_ids().collect::<Vec<_>>()
+                    });
+
+                workspace.add_terminal_tab(false, ctx);
+                let target_pane_group_id = workspace.active_tab_pane_group().id();
+                expected_pane_ids.extend(
+                    workspace
+                        .active_tab_pane_group()
+                        .read(ctx, |pane_group, _| {
+                            pane_group.pane_ids().collect::<Vec<_>>()
+                        }),
+                );
+
+                workspace.handle_action(&WorkspaceAction::MoveTabIntoActiveTab(0), ctx);
+                (target_pane_group_id, expected_pane_ids)
+            });
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(workspace.active_tab_pane_group().id(), target_pane_group_id);
+            let actual_pane_ids = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .pane_ids()
+                .collect::<HashSet<_>>();
+            assert_eq!(actual_pane_ids, expected_pane_ids.into_iter().collect());
+        });
+    });
+}
+
+#[test]
+fn combining_selected_tabs_moves_them_into_the_active_tab() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (target_pane_group_id, expected_pane_ids) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.add_terminal_tab(false, ctx);
+                workspace.add_terminal_tab(false, ctx);
+                let target_pane_group_id = workspace.active_tab_pane_group().id();
+                let expected_pane_ids = workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| {
+                        tab.pane_group.read(ctx, |pane_group, _| {
+                            pane_group.pane_ids().collect::<Vec<_>>()
+                        })
+                    })
+                    .collect::<HashSet<_>>();
+                workspace.tabs[0].in_multi_selection = true;
+                workspace.tabs[1].in_multi_selection = true;
+
+                workspace.handle_action(&WorkspaceAction::CombineSelectedTabsIntoActiveTab, ctx);
+                (target_pane_group_id, expected_pane_ids)
+            });
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(workspace.active_tab_pane_group().id(), target_pane_group_id);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .pane_ids()
+                    .collect::<HashSet<_>>(),
+                expected_pane_ids
+            );
+            assert!(!workspace.tabs[0].in_multi_selection);
+        });
+    });
+}
+
+#[test]
+fn inactive_tab_menu_offers_moving_the_tab_into_the_active_tab() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.toggle_tab_right_click_menu(
+                0,
+                TabContextMenuAnchor::Pointer(Vector2F::zero()),
+                ctx,
+            );
+
+            let has_move_item = workspace.tab_right_click_menu.read(ctx, |menu, _| {
+                menu.items().iter().any(|item| {
+                    item.fields().is_some_and(|fields| {
+                        fields.label() == "Move tab into active tab as pane"
+                            && matches!(
+                                fields.on_select_action(),
+                                Some(WorkspaceAction::MoveTabIntoActiveTab(0))
+                            )
+                    })
+                })
+            });
+            assert!(has_move_item);
+        });
+    });
+}
+
 fn number_of_shared_sessions_in_tab(
     workspace: &Workspace,
     index: usize,
@@ -2878,8 +2994,16 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (focused), the options
         // for sharing are "Stop sharing" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                false,
+                ctx,
+            );
             assert!(
                 items[0].is_approximately_same_item_as(
                     &MenuItemFields::new("Stop sharing").into_item()
@@ -2903,8 +3027,16 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (unfocused), the options
         // for sharing are "Share session" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                false,
+                ctx,
+            );
             assert!(
                 items[0].is_approximately_same_item_as(
                     &MenuItemFields::new("Share session").into_item()
@@ -2923,8 +3055,16 @@ fn test_tab_context_menu_share_session_items() {
 
         // When there's no shared sessions in a tab, the only option is "Share session".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                false,
+                ctx,
+            );
             assert!(
                 items[0].is_approximately_same_item_as(
                     &MenuItemFields::new("Share session").into_item()
@@ -5542,6 +5682,7 @@ fn restart_and_change_shell_appear_in_pane_context_menus() {
                     workspace.tab_is_only_member_of_its_group(tab_index),
                     workspace.can_move_tab(tab_index, TabMovement::Left),
                     workspace.can_move_tab(tab_index, TabMovement::Right),
+                    false,
                     ctx,
                 );
                 let terminal_view = workspace
@@ -7611,7 +7752,7 @@ fn move_session_cut_over_ignores_endings_it_is_not_waiting_for() {
 
         let cutting_over = MoveStep::CuttingOver {
             job_id: "job-cut".to_owned(),
-            pushed_branch: "gitea/handoff/x".to_owned(),
+            pushed_branch: Some("gitea/handoff/x".to_owned()),
         };
         workspace.update(&mut app, |workspace, _| {
             workspace
@@ -7743,14 +7884,14 @@ fn move_session_status_keeps_the_outcome_until_the_next_move() {
                 moved_view_id,
                 MoveStep::CuttingOver {
                     job_id: "job-cut".to_owned(),
-                    pushed_branch: "gitea/handoff/x".to_owned(),
+                    pushed_branch: Some("gitea/handoff/x".to_owned()),
                 },
             );
             workspace.finish_agent_ctrl_move(
                 moved_view_id,
                 MoveStep::Done {
                     job_id: "job-cut".to_owned(),
-                    pushed_branch: "gitea/handoff/x".to_owned(),
+                    pushed_branch: Some("gitea/handoff/x".to_owned()),
                 },
                 ctx,
             );
@@ -7759,7 +7900,7 @@ fn move_session_status_keeps_the_outcome_until_the_next_move() {
             move_status(&mut app),
             Some(MoveStep::Done {
                 job_id: "job-cut".to_owned(),
-                pushed_branch: "gitea/handoff/x".to_owned(),
+                pushed_branch: Some("gitea/handoff/x".to_owned()),
             }),
             "a finished move reports its outcome"
         );
@@ -7797,7 +7938,7 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
                 moved_view_id,
                 MoveStep::CuttingOver {
                     job_id: "job-cut".to_owned(),
-                    pushed_branch: "gitea/handoff/x".to_owned(),
+                    pushed_branch: Some("gitea/handoff/x".to_owned()),
                 },
             );
         });
@@ -7845,6 +7986,87 @@ fn move_session_cut_over_opens_the_viewer_when_the_agent_ends() {
             links.iter().any(|(text, action)| text == "Open fleet"
                 && matches!(action, Some(WorkspaceAction::OpenAgentCtrlFleetPane))),
             "{links:?}"
+        );
+    });
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+#[test]
+fn move_session_without_saved_history_starts_fresh_and_attaches() {
+    App::test((), |mut app| async move {
+        const MISSING_SESSION_ID: &str = "ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb";
+
+        initialize_app_for_move_session(&mut app);
+        let repo = TempDir::new().unwrap();
+        init_repo_with_gitea_remote(repo.path());
+        let workspace = mock_workspace(&mut app);
+        let terminal_view = focused_terminal_view_for_move(&workspace, &mut app);
+        let terminal_view_id = terminal_view.id();
+        let pty_writes: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>> = Default::default();
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal_view, move |_, event, _| {
+                if let crate::terminal::view::Event::WriteBytesToPty { bytes }
+                | crate::terminal::view::Event::WriteAgentInputToPty { bytes, .. } = event
+                {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+        workspace.update(&mut app, |workspace, ctx| {
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_active_local_session_for_test(repo.path(), ctx);
+                view.set_current_repo_path_for_test(Some(repo.path()));
+            });
+            seed_agent_session(
+                terminal_view_id,
+                crate::terminal::CLIAgent::Pi,
+                Some(MISSING_SESSION_ID),
+                None,
+                repo.path(),
+                ctx,
+            );
+            workspace.fake_start_run_on_repo = Some(fake_start_fresh_pi_run);
+            workspace.start_agent_ctrl_move(terminal_view_id, None, ctx);
+        });
+
+        assert_eventually_within!(
+            std::time::Duration::from_secs(15) => agent_ctrl_move_step(
+                &workspace,
+                terminal_view_id,
+                &mut app,
+            ) == Some(MoveStep::CuttingOver {
+                job_id: "job-fresh".to_owned(),
+                pushed_branch: None,
+            }),
+            "{:?}",
+            agent_ctrl_move_step(&workspace, terminal_view_id, &mut app)
+        );
+        assert!(
+            pty_writes
+                .borrow()
+                .iter()
+                .any(|write| String::from_utf8_lossy(write).contains("/quit")),
+            "{:?}",
+            pty_writes.borrow()
+        );
+
+        workspace.update(&mut app, |_, ctx| {
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.remove_session(terminal_view_id, ctx)
+            });
+        });
+
+        let buffer = app.read(|ctx| {
+            terminal_view.read(ctx, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+        });
+        assert!(
+            buffer.ends_with(" agent-ctrl open job-fresh --environment staging"),
+            "{buffer}"
+        );
+        assert!(
+            workspace_toast_texts(&workspace, &mut app)
+                .contains(&"Started a fresh AgentCtrl session as job-fresh".to_owned())
         );
     });
 }
@@ -8219,6 +8441,20 @@ fn fake_start_run_on_repo(
     assert_eq!(repo_url, "https://gitea.example.com/acme/warp.git");
     assert_eq!((base_branch, prompt), (None, None));
     Ok("job-new".to_owned())
+}
+
+#[cfg(all(feature = "local_fs", feature = "local_tty"))]
+fn fake_start_fresh_pi_run(
+    _: warp_cli::managed_sessions::ManagedEnvironment,
+    agent_name: &str,
+    repo_url: &str,
+    base_branch: Option<&str>,
+    prompt: Option<&str>,
+) -> anyhow::Result<String> {
+    assert_eq!(agent_name, "staging-pi-interactive-rw");
+    assert_eq!(repo_url, "https://gitea.example.com/acme/warp.git");
+    assert_eq!((base_branch, prompt), (None, None));
+    Ok("job-fresh".to_owned())
 }
 
 #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -9062,25 +9298,41 @@ fn associated_managed_session_is_selected_when_the_browser_opens() {
     App::test((), |mut app| async move {
         initialize_app_for_associated_run(&mut app);
         let workspace = mock_workspace(&mut app);
-        let (target, sessions_view) =
+        let (target, sessions_view, terminal_view) =
             workspace.update(&mut app, |workspace, ctx| {
                 let pane_group = workspace.active_tab_pane_group();
                 let target = PaneViewLocator {
                     pane_group_id: pane_group.id(),
                     pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
                 };
-                pane_group.update(ctx, |pane_group, _| {
+                pane_group.update(ctx, |pane_group, ctx| {
                     assert!(pane_group.set_managed_session_job_id(
                         target.pane_id,
                         Some("job-associated".to_owned()),
+                        ctx,
                     ));
                 });
+                let terminal_view = pane_group
+                    .as_ref(ctx)
+                    .terminal_view_from_pane_id(target.pane_id, ctx)
+                    .expect("the associated pane is a terminal");
                 workspace.show_agent_sessions(Some(target), ctx);
                 (
                     target,
                     workspace.agent_sessions_modal.as_ref(ctx).body().clone(),
+                    terminal_view,
                 )
             });
+        let items = terminal_view.read(&app, |view, ctx| view.pane_header_overflow_menu_items(ctx));
+        assert!(items.iter().any(|item| {
+            item.fields().is_some_and(|fields| {
+                fields.label() == "Resume in Obachan…"
+                    && matches!(
+                        fields.on_select_action(),
+                        Some(crate::terminal::view::TerminalAction::ShowAgentSessions)
+                    )
+            })
+        }));
 
         assert_eventually_within!(
             std::time::Duration::from_secs(5) => sessions_view

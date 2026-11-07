@@ -6,6 +6,7 @@ use warpui::{EntityId, UpdateView, ViewContext};
 
 use super::{Workspace, group_member_indices};
 use crate::menu::{MenuItem, MenuItemFields};
+use crate::pane_group::Direction;
 use crate::tab::{MOVE_TO_GROUP_LABEL, TabData};
 use crate::workspace::action::{TabContextMenuAnchor, WorkspaceAction};
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
@@ -193,6 +194,70 @@ impl Workspace {
         } else {
             self.remove_tab_from_group(self.active_tab_index, ctx);
         }
+    }
+
+    pub(super) fn move_tab_into_active_tab(
+        &mut self,
+        source_tab_index: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.move_tabs_into_active_tab([source_tab_index], ctx);
+    }
+
+    pub(super) fn combine_selected_tabs_into_active_tab(&mut self, ctx: &mut ViewContext<Self>) {
+        let source_tab_indices = self
+            .selected_tab_indices()
+            .into_iter()
+            .filter(|index| *index != self.active_tab_index)
+            .collect::<Vec<_>>();
+        self.move_tabs_into_active_tab(source_tab_indices, ctx);
+    }
+
+    fn move_tabs_into_active_tab(
+        &mut self,
+        source_tab_indices: impl IntoIterator<Item = usize>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(target_pane_group) = self
+            .tabs
+            .get(self.active_tab_index)
+            .map(|tab| tab.pane_group.clone())
+        else {
+            return;
+        };
+        let source_pane_groups = source_tab_indices
+            .into_iter()
+            .filter(|index| *index != self.active_tab_index)
+            .filter_map(|index| self.tabs.get(index).map(|tab| tab.pane_group.clone()))
+            .collect::<Vec<_>>();
+        if source_pane_groups.is_empty() {
+            return;
+        }
+
+        self.clear_tab_multi_selection(ctx);
+        for source_pane_group in source_pane_groups {
+            if source_pane_group.id() == target_pane_group.id() {
+                continue;
+            }
+            let pane_ids = source_pane_group.read(ctx, |pane_group, _| {
+                pane_group.pane_ids().collect::<Vec<_>>()
+            });
+            let panes = source_pane_group.update(ctx, |pane_group, ctx| {
+                pane_ids
+                    .iter()
+                    .filter_map(|pane_id| pane_group.remove_pane_for_move(pane_id, ctx))
+                    .collect::<Vec<_>>()
+            });
+            target_pane_group.update(ctx, |pane_group, ctx| {
+                let target_pane_id = pane_group.focused_pane_id(ctx);
+                for pane in panes {
+                    pane_group.add_pane_sibling(target_pane_id, Direction::Right, pane, false, ctx);
+                }
+            });
+        }
+
+        self.restore_active_tab_index(Some(target_pane_group.id()));
+        ctx.notify();
     }
 
     /// "Create group from tabs" menu action. Group membership requires
@@ -457,13 +522,14 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Items shown in the multi-tab right-click menu. Composition depends on
-    /// the selection: "Create group from tabs" is always there; "Remove from
-    /// group" only when the selection has an unambiguous group; "Move to
-    /// group" only when there's a destination group worth offering.
+    /// Items shown in the multi-tab right-click menu. Combining and creating a
+    /// group are always available; group-specific entries depend on the selection.
     fn tab_selection_menu_items(&self) -> Vec<MenuItem<WorkspaceAction>> {
         let shared_group = self.selection_shared_group();
         let mut menu_items = vec![
+            MenuItemFields::new("Combine selected tabs as panes")
+                .with_on_select_action(WorkspaceAction::CombineSelectedTabsIntoActiveTab)
+                .into_item(),
             MenuItemFields::new("Create group from tabs")
                 .with_on_select_action(WorkspaceAction::NewTabGroupFromSelectedTabs)
                 .into_item(),

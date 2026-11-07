@@ -140,6 +140,8 @@ pub enum WorkspaceAction {
     MoveActiveTabRight,
     MoveTabLeft(usize),
     MoveTabRight(usize),
+    /// Moves every pane from the tab at this index into the active tab.
+    MoveTabIntoActiveTab(usize),
     RenameTab(usize),
     ResetTabName(usize),
     RenamePane(PaneViewLocator),
@@ -227,6 +229,8 @@ pub enum WorkspaceAction {
     MoveSelectedTabsToGroup {
         group_id: TabGroupId,
     },
+    /// Moves every pane from the selected tabs into the active tab.
+    CombineSelectedTabsIntoActiveTab,
     /// Removes every selected tab from its group (requires a single shared group).
     RemoveSelectedTabsFromGroup,
     /// Context-aware "remove from group" entry point for the keybinding:
@@ -1065,6 +1069,7 @@ impl WorkspaceAction {
             | MoveActiveTabRight
             | MoveTabLeft(_)
             | MoveTabRight(_)
+            | MoveTabIntoActiveTab(_)
             | DropTab
             | DropGroup
             | RenameTab(_)
@@ -1091,6 +1096,7 @@ impl WorkspaceAction {
             | NewTabGroupFromSelectedTabs
             | NewTabGroupFromActiveOrSelectedTabs
             | MoveSelectedTabsToGroup { .. }
+            | CombineSelectedTabsIntoActiveTab
             | RemoveSelectedTabsFromGroup
             | RemoveActiveOrSelectedTabsFromGroup
             | UngroupTabs(_)

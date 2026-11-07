@@ -1267,6 +1267,32 @@ impl BlockList {
         self.remove_item_from_blocklist(RemovableBlocklistItem::InlineBanner(banner_id));
     }
 
+    /// Removes block-list banner entries that no longer have a render element.
+    ///
+    /// Banner view state is authoritative. Returning the removed IDs lets callers emit one
+    /// bounded repair diagnostic instead of warning on every layout frame.
+    pub fn remove_inline_banners_without_elements(
+        &mut self,
+        rendered_banner_ids: &HashSet<InlineBannerId>,
+    ) -> Vec<InlineBannerId> {
+        let mut stale_banner_ids = self
+            .removable_blocklist_item_positions
+            .keys()
+            .filter_map(|item| match item {
+                RemovableBlocklistItem::InlineBanner(id) if !rendered_banner_ids.contains(id) => {
+                    Some(*id)
+                }
+                RemovableBlocklistItem::InlineBanner(_)
+                | RemovableBlocklistItem::RichContent(_) => None,
+            })
+            .collect::<Vec<_>>();
+        stale_banner_ids.sort_unstable();
+        for banner_id in &stale_banner_ids {
+            self.remove_inline_banner(*banner_id);
+        }
+        stale_banner_ids
+    }
+
     /// Removes a removable item from the blocklist. This supports removing inline banners and rich content blocks.
     fn remove_item_from_blocklist(&mut self, item: RemovableBlocklistItem) {
         if let Some(index) = self.removable_blocklist_item_positions.remove(&item) {

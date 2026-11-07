@@ -3637,6 +3637,10 @@ fn launch(
                         recovered
                     })
                 }
+                // An empty isolated-worker payload means "create one new window". It must not
+                // inherit the coordinator's persisted AppState and accidentally restore one or
+                // more old windows before creating that window.
+                (None, None) if isolated_worker => None,
                 (None, None) if should_skip_restore || starts_empty => None,
                 (None, None) => app_state,
             };
@@ -3751,10 +3755,28 @@ fn launch(
                 }
             }
 
+            let initial_isolated_new_window_url = (isolated_worker && !isolated_restore)
+                .then(|| {
+                    isolated_urls
+                        .iter()
+                        .find(|url| uri::requests_new_window(url))
+                        .cloned()
+                })
+                .flatten();
             if isolated_worker && ctx.window_ids().count() == 0 {
-                ctx.dispatch_global_action("root_view:open_new", &());
+                if let Some(path) = initial_isolated_new_window_url
+                    .as_ref()
+                    .and_then(uri::isolated_new_window_path)
+                {
+                    // Consume the launch request as this worker's one allowed window instead of
+                    // first creating an empty window and then attempting a forbidden second one.
+                    ctx.dispatch_global_action("root_view:open_new_from_path", &OpenPath { path });
+                } else {
+                    ctx.dispatch_global_action("root_view:open_new", &());
+                }
             }
 
+            let mut isolated_connection = None;
             if let Some((mut client, _)) = isolated_window_startup {
                 if ctx.window_ids().count() != 1 {
                     report_error!("Isolated window worker restored an invalid window count");
@@ -3775,14 +3797,35 @@ fn launch(
                 let connection = ctx.add_singleton_model(move |ctx| {
                     window_process::worker::WorkerConnection::new(client, ctx)
                 });
+                isolated_connection = Some(connection.clone());
                 ctx.on_first_frame_drawn(move |ctx| {
                     connection.update(ctx, |connection, ctx| connection.first_frame_presented(ctx));
+                    let workspace = ctx
+                        .window_ids()
+                        .find_map(|window_id| WorkspaceRegistry::as_ref(ctx).get(window_id, ctx));
+                    match workspace {
+                        Some(workspace) => workspace.update(ctx, |workspace, ctx| {
+                            workspace.finish_isolated_window_restore(ctx);
+                        }),
+                        None => report_error!(
+                            "Isolated window worker presented a frame without a workspace"
+                        ),
+                    }
                 });
             }
 
             // Process any URLs that were provided on the command line (which may be
             // file:// URLs or ones using our custom URL scheme).
             for url in launch_mode.args().urls.iter().chain(&isolated_urls) {
+                if initial_isolated_new_window_url.as_ref() == Some(url) {
+                    continue;
+                }
+                if uri::requests_new_window(url)
+                    && let Some(connection) = isolated_connection.as_ref()
+                {
+                    connection.update(ctx, |connection, ctx| connection.open_window(ctx));
+                    continue;
+                }
                 uri::handle_incoming_uri(url, ctx);
             }
 

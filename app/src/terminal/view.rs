@@ -648,6 +648,18 @@ const BRACKETED_PASTE_SUFFIX: &str = "\x1b[201~";
 
 /// Duration before we consider a session to have failed bootstrapping.
 const BOOTSTRAP_FAILED_DURATION: Duration = Duration::from_secs(7);
+/// Windows PowerShell 5.1 loads its .NET runtime and legacy profiles materially more slowly than
+/// PowerShell 7. The generic seven-second timer repeatedly declared healthy 5.1 sessions failed
+/// two or three seconds before their `Bootstrapped` hook arrived.
+const WINDOWS_POWERSHELL_BOOTSTRAP_FAILED_DURATION: Duration = Duration::from_secs(15);
+
+fn login_shell_bootstrap_timeout_for_display_name(display_name: &str) -> Duration {
+    if cfg!(windows) && display_name == "Windows PowerShell" {
+        WINDOWS_POWERSHELL_BOOTSTRAP_FAILED_DURATION
+    } else {
+        BOOTSTRAP_FAILED_DURATION
+    }
+}
 
 /// How often a running agent's session is re-read from its process registry. The session can
 /// change under a running agent, through `/resume` or `/new`.
@@ -16706,6 +16718,12 @@ impl TerminalView {
         self.enter_agent_view_after_pending_commands = false;
     }
 
+    fn login_shell_bootstrap_timeout(&self) -> Duration {
+        login_shell_bootstrap_timeout_for_display_name(
+            self.model.lock().shell_launch_state().display_name(),
+        )
+    }
+
     /// Start a timer so that we can detect when a session does not bootstrap in a timely manner
     fn start_bootstrap_timer(&self, duration: Duration, ctx: &mut ViewContext<Self>) {
         let _ = ctx.spawn(
@@ -16731,9 +16749,15 @@ impl TerminalView {
             }
 
             let is_ssh = model.has_pending_ssh_session();
-            let shell = model
-                .pending_shell_type()
-                .map_or("unknown", |shell| shell.name());
+            let shell = model.pending_shell_type().map_or("unknown", |shell| {
+                if shell == ShellType::PowerShell
+                    && model.shell_launch_state().display_name() == "Windows PowerShell"
+                {
+                    "powershell"
+                } else {
+                    shell.name()
+                }
+            });
             let pending_subshell_info = model.pending_subshell_session();
             let is_subshell = pending_subshell_info.is_some();
             let was_triggered_by_rc_file = pending_subshell_info
@@ -27246,8 +27270,9 @@ impl TerminalSurface for TerminalView {
     fn on_shell_determined(&mut self, ctx: &mut ViewContext<Self>) {
         if !self.model.lock().shared_session_status().is_viewer() {
             // Start a timer for the initial session bootstrapping, so that we can log and show a
-            // banner to the user if the bootstrapping takes too long
-            self.start_bootstrap_timer(BOOTSTRAP_FAILED_DURATION, ctx);
+            // banner to the user if the bootstrapping takes too long. Windows PowerShell 5.1 gets
+            // its own threshold because a normal cold start routinely exceeds the generic one.
+            self.start_bootstrap_timer(self.login_shell_bootstrap_timeout(), ctx);
         }
     }
 

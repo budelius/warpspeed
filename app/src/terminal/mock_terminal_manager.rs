@@ -61,6 +61,9 @@ impl MockTerminalManager {
         );
         let colors = model.colors();
         let model = Arc::new(FairMutex::new(model));
+        model
+            .lock()
+            .set_shell_start_deferred(shell_start.is_deferred());
 
         let sessions: ModelHandle<Sessions> =
             ctx.add_model(|ctx| Sessions::new(executor_command_tx, ctx));
@@ -139,8 +142,11 @@ impl TerminalManager for MockTerminalManager {
         }
     }
 
-    fn ensure_shell_started(&mut self, _ctx: &mut ModelContext<Box<dyn TerminalManager>>) {
-        self.deferred_shell.take();
+    fn ensure_shell_started(&mut self, ctx: &mut ModelContext<Box<dyn TerminalManager>>) {
+        if self.deferred_shell.take().is_some() {
+            self.model.lock().set_shell_start_deferred(false);
+            self.view.update(ctx, |_view, ctx| ctx.notify());
+        }
     }
 
     fn has_deferred_shell(&self) -> bool {

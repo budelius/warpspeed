@@ -1272,6 +1272,36 @@ fn test_banner_insertion_and_removal() {
     );
 }
 
+#[test]
+fn test_missing_inline_banner_elements_are_reconciled_once() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+
+    block_list.append_inline_banner(InlineBannerItem::new(
+        7,
+        InlineBannerType::NotificationsDiscovery,
+    ));
+    block_list.append_inline_banner(InlineBannerItem::new(
+        9,
+        InlineBannerType::NotificationsDiscovery,
+    ));
+
+    let rendered_banner_ids = std::collections::HashSet::from([9]);
+    assert_eq!(
+        block_list.remove_inline_banners_without_elements(&rendered_banner_ids),
+        vec![7]
+    );
+    assert_eq!(block_list.inline_banner_count(), 1);
+
+    // The second reconciliation is a no-op, preventing a per-frame warning/relayout loop.
+    assert!(
+        block_list
+            .remove_inline_banners_without_elements(&rendered_banner_ids)
+            .is_empty()
+    );
+    assert_eq!(block_list.inline_banner_count(), 1);
+}
+
 /// Regression test for WAR-6056, an issue where removing a banner would leave
 /// the active gap in an incorrect state, causing a panic on the next window resize.
 #[test]

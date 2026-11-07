@@ -243,6 +243,16 @@ impl PromptRenderHelper {
     fn bootstrapping_shell_message(&self, model: &TerminalModel, sessions: &Sessions) -> String {
         use crate::terminal::event::RemoteServerSetupState;
 
+        // A background tab whose PTY is intentionally parked is not "starting" yet. Calling it
+        // that made lazy startup indistinguishable from a hung shell and encouraged repeated
+        // restarts. Activation clears this marker before shell resolution begins.
+        if model.is_shell_start_deferred() {
+            return format!(
+                "{} will start when this tab is opened",
+                model.shell_launch_state().display_name()
+            );
+        }
+
         // If a remote server setup is in progress for the pending session,
         // show a stage-specific message instead of the generic "Starting shell...".
         if let Some(pending_session_id) = model.pending_session_id()

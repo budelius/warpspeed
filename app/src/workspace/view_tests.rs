@@ -5594,6 +5594,52 @@ fn process_handoff_restore_keeps_every_shell_parked_until_release() {
     });
 }
 
+#[test]
+fn isolated_restore_releases_only_the_visible_tabs_shell() {
+    let _flag = FeatureFlag::LazyShellStartup.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        register_fleet_test_models(&mut app);
+        let global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        let snapshot = window_snapshot_with_tabs(3, 1);
+        let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            Workspace::new(
+                global_resource_handles,
+                None,
+                NewWorkspaceSource::Restored {
+                    window_snapshot: snapshot,
+                    block_lists: Arc::new(HashMap::new()),
+                    defer_shell_start: true,
+                },
+                ctx,
+            )
+        });
+
+        app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.finish_isolated_window_restore(ctx);
+            });
+        });
+
+        let deferred = app.read(|ctx| {
+            workspace.read(ctx, |workspace, ctx| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        tab.pane_group
+                            .read(ctx, |group, ctx| group.terminal_manager(0, ctx))
+                            .expect("each restored tab has one terminal pane")
+                            .read(ctx, |manager, _| manager.has_deferred_shell())
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+
+        assert_eq!(deferred, vec![true, false, true]);
+    });
+}
+
 /// An out-of-range `active_tab_index` on the restored snapshot must not
 /// leave the visible tab's shell parked forever: `activate_tab_internal`
 /// silently no-ops on an out-of-range index rather than clamping, so the

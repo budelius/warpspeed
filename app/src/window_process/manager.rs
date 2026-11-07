@@ -154,6 +154,11 @@ impl CoordinatorManager {
             match self.server.worker_status(starting.worker_id) {
                 Some(WorkerStatus::Presented) => {
                     let starting = self.starting.take().unwrap();
+                    log::info!(
+                        "Window isolation worker {} presented its first frame; {} window(s) remain queued",
+                        starting.worker_id,
+                        self.queued_windows.len()
+                    );
                     while let Some(url) = self.pending_urls.pop_front() {
                         self.server.enqueue_worker_command(
                             starting.worker_id,
@@ -253,6 +258,12 @@ impl CoordinatorManager {
             commands,
         );
         let process = spawn::launch(&self.state_dir, &bootstrap)?;
+        log::info!(
+            "Window isolation launched worker {} (restore position {}, {} window(s) queued)",
+            bootstrap.worker_id,
+            self.window_order.len(),
+            self.queued_windows.len()
+        );
         self.window_order.push(bootstrap.worker_id);
         if let Some(window) = initial_window {
             self.windows.insert(bootstrap.worker_id, window);
@@ -351,6 +362,11 @@ impl CoordinatorManager {
             self.server.remove_worker(worker.worker_id);
             self.unresponsive_workers.remove(&worker.worker_id);
             if status.success() || coordinator_status == Some(WorkerStatus::Closed) {
+                log::info!(
+                    "Window isolation worker {} closed cleanly with {}",
+                    worker.worker_id,
+                    status
+                );
                 self.remove_window(worker.worker_id);
                 self.persist_aggregate_state()?;
                 continue;
@@ -375,6 +391,13 @@ impl CoordinatorManager {
                 continue;
             }
             self.worker_crashes.push_back(now);
+            log::warn!(
+                "Window isolation worker {} exited with {}; scheduling isolated recovery attempt {}/{}",
+                worker.worker_id,
+                status,
+                self.worker_crashes.len(),
+                MAX_WORKER_RESTARTS_PER_CRASH_WINDOW
+            );
             if let Some(window) = window {
                 let payload = super::worker::StartupPayload {
                     window: Some(window),
@@ -404,6 +427,7 @@ impl CoordinatorManager {
     fn halt(&mut self, reason: String) -> Result<()> {
         self.queued_windows.clear();
         self.halted = Some(reason.clone());
+        log::error!("Window isolation restore halted without shared-process fallback: {reason}");
         bail!(reason)
     }
 }

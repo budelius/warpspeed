@@ -4062,6 +4062,10 @@ fn test_deferred_template_pane_parks_shell_until_started() {
             app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
             "a deferred pane parks its shell start"
         );
+        assert!(
+            app.read(|ctx| manager.read(ctx, |m, _| m.model().lock().is_shell_start_deferred())),
+            "the model must expose that no launch has been attempted instead of rendering a false starting state"
+        );
 
         app.update(|ctx| {
             manager.update(ctx, |m, ctx| m.ensure_shell_started(ctx));
@@ -4069,6 +4073,10 @@ fn test_deferred_template_pane_parks_shell_until_started() {
         assert!(
             !app.read(|ctx| manager.read(ctx, |m, _| m.has_deferred_shell())),
             "the first activation consumes the parked start"
+        );
+        assert!(
+            !app.read(|ctx| manager.read(ctx, |m, _| m.model().lock().is_shell_start_deferred())),
+            "visible activation must change the model from parked to genuinely starting"
         );
 
         // Idempotency: Option::take left None, so this must do nothing rather
@@ -5671,6 +5679,42 @@ fn restartable_pane(
         .read(|ctx| pane_group.read(ctx, |group, ctx| group.terminal_view_at_pane_index(0, ctx)))
         .expect("pane 0 has a terminal view");
     (pane_group, manager, view)
+}
+
+#[test]
+fn test_failed_visible_shell_start_retries_once_with_fresh_resources() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (_pane_group, manager, _view) = restartable_pane(&mut app);
+
+        app.update(|ctx| {
+            manager.update(ctx, |manager, ctx| {
+                manager
+                    .as_any_mut()
+                    .downcast_mut::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .schedule_shell_start_retry_for_test(ctx);
+            });
+        });
+
+        assert_eventually_within!(
+            Duration::from_secs(10) => app.read(|ctx| manager.read(ctx, |manager, _| {
+                manager
+                    .as_any()
+                    .downcast_ref::<LocalTtyTerminalManager<TerminalView>>()
+                    .expect("panes in this harness use the local-tty manager")
+                    .established_session_count()
+                    == 1
+            })),
+            "the bounded retry never established a replacement PTY"
+        );
+        app.read(|ctx| {
+            manager.read(ctx, |manager, _| {
+                assert!(!manager.has_deferred_shell());
+                assert!(!manager.model().lock().is_shell_start_deferred());
+            });
+        });
+    });
 }
 
 /// The replaced shell's post-mortem must not outlive it.

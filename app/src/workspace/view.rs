@@ -13457,6 +13457,14 @@ impl Workspace {
         }
     }
 
+    /// Releases the active tab's deferred shells after an isolated worker has presented its
+    /// first frame. Unlike process handoff, no predecessor process remains to signal release;
+    /// starting only the visible tab preserves lazy startup for every background tab.
+    pub(crate) fn finish_isolated_window_restore(&mut self, ctx: &mut ViewContext<Self>) {
+        self.activate_tab_internal(self.active_tab_index, ctx);
+        ctx.notify();
+    }
+
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn accept_window_process_handoff(
         &mut self,

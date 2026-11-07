@@ -25,6 +25,92 @@ mod ref_count_tests;
 mod try_update_view_tests;
 
 #[test]
+fn occluded_windows_cancel_and_reject_visual_repaint_timers() {
+    struct View;
+
+    impl Entity for View {
+        type Event = ();
+    }
+
+    impl super::View for View {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            Empty::new().finish()
+        }
+
+        fn ui_name() -> &'static str {
+            "OcclusionTestView"
+        }
+    }
+
+    impl TypedActionView for View {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        let (window_id, _) = app.add_window(WindowStyle::NotStealFocus, |_| View);
+
+        app.update(|ctx| {
+            ctx.manage_delayed_repaint_timers(
+                window_id,
+                instant::Instant::now() + std::time::Duration::from_secs(3_600),
+            );
+            assert_eq!(ctx.repaint_task_count_for_window(window_id), 1);
+
+            ctx.handle_window_occlusion(window_id, true);
+            assert!(ctx.is_window_occluded(window_id));
+            assert_eq!(ctx.repaint_task_count_for_window(window_id), 0);
+
+            ctx.manage_delayed_repaint_timers(
+                window_id,
+                instant::Instant::now() + std::time::Duration::from_secs(3_600),
+            );
+            assert_eq!(ctx.repaint_task_count_for_window(window_id), 0);
+
+            ctx.handle_window_occlusion(window_id, false);
+            assert!(!ctx.is_window_occluded(window_id));
+        });
+    });
+}
+
+#[test]
+fn unfocused_window_redraws_are_capped_at_five_fps() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let window_id = WindowId::new();
+            let now = instant::Instant::now();
+
+            assert_eq!(ctx.defer_unfocused_redraw_until(window_id, None, now), None);
+            assert_eq!(
+                ctx.defer_unfocused_redraw_until(
+                    window_id,
+                    None,
+                    now + std::time::Duration::from_millis(50)
+                ),
+                Some(now + std::time::Duration::from_millis(200))
+            );
+            assert_eq!(
+                ctx.defer_unfocused_redraw_until(
+                    window_id,
+                    None,
+                    now + std::time::Duration::from_millis(200)
+                ),
+                None
+            );
+
+            // Focused windows bypass the background cap even immediately after admission.
+            assert_eq!(
+                ctx.defer_unfocused_redraw_until(
+                    window_id,
+                    Some(window_id),
+                    now + std::time::Duration::from_millis(201)
+                ),
+                None
+            );
+        });
+    });
+}
+
+#[test]
 fn test_subscribe_and_emit_from_model() {
     #[derive(Default)]
     struct Model {

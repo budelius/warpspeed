@@ -7,6 +7,29 @@ use crate::launch_configs::launch_config::{
 use crate::linear::{LinearAction, LinearIssueWork};
 
 #[test]
+fn isolated_new_window_requests_expose_their_initial_path() {
+    let url = Url::parse(&format!(
+        "{}://action/new_window?path=C%3A%5CUsers%5Cbudel",
+        ChannelState::url_scheme()
+    ))
+    .unwrap();
+
+    assert!(requests_new_window(&url));
+    assert_eq!(
+        isolated_new_window_path(&url),
+        Some(PathBuf::from(r"C:\Users\budel"))
+    );
+
+    let new_tab = Url::parse(&format!(
+        "{}://action/new_tab?path=C%3A%5CUsers%5Cbudel",
+        ChannelState::url_scheme()
+    ))
+    .unwrap();
+    assert!(!requests_new_window(&new_tab));
+    assert_eq!(isolated_new_window_path(&new_tab), None);
+}
+
+#[test]
 fn test_find_matching_config() {
     let mut configs: Vec<LaunchConfig> = vec![];
     for i in 0..5 {

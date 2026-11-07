@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{SendError, SyncSender};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use ai::api_keys::ApiKeyManager;
 use anyhow::Context as _;
@@ -22,8 +23,8 @@ use warp_errors::report_error;
 use warp_util::path::{
     convert_windows_host_to_wsl_path, convert_windows_native_to_msys2_path, msys2_exe_to_root,
 };
-use warpui::r#async::SpawnedFutureHandle;
 use warpui::r#async::executor::Background;
+use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle};
 
 use super::event_loop::EventLoop;
@@ -80,6 +81,9 @@ use crate::terminal::{
 type PtyController = writeable_pty::PtyController<mio_channel::Sender<Message>>;
 type RemoteServerController =
     writeable_pty::remote_server_controller::RemoteServerController<mio_channel::Sender<Message>>;
+
+const AUTOMATIC_SHELL_START_RETRY_DELAY: Duration = Duration::from_secs(2);
+const AUTOMATIC_SHELL_START_RETRY_LIMIT: u8 = 1;
 
 struct AppPtySpawnHooks {
     is_crash_reporting_enabled: bool,
@@ -211,6 +215,16 @@ pub struct TerminalManager<S> {
     /// background work. Best effort only -- see `session_generation`.
     pending_shell_start: Option<SpawnedFutureHandle>,
 
+    /// A bounded delayed retry after PTY creation fails. Windows can reject a ConPTY allocation
+    /// transiently while recently closed consoles are still draining; consuming the deferred
+    /// start permanently in that window left a visible pane unable to start.
+    pending_shell_start_retry: Option<SpawnedFutureHandle>,
+    automatic_shell_start_retries_remaining: u8,
+    automatic_shell_start_retry_in_progress: bool,
+    /// Retained after the automatic retry budget is exhausted so reactivating or clicking the
+    /// pane can retry without requiring a destructive shell change.
+    failed_shell_start: Option<RetryableShellStart>,
+
     /// Test-only: how many times a PTY event loop has been installed on this
     /// manager.
     ///
@@ -244,6 +258,12 @@ pub struct TerminalManager<S> {
 /// these two. `env_vars` and the banner handle are the pane's own launch
 /// inputs, kept so a restart relaunches *this* pane -- its session focus env
 /// vars included -- rather than a default one.
+#[derive(Clone)]
+struct RetryableShellStart {
+    shell_launch_data: Option<ShellLaunchData>,
+    startup_directory: Option<PathBuf>,
+}
+
 struct SessionTemplate {
     channel_event_proxy: ChannelEventListener,
     #[cfg(unix)]
@@ -684,6 +704,9 @@ impl<S> TerminalManager<S> {
         );
         let colors = model.colors();
         let model = Arc::new(FairMutex::new(model));
+        model
+            .lock()
+            .set_shell_start_deferred(shell_start.is_deferred());
 
         // Have ApiKeyManager subscribe to block completion events for AWS credential refresh.
         // This must happen after `model` is created, since the subscription needs it to resolve
@@ -803,6 +826,10 @@ impl<S> TerminalManager<S> {
             persistent_server_client: None,
             session_generation: 0,
             pending_shell_start: None,
+            pending_shell_start_retry: None,
+            automatic_shell_start_retries_remaining: AUTOMATIC_SHELL_START_RETRY_LIMIT,
+            automatic_shell_start_retry_in_progress: false,
+            failed_shell_start: None,
             #[cfg(test)]
             established_session_count: 0,
             #[cfg(test)]
@@ -929,6 +956,53 @@ impl<S> TerminalManager<S> {
         self.pending_shell_start = Some(handle);
     }
 
+    fn schedule_shell_start_retry(
+        &mut self,
+        retry: RetryableShellStart,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        self.failed_shell_start = Some(retry.clone());
+        if self.automatic_shell_start_retries_remaining == 0
+            || self.pending_shell_start_retry.is_some()
+        {
+            return;
+        }
+
+        self.automatic_shell_start_retries_remaining -= 1;
+        let generation = self.session_generation;
+        log::warn!(
+            "PTY creation failed; retrying the visible shell once after {AUTOMATIC_SHELL_START_RETRY_DELAY:?}"
+        );
+        let handle = ctx.spawn(
+            async move {
+                Timer::after(AUTOMATIC_SHELL_START_RETRY_DELAY).await;
+            },
+            move |manager: &mut Box<dyn TerminalManagerTrait>, _, ctx| {
+                let Some(manager) =
+                    TerminalManagerTrait::as_any_mut(manager.as_mut()).downcast_mut::<Self>()
+                else {
+                    return;
+                };
+                manager.pending_shell_start_retry = None;
+                if manager.session_generation != generation || manager.event_loop_handle.is_some() {
+                    return;
+                }
+
+                manager.automatic_shell_start_retry_in_progress = true;
+                manager.restart_session_inner(
+                    retry.shell_launch_data,
+                    retry.startup_directory,
+                    None,
+                    ctx,
+                );
+            },
+        );
+        self.pending_shell_start_retry = Some(handle);
+    }
+
     /// The sole body of `TerminalManagerTrait::ensure_shell_started`. Both the
     /// concrete `impl TerminalManagerTrait for TerminalManager<TerminalView>`
     /// (terminal_view_adaptor.rs) and `TuiTerminalManager`'s forwarding impl
@@ -942,10 +1016,20 @@ impl<S> TerminalManager<S> {
         S: TerminalSurface,
         <S as Entity>::Event: PtyIntentEvent,
     {
-        let Some(parked) = self.deferred_shell.take() else {
+        if let Some(parked) = self.deferred_shell.take() {
+            self.model.lock().set_shell_start_deferred(false);
+            self.view.update(ctx, |_surface, ctx| ctx.notify());
+            self.spawn_shell_start(parked, ctx);
             return;
-        };
-        self.spawn_shell_start(parked, ctx);
+        }
+
+        // The first visible start may have lost a transient ConPTY race. Reactivation is an
+        // explicit retry signal; it also cancels a not-yet-fired automatic retry in
+        // `restart_session_inner`, so these paths can never fork two shells.
+        if let Some(retry) = self.failed_shell_start.take() {
+            self.automatic_shell_start_retries_remaining = AUTOMATIC_SHELL_START_RETRY_LIMIT;
+            self.restart_session_inner(retry.shell_launch_data, retry.startup_directory, None, ctx);
+        }
     }
 
     /// The sole body of `TerminalManagerTrait::has_deferred_shell`. See
@@ -975,6 +1059,23 @@ impl<S> TerminalManager<S> {
     #[cfg(test)]
     pub(crate) fn repaint_screen_on_attach(&self) -> bool {
         self.repaint_screen_on_attach
+    }
+
+    #[cfg(test)]
+    pub(crate) fn schedule_shell_start_retry_for_test(
+        &mut self,
+        ctx: &mut ModelContext<Box<dyn TerminalManagerTrait>>,
+    ) where
+        S: TerminalSurface,
+        <S as Entity>::Event: PtyIntentEvent,
+    {
+        self.schedule_shell_start_retry(
+            RetryableShellStart {
+                shell_launch_data: None,
+                startup_directory: None,
+            },
+            ctx,
+        );
     }
 
     #[cfg(test)]
@@ -1252,6 +1353,10 @@ impl<S> TerminalManager<S> {
         if let Some(pending) = self.pending_shell_start.take() {
             pending.abort();
         }
+        if let Some(retry) = self.pending_shell_start_retry.take() {
+            retry.abort();
+        }
+        self.failed_shell_start = None;
         self.deferred_shell = None;
         self.shutdown_event_loop();
         self.persistent_session_id = None;
@@ -1338,6 +1443,15 @@ impl<S> TerminalManager<S> {
         S: TerminalSurface,
         <S as Entity>::Event: PtyIntentEvent,
     {
+        let automatic_retry = std::mem::take(&mut self.automatic_shell_start_retry_in_progress);
+        if !automatic_retry {
+            self.automatic_shell_start_retries_remaining = AUTOMATIC_SHELL_START_RETRY_LIMIT;
+        }
+        if let Some(retry) = self.pending_shell_start_retry.take() {
+            retry.abort();
+        }
+        self.failed_shell_start = None;
+
         // 1. Mark the restart on the surface *before* anything can exit, so no
         //    exit produced below is mistaken for a shell that died. Until the
         //    barrier posted in step 5 comes back round, the view suppresses the
@@ -1400,6 +1514,7 @@ impl<S> TerminalManager<S> {
         // and now. Leaving it parked would fork a second one the next time the
         // pane is activated.
         self.deferred_shell = None;
+        self.model.lock().set_shell_start_deferred(false);
 
         // 4. Stop the replaced session's terminal-attributes poller, which
         //    holds its PTY fd on a repeating timer. `on_shell_determined` would
@@ -1639,6 +1754,10 @@ fn on_shell_determined<S: TerminalSurface>(
         },
     };
 
+    // Preserve the host-form request for a bounded retry. The converted directory below may be a
+    // WSL/MSYS2 path and cannot safely be fed through native conversion a second time.
+    let retry_startup_directory = startup_directory.clone();
+
     // `startup_directory` is in host form when it came from a caller (e.g.
     // a restart's requested `cwd`); translate it to the form the resolved
     // shell expects. A conversion failure, or a directory that no longer
@@ -1809,6 +1928,13 @@ fn on_shell_determined<S: TerminalSurface>(
                     surface.on_pty_spawn_failed(err, ctx);
                 });
                 manager.model().lock().exit(ExitReason::PtySpawnFailed);
+                manager.schedule_shell_start_retry(
+                    RetryableShellStart {
+                        shell_launch_data: Some(shell_launch_data.clone()),
+                        startup_directory: retry_startup_directory,
+                    },
+                    ctx,
+                );
                 return;
             }
         },
@@ -1892,6 +2018,11 @@ fn on_shell_determined<S: TerminalSurface>(
     );
 
     manager.event_loop_handle = Some(event_loop_handle);
+    manager.failed_shell_start = None;
+    manager.automatic_shell_start_retries_remaining = AUTOMATIC_SHELL_START_RETRY_LIMIT;
+    if let Some(retry) = manager.pending_shell_start_retry.take() {
+        retry.abort();
+    }
     #[cfg(test)]
     {
         manager.established_session_count += 1;

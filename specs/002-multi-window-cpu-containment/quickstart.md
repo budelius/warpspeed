@@ -5,8 +5,26 @@
 - Use a clean checkout of `002-multi-window-cpu-containment` after the implementation commits are applied.
 - Install repository build and test dependencies.
 - Use only generated fixtures and an isolated `WARPSPEED_PROFILE`; do not restart, mutate, or benchmark the user's active profile.
-- Keep window isolation disabled for feature-off compatibility checks and enable it only through the implementation's explicit test/local override for isolation checks.
+- WarpSpeed dogfood builds enable window isolation by default. Use a test-only feature override solely for the feature-off compatibility check; never allow an automatic shared-process fallback during an isolated restore.
 - Normalize CPU as percentage of one logical core: `100%` means one fully occupied logical processor.
+
+## Recorded implementation baseline
+
+- Source baseline: `gitea/dev@20465a914450cf2d56bdc3f16d7c96d257b5c69d`.
+- Previously installed comparison build: `20261106-070625389-99fdfe49cab7`.
+- Reference normal-profile workload (for the final authorized gate only): 8 windows, 95 tabs, 208 terminal panes, 313 pane nodes, and 500 blocks.
+- Pre-change reference load: approximately 175.5% aggregate GUI CPU and 4.1 GB private memory; the independently owned `SYS` profile is excluded.
+- Focused implementation commands:
+
+  ```bash
+  cargo test -p warp_features dogfood_builds_isolate_gui_windows_by_default --lib
+  cargo test -p warpui_core unfocused_window_redraws_are_capped_at_five_fps --lib
+  cargo test -p warpui_core occluded_windows_cancel_and_reject_visual_repaint_timers --lib
+  cargo test -p warp test_missing_inline_banner_elements_are_reconciled_once --lib
+  cargo test -p warp window_process:: --lib
+  cargo check -p warpui
+  cargo check -p warp --lib
+  ```
 
 ## 1. Focused deterministic tests
 
@@ -57,7 +75,7 @@ This run establishes a comparison baseline; it is not expected to meet the new C
 
 ## 4. Isolated restore and ownership
 
-Enable the test/local override and start the disposable profile.
+Start the WarpSpeed dogfood build against the disposable profile; isolation must already be enabled by the channel's default feature set.
 
 Expected after restoration:
 

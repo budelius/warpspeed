@@ -842,7 +842,15 @@ impl EventLoop {
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::RedrawRequested,
-            } => self.redraw_window(window_id, window_target),
+            } => {
+                let should_redraw = self.state.windows.get(&window_id).is_some_and(|state| {
+                    self.ui_app
+                        .read(|ctx| !ctx.is_window_occluded(state.window_id))
+                });
+                if should_redraw {
+                    self.redraw_window(window_id, window_target);
+                }
+            }
             Event::WindowEvent {
                 window_id: winit_window_id,
                 event: WindowEvent::CloseRequested,
@@ -1066,6 +1074,15 @@ impl EventLoop {
                 window.handle_resize();
                 self.callbacks.for_window(window).window_resized(window);
                 self.callbacks.window_resized();
+            }
+            ConvertedEvent::Occluded(is_occluded) => {
+                log::debug!(
+                    "Window {:?} presentation state changed: occluded={is_occluded}",
+                    window_state.window_id
+                );
+                self.callbacks
+                    .for_window(window.as_ref())
+                    .window_occluded(is_occluded);
             }
             ConvertedEvent::ModifierKeyChanged { key_code, state } => {
                 let mut window_callbacks = self.callbacks.for_window(window.as_ref());
@@ -1321,6 +1338,7 @@ impl EventLoop {
                 }
             }
             WindowEvent::Resized(_) => Some(ConvertedEvent::Resize),
+            WindowEvent::Occluded(is_occluded) => Some(ConvertedEvent::Occluded(is_occluded)),
             WindowEvent::Focused(is_focused) => {
                 // On mobile WASM, ignore focus-out events. The soft keyboard's hidden input
                 // causes spurious focus events, and mobile doesn't have the concept of
@@ -2111,6 +2129,7 @@ enum ConvertedEvent {
         event: crate::Event,
     },
     Resize,
+    Occluded(bool),
     WindowMoved {
         new_position: PhysicalPosition<i32>,
     },

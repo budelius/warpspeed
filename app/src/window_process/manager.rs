@@ -135,6 +135,13 @@ impl CoordinatorManager {
         Ok(())
     }
 
+    fn queue_new_window(&mut self, urls: Vec<url::Url>) -> Result<()> {
+        let payload = super::worker::StartupPayload { window: None, urls };
+        self.queue_window(
+            serde_json::to_vec(&payload).context("failed to encode new window startup")?,
+        )
+    }
+
     pub(crate) fn poll(&mut self, now: Instant) -> Result<()> {
         while let Some(event) = self.server.try_next_event() {
             self.handle_event(event)?;
@@ -218,6 +225,8 @@ impl CoordinatorManager {
                     url: url.to_string(),
                 },
             )
+        } else if self.starting.is_none() && self.queued_windows.is_empty() {
+            self.queue_new_window(vec![url])
         } else {
             ensure!(
                 self.pending_urls.len() < MAX_PENDING_URLS,
@@ -288,15 +297,7 @@ impl CoordinatorManager {
                     self.persist_aggregate_state()?;
                 }
             }
-            WorkerMessage::OpenWindow => {
-                let payload = super::worker::StartupPayload {
-                    window: None,
-                    urls: Vec::new(),
-                };
-                self.queue_window(
-                    serde_json::to_vec(&payload).context("failed to encode new window startup")?,
-                )?;
-            }
+            WorkerMessage::OpenWindow => self.queue_new_window(Vec::new())?,
             WorkerMessage::Hello { .. }
             | WorkerMessage::Ready
             | WorkerMessage::FirstFramePresented

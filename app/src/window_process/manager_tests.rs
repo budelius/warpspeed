@@ -1,7 +1,14 @@
-use uuid::Uuid;
+use std::sync::Arc;
+use std::sync::mpsc::sync_channel;
 
-use super::{MAX_WINDOW_RESTORE_BYTES, SnapshotTransfer, restore_commands};
+use tempfile::TempDir;
+use uuid::Uuid;
+use warpui_core::r#async::executor::Background;
+
+use super::{CoordinatorManager, MAX_WINDOW_RESTORE_BYTES, SnapshotTransfer, restore_commands};
+use crate::app_state::AppState;
 use crate::window_process::protocol::{Chunk, CoordinatorMessage, MAX_CHUNK_BYTES};
+use crate::window_process::worker::StartupPayload;
 
 #[test]
 fn restore_snapshots_are_split_into_bounded_ordered_chunks() {
@@ -84,4 +91,44 @@ fn worker_window_snapshot_chunks_reject_out_of_order_transfers() {
         .unwrap_err();
 
     assert_eq!(error.to_string(), "invalid worker window snapshot transfer");
+}
+
+#[test]
+fn routed_url_starts_a_worker_after_the_last_window_closes() {
+    let state_dir = TempDir::new().unwrap();
+    let (persistence_sender, _persistence_receiver) = sync_channel(4);
+    let mut manager = CoordinatorManager::start(
+        "build-identity".to_owned(),
+        "profile-identity".to_owned(),
+        state_dir.path().to_path_buf(),
+        AppState {
+            windows: Vec::new(),
+            active_window_index: None,
+            block_lists: Arc::default(),
+            running_mcp_servers: Vec::new(),
+        },
+        persistence_sender,
+        Arc::new(Background::default()),
+    )
+    .unwrap();
+    let first_url =
+        url::Url::parse("warpspeed://action/new_window?path=C%3A%5CUsers%5Cbudel").unwrap();
+    let second_url =
+        url::Url::parse("warpspeed://action/new_window?path=C%3A%5CUsers%5Cbudel%5Cprojects")
+            .unwrap();
+
+    manager.route_url(first_url.clone()).unwrap();
+
+    assert!(manager.pending_urls.is_empty());
+    assert_eq!(manager.queued_windows.len(), 1);
+    let payload: StartupPayload =
+        serde_json::from_slice(manager.queued_windows.front().unwrap()).unwrap();
+    assert!(payload.window.is_none());
+    assert_eq!(payload.urls, vec![first_url]);
+
+    manager.route_url(second_url.clone()).unwrap();
+
+    assert_eq!(manager.queued_windows.len(), 1);
+    assert_eq!(manager.pending_urls.len(), 1);
+    assert_eq!(manager.pending_urls.front(), Some(&second_url));
 }

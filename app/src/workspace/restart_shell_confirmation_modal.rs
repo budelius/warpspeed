@@ -75,6 +75,11 @@ impl View for RestartShellConfirmationModal {
         let description_text = Text::new(description, appearance.ui_font_family(), 14.)
             .with_color(theme.sub_text_color(theme.surface_2()).into())
             .finish();
+        let confirm_label = if self.supervisor_restart {
+            "Restart & take over"
+        } else {
+            "Restart"
+        };
 
         let button_style = UiComponentStyles {
             font_size: Some(14.),
@@ -101,7 +106,7 @@ impl View for RestartShellConfirmationModal {
                     appearance
                         .ui_builder()
                         .button(ButtonVariant::Accent, self.confirm_mouse_state.clone())
-                        .with_text_label("Restart".to_string())
+                        .with_text_label(confirm_label.to_owned())
                         .with_style(button_style)
                         .build()
                         .on_click(|ctx, _, _| {

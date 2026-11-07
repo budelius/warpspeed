@@ -419,7 +419,7 @@ fn move_step_pushed_branch(
     match step {
         MoveStep::Preparing | MoveStep::Importing | MoveStep::WaitingForResume { .. } => None,
         MoveStep::CuttingOver { pushed_branch, .. } | MoveStep::Done { pushed_branch, .. } => {
-            Some(pushed_branch)
+            pushed_branch
         }
         MoveStep::Failed { pushed_branch, .. } => pushed_branch,
     }

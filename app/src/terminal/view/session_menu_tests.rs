@@ -30,10 +30,15 @@ fn older_supervisor_connection_is_visible_and_restart_clears_its_status() {
             assert!(items.iter().any(|item| item.fields().is_some_and(|fields| {
                 fields.label() == "Supervisor: build old-build" && fields.is_disabled()
             })));
-            assert!(items.iter().any(|item| matches!(
-                item.fields().and_then(MenuItemFields::on_select_action),
-                Some(TerminalAction::RestartInCurrentSupervisor)
-            )));
+            assert!(items.iter().any(|item| {
+                item.fields().is_some_and(|fields| {
+                    fields.label() == "Restart & take over…"
+                        && matches!(
+                            fields.on_select_action(),
+                            Some(TerminalAction::RestartInCurrentSupervisor)
+                        )
+                })
+            }));
             view.on_session_restart_started(ctx);
             assert!(view.connected_supervisor.is_none());
             assert!(

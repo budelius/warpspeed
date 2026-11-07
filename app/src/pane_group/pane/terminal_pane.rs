@@ -220,7 +220,14 @@ impl TerminalPane {
         self.managed_session_job_id.as_deref()
     }
 
-    pub(in crate::pane_group) fn set_managed_session_job_id(&mut self, job_id: Option<String>) {
+    pub(in crate::pane_group) fn set_managed_session_job_id(
+        &mut self,
+        job_id: Option<String>,
+        ctx: &mut ViewContext<PaneGroup>,
+    ) {
+        self.terminal_view(ctx).update(ctx, |view, _| {
+            view.set_managed_session_job_id(job_id.clone())
+        });
         self.managed_session_job_id = job_id;
     }
 

@@ -18,6 +18,78 @@ use crate::local_tty::server::{api, protocol};
 use crate::local_tty::shell::{DirectShellStarter, ShellStarter};
 use crate::shell::ShellType;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_socket_path_fits_application_support_directory() {
+    let state = Path::new("/Users/budelius/Library/Application Support/dev.warp.WarpOss");
+    let directory = state.join(SOCKET_DIRECTORY_NAME);
+
+    let path = socket_path_with_fallback(state, &directory, Path::new("/private/tmp"));
+
+    assert_eq!(path.parent(), Some(directory.as_path()));
+    nix::sys::socket::UnixAddr::new(&path).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_long_profile_path_uses_bindable_private_fallback() {
+    let state = Path::new(
+        "/Users/a-user-with-a-long-home-directory/Library/Application Support/dev.warp.WarpOss-profile-with-a-long-name",
+    );
+    let temporary = tempfile::tempdir().unwrap();
+    let path = socket_path_with_fallback(state, &state.join("pty"), temporary.path());
+    let directory = temporary.path().join("warp-pty");
+
+    assert_eq!(path.parent(), Some(directory.as_path()));
+    prepare_socket_directory(&directory).unwrap();
+    let listener = bind_listener(&path).unwrap();
+    let stream = UnixStream::connect(&path).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+    assert_eq!(std::fs::metadata(&directory).unwrap().mode() & 0o777, 0o700);
+    drop((stream, accepted, listener));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_socket_limit_counts_utf8_bytes_not_characters() {
+    let state = PathBuf::from("/Users").join("界".repeat(30));
+    let temporary = Path::new("/private/tmp/user");
+
+    let path = socket_path_with_fallback(&state, &state.join("pty"), temporary);
+
+    assert_eq!(path.parent(), Some(Path::new("/private/tmp/user/warp-pty")));
+    nix::sys::socket::UnixAddr::new(&path).unwrap();
+}
+
+#[test]
+fn socket_identity_distinguishes_profiles_in_shared_runtime_directory() {
+    let directory = Path::new("/runtime/pty");
+    let first = socket_path_in(Path::new("/state/WarpOss"), directory);
+    let second = socket_path_in(Path::new("/state/WarpOss-profile"), directory);
+    let other_channel = socket_path_in(Path::new("/state/WarpLocal"), directory);
+
+    assert_ne!(first, second);
+    assert_ne!(first, other_channel);
+    assert_eq!(
+        first,
+        socket_path_in(Path::new("/state/WarpOss"), directory)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_fallback_refuses_symlink_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(other.path(), temporary.path().join("warp-pty")).unwrap();
+    let state = PathBuf::from("/state").join("long-profile".repeat(20));
+    let path = socket_path_with_fallback(&state, &state.join("pty"), temporary.path());
+
+    let error = prepare_socket_directory(path.parent().unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("is not a directory"));
+}
+
 fn request(supervisor: &mut Supervisor, message: api::Message) -> api::Message {
     let (client, server) = UnixStream::pair().unwrap();
     protocol::send_message(client.as_fd(), message, None).unwrap();

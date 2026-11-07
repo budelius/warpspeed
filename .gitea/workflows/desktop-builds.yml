@@ -88,11 +88,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ci-artifacts
-          printf '%s\n' "$GITHUB_SHA" > ci-artifacts/WarpOss-macos-arm64.source-commit.txt
+          channel=$([[ "$GITHUB_REF_NAME" == main ]] && echo stable || echo latest)
+          base="WarpSpeed-${channel}-macos-arm64"
+          printf '%s\n' "$GITHUB_SHA" > "ci-artifacts/${base}.source-commit.txt"
           ditto -c -k --sequesterRsrc --keepParent \
-            target/debug/bundle/osx/WarpOss.app ci-artifacts/WarpOss-macos-arm64.zip
-          shasum -a 256 ci-artifacts/WarpOss-macos-arm64.zip \
-            > ci-artifacts/WarpOss-macos-arm64.zip.sha256
+            target/debug/bundle/osx/WarpOss.app "ci-artifacts/${base}.zip"
+          shasum -a 256 "ci-artifacts/${base}.zip" \
+            > "ci-artifacts/${base}.zip.sha256"
 
       - name: Stage macOS artifact
         uses: actions/upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
@@ -185,7 +187,8 @@ jobs:
           $artifactDirectory = Join-Path $PWD 'ci-artifacts'
           New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
           $installer = Join-Path $PWD 'script\windows\Output\WarpOssSetup.exe'
-          $destination = Join-Path $artifactDirectory 'WarpOss-windows-x64-setup.exe'
+          $channel = if ($env:GITHUB_REF_NAME -eq 'main') { 'stable' } else { 'latest' }
+          $destination = Join-Path $artifactDirectory "WarpSpeed-$channel-windows-x64-setup.exe"
           Copy-Item -LiteralPath $installer -Destination $destination
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText(
@@ -194,7 +197,7 @@ jobs:
               [Text.Encoding]::ASCII
           )
           [IO.File]::WriteAllText(
-              (Join-Path $artifactDirectory 'WarpOss-windows-x64.source-commit.txt'),
+              (Join-Path $artifactDirectory "WarpSpeed-$channel-windows-x64.source-commit.txt"),
               "$env:GITHUB_SHA`n",
               [Text.Encoding]::ASCII
           )
@@ -208,7 +211,7 @@ jobs:
           retention-days: 2
 
   publish:
-    name: Publish latest branch downloads
+    name: Publish stable/latest downloads
     needs: [macos, windows]
     if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
     runs-on: ubuntu-latest

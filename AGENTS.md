@@ -190,6 +190,7 @@ for itself.
   ```
 
 **Pull Request Workflow**:
+- Every user-visible WarpSpeed feature, improvement, or bug fix must update `CHANGELOG.md` under `## [Unreleased]` in the same change, even when no pull request is used. Before merging, pushing, building, or installing, verify that the entry is present and describes the user-visible behavior rather than the implementation.
 - **ALWAYS** run `./script/format` and `cargo clippy` (the versions specified in ./script/presubmit) before opening a PR or pushing updates to an existing PR branch
 - Those commands must pass completely before creating or updating a pull request
 - Specifically, ensure `./script/format` and `cargo clippy` checks pass

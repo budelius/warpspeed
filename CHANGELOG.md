@@ -26,6 +26,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Take over sessions from another WarpSpeed supervisor and combine recovered tabs.** A terminal
+  connected to another supervisor now offers **Restart & take over…** directly in its inline
+  banner, using the existing confirmation flow without requiring the pane menu. Recovered tabs can
+  also be moved into the active tab as panes, individually or through multi-selection, while
+  preserving every live pane and session.
+
 - **Detach and attach a terminal session by hand.** "Detach session" in a pane's
   overflow menu and a tab's right-click menu hands that pane's shell -- and
   everything running under it, a CLI agent included -- to the session supervisor

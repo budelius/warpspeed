@@ -12,14 +12,16 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-EXPECTED_ASSETS = (
-    "WarpOss-macos-arm64.zip",
-    "WarpOss-macos-arm64.zip.sha256",
-    "WarpOss-macos-arm64.source-commit.txt",
-    "WarpOss-windows-x64-setup.exe",
-    "WarpOss-windows-x64-setup.exe.sha256",
-    "WarpOss-windows-x64.source-commit.txt",
-)
+
+def expected_assets(channel: str) -> tuple[str, ...]:
+    return (
+        f"WarpSpeed-{channel}-macos-arm64.zip",
+        f"WarpSpeed-{channel}-macos-arm64.zip.sha256",
+        f"WarpSpeed-{channel}-macos-arm64.source-commit.txt",
+        f"WarpSpeed-{channel}-windows-x64-setup.exe",
+        f"WarpSpeed-{channel}-windows-x64-setup.exe.sha256",
+        f"WarpSpeed-{channel}-windows-x64.source-commit.txt",
+    )
 
 
 def required_env(name: str) -> str:
@@ -143,20 +145,22 @@ def main() -> None:
     if branch not in {"main", "dev"}:
         raise RuntimeError(f"rolling releases are restricted to main and dev, got {branch!r}")
 
+    channel = "stable" if branch == "main" else "latest"
+    asset_names = expected_assets(channel)
     assets_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "release-assets").resolve()
-    assets = [assets_dir / name for name in EXPECTED_ASSETS]
+    assets = [assets_dir / name for name in asset_names]
     missing = [str(path) for path in assets if not path.is_file()]
     if missing:
         raise RuntimeError(f"missing release assets: {', '.join(missing)}")
 
     for platform in ("macos-arm64", "windows-x64"):
-        marker = assets_dir / f"WarpOss-{platform}.source-commit.txt"
+        marker = assets_dir / f"WarpSpeed-{channel}-{platform}.source-commit.txt"
         if marker.read_text(encoding="utf-8").strip() != commit:
             raise RuntimeError(f"{marker.name} was not built from {commit}")
 
     for artifact in (
-        assets_dir / "WarpOss-macos-arm64.zip",
-        assets_dir / "WarpOss-windows-x64-setup.exe",
+        assets_dir / f"WarpSpeed-{channel}-macos-arm64.zip",
+        assets_dir / f"WarpSpeed-{channel}-windows-x64-setup.exe",
     ):
         checksum_file = artifact.with_name(f"{artifact.name}.sha256")
         expected = checksum_file.read_text(encoding="utf-8").split()[0].lower()
@@ -179,10 +183,10 @@ def main() -> None:
             payload={
                 "tag_name": tag,
                 "target_commitish": commit,
-                "name": f"Latest {branch} desktop builds",
+                "name": f"WarpSpeed {channel} desktop builds",
                 "body": "Publishing desktop artifacts…",
                 "draft": False,
-                "prerelease": True,
+                "prerelease": branch == "dev",
             },
         )
     if not isinstance(release, dict) or "id" not in release:
@@ -222,9 +226,9 @@ def main() -> None:
             continue
         name = str(asset["name"])
         is_previous_upload = any(
-            name.startswith(f"{base}.upload-") for base in EXPECTED_ASSETS
+            name.startswith(f"{base}.upload-") for base in asset_names
         )
-        if name in EXPECTED_ASSETS or is_previous_upload:
+        if name in asset_names or is_previous_upload:
             api_request(
                 api_url,
                 token,
@@ -260,10 +264,10 @@ platform builds for the same commit succeed.
         payload={
             "tag_name": tag,
             "target_commitish": commit,
-            "name": f"Latest {branch} desktop builds ({short_commit})",
+            "name": f"WarpSpeed {channel} desktop builds ({short_commit})",
             "body": body,
             "draft": False,
-            "prerelease": True,
+            "prerelease": branch == "dev",
         },
     )
     print(f"Published {len(uploaded)} assets to {server_url}/{repository}/releases/tag/{tag}")

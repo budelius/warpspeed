@@ -8,6 +8,10 @@ Link the GitHub issue this PR addresses. Before opening this PR, please confirm:
 - [ ] The linked issue is labeled `ready-to-spec` or `ready-to-implement`.
 - [ ] Where appropriate, screenshots or a short video of the implementation are included below (especially for user-visible or UI changes).
 
+## WarpSpeed changelog
+
+- [ ] I updated `CHANGELOG.md` under `## [Unreleased]` for every user-visible change, or this PR has no user-visible impact.
+
 ## Testing
 <!--
 How did you test this change? What automated tests did you add? If you didn't add any new tests, what's your justification for not adding any?

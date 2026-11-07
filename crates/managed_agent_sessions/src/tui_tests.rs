@@ -28,6 +28,7 @@ fn test_tui() -> ManagedSessionsTui {
         Vec::new(),
         updates_tx,
         updates_rx,
+        "run failed".to_owned(),
     )
 }
 
@@ -79,6 +80,49 @@ fn full_screen_contains_header_transcript_composer_and_controls() {
     assert!(lines[17].contains("Enter send"));
     assert!(lines[17].contains("/help commands"));
     assert!(lines[17].contains("Ctrl-O shell"));
+}
+
+#[test]
+fn fallback_shows_the_terminal_failure_and_run_error() {
+    let mut tui = test_tui();
+    tui.descriptor.state = "failed".to_owned();
+    tui.updates_tx
+        .send(TuiUpdate::RunFailure(
+            "workspace git fetch failed".to_owned(),
+        ))
+        .unwrap();
+    tui.apply_updates();
+
+    let lines = render_lines(&mut tui, 100, 18);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Native terminal unavailable: run failed"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Run error: workspace git fetch failed"))
+    );
+}
+
+#[test]
+fn failure_lookup_selects_the_requested_run() {
+    let page = serde_json::json!({"items": [
+        {"job_id": "other", "error": "other failure"},
+        {"job_id": "job-123", "error": "fetch failed"},
+        {"job_id": "interrupted", "error": "", "interrupted_reason": "node lost"}
+    ]});
+    assert_eq!(
+        run_failure_reason(&page, "job-123").as_deref(),
+        Some("fetch failed")
+    );
+    assert_eq!(
+        run_failure_reason(&page, "interrupted").as_deref(),
+        Some("node lost")
+    );
+    assert_eq!(run_failure_reason(&page, "missing"), None);
 }
 
 #[test]

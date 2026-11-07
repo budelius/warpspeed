@@ -14629,7 +14629,7 @@ impl Workspace {
             "Move this {} session to AgentCtrl staging? This pushes your working tree, including \
              untracked files, to the repo's {remote} remote as a handoff/… branch, and the local \
              agent exits once the cloud run has resumed. If its saved history is unavailable, a \
-             fresh AgentCtrl session starts instead.",
+             fresh AgentCtrl run is requested separately and the local agent remains open.",
             source.agent.display_name()
         ))
         .with_link(ToastLink::new("Move".to_owned()).with_onclick_action(
@@ -14749,9 +14749,7 @@ impl Workspace {
                 .await
             },
             move |me, result, ctx| match result {
-                Ok(job_id) => {
-                    me.cut_over_to_fresh_agent_ctrl(terminal_view_id, source, job_id, ctx)
-                }
+                Ok(job_id) => me.open_fresh_agent_ctrl_run(terminal_view_id, job_id, ctx),
                 Err(error) => me.fail_agent_ctrl_move(terminal_view_id, &error, None, ctx),
             },
         );
@@ -14981,31 +14979,34 @@ impl Workspace {
     }
 
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
-    fn cut_over_to_fresh_agent_ctrl(
+    fn open_fresh_agent_ctrl_run(
         &mut self,
         terminal_view_id: EntityId,
-        source: HandoffSource,
         job_id: String,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.agent_ctrl_moves.insert(
+        use managed_agent_sessions::ManagedSessionDeepLink;
+        use warp_cli::managed_sessions::ManagedEnvironment;
+
+        let arguments = ManagedSessionDeepLink {
+            job_id: job_id.clone(),
+            environment: ManagedEnvironment::Staging,
+        }
+        .cli_arguments();
+        self.add_terminal_tab(false, ctx);
+        if let Some(view) = self.focused_terminal_view(ctx) {
+            let new_view_id = view.id();
+            Self::execute_managed_session_command_in(&view, &arguments, ctx);
+            self.set_managed_job_for_terminal_view(new_view_id, &job_id, ctx);
+        }
+        self.finish_agent_ctrl_move(
             terminal_view_id,
-            MoveStep::CuttingOver {
-                job_id: job_id.clone(),
+            MoveStep::Done {
+                job_id,
                 pushed_branch: None,
             },
+            ctx,
         );
-        let sessions = CLIAgentSessionsModel::as_ref(ctx);
-        match sessions.session_id(terminal_view_id) {
-            Some(session_id) if session_id == source.session_id => {
-                self.exit_local_agent_for_agent_ctrl(terminal_view_id, job_id, ctx)
-            }
-            None => self.open_moved_session_viewer(terminal_view_id, ctx),
-            Some(_) => {
-                let reason = session_changed_message(None);
-                self.stop_run_and_fail_agent_ctrl_move(terminal_view_id, job_id, reason, None, ctx);
-            }
-        }
     }
 
     #[cfg(all(feature = "local_fs", feature = "local_tty"))]
@@ -15184,7 +15185,10 @@ impl Workspace {
                 let message = if pushed_branch.is_some() {
                     format!("Moved to AgentCtrl as {job_id}")
                 } else {
-                    format!("Started a fresh AgentCtrl session as {job_id}")
+                    format!(
+                        "AgentCtrl accepted fresh run {job_id}; the local agent remains open. \
+                         The run is not a copy of its conversation."
+                    )
                 };
                 self.show_agent_ctrl_move_toast(
                     terminal_view_id,
@@ -16452,7 +16456,14 @@ impl Workspace {
                     .terminal_view_from_pane_id(new_pane_id, ctx)
                 {
                     view.update(ctx, |view, ctx| {
-                        view.execute_command_or_set_pending(&resume, ctx);
+                        let shell = view
+                            .active_session_shell_type(ctx)
+                            .map(ShellKind::from)
+                            .unwrap_or_else(|| view.shell_family(ctx).into());
+                        view.execute_command_or_set_pending(
+                            &resume_command_line(cwd, &resume, shell),
+                            ctx,
+                        );
                     });
                 }
                 self.focus_pane(

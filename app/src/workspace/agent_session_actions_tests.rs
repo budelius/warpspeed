@@ -89,6 +89,18 @@ fn each_action_has_its_label() {
             agent: None,
         }
         .label(),
+        "Attach shell"
+    );
+    assert_eq!(
+        AgentSessionAction::Attach {
+            session_id: warp_core::SessionId::from(2),
+            holder: None,
+            agent: Some(HeldAgent {
+                agent: CLIAgent::Pi,
+                session_id: "abc".into(),
+            }),
+        }
+        .label(),
         "Attach"
     );
     assert_eq!(

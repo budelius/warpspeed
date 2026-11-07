@@ -262,10 +262,21 @@ fn a_foreign_detached_session_uses_its_saved_panes_agent_identity() {
     };
     let mut input = detached(7, "", "/work/repo", 5);
     input.holder = Some(holder.clone());
+    input.session_uuid_hex = "pane-uuid".into();
     let mut history = past_session(CLIAgent::Pi, "pi-session", "/work/repo");
     history.last_prompt = Some("continue the migration".into());
+    let process = ScannedAgent {
+        agent: CLIAgent::Pi,
+        session_id: "pi-session".into(),
+        cwd: Some("/work/repo".into()),
+        pid: 42,
+        started_at_unix_seconds: 0,
+        warp_session_uuid: Some("pane-uuid".into()),
+        placement: Placement::Known,
+        process_count: 1,
+    };
 
-    let rows = build_rows(&[pane], &[input], &[history]);
+    let rows = build_rows_with_scanned(&[pane], &[input], &[history], &[process]);
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].agent, Some(CLIAgent::Pi));
@@ -281,6 +292,48 @@ fn a_foreign_detached_session_uses_its_saved_panes_agent_identity() {
             holder: Some(holder),
         }
     );
+}
+
+#[test]
+fn detached_shell_does_not_claim_a_pending_agent_without_a_matching_process() {
+    let pane = PaneAgentInput {
+        supervisor_session_id: Some(SessionId::from(7)),
+        pending: Some(claude("conversation", "/work/repo")),
+        ..pane_at(0, "/work/repo")
+    };
+    let input = detached(7, "", "/work/repo", 5);
+    let history = past_session(CLIAgent::Claude, "conversation", "/work/repo");
+
+    let rows = build_rows(&[pane], &[input], &[history]);
+
+    assert_eq!(rows.len(), 2);
+    assert!(matches!(rows[0].state, AgentSessionState::Past));
+    assert_eq!(rows[0].session_id.as_deref(), Some("conversation"));
+    assert!(matches!(rows[1].state, AgentSessionState::Detached { .. }));
+    assert_eq!(rows[1].agent, None);
+    assert_eq!(rows[1].session_id, None);
+}
+
+#[test]
+fn detached_shell_does_not_claim_a_stale_held_agent() {
+    let pane = PaneAgentInput {
+        supervisor_session_id: Some(SessionId::from(7)),
+        held_agent: Some(HeldAgent {
+            agent: CLIAgent::Pi,
+            session_id: "pi-session".into(),
+        }),
+        ..pane_at(0, "/work/repo")
+    };
+    let input = detached(7, "", "/work/repo", 5);
+    let history = past_session(CLIAgent::Pi, "pi-session", "/work/repo");
+
+    let rows = build_rows(&[pane], &[input], &[history]);
+
+    assert_eq!(rows.len(), 2);
+    assert!(matches!(rows[0].state, AgentSessionState::Detached { .. }));
+    assert_eq!(rows[0].agent, None);
+    assert!(matches!(rows[1].state, AgentSessionState::Past));
+    assert_eq!(rows[1].session_id.as_deref(), Some("pi-session"));
 }
 
 #[test]

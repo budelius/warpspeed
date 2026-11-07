@@ -21,7 +21,7 @@ use super::event_stream::EventFeed;
 use super::{
     EnvironmentProfile, ManagedSessionBookmark, OpenedManagedSession, RunEvent, SessionDescriptor,
     dashboard_token, open_managed_session, pause_run_with, post_input_with, resume_run_with,
-    retain_new_events, save_bookmarks, stop_run_with, update_bookmark_cursor,
+    retain_new_events, save_bookmarks, send, stop_run_with, update_bookmark_cursor,
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -31,7 +31,11 @@ pub(super) fn can_run() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
-pub(super) fn run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
+pub(super) fn run(
+    environment: ManagedEnvironment,
+    job_id: &str,
+    fallback_reason: String,
+) -> Result<()> {
     let OpenedManagedSession {
         profile,
         descriptor,
@@ -47,6 +51,9 @@ pub(super) fn run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
         updates_tx.clone(),
     );
 
+    if matches!(descriptor.state.as_str(), "failed" | "interrupted") {
+        spawn_failure_lookup(profile, job_id.to_owned(), updates_tx.clone());
+    }
     let display_name = descriptor.display_name.clone();
     let mut app = ManagedSessionsTui::new(
         profile,
@@ -55,6 +62,7 @@ pub(super) fn run(environment: ManagedEnvironment, job_id: &str) -> Result<()> {
         bookmarks,
         updates_tx,
         updates_rx,
+        fallback_reason,
     );
     loop {
         let mut terminal = ratatui::try_init().context("failed to initialize AgentCtrl TUI")?;
@@ -172,6 +180,49 @@ fn spawn_event_poller(
     });
 }
 
+fn spawn_failure_lookup(
+    profile: &'static EnvironmentProfile,
+    job_id: String,
+    updates: Sender<TuiUpdate>,
+) {
+    thread::spawn(move || {
+        let result = (|| -> Result<_> {
+            let token = dashboard_token()?;
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()?;
+            let page: serde_json::Value = send(
+                profile,
+                client
+                    .get(format!(
+                        "{}/api/agent-control/runs?limit=100",
+                        profile.base_url
+                    ))
+                    .bearer_auth(token)
+                    .header("X-Stozn-Client", "warpspeed"),
+            )?
+            .json()?;
+            Ok(run_failure_reason(&page, &job_id))
+        })();
+        if let Ok(Some(reason)) = result {
+            let _ = updates.send(TuiUpdate::RunFailure(reason));
+        }
+    });
+}
+
+fn run_failure_reason(page: &serde_json::Value, job_id: &str) -> Option<String> {
+    let run = page
+        .get("items")?
+        .as_array()?
+        .iter()
+        .find(|item| item.get("job_id").and_then(serde_json::Value::as_str) == Some(job_id))?;
+    ["error", "interrupted_reason"]
+        .into_iter()
+        .filter_map(|key| run.get(key).and_then(serde_json::Value::as_str))
+        .find(|reason| !reason.is_empty())
+        .map(str::to_owned)
+}
+
 enum TuiExit {
     Detach,
     LocalShell(Option<String>),
@@ -257,6 +308,7 @@ enum TuiUpdate {
         earliest_cursor: Option<String>,
     },
     PollFailed(String),
+    RunFailure(String),
     ActionFinished {
         action: SessionAction,
         result: std::result::Result<(), String>,
@@ -280,6 +332,8 @@ struct ManagedSessionsTui {
     profile: &'static EnvironmentProfile,
     job_id: String,
     descriptor: SessionDescriptor,
+    fallback_reason: String,
+    run_failure: Option<String>,
     bookmarks: Vec<ManagedSessionBookmark>,
     updates_tx: Sender<TuiUpdate>,
     updates_rx: Receiver<TuiUpdate>,
@@ -305,11 +359,14 @@ impl ManagedSessionsTui {
         bookmarks: Vec<ManagedSessionBookmark>,
         updates_tx: Sender<TuiUpdate>,
         updates_rx: Receiver<TuiUpdate>,
+        fallback_reason: String,
     ) -> Self {
         Self {
             profile,
             job_id,
             descriptor,
+            fallback_reason,
+            run_failure: None,
             bookmarks,
             updates_tx,
             updates_rx,
@@ -386,6 +443,7 @@ impl ManagedSessionsTui {
                         );
                     }
                 }
+                TuiUpdate::RunFailure(reason) => self.run_failure = Some(reason),
                 TuiUpdate::PollFailed(error) => {
                     self.set_status(
                         format!("Connection lost; retrying: {error}"),
@@ -819,7 +877,22 @@ impl ManagedSessionsTui {
     }
 
     fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) {
-        let text = Text::from(transcript_lines(&self.events, self.history_gap));
+        let mut lines = vec![Line::from(Span::styled(
+            format!(
+                "Native terminal unavailable: {}",
+                safe_terminal_text(&self.fallback_reason)
+            ),
+            Style::default().fg(Color::Yellow),
+        ))];
+        if let Some(reason) = &self.run_failure {
+            lines.push(Line::from(Span::styled(
+                format!("Run error: {}", safe_terminal_text(reason)),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines.push(Line::default());
+        lines.extend(transcript_lines(&self.events, self.history_gap));
+        let text = Text::from(lines);
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(

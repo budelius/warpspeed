@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use pathfinder_geometry::vector::vec2f;
@@ -568,6 +569,13 @@ fn local_session_details_include_last_activity_age_and_date() {
     assert!(detail.contains("Local"));
     assert!(detail.contains("last active"));
     assert!(detail.contains("1970-"));
+}
+
+#[test]
+fn list_and_preview_actions_do_not_share_click_state() {
+    let states = RowMouseStates::default();
+
+    assert!(!Arc::ptr_eq(&states.list_action, &states.preview_action));
 }
 
 #[test]

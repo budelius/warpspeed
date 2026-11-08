@@ -1,7 +1,6 @@
 use std::ffi::OsStr;
-use std::fmt;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::{fmt, fs};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, Local};

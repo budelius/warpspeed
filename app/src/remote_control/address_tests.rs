@@ -1,13 +1,70 @@
-//! Only the naming is tested here.
-//!
 //! [`write_marker`] and [`read_markers`] work against the real state directory,
 //! which a unit test must not write into: this suite runs beside a developer's
 //! own Warp, and a stray marker there would be offered to the `sessions` command as a
-//! live instance. What those two functions do beyond `serde_json` and
-//! `std::fs` is nothing, and the part worth pinning -- that a name identifies
-//! one process, one protocol version, and one profile -- is all in the naming.
+//! live instance. Reading is tested against a temporary directory instead.
 
 use super::*;
+
+fn marker_json(pid: u32, address: &str) -> String {
+    serde_json::to_string(&InstanceMarker {
+        pid,
+        address: address.to_owned(),
+        version: format!("build-of-{pid}"),
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_marker_file_name_declares_its_protocol_version() {
+    assert_eq!(marker_protocol_version("v7-1234.json"), Some(7));
+    assert_eq!(marker_protocol_version("v12-1.json"), Some(12));
+    assert_eq!(marker_protocol_version("1234.json"), None);
+    assert_eq!(marker_protocol_version("vx-1234.json"), None);
+    assert_eq!(
+        marker_protocol_version(&marker_path(1).file_name().unwrap().to_string_lossy()),
+        Some(PROTOCOL_VERSION)
+    );
+}
+
+/// An older build's marker records an older build's channel. Sending this build's bytes there is
+/// how a `sessions panes` once got `InvalidBoolEncoding` back from a window on protocol 6.
+#[test]
+fn only_markers_of_this_protocol_are_offered_for_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let older = PROTOCOL_VERSION - 1;
+    for (name, contents) in [
+        (
+            format!("v{PROTOCOL_VERSION}-20.json"),
+            marker_json(20, "current"),
+        ),
+        (format!("v{older}-10.json"), marker_json(10, "older")),
+        ("30.json".to_owned(), marker_json(30, "unversioned")),
+        ("notes.txt".to_owned(), "not a marker".to_owned()),
+    ] {
+        std::fs::write(directory.path().join(name), contents).unwrap();
+    }
+
+    let found = read_markers_in(directory.path());
+
+    let summary: Vec<(u32, Option<u32>, bool)> = found
+        .iter()
+        .map(|found| {
+            (
+                found.marker.pid,
+                found.protocol_version,
+                found.speaks_this_protocol(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (10, Some(older), false),
+            (20, Some(PROTOCOL_VERSION), true),
+            (30, None, false),
+        ]
+    );
+}
 
 #[test]
 fn a_marker_path_identifies_one_process() {

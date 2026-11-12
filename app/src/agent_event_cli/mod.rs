@@ -105,6 +105,12 @@ fn truncate_at_char_boundary(text: &mut String, max_bytes: usize) {
 
 /// Offers the notification to every running instance at once, so one that never answers cannot
 /// keep it from the instance that owns the token.
+///
+/// Unlike the `sessions` command, this reaches instances of every protocol version. A hook runs
+/// the binary that started its shell, and a newer window that adopted the shell owns the token, so
+/// a hook limited to its own version would lose every event of an adopted agent. That is safe only
+/// because `CliAgentEvent` and `Done` keep their encoding across versions, which
+/// `cli_agent_event_keeps_its_encoding_across_protocol_versions` pins.
 fn deliver(token: &str, notification: &str) {
     let attempts = address::read_markers().into_iter().map(|marker| {
         let request = Request::CliAgentEvent {

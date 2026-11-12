@@ -370,16 +370,18 @@ struct SkippedInstance {
 /// The instances that answered with their panes, and those that could not be asked.
 ///
 /// Reads the markers itself rather than taking [`crate::remote_control::client::live_instances`],
-/// because an instance on an older protocol has to be reported rather than silently dropped: only
+/// because an instance on another protocol has to be reported rather than silently dropped: only
 /// windows on this build can carry out a move.
 fn discover() -> (Vec<(Instance, Vec<PaneSummary>)>, Vec<SkippedInstance>) {
-    let current_channel = format!("-v{PROTOCOL_VERSION}-");
     let mut answered = Vec::new();
     let mut skipped = Vec::new();
-    for marker in address::read_markers() {
-        let pid = marker.pid;
-        let is_current = marker.address.contains(&current_channel);
-        let Ok(instance) = Instance::connect(marker) else {
+    for found in address::found_markers() {
+        let pid = found.marker.pid;
+        let is_current = found.speaks_this_protocol();
+        let protocol_version = found.protocol_version;
+        // Connecting sends nothing, so it is safe on any version and tells a live instance from a
+        // marker its process left behind.
+        let Ok(instance) = Instance::connect(found.marker) else {
             if is_current {
                 address::forget(pid);
             }
@@ -388,7 +390,12 @@ fn discover() -> (Vec<(Instance, Vec<PaneSummary>)>, Vec<SkippedInstance>) {
         if !is_current {
             skipped.push(SkippedInstance {
                 pid,
-                reason: "instance on an older protocol".to_owned(),
+                reason: match protocol_version {
+                    Some(version) => format!(
+                        "instance on protocol {version}, this build speaks {PROTOCOL_VERSION}"
+                    ),
+                    None => "instance on an unrecognised protocol".to_owned(),
+                },
             });
             continue;
         }

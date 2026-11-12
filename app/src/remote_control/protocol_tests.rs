@@ -145,6 +145,25 @@ fn window_and_restart_variants_are_appended_for_cross_build_safety() {
     );
 }
 
+/// `agent-event` sends this request to instances of every protocol version, so a bump must not
+/// change how it or its `Done` answer is encoded. See `agent_event_cli::deliver`.
+#[test]
+fn cli_agent_event_keeps_its_encoding_across_protocol_versions() {
+    let notification = r#"{"v":1,"agent":"pi","event":"stop"}"#;
+    assert_eq!(
+        bincode::serialize(&Request::CliAgentEvent {
+            token: AgentEventToken::from(TOKEN.to_owned()),
+            notification: notification.to_owned(),
+        })
+        .unwrap(),
+        bincode::serialize(&(10_u32, TOKEN, notification)).unwrap()
+    );
+    assert_eq!(
+        bincode::serialize(&Response::Done).unwrap(),
+        4_u32.to_le_bytes()
+    );
+}
+
 #[test]
 fn restart_session_variants_are_appended_for_cross_build_safety() {
     assert_eq!(

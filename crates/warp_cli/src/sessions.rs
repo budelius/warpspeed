@@ -84,6 +84,9 @@ pub enum SessionsCommand {
     Agents,
 
     /// List the running Warp instances that accept these commands.
+    ///
+    /// Only instances on this build's protocol version accept them. Running instances on another
+    /// version are listed separately, because sending them a request would be misread.
     Instances,
 
     /// List the terminal panes of a running Warp instance.

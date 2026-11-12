@@ -13,6 +13,13 @@
 //! process is the expected case, not an error: nothing is trusted until a
 //! `Ping` comes back, and a file whose owner never answers is removed by
 //! whoever noticed.
+//!
+//! ## Protocol versions
+//!
+//! Builds of different protocol versions share the directory, and each marker's file name says
+//! which version it speaks. A request goes only to [`current_markers`]: the version in the channel
+//! name does not keep builds apart on its own, because the marker hands a reader the channel. Code
+//! that only asks whether other instances exist reads every version with [`read_markers`].
 
 use std::path::{Path, PathBuf};
 
@@ -141,38 +148,104 @@ pub fn remove_marker(marker: &InstanceMarker) {
     let _ = Path::new(&marker.address);
 }
 
-/// Every marker currently on disk, newest pid last.
-///
-/// Says nothing about whether the instances are alive. Callers probe.
-pub fn read_markers() -> Vec<InstanceMarker> {
-    let directory = marker_directory();
-    let Ok(entries) = std::fs::read_dir(&directory) else {
+/// A marker as discovery found it on disk.
+#[derive(Debug, Clone)]
+pub struct FoundMarker {
+    /// The protocol version the marker's file name declares, or `None` for a name this build does
+    /// not recognise.
+    pub protocol_version: Option<u32>,
+    pub marker: InstanceMarker,
+}
+
+impl FoundMarker {
+    /// Whether this build can talk to the instance. One on any other version would decode this
+    /// build's messages as something else.
+    pub fn speaks_this_protocol(&self) -> bool {
+        self.protocol_version == Some(PROTOCOL_VERSION)
+    }
+}
+
+/// The protocol version a marker file name declares: `v7-1234.json` is version 7.
+fn marker_protocol_version(file_name: &str) -> Option<u32> {
+    let (version, _) = file_name.strip_prefix('v')?.split_once('-')?;
+    version.parse().ok()
+}
+
+/// Every marker in `directory`, of every protocol version, newest pid last.
+fn read_markers_in(directory: &Path) -> Vec<FoundMarker> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
-    let mut markers: Vec<InstanceMarker> = entries
+    let mut markers: Vec<FoundMarker> = entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|entry| {
             let contents = std::fs::read(entry.path()).ok()?;
-            serde_json::from_slice::<InstanceMarker>(&contents).ok()
+            let marker = serde_json::from_slice::<InstanceMarker>(&contents).ok()?;
+            Some(FoundMarker {
+                protocol_version: marker_protocol_version(&entry.file_name().to_string_lossy()),
+                marker,
+            })
         })
         .collect();
-    markers.sort_by_key(|marker| marker.pid);
+    markers.sort_by_key(|found| found.marker.pid);
     markers
 }
 
-/// Pids of other instances whose processes are still running.
+/// Every marker currently on disk, of every protocol version, newest pid last.
 ///
-/// Checks the process table rather than pinging, so it is cheap enough to call on every save. A
-/// reused pid can make a dead instance look alive, which only errs towards caution.
-pub fn other_running_instance_pids() -> Vec<u32> {
-    let own_pid = std::process::id();
-    let pids: Vec<sysinfo::Pid> = read_markers()
+/// Says nothing about whether the instances are alive. Callers probe.
+pub fn found_markers() -> Vec<FoundMarker> {
+    read_markers_in(&marker_directory())
+}
+
+/// Every instance marker on disk, whatever protocol it speaks.
+///
+/// For deciding whether other instances exist. Only [`current_markers`] are safe to send a
+/// request to.
+pub fn read_markers() -> Vec<InstanceMarker> {
+    found_markers()
         .into_iter()
-        .map(|marker| marker.pid)
-        .filter(|pid| *pid != own_pid)
-        .map(sysinfo::Pid::from_u32)
+        .map(|found| found.marker)
+        .collect()
+}
+
+/// The markers of instances speaking this build's protocol, the only ones a request can be sent
+/// to.
+///
+/// The version is in the channel name too, but that does not keep builds apart: a marker records
+/// its channel, so a reader that took every marker would connect to an older build's channel and
+/// have its bytes read as different messages.
+pub fn current_markers() -> Vec<InstanceMarker> {
+    found_markers()
+        .into_iter()
+        .filter(FoundMarker::speaks_this_protocol)
+        .map(|found| found.marker)
+        .collect()
+}
+
+/// The markers of other protocol versions whose processes are still running.
+///
+/// This build cannot talk to them, but a command that finds no instance should say they exist
+/// rather than report that nothing is running.
+pub fn running_markers_of_other_protocols() -> Vec<FoundMarker> {
+    let others: Vec<FoundMarker> = found_markers()
+        .into_iter()
+        .filter(|found| !found.speaks_this_protocol())
         .collect();
+    let running = running_pids(others.iter().map(|found| found.marker.pid));
+    others
+        .into_iter()
+        .filter(|found| running.contains(&found.marker.pid))
+        .collect()
+}
+
+/// Which of `pids` belong to running processes.
+///
+/// Checks the process table rather than pinging. A reused pid can make a dead instance look
+/// alive, which only errs towards caution.
+fn running_pids(pids: impl IntoIterator<Item = u32>) -> Vec<u32> {
+    let pids: Vec<sysinfo::Pid> = pids.into_iter().map(sysinfo::Pid::from_u32).collect();
     if pids.is_empty() {
         return Vec::new();
     }
@@ -186,6 +259,20 @@ pub fn other_running_instance_pids() -> Vec<u32> {
         .filter(|pid| system.process(*pid).is_some())
         .map(|pid| pid.as_u32())
         .collect()
+}
+
+/// Pids of other instances whose processes are still running, on any protocol version.
+///
+/// Cheap enough to call on every save. Every build shares one saved session, so an instance of
+/// another version counts as much as one of this version.
+pub fn other_running_instance_pids() -> Vec<u32> {
+    let own_pid = std::process::id();
+    running_pids(
+        read_markers()
+            .into_iter()
+            .map(|marker| marker.pid)
+            .filter(|pid| *pid != own_pid),
+    )
 }
 
 /// Deletes the marker for a pid that did not answer.

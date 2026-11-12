@@ -13,7 +13,7 @@ use warpui_core::r#async::block_on;
 use warpui_core::r#async::executor::Background;
 
 use super::address::{self, InstanceMarker};
-use super::protocol::{Request, Response};
+use super::protocol::{PROTOCOL_VERSION, Request, Response};
 use super::server::RemoteControlService;
 
 /// How long to wait for one answer.
@@ -96,7 +96,7 @@ impl Instance {
 /// listing is also the moment those get cleaned up. Nothing else sweeps them.
 pub(crate) fn live_instances() -> Vec<Instance> {
     let mut instances = Vec::new();
-    for marker in address::read_markers() {
+    for marker in address::current_markers() {
         let pid = marker.pid;
         match Instance::connect(marker) {
             Ok(instance) => match instance.call(Request::Ping) {
@@ -115,7 +115,7 @@ pub(crate) fn live_instances() -> Vec<Instance> {
 /// nothing either; only a reply does. Used to tell a quit that has finished
 /// from one that has not.
 pub(crate) fn is_listening(pid: u32) -> bool {
-    let Some(marker) = address::read_markers()
+    let Some(marker) = address::current_markers()
         .into_iter()
         .find(|marker| marker.pid == pid)
     else {
@@ -134,15 +134,27 @@ pub(crate) fn is_listening(pid: u32) -> bool {
 /// means detaching a session in a window they were not looking at.
 pub(crate) fn select_instance(pid: Option<u32>) -> Result<Instance> {
     if let Some(pid) = pid {
-        let marker = address::read_markers()
+        let Some(marker) = address::current_markers()
             .into_iter()
             .find(|marker| marker.pid == pid)
-            .with_context(|| {
-                format!(
+        else {
+            let other = address::running_markers_of_other_protocols()
+                .into_iter()
+                .find(|found| found.marker.pid == pid);
+            match other {
+                Some(found) => bail!(
+                    "The Warp instance with pid {pid} runs build {}, which speaks {}; this \
+                     command speaks protocol {PROTOCOL_VERSION}. Run that build's own executable, \
+                     or reopen the window on this build.",
+                    found.marker.version,
+                    describe_protocol(found.protocol_version)
+                ),
+                None => bail!(
                     "No Warp instance with pid {pid} is listening. Try `{} sessions instances`.",
                     super::program_name()
-                )
-            })?;
+                ),
+            }
+        };
         let instance = Instance::connect(marker)?;
         instance.call(Request::Ping)?;
         return Ok(instance);
@@ -153,8 +165,11 @@ pub(crate) fn select_instance(pid: Option<u32>) -> Result<Instance> {
         0 => bail!(
             "No running Warp instance is listening for the `sessions` command. Start Warp, or check that \
              it is the same profile: this command talks to the instances of the state directory \
-             at {:?}.",
-            warp_core::paths::state_dir()
+             at {:?}.{}",
+            warp_core::paths::state_dir(),
+            other_protocols_note()
+                .map(|note| format!("\n{note}"))
+                .unwrap_or_default()
         ),
         1 => Ok(instances.remove(0)),
         _ => {
@@ -169,5 +184,36 @@ pub(crate) fn select_instance(pid: Option<u32>) -> Result<Instance> {
                 super::program_name()
             )
         }
+    }
+}
+
+/// Names the running instances this build cannot talk to, or `None` when there are none.
+pub(crate) fn other_protocols_note() -> Option<String> {
+    let others = address::running_markers_of_other_protocols();
+    if others.is_empty() {
+        return None;
+    }
+    let listed = others
+        .iter()
+        .map(|found| {
+            format!(
+                "  pid {}, build {}, {}",
+                found.marker.pid,
+                found.marker.version,
+                describe_protocol(found.protocol_version)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "Running, but on another protocol than this build's {PROTOCOL_VERSION}, so out of its \
+         reach:\n{listed}\nUse that build's own executable, or reopen those windows on this build."
+    ))
+}
+
+fn describe_protocol(version: Option<u32>) -> String {
+    match version {
+        Some(version) => format!("protocol {version}"),
+        None => "an unrecognised protocol".to_owned(),
     }
 }

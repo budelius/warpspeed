@@ -5,7 +5,13 @@
 //! of it, because the whole point is to drive an installed Warp from a shell.
 //! A mismatched pair must fail by not finding each other, not by
 //! misinterpreting bytes, which is why [`PROTOCOL_VERSION`] is in the channel
-//! name rather than in a handshake.
+//! name and the marker file name rather than in a handshake. The channel name
+//! alone is not enough, because a marker hands its reader the channel: requests
+//! go only to instances that [`super::address::current_markers`] returns.
+//!
+//! `agent-event` is the one sender that reaches every version, so the
+//! `CliAgentEvent` request and its `Done` answer must keep their encoding
+//! across bumps.
 
 use serde::{Deserialize, Serialize};
 

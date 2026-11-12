@@ -469,8 +469,12 @@ fn list_instances(json: bool) -> Result<()> {
         })
         .collect();
 
+    let other_protocols = client::other_protocols_note();
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
+        if let Some(note) = other_protocols {
+            eprintln!("{note}");
+        }
         return Ok(());
     }
     if rows.is_empty() {
@@ -479,11 +483,14 @@ fn list_instances(json: bool) -> Result<()> {
              directory at {:?}.",
             warp_core::paths::state_dir()
         );
-        return Ok(());
+    } else {
+        println!("{:<8}  BUILD", "PID");
+        for row in rows {
+            println!("{:<8}  {}", row.pid, row.version);
+        }
     }
-    println!("{:<8}  BUILD", "PID");
-    for row in rows {
-        println!("{:<8}  {}", row.pid, row.version);
+    if let Some(note) = other_protocols {
+        println!("\n{note}");
     }
     Ok(())
 }
